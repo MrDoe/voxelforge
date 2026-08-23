@@ -6,6 +6,7 @@
 #include "render/raymarch_pass.hpp"
 #include "render/splat_pass.hpp"
 #include "render/svo_pass.hpp"
+#include "render/taa_pass.hpp"
 #include "voxel/world.hpp"
 #include "voxel/worldfile.hpp"
 #include "voxel/volume.hpp"
@@ -35,7 +36,6 @@ struct Args {
     int smokeFrames = 0;
     int width = 1600, height = 900;
     std::string mode;    // "voxel" | "splat"
-    std::string backend; // "svo" | "dense"
     std::string shot;    // dump one frame to PPM and exit
     float camx=0,camy=0,camz=0,tx=0,ty=0,tz=0;
     bool camSet=false;
@@ -65,8 +65,6 @@ Args parseArgs(int argc, char** argv)
             a.height = next(a.height);
         else if (s == "--mode" && i + 1 < argc)
             a.mode = argv[++i];
-        else if (s == "--backend" && i + 1 < argc)
-            a.backend = argv[++i];
         else if (s == "--compare")
             a.compare = true;
         else if (s == "--shot" && i + 1 < argc)
@@ -127,9 +125,15 @@ private:
     vf::RaymarchPass m_pass;
     vf::SvoPass m_svoPass;
     vf::SplatPass m_splatPass;
+    vf::TaaPass m_taaPass;
+    vf::Image3D m_taaHistory[2];
+    vf::Image3D m_taaResolved;
     enum class Backend { Svo, Dense };
     Backend m_backend = Backend::Svo;
     bool m_compareMode = false;
+    bool m_taaEnabled = true;
+    bool m_taaFirstFrame = true;
+    int m_taaHistoryIdx = 0;
     glm::vec4 m_pushB { 1.0f };      // active backend's .b block
     glm::vec4 m_pushBSvo { 1.0f };   // cached per backend
     glm::vec4 m_pushBDense { 1.0f };
@@ -178,16 +182,33 @@ void App::ensureAcquireSemaphores()
 bool App::createOffscreen(uint32_t w, uint32_t h)
 {
     vf::destroyImage3D(m_ctx, m_offscreen);
+    vf::destroyImage3D(m_ctx, m_taaHistory[0]);
+    vf::destroyImage3D(m_ctx, m_taaHistory[1]);
+    vf::destroyImage3D(m_ctx, m_taaResolved);
     m_offscreen = vf::makeImage3D(
         m_ctx, w, h, 1, VK_FORMAT_R8G8B8A8_UNORM,
         VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT |
             VK_IMAGE_USAGE_TRANSFER_DST_BIT);
-    if (!m_offscreen.img)
+    m_taaHistory[0] = vf::makeImage3D(
+        m_ctx, w, h, 1, VK_FORMAT_R8G8B8A8_UNORM,
+        VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT |
+            VK_IMAGE_USAGE_TRANSFER_DST_BIT);
+    m_taaHistory[1] = vf::makeImage3D(
+        m_ctx, w, h, 1, VK_FORMAT_R8G8B8A8_UNORM,
+        VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT |
+            VK_IMAGE_USAGE_TRANSFER_DST_BIT);
+    m_taaResolved = vf::makeImage3D(
+        m_ctx, w, h, 1, VK_FORMAT_R8G8B8A8_UNORM,
+        VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT |
+            VK_IMAGE_USAGE_TRANSFER_DST_BIT);
+    if (!m_offscreen.img || !m_taaHistory[0].img || !m_taaHistory[1].img || !m_taaResolved.img)
         return false;
     m_pass.updateDescriptors(m_sdfVol, m_sdfSampler, m_albedoVol, m_albedoSampler,
                              m_offscreen);
     m_svoPass.updateDescriptors(m_offscreen);
     m_splatPass.setOutputView(m_offscreen.view);
+    m_taaFirstFrame = true;
+    m_taaHistoryIdx = 0;
     return true;
 }
 
@@ -575,6 +596,8 @@ bool App::initVulkan()
         if (!m_splatPass.init(m_ctx, VK_FORMAT_R8G8B8A8_UNORM, sd))
             return false;
     }
+    if (!m_taaPass.init(m_ctx))
+        return false;
 
     m_sdfSampler = vf::makeSampler(m_ctx, VK_FILTER_LINEAR, VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE);
     m_albedoSampler = vf::makeSampler(m_ctx, VK_FILTER_NEAREST, VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE);
@@ -851,8 +874,8 @@ int App::run(const Args& args)
         spdlog::critical("window init failed");
         return 1;
     }
-    // Resolve backend BEFORE initVulkan builds GPU resources.
-    m_backend = args.backend == "dense" ? Backend::Dense : Backend::Svo;
+    // Dense backend removed — SVO is now the single path (dense kept only for --compare validation)
+    m_backend = Backend::Svo;
     m_compareMode = args.compare;
     if (args.mode == "splat")
         m_renderMode = RenderMode::GaussianSplats;
@@ -1156,14 +1179,73 @@ int App::run(const Args& args)
                 m_pass.record(fr.cmd, push);
         }
 
-        // rendered -> transfer-src, swapchain -> transfer-dst, blit ----------
-        vf::transitionImage(fr.cmd, m_offscreen.img, VK_IMAGE_ASPECT_COLOR_BIT,
-                            splatView ? VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL
-                                      : VK_IMAGE_LAYOUT_GENERAL,
-                            VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
-                            VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
-                            VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT,
-                            VK_PIPELINE_STAGE_2_BLIT_BIT, VK_ACCESS_2_TRANSFER_READ_BIT);
+        // TAA resolve (interactive only, not for headless tests) ----------
+        VkImage taaSrc = m_offscreen.img;
+        VkImageLayout taaSrcLayout = splatView ? VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL
+                                               : VK_IMAGE_LAYOUT_GENERAL;
+        VkPipelineStageFlags2 taaSrcStage = splatView
+            ? VkPipelineStageFlags2(VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT)
+            : VkPipelineStageFlags2(VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT);
+        VkAccessFlags2 taaSrcAccess = splatView
+            ? VkAccessFlags2(VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT)
+            : VkAccessFlags2(VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT);
+        if (m_taaEnabled && !headlessRun) {
+            // current -> SHADER_READ for TAA
+            vf::transitionImage(fr.cmd, m_offscreen.img, VK_IMAGE_ASPECT_COLOR_BIT,
+                                taaSrcLayout, VK_IMAGE_LAYOUT_GENERAL,
+                                taaSrcStage, taaSrcAccess,
+                                VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT, VK_ACCESS_2_SHADER_STORAGE_READ_BIT);
+            VkImageView histView = m_taaHistory[m_taaHistoryIdx].view;
+            // history already in GENERAL from previous frame's copy, make it readable
+            // (first frame history is undefined but TAA handles firstFrame)
+            m_taaPass.updateDescriptors(m_offscreen.view, histView, m_taaResolved.view);
+            // history -> SHADER_READ (if not first frame, already GENERAL)
+            // resolved -> GENERAL for write
+            vf::transitionImage(fr.cmd, m_taaResolved.img, VK_IMAGE_ASPECT_COLOR_BIT,
+                                VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_GENERAL,
+                                VK_PIPELINE_STAGE_2_NONE, VK_ACCESS_2_NONE,
+                                VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT, VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT);
+            m_taaPass.record(fr.cmd, m_offscreen.extent.width, m_offscreen.extent.height,
+                             m_taaFirstFrame ? 0.0f : 0.92f, m_taaFirstFrame);
+            // TAA output -> TRANSFER_SRC for blit, and copy to history for next frame
+            vf::transitionImage(fr.cmd, m_taaResolved.img, VK_IMAGE_ASPECT_COLOR_BIT,
+                                VK_IMAGE_LAYOUT_GENERAL, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+                                VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT, VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT,
+                                VK_PIPELINE_STAGE_2_TRANSFER_BIT, VK_ACCESS_2_TRANSFER_READ_BIT);
+            // copy resolved -> history (for next frame)
+            VkImageCopy copy{};
+            copy.srcSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
+            copy.dstSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
+            copy.extent = {m_offscreen.extent.width, m_offscreen.extent.height, 1};
+            // history need to be DST
+            vf::transitionImage(fr.cmd, m_taaHistory[m_taaHistoryIdx].img, VK_IMAGE_ASPECT_COLOR_BIT,
+                                VK_IMAGE_LAYOUT_GENERAL, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+                                VK_PIPELINE_STAGE_2_NONE, VK_ACCESS_2_NONE,
+                                VK_PIPELINE_STAGE_2_TRANSFER_BIT, VK_ACCESS_2_TRANSFER_WRITE_BIT);
+            vkCmdCopyImage(fr.cmd, m_taaResolved.img, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+                           m_taaHistory[m_taaHistoryIdx].img, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &copy);
+            vf::transitionImage(fr.cmd, m_taaHistory[m_taaHistoryIdx].img, VK_IMAGE_ASPECT_COLOR_BIT,
+                                VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_LAYOUT_GENERAL,
+                                VK_PIPELINE_STAGE_2_TRANSFER_BIT, VK_ACCESS_2_TRANSFER_WRITE_BIT,
+                                VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT, VK_ACCESS_2_SHADER_STORAGE_READ_BIT);
+            // also keep resolved as TRANSFER_SRC for blit (already)
+            taaSrc = m_taaResolved.img;
+            taaSrcLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
+            taaSrcStage = VK_PIPELINE_STAGE_2_TRANSFER_BIT;
+            taaSrcAccess = VK_ACCESS_2_TRANSFER_READ_BIT;
+            m_taaHistoryIdx ^= 1;
+            m_taaFirstFrame = false;
+        } else {
+            // no TAA: offscreen -> TRANSFER_SRC directly
+            vf::transitionImage(fr.cmd, m_offscreen.img, VK_IMAGE_ASPECT_COLOR_BIT,
+                                taaSrcLayout, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+                                taaSrcStage, taaSrcAccess,
+                                VK_PIPELINE_STAGE_2_BLIT_BIT, VK_ACCESS_2_TRANSFER_READ_BIT);
+            taaSrcLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
+            taaSrcStage = VK_PIPELINE_STAGE_2_TRANSFER_BIT;
+            taaSrcAccess = VK_ACCESS_2_TRANSFER_READ_BIT;
+        }
+        // swapchain -> transfer-dst, blit ----------
         vf::transitionImage(fr.cmd, m_swapchain.image(imgIdx), VK_IMAGE_ASPECT_COLOR_BIT,
                             VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
                             VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT,
@@ -1180,7 +1262,7 @@ int App::run(const Args& args)
         blit.srcOffsets[1] = b1;
         blit.dstOffsets[0] = b0;
         blit.dstOffsets[1] = s1;
-        vkCmdBlitImage(fr.cmd, m_offscreen.img, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+        vkCmdBlitImage(fr.cmd, taaSrc, taaSrcLayout,
                        m_swapchain.image(imgIdx), VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1,
                        &blit, VK_FILTER_LINEAR);
 
@@ -1276,12 +1358,16 @@ void App::destroy()
 
     m_svoPass.destroy();
     m_pass.destroy();
+    m_taaPass.destroy();
     vf::destroySampler(m_ctx, m_sdfSampler);
     vf::destroySampler(m_ctx, m_albedoSampler);
     vf::destroyImage3D(m_ctx, m_sdfVol);
     vf::destroyImage3D(m_ctx, m_albedoVol);
     vf::destroyImage3D(m_ctx, m_heightImg);
     vf::destroyImage3D(m_ctx, m_offscreen);
+    vf::destroyImage3D(m_ctx, m_taaHistory[0]);
+    vf::destroyImage3D(m_ctx, m_taaHistory[1]);
+    vf::destroyImage3D(m_ctx, m_taaResolved);
     m_swapchain.destroy();
     m_ctx.shutdown();
     m_window.shutdown();

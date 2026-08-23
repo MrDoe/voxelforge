@@ -263,9 +263,10 @@ void SplatPass::updateSorting(const glm::vec3& camPos, const glm::vec3& camFwd)
     size_t stride = hasNew ? 3 : 2;
     std::vector<uint32_t> idx(m_count);
     std::iota(idx.begin(), idx.end(), 0u);
-    std::sort(idx.begin(), idx.end(), [&](uint32_t a, uint32_t b){
+    std::stable_sort(idx.begin(), idx.end(), [&](uint32_t a, uint32_t b){
         float da = glm::dot(glm::vec3(m_origPos[a]) - camPos, camFwd);
         float db = glm::dot(glm::vec3(m_origPos[b]) - camPos, camFwd);
+        if (std::abs(da - db) < 0.005f) return a < b;
         return da > db;
     });
     std::vector<glm::vec4> packed(m_count * stride);

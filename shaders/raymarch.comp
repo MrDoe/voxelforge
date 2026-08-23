@@ -72,13 +72,13 @@ float sdfAt(vec3 p)
     vec3 uvw = p / pc.b.x + 0.5;
     if (any(lessThan(uvw, vec3(0.0))) || any(greaterThan(uvw, vec3(1.0))))
         return pc.b.y;
-    float lod = clamp(log2(max(length(p - pc.camPos.xyz) * 0.015, 1.0)), 0.0, 8.0);
+    float lod = clamp(log2(max(length(p - pc.camPos.xyz) * 0.03, 1.0)), 0.0, 8.0);
     return textureLod(uSDF, uvw, lod).r * pc.b.y;
 }
 vec3 albedoAt(vec3 p)
 {
     vec3 uvw = p / pc.b.x + 0.5;
-    float lod = clamp(log2(max(length(p - pc.camPos.xyz) * 0.015, 1.0)), 0.0, 8.0);
+    float lod = clamp(log2(max(length(p - pc.camPos.xyz) * 0.03, 1.0)), 0.0, 8.0);
     return textureLod(uAlbedo, uvw, lod).rgb;
 }
 
