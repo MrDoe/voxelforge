@@ -39,7 +39,7 @@ struct Args {
     std::string shot;    // dump one frame to PPM and exit
     float camx=0,camy=0,camz=0,tx=0,ty=0,tz=0;
     bool camSet=false;
-    float sunElev=56.5f, sunAzim=54.5f; // degrees; default reproduces prior sun
+    float sunElev=34.0f, sunAzim=238.0f; // golden-hour: long visible shadows
     bool sunSet=false;
     float splatScale=1.0f;
     bool probeSet=false;
@@ -734,9 +734,11 @@ int App::run(const Args& args)
         m_camera.pitch = asin(dir.y);
         m_camera.speed = 6.0f;
     } else {
-        m_camera.pos = { 0.f, 14.f, -40.f }; // elevated view over the river valley
-        m_camera.yaw = glm::half_pi<float>();
-        m_camera.pitch = -0.15f;
+        // hero shot: across the river toward the cabin, sun raking from the west
+        m_camera.pos = { -16.f, 6.5f, -14.f };
+        glm::vec3 dir = glm::normalize(glm::vec3(6.5f, 0.8f, 11.0f) - m_camera.pos);
+        m_camera.yaw = atan2(dir.z, dir.x);
+        m_camera.pitch = asin(dir.y);
     }
 
     if (args.camSet) {
@@ -771,7 +773,7 @@ int App::run(const Args& args)
                                    : RenderMode::VoxelRaymarch;
                 spdlog::info("Render mode -> {}",
                              m_renderMode == RenderMode::VoxelRaymarch ? "voxel ray-march"
-                                                                       : "gaussian splats (placeholder)");
+                                                                       : "gaussian splats");
             }
             m_fWasDown = true;
         } else {

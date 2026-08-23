@@ -101,8 +101,7 @@ inline uint8_t materialAt(float x, float z, float H)
 
 // --- riverside objects (built layer for layer, bottom to top) ---------------
 inline constexpr glm::vec2 kHousePos { 6.5f, 12.5f }; // west bank of the river
-inline constexpr glm::vec2 kTreePos { 10.5f, 11.5f };
-inline constexpr float kPadY = -0.40f; // flattened ground level around both
+inline constexpr float kPadY = -0.40f; // flattened ground level around the house
 
 struct ObjHit {
     float d;
@@ -195,9 +194,10 @@ inline ObjHit houseAt(glm::vec3 p)
 }
 
 // broadleaf tree: root flare -> tapered trunk -> four foliage tiers (~7.5 m)
-inline ObjHit treeAt(glm::vec3 p)
+// base y comes from the heightmap so trees hug whatever ground they stand on
+inline ObjHit treeAt(glm::vec3 p, glm::vec2 spot, float groundY)
 {
-    glm::vec3 q(p.x - kTreePos.x, p.y - kPadY, p.z - kTreePos.y);
+    glm::vec3 q(p.x - spot.x, p.y - groundY, p.z - spot.y);
     ObjHit best { 1e9f, 6u };
 
     best.d = sdCylY(q, glm::vec2(0.f), -0.05f, 0.20f, 0.37f);      // root flare
@@ -224,6 +224,52 @@ inline ObjHit treeAt(glm::vec3 p)
     return best;
 }
 
+// valley-wide scatter: five more trees plus half-buried bank boulders
+inline const std::array<glm::vec2, 6> kTreeSpots {
+    glm::vec2 { 10.5f, 11.5f }, glm::vec2 { 2.0f, 17.0f },  glm::vec2 { -6.0f, 20.0f },
+    glm::vec2 { 14.0f, 4.0f },  glm::vec2 { 18.0f, 16.0f }, glm::vec2 { 15.0f, 22.0f },
+};
+inline const std::array<glm::vec2, 3> kRockSpots {
+    glm::vec2 { 3.0f, 9.0f }, glm::vec2 { 11.5f, 9.0f }, glm::vec2 { -1.0f, 4.5f },
+};
+inline const std::array<float, 3> kRockRadii { 0.85f, 0.65f, 1.00f };
+
+inline ObjHit treesAt(glm::vec3 p)
+{
+    const HeightMap& hm = sharedHeightmap();
+    ObjHit best { 1e9f, 8u };
+    for (const glm::vec2& s : kTreeSpots) {
+        float dx = p.x - s.x, dz = p.z - s.y;
+        if (dx * dx + dz * dz > 16.0f || p.y > hm.sample(s.x, s.y) + 8.4f)
+            continue; // cheap reject outside the crown cylinder
+        ObjHit t = treeAt(p, s, hm.sample(s.x, s.y));
+        if (t.d < best.d)
+            best = t;
+    }
+    return best;
+}
+
+inline ObjHit rocksAt(glm::vec3 p)
+{
+    const HeightMap& hm = sharedHeightmap();
+    ObjHit best { 1e9f, 4u };
+    for (size_t i = 0; i < kRockSpots.size(); ++i) {
+        glm::vec2 s = kRockSpots[i];
+        float r = kRockRadii[i];
+        float dx = p.x - s.x, dz = p.z - s.y;
+        if (dx * dx + dz * dz > (r + 0.4f) * (r + 0.4f))
+            continue;
+        // half-buried: center sits below local ground
+        glm::vec3 c(s.x, hm.sample(s.x, s.y) + r * 0.30f, s.y);
+        float d = glm::length(p - c) - r;
+        if (d < best.d) {
+            best.d = d;
+            best.mat = uint8_t(i == 1 ? 5 : 4);
+        }
+    }
+    return best;
+}
+
 inline SceneSample scene(glm::vec3 p)
 {
     const HeightMap& hm = sharedHeightmap();
@@ -231,15 +277,20 @@ inline SceneSample scene(glm::vec3 p)
     float d = p.y - H;
     uint8_t mat = materialAt(p.x, p.z, H);
 
-    ObjHit house = houseAt(p);
-    ObjHit tree = treeAt(p);
-    if (tree.d < house.d) {
-        house.d = tree.d;
-        house.mat = tree.mat;
+    ObjHit obj = houseAt(p);
+    ObjHit t = treesAt(p);
+    if (t.d < obj.d) {
+        obj.d = t.d;
+        obj.mat = t.mat;
     }
-    if (house.d < d) {
-        d = house.d;
-        mat = house.mat;
+    ObjHit r = rocksAt(p);
+    if (r.d < obj.d) {
+        obj.d = r.d;
+        obj.mat = r.mat;
+    }
+    if (obj.d < d) {
+        d = obj.d;
+        mat = obj.mat;
     }
     return { d, mat };
 }

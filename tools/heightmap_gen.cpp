@@ -60,13 +60,13 @@ float terrainHeightAt(float x, float z)
     float bed = WATER_LEVEL - 2.1f + fbm2(x * 0.23f, z * 0.23f) * 0.12f;
     float h = glm::mix(floorH, bed, bowl);
 
-    // building pads: flatten ground under the riverside house & tree
+    // building pad: flatten ground under the riverside house
+    // (trees & rocks hug the natural ground via sampled bases - no pads needed)
     auto pad = [&](glm::vec2 c, float r0, float r1) {
         float dd = glm::length(glm::vec2(x, z) - c);
         h = glm::mix(kPadY, h, smoothstepf(r0, r1, dd));
     };
     pad(kHousePos, 4.6f, 7.5f);
-    pad(kTreePos, 2.0f, 4.2f);
     return glm::clamp(h, kHmMinMeters + 0.05f, kHmMaxMeters - 0.05f);
 }
 

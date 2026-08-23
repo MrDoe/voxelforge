@@ -161,12 +161,18 @@ different scenes and `--compare` could never agree. `vol.worldSize` is now set t
       flattened in the generator; palette extended (wood/shingles/foliage)
 - [x] **Constant-mist fix**: distance fog density 0.006 → 0.002 in both backends;
       terrain luminance spread at the canonical view widened 23 → 39 (p5 214→196)
-- [ ] Visual iteration pass on screenshots in `tests/screenshots/`: water mask edges,
-      object placement fine-tuning
-- [ ] Water flow polish: foam lines at banks, depth-based color gradient
-- [ ] Exposure/saturation grading pass
-- [ ] Objects don't cast shadow-march shadows yet (softShadow is heightfield-only)
-- [ ] More pines + deciduous variant; scattered rocks/grass tufts as instanced details
+- [x] **Object + terrain shadows**: softShadow marches min(heightfield, objectDistance)
+      identically in both backends — house, trees and boulders cast soft shadows
+      (sun-flip test: 28.9/255 directional response, zero pitch-black)
+- [x] **Shoreline foam**: animated value-noise streaks hugging the waterline
+      (depth-band masked; sparse by design)
+- [x] **Grading**: post-ACES saturation lift (1.14) in both backends; sun glow
+      strengthened so the light source reads in the sky
+- [x] **Golden-hour defaults + hero shot**: sun defaults to 34°/238°; SVO spawn camera
+      looks across the river at the cabin; splat scale keys (+/-) with HUD readout
+- [x] **Valley scatter**: five additional trees + three half-buried bank boulders,
+      all ground-hugging via sampled bases
+- [ ] Visual iteration pass on screenshots in `tests/screenshots/` (fine-tuning)
 
 ### Phase P1 — realism upgrades (was M5)
 - [ ] Sky model (Hosek-Wilkie or Preetham) replacing gradient sky
