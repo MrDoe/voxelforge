@@ -14,7 +14,7 @@ struct alignas(16) RaymarchPush {
     glm::vec4 a; // tanHalfFov, aspect, extentX, extentY
     glm::vec4 b; // worldSize, maxEncodedDist, voxelSize, frameIdx
     glm::vec4 sunDir; // normalized direction TOWARD the sun (xyz)
-    glm::vec4 misc;   // x = splat size scale
+    glm::vec4 misc;   // x = splat size scale, y = animation time (seconds)
 };
 static_assert(sizeof(RaymarchPush) == 128);
 

@@ -42,6 +42,7 @@ struct Args {
     float sunElev=34.0f, sunAzim=238.0f; // golden-hour: long visible shadows
     bool sunSet=false;
     float splatScale=1.0f;
+    float animTime=0.0f;
     bool probeSet=false;
     glm::vec3 probe { 0.f };
 };
@@ -79,6 +80,8 @@ Args parseArgs(int argc, char** argv)
             a.sunSet = true;
         } else if (s == "--splatscale" && i + 1 < argc) {
             a.splatScale = atof(argv[++i]);
+        } else if (s == "--animtime" && i + 1 < argc) {
+            a.animTime = atof(argv[++i]);
         } else if (s == "--probe" && i + 3 < argc) {
             a.probe = { float(atof(argv[i + 1])), float(atof(argv[i + 2])),
                         float(atof(argv[i + 3])) };
@@ -148,7 +151,9 @@ private:
     uint64_t m_frameIdx = 0;
     bool m_showControls = true;
     bool m_fWasDown = false;
-    float m_splatScale = 1.0f;    uint32_t m_nextAcquire = 0;
+    float m_splatScale = 1.0f;
+    float m_animTime = 0.0f;
+    uint32_t m_nextAcquire = 0;
 };
 
 bool App::initWindow(const Args& args)
@@ -590,7 +595,7 @@ bool App::runCompare()
                            float(m_offscreen.extent.width), float(m_offscreen.extent.height));
         push.b = glm::vec4(pushBFor(be).x, pushBFor(be).y, pushBFor(be).z, 0);
         push.sunDir = m_sunDir;
-        push.misc = glm::vec4(m_splatScale, 0.0f, 0.0f, 0.0f);
+        push.misc = glm::vec4(m_splatScale, m_animTime, 0.0f, 0.0f);
         if (be == Backend::Svo)
             m_svoPass.record(fr.cmd, push);
         else
@@ -665,6 +670,7 @@ int App::run(const Args& args)
             glm::normalize(glm::vec3(cosf(e) * sinf(a), sinf(e), cosf(e) * cosf(a))), 0.0f);
     }
     m_splatScale = std::clamp(args.splatScale, 0.25f, 4.0f);
+    m_animTime = args.animTime;
     if (args.probeSet) {
         auto s = vf::voxel::scene(args.probe);
         spdlog::info("probe({:.2f},{:.2f},{:.2f}): d={:+.3f} mat={} ({})", args.probe.x,
@@ -781,6 +787,8 @@ int App::run(const Args& args)
             m_fWasDown = false;
         }
 
+        m_animTime += dt;
+
         // +/- adjust the global splat size multiplier (hold to slide)
         {
             GLFWwindow* win = m_window.handle();
@@ -828,7 +836,7 @@ int App::run(const Args& args)
                                float(m_offscreen.extent.height));
             push.b = glm::vec4(m_pushB.x, m_pushB.y, m_pushB.z, float(m_frameIdx % 1024));
             push.sunDir = m_sunDir;
-            push.misc = glm::vec4(m_splatScale, 0.0f, 0.0f, 0.0f);
+            push.misc = glm::vec4(m_splatScale, m_animTime, 0.0f, 0.0f);
             const bool hSplat = m_renderMode == RenderMode::GaussianSplats && m_splatPass.count() > 0;
             if (hSplat) {
                 vf::transitionImage(fr.cmd, m_offscreen.img, VK_IMAGE_ASPECT_COLOR_BIT,
@@ -934,7 +942,7 @@ int App::run(const Args& args)
                            float(m_offscreen.extent.width), float(m_offscreen.extent.height));
         push.b = glm::vec4(m_pushB.x, m_pushB.y, m_pushB.z, float(m_frameIdx % 1024));
         push.sunDir = m_sunDir;
-        push.misc = glm::vec4(m_splatScale, 0.0f, 0.0f, 0.0f);
+        push.misc = glm::vec4(m_splatScale, m_animTime, 0.0f, 0.0f);
 
         const bool splatView =
             m_renderMode == RenderMode::GaussianSplats && m_splatPass.count() > 0;

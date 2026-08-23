@@ -17,15 +17,15 @@ constexpr float CHUNK_M = float(CHUNK_N) * VOXEL;
 constexpr int GRID_N = int(WORLD / CHUNK_M);
 
 inline const std::array<glm::vec3, 9> kPalette {
-    glm::vec3 { 0.32f, 0.46f, 0.22f }, // 0 grass dark
-    glm::vec3 { 0.45f, 0.58f, 0.26f }, // 1 grass light
-    glm::vec3 { 0.52f, 0.44f, 0.30f }, // 2 soil
-    glm::vec3 { 0.62f, 0.55f, 0.42f }, // 3 sand
-    glm::vec3 { 0.42f, 0.41f, 0.40f }, // 4 rock
-    glm::vec3 { 0.50f, 0.48f, 0.46f }, // 5 light rock
-    glm::vec3 { 0.42f, 0.30f, 0.18f }, // 6 wood (logs/trunk)
-    glm::vec3 { 0.28f, 0.22f, 0.16f }, // 7 roof shingles
-    glm::vec3 { 0.20f, 0.38f, 0.15f }, // 8 foliage
+    glm::vec3 { 0.07f, 0.52f, 0.06f }, // 0 grass dark - vivid
+    glm::vec3 { 0.16f, 0.68f, 0.10f }, // 1 grass light - vivid
+    glm::vec3 { 0.62f, 0.36f, 0.14f }, // 2 soil - warm brown
+    glm::vec3 { 0.84f, 0.72f, 0.38f }, // 3 sand - golden
+    glm::vec3 { 0.48f, 0.42f, 0.38f }, // 4 rock
+    glm::vec3 { 0.66f, 0.64f, 0.60f }, // 5 light rock
+    glm::vec3 { 0.62f, 0.33f, 0.10f }, // 6 wood (logs/trunk) - reddish
+    glm::vec3 { 0.42f, 0.22f, 0.10f }, // 7 roof shingles - deep brown
+    glm::vec3 { 0.04f, 0.52f, 0.03f }, // 8 foliage - vivid green
 };
 
 // per-material surface attributes, 0-255: x = reflectivity, y = roughness
