@@ -190,7 +190,8 @@ bool uploadToImage3D(const Context& ctx, Image3D& im, const void* data, size_t b
             for (uint32_t y = 0; y < ch; ++y)
                 for (uint32_t x = 0; x < cw; ++x) {
                     if (bpp == 1) {
-                        int sum = 0, cnt = 0;
+                        int8_t best = 127;
+                        int bestAbs = 128;
                         for (uint32_t dz = 0; dz < 2; ++dz)
                             for (uint32_t dy = 0; dy < 2; ++dy)
                                 for (uint32_t dx = 0; dx < 2; ++dx) {
@@ -199,11 +200,13 @@ bool uploadToImage3D(const Context& ctx, Image3D& im, const void* data, size_t b
                                     uint32_t sz = std::min(2 * z + dz, pd - 1);
                                     int8_t v = reinterpret_cast<const int8_t*>(prev.data())[
                                         (size_t(sz) * ph + sy) * pw + sx];
-                                    sum += v;
-                                    ++cnt;
+                                    int a = std::abs(int(v));
+                                    if (a < bestAbs) {
+                                        bestAbs = a;
+                                        best = v;
+                                    }
                                 }
-                        int8_t avg = int8_t(std::clamp(sum / cnt, -128, 127));
-                        cur[(size_t(z) * ch + y) * cw + x] = reinterpret_cast<uint8_t*>(&avg)[0];
+                        cur[(size_t(z) * ch + y) * cw + x] = reinterpret_cast<uint8_t*>(&best)[0];
                     } else {
                         int sum[4] = {0, 0, 0, 0};
                         int cnt = 0;

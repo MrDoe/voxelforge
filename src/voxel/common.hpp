@@ -270,6 +270,38 @@ inline ObjHit rocksAt(glm::vec3 p)
     return best;
 }
 
+inline constexpr float kBushCell = 6.0f;
+
+inline ObjHit bushesAt(glm::vec3 p)
+{
+    const HeightMap& hm = sharedHeightmap();
+    ObjHit best { 1e9f, 8u };
+    float cell = kBushCell;
+    int ix = int(floor(p.x / cell));
+    int iz = int(floor(p.z / cell));
+    for (int dz = -1; dz <= 1; ++dz) for (int dx = -1; dx <= 1; ++dx) {
+        int cx = ix + dx, cz = iz + dz;
+        float hCell = hash2(float(cx) * 19.1f, float(cz) * 37.7f);
+        if (hCell < 0.62f) continue;
+        float jx = hash2(float(cx) * 7.3f, float(cz) * 11.1f);
+        float jz = hash2(float(cx) * 13.7f, float(cz) * 17.3f);
+        float hr = hash2(float(cx) * 23.1f, float(cz) * 29.7f);
+        glm::vec2 center((cx + jx) * cell, (cz + jz) * cell);
+        float H = hm.sample(center.x, center.y);
+        uint8_t mat = materialAt(center.x, center.y, H);
+        if (mat != 0 && mat != 1) continue;
+        float slope = glm::length(hm.gradient(center.x, center.y));
+        if (slope > 0.9f) continue;
+        float r = 0.35f + hr * 0.45f;
+        glm::vec3 c(center.x, H + r * 0.55f, center.y);
+        // vertical cull
+        if (p.y < H - 0.5f || p.y > c.y + r + 1.0f) continue;
+        float d = glm::length(p - c) - r;
+        if (d < best.d) best.d = d;
+    }
+    return best;
+}
+
 inline SceneSample scene(glm::vec3 p)
 {
     const HeightMap& hm = sharedHeightmap();
@@ -287,6 +319,11 @@ inline SceneSample scene(glm::vec3 p)
     if (r.d < obj.d) {
         obj.d = r.d;
         obj.mat = r.mat;
+    }
+    ObjHit b = bushesAt(p);
+    if (b.d < obj.d) {
+        obj.d = b.d;
+        obj.mat = b.mat;
     }
     if (obj.d < d) {
         d = obj.d;
