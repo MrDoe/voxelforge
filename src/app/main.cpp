@@ -311,22 +311,37 @@ bool App::initVulkan()
 
         m_pushBSvo = glm::vec4(vf::voxel::WORLD, vf::voxel::VOXEL, float(vf::voxel::GRID_N), 0);
 
-        // derive preview splats by CPU-sampling the SVO around the origin
-        const int SN = 96;
+        // derive preview splats on a dense lattice over the terrain surface;
+        // radius derives from lattice spacing so adjacent splats overlap even
+        // across slopes; colors bake the same direct+ambient terms as the
+        // raymarch shading so both modes match in brightness
+        const int SN = 192;
         const float ext = 30.0f;
+        const float spacing = (2.0f * ext) / float(SN - 1);
+        const float splatRadius = spacing * 1.25f;
+        const glm::vec3 sunCol = glm::vec3(1.0f, 0.95f, 0.84f) * 2.7f;
+        const glm::vec3 ambBase = (glm::vec3(0.72f, 0.80f, 0.90f) +
+                                   glm::vec3(0.20f, 0.36f, 0.62f)) *
+                                  0.5f * 0.55f;
+        const vf::voxel::HeightMap& hm = vf::voxel::sharedHeightmap();
         for (int zi = 0; zi < SN; ++zi)
             for (int yi = 0; yi < SN; ++yi)
                 for (int xi = 0; xi < SN; ++xi) {
                     glm::vec3 p(glm::mix(-ext, ext, (xi + 0.5f) / SN),
                                 glm::mix(-8.f, 24.f, (yi + 0.5f) / SN),
                                 glm::mix(-ext, ext, (zi + 0.5f) / SN));
-                    float d = world.sample(p);
+                    float d = p.y - hm.sample(p.x, p.z);
                     if (std::abs(d) > 0.22f)
                         continue;
                     vf::voxel::SceneSample s = vf::voxel::scene(p);
                     if (!denseIsPrimary) {
-                        sd.posRadius.emplace_back(p, vf::voxel::VOXEL * 1.45f);
-                        sd.colors.emplace_back(vf::voxel::kPalette[s.mat], 1.0f);
+                        glm::vec2 g = hm.gradient(p.x, p.z);
+                        glm::vec3 n = glm::normalize(glm::vec3(-g.x, 1.0f, -g.y));
+                        float ndl = glm::max(glm::dot(n, glm::vec3(m_sunDir)), 0.0f);
+                        glm::vec3 amb = ambBase * (n.y * 0.5f + 0.5f);
+                        sd.posRadius.emplace_back(p, splatRadius);
+                        sd.colors.emplace_back(
+                            vf::voxel::kPalette[s.mat] * (sunCol * ndl + amb), 1.0f);
                     }
                 }
     }

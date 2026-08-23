@@ -44,7 +44,10 @@ void main()
     vec2 ndc = view.xy / (view.z * pc.a.x * vec2(pc.a.y, 1.0));
     gl_Position = vec4(ndc.x, -ndc.y, 0.5, 1.0);
 
-    // world-radius -> pixel diameter
-    float px = 2.0 * radius / (view.z * pc.a.x) * pc.a.w * 0.5;
-    gl_PointSize = clamp(px, 1.0, 48.0);
+    // world-radius -> pixel diameter, inflated near the camera so adjacent
+    // splats stay fused when perspective magnifies the sampling lattice
+    float dCam = length(rel);
+    float grow = 1.0 + 0.9 * (1.0 - smoothstep(5.0, 28.0, dCam));
+    float px = 2.0 * radius * grow / (view.z * pc.a.x) * pc.a.w * 0.5;
+    gl_PointSize = clamp(px, 1.0, 96.0);
 }

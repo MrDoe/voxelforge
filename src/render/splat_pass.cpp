@@ -208,7 +208,7 @@ bool SplatPass::init(const Context& ctx, VkFormat colorFormat, const SplatVertex
 void SplatPass::record(VkCommandBuffer cmd, VkExtent2D extent, const RaymarchPush& push) const
 {
     VkClearValue clear {};
-    clear.color = { { 0.30f, 0.42f, 0.60f, 1.0f } }; // sky-ish backdrop
+    clear.color = { { 0.86f, 0.90f, 0.95f, 1.0f } }; // gamma-encoded horizon backdrop
 
     VkRenderingAttachmentInfo att { VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO };
     att.imageView = m_outView;
