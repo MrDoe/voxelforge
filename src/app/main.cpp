@@ -151,8 +151,12 @@ private:
     uint64_t m_frameIdx = 0;
     bool m_showControls = true;
     bool m_fWasDown = false;
+    bool m_bWasDown = false;
+    bool m_oWasDown = false;
     float m_splatScale = 1.0f;
     float m_animTime = 0.0f;
+    int m_splatShadingMode = 0; // 0 = BBSplats, 1 = 3DGS
+    bool m_splatAO = true;
     uint32_t m_nextAcquire = 0;
 };
 
@@ -306,8 +310,29 @@ bool App::initVulkan()
                                 (z + 0.5f) / n * vol.worldSize - 0.5f * vol.worldSize);
                     const glm::vec3& c = vf::voxel::kPalette[vol.matId[i]];
                     if (denseIsPrimary) {
+                        const auto& hm = vf::voxel::sharedHeightmap();
+                        glm::vec2 g = hm.gradient(p.x, p.z);
+                        glm::vec3 n = glm::normalize(glm::vec3(-g.x, 1.0f, -g.y));
+                        float dObj = std::min({vf::voxel::houseAt(p).d, vf::voxel::treesAt(p).d, vf::voxel::rocksAt(p).d, vf::voxel::bushesAt(p).d});
+                        float dT = p.y - hm.sample(p.x, p.z);
+                        if (dObj + 0.01f < dT) {
+                            float eo=0.03f;
+                            auto od = [&](glm::vec3 q){ return std::min({vf::voxel::houseAt(q).d, vf::voxel::treesAt(q).d, vf::voxel::rocksAt(q).d, vf::voxel::bushesAt(q).d}); };
+                            n = glm::normalize(glm::vec3(od(p+glm::vec3(eo,0,0))-od(p-glm::vec3(eo,0,0)),
+                                                          od(p+glm::vec3(0,eo,0))-od(p-glm::vec3(0,eo,0)),
+                                                          od(p+glm::vec3(0,0,eo))-od(p-glm::vec3(0,0,eo))));
+                        }
+                        // fast AO
+                        float ao = 1.0f;
+                        {
+                            float occ=0; const glm::vec3 dirs[4]={glm::vec3(0.8,0.3,0.2),glm::vec3(-0.6,0.4,0.5),glm::vec3(0.2,0.8,-0.3),glm::vec3(0.1,0.5,0.9)};
+                            for(int k=0;k<4;++k){ glm::vec3 d=glm::normalize(dirs[k]); if(glm::dot(d,n)<0) d=-d; glm::vec3 sp=p+n*0.06f+d*0.35f; float sd=vf::voxel::scene(sp).d; float w=1.0f-glm::clamp(sd/0.35f,0.0f,1.0f); occ+=w*0.25f; }
+                            ao = glm::clamp(1.0f - occ, 0.0f, 1.0f);
+                        }
                         sd.posRadius.emplace_back(p + vol.originOffset, 0.38f);
-                        sd.colors.emplace_back(c, 1.0f);
+                        sd.albedoAO.emplace_back(c, ao);
+                        sd.normalMat.emplace_back(n, float(vol.matId[i]));
+                        sd.colors.emplace_back(c * ao, 1.0f);
                     }
                 }
         // Water surface splats for dense mode (analytic plane not in SDF)
@@ -363,6 +388,8 @@ bool App::initVulkan()
                 float ndl = glm::max(glm::dot(n, glm::vec3(m_sunDir)), 0.0f);
                 glm::vec3 amb = ambBase2 * (n.y * 0.5f + 0.5f);
                 sd.posRadius.emplace_back(p, r2);
+                sd.albedoAO.emplace_back(vf::voxel::kPalette[s.mat], 1.0f);
+                sd.normalMat.emplace_back(n, float(s.mat));
                 sd.colors.emplace_back(vf::voxel::kPalette[s.mat] * (sunCol2 * ndl + amb), 1.0f);
             }
         }
@@ -428,15 +455,47 @@ bool App::initVulkan()
                                    glm::vec3(0.20f, 0.36f, 0.62f)) *
                                   0.5f * 0.55f;
         const vf::voxel::HeightMap& hm = vf::voxel::sharedHeightmap();
-        auto addSplat = [&](const glm::vec3& p, const glm::vec3& albedo) {
-            if (!denseIsPrimary) {
-                glm::vec2 g = hm.gradient(p.x, p.z);
-                glm::vec3 n = glm::normalize(glm::vec3(-g.x, 1.0f, -g.y));
-                float ndl = glm::max(glm::dot(n, glm::vec3(m_sunDir)), 0.0f);
-                glm::vec3 amb = ambBase * (n.y * 0.5f + 0.5f);
-                sd.posRadius.emplace_back(p, splatRadius);
-                sd.colors.emplace_back(albedo * (sunCol * ndl + amb), 1.0f);
+        auto computeAO = [&](const glm::vec3& p, const glm::vec3& n) -> float {
+            float occ = 0.0f;
+            // 6 hemisphere samples
+            const glm::vec3 dirs[6] = {
+                glm::vec3( 0.8f, 0.2f, 0.1f), glm::vec3(-0.7f, 0.3f, 0.4f),
+                glm::vec3( 0.2f, 0.15f, 0.9f), glm::vec3(-0.3f, 0.25f,-0.8f),
+                glm::vec3( 0.1f, 0.9f, 0.2f), glm::vec3( 0.0f, 0.6f,-0.7f)
+            };
+            for (int i=0;i<6;++i){
+                glm::vec3 d = glm::normalize(dirs[i]);
+                if (glm::dot(d,n) < 0) d = -d;
+                glm::vec3 sp = p + n*0.06f + d*0.38f;
+                float sd = vf::voxel::scene(sp).d;
+                float w = 1.0f - glm::clamp(sd / 0.38f, 0.0f, 1.0f);
+                occ += w * (1.0f / (1.0f + sd*sd*4.0f));
             }
+            return glm::clamp(1.0f - occ * 0.18f, 0.0f, 1.0f);
+        };
+        auto addSplat = [&](const glm::vec3& p, const glm::vec3& albedo) {
+            if (denseIsPrimary) return;
+            // normal: terrain gradient or object SDF central diff if near object
+            glm::vec3 n;
+            float dObj = std::min({vf::voxel::houseAt(p).d, vf::voxel::treesAt(p).d, vf::voxel::rocksAt(p).d, vf::voxel::bushesAt(p).d});
+            float dTerrain = p.y - hm.sample(p.x, p.z);
+            if (dObj + 0.01f < dTerrain) {
+                float eo=0.03f;
+                auto od = [&](glm::vec3 q){ return std::min({vf::voxel::houseAt(q).d, vf::voxel::treesAt(q).d, vf::voxel::rocksAt(q).d, vf::voxel::bushesAt(q).d}); };
+                n = glm::normalize(glm::vec3(od(p+glm::vec3(eo,0,0))-od(p-glm::vec3(eo,0,0)),
+                                              od(p+glm::vec3(0,eo,0))-od(p-glm::vec3(0,eo,0)),
+                                              od(p+glm::vec3(0,0,eo))-od(p-glm::vec3(0,0,eo))));
+            } else {
+                glm::vec2 g = hm.gradient(p.x, p.z);
+                n = glm::normalize(glm::vec3(-g.x, 1.0f, -g.y));
+            }
+            float ao = computeAO(p, n);
+            // material id for PBR (store in normalMat.w)
+            uint8_t mat = vf::voxel::scene(p).mat;
+            sd.posRadius.emplace_back(p, splatRadius);
+            sd.albedoAO.emplace_back(albedo, ao);
+            sd.normalMat.emplace_back(n, float(mat));
+            sd.colors.emplace_back(albedo * ao, 1.0f); // legacy fallback
         };
         // SVO splats: single source is the voxel file. When the file is
         // available we derive splats directly from its surface records
@@ -570,9 +629,10 @@ void App::drawHud()
     ImGui::Text("Mode: %s", modeName);
     if (m_renderMode == RenderMode::GaussianSplats) {
         ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1.0f, 0.75f, 0.35f, 1.0f));
-        ImGui::TextWrapped("Preview: isotropic surface point-splats (unsorted). True 3DGS lands in M7.");
+        ImGui::TextWrapped("Preview: isotropic surface point-splats. Press B to toggle shading, O for AO.");
         ImGui::PopStyleColor();
-        ImGui::Text("Splat scale x%.2f  [+ / -]", m_splatScale);
+        ImGui::Text("Splat scale x%.2f  [+ / -]  Shading: %s [B]  AO: %s [O]",
+                    m_splatScale, m_splatShadingMode ? "3DGS" : "BBSplats", m_splatAO ? "on" : "off");
     }
 
     ImGui::Text("Cam  %.1f %.1f %.1f", m_camera.pos.x, m_camera.pos.y, m_camera.pos.z);
@@ -584,7 +644,7 @@ void App::drawHud()
         ImGui::BulletText("WASD move, Q/E down/up");
         ImGui::BulletText("RMB hold: look");
         ImGui::BulletText("Wheel: speed, Shift/Ctrl boost/slow");
-        ImGui::BulletText("F: toggle voxel/splat render");
+        ImGui::BulletText("F: toggle voxel/splat  B: shading  O: AO  +/-: size");
         ImGui::BulletText("ESC: quit");
     }
     ImGui::End();
@@ -700,7 +760,7 @@ bool App::runCompare()
                            float(m_offscreen.extent.width), float(m_offscreen.extent.height));
         push.b = glm::vec4(pushBFor(be).x, pushBFor(be).y, pushBFor(be).z, 0);
         push.sunDir = m_sunDir;
-        push.misc = glm::vec4(m_splatScale, m_animTime, 0.0f, 0.0f);
+        push.misc = glm::vec4(m_splatScale, m_animTime, float(m_splatShadingMode), m_splatAO?1.0f:0.0f);
         if (be == Backend::Svo)
             m_svoPass.record(fr.cmd, push);
         else
@@ -915,6 +975,22 @@ int App::run(const Args& args)
             if (m_splatScale != prev && m_renderMode == RenderMode::GaussianSplats)
                 spdlog::info("splat scale x{:.2f}", m_splatScale);
         }
+        // B toggles BBSplats / 3DGS shading, O toggles AO
+        {
+            GLFWwindow* win = m_window.handle();
+            bool bDown = glfwGetKey(win, GLFW_KEY_B) == GLFW_PRESS;
+            bool oDown = glfwGetKey(win, GLFW_KEY_O) == GLFW_PRESS;
+            if (bDown && !m_bWasDown) {
+                m_splatShadingMode ^= 1;
+                spdlog::info("splat shading -> {}", m_splatShadingMode ? "3DGS" : "BBSplats");
+            }
+            m_bWasDown = bDown;
+            if (oDown && !m_oWasDown) {
+                m_splatAO = !m_splatAO;
+                spdlog::info("splat AO {}", m_splatAO ? "on" : "off");
+            }
+            m_oWasDown = oDown;
+        }
 
         if (m_window.resized()) {
             m_window.clearResized();
@@ -946,7 +1022,7 @@ int App::run(const Args& args)
                                float(m_offscreen.extent.height));
             push.b = glm::vec4(m_pushB.x, m_pushB.y, m_pushB.z, float(m_frameIdx % 1024));
             push.sunDir = m_sunDir;
-            push.misc = glm::vec4(m_splatScale, m_animTime, 0.0f, 0.0f);
+            push.misc = glm::vec4(m_splatScale, m_animTime, float(m_splatShadingMode), m_splatAO?1.0f:0.0f);
             const bool hSplat = m_renderMode == RenderMode::GaussianSplats && m_splatPass.count() > 0;
             if (hSplat) {
                 m_splatPass.updateSorting(m_camera.pos, m_camera.forward());
@@ -1053,7 +1129,7 @@ int App::run(const Args& args)
                            float(m_offscreen.extent.width), float(m_offscreen.extent.height));
         push.b = glm::vec4(m_pushB.x, m_pushB.y, m_pushB.z, float(m_frameIdx % 1024));
         push.sunDir = m_sunDir;
-        push.misc = glm::vec4(m_splatScale, m_animTime, 0.0f, 0.0f);
+        push.misc = glm::vec4(m_splatScale, m_animTime, float(m_splatShadingMode), m_splatAO?1.0f:0.0f);
 
         const bool splatView =
             m_renderMode == RenderMode::GaussianSplats && m_splatPass.count() > 0;

@@ -47,12 +47,21 @@ bool SplatPass::init(const Context& ctx, VkFormat colorFormat, const SplatVertex
 
     m_origPos = data.posRadius;
     m_origCol = data.colors;
+    m_origAlbedoAO = data.albedoAO;
+    m_origNormalMat = data.normalMat;
+    bool hasNew = (data.albedoAO.size() == m_count && data.normalMat.size() == m_count);
 
-    // interleaved SSBO: posRadius[i], colors[i]
-    std::vector<glm::vec4> packed(m_count * 2);
+    size_t stride = hasNew ? 3 : 2;
+    std::vector<glm::vec4> packed(m_count * stride);
     for (size_t i = 0; i < m_count; ++i) {
-        packed[2 * i + 0] = data.posRadius[i];
-        packed[2 * i + 1] = data.colors[i];
+        packed[stride * i + 0] = data.posRadius[i];
+        if (hasNew) {
+            packed[stride * i + 1] = data.albedoAO[i];
+            packed[stride * i + 2] = data.normalMat[i];
+        } else {
+            // legacy: colors is baked lit color
+            packed[stride * i + 1] = data.colors[i];
+        }
     }
 
     Buffer staging =
@@ -250,19 +259,25 @@ void SplatPass::record(VkCommandBuffer cmd, VkExtent2D extent, const RaymarchPus
 void SplatPass::updateSorting(const glm::vec3& camPos, const glm::vec3& camFwd)
 {
     if (m_count == 0 || m_origPos.empty()) return;
+    bool hasNew = (m_origAlbedoAO.size() == m_count && m_origNormalMat.size() == m_count);
+    size_t stride = hasNew ? 3 : 2;
     std::vector<uint32_t> idx(m_count);
     std::iota(idx.begin(), idx.end(), 0u);
-    // back-to-front: far first so near splats blend on top (front covers far)
     std::sort(idx.begin(), idx.end(), [&](uint32_t a, uint32_t b){
         float da = glm::dot(glm::vec3(m_origPos[a]) - camPos, camFwd);
         float db = glm::dot(glm::vec3(m_origPos[b]) - camPos, camFwd);
         return da > db;
     });
-    std::vector<glm::vec4> packed(m_count * 2);
+    std::vector<glm::vec4> packed(m_count * stride);
     for (size_t i = 0; i < m_count; ++i) {
         uint32_t s = idx[i];
-        packed[2*i+0] = m_origPos[s];
-        packed[2*i+1] = m_origCol[s];
+        packed[stride*i+0] = m_origPos[s];
+        if (hasNew) {
+            packed[stride*i+1] = m_origAlbedoAO[s];
+            packed[stride*i+2] = m_origNormalMat[s];
+        } else {
+            packed[stride*i+1] = m_origCol[s];
+        }
     }
     Buffer staging = makeBuffer(*m_ctx, packed.size()*sizeof(glm::vec4),
                                 VK_BUFFER_USAGE_TRANSFER_SRC_BIT,

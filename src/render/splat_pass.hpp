@@ -7,8 +7,10 @@
 namespace vf {
 
 struct SplatVertexData {
-    std::vector<glm::vec4> posRadius;
-    std::vector<glm::vec4> colors;
+    std::vector<glm::vec4> posRadius; // xyz + radius
+    std::vector<glm::vec4> colors;    // legacy baked (kept for compat)
+    std::vector<glm::vec4> albedoAO;  // rgb albedo, a = AO
+    std::vector<glm::vec4> normalMat; // xyz normal, w = matId
 };
 
 // Renders surface point-splats as Gaussian sprites into the offscreen image.
@@ -36,6 +38,8 @@ private:
     size_t m_count = 0;
     std::vector<glm::vec4> m_origPos;
     std::vector<glm::vec4> m_origCol;
+    std::vector<glm::vec4> m_origAlbedoAO;
+    std::vector<glm::vec4> m_origNormalMat;
 };
 
 } // namespace vf
