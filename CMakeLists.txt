@@ -1,0 +1,129 @@
+cmake_minimum_required(VERSION 3.24)
+project(voxelforge LANGUAGES C CXX)
+
+set(CMAKE_CXX_STANDARD 20)
+set(CMAKE_CXX_STANDARD_REQUIRED ON)
+set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
+
+if(NOT CMAKE_BUILD_TYPE)
+    set(CMAKE_BUILD_TYPE RelWithDebInfo)
+endif()
+
+add_compile_options(-Wall -Wextra -Wno-missing-field-initializers)
+
+find_package(Vulkan REQUIRED)
+
+include(FetchContent)
+
+# ---- spdlog ------------------------------------------------------------------
+FetchContent_Declare(spdlog GIT_REPOSITORY https://github.com/gabime/spdlog.git
+                     GIT_TAG v1.14.1 GIT_SHALLOW TRUE)
+FetchContent_MakeAvailable(spdlog)
+
+# ---- GLFW -----------------------------------------------------------------
+set(GLFW_BUILD_DOCS OFF CACHE BOOL "" FORCE)
+set(GLFW_BUILD_TESTS OFF CACHE BOOL "" FORCE)
+set(GLFW_BUILD_EXAMPLES OFF CACHE BOOL "" FORCE)
+set(GLFW_INSTALL OFF CACHE BOOL "" FORCE)
+FetchContent_Declare(glfw GIT_REPOSITORY https://github.com/glfw/glfw.git
+                     GIT_TAG 3.4 GIT_SHALLOW TRUE)
+FetchContent_MakeAvailable(glfw)
+
+# ---- header-only fetches (populate only, no build) -------------------------
+FetchContent_Declare(glm GIT_REPOSITORY https://github.com/g-truc/glm.git
+                     GIT_TAG 1.0.1 GIT_SHALLOW TRUE)
+FetchContent_GetProperties(glm)
+if(NOT glm_POPULATED)
+    FetchContent_Populate(glm)
+    add_library(vf_glm INTERFACE)
+    target_include_directories(vf_glm INTERFACE ${glm_SOURCE_DIR})
+endif()
+
+FetchContent_Declare(vma GIT_REPOSITORY https://github.com/GPUOpen-LibrariesAndSDKs/VulkanMemoryAllocator.git
+                     GIT_TAG v3.1.0 GIT_SHALLOW TRUE)
+FetchContent_GetProperties(vma)
+if(NOT vma_POPULATED)
+    FetchContent_Populate(vma)
+    add_library(vf_vma INTERFACE)
+    target_include_directories(vf_vma INTERFACE ${vma_SOURCE_DIR}/include)
+endif()
+
+FetchContent_Declare(doctest GIT_REPOSITORY https://github.com/doctest/doctest.git
+                     GIT_TAG v2.4.12 GIT_SHALLOW TRUE)
+FetchContent_GetProperties(doctest)
+if(NOT doctest_POPULATED)
+    FetchContent_Populate(doctest)
+    add_library(vf_doctest INTERFACE)
+    target_include_directories(vf_doctest INTERFACE ${doctest_SOURCE_DIR})
+endif()
+
+# ---- Dear ImGui -------------------------------------------------------------
+FetchContent_Declare(imgui GIT_REPOSITORY https://github.com/ocornut/imgui.git
+                     GIT_TAG v1.91.8 GIT_SHALLOW TRUE)
+FetchContent_GetProperties(imgui)
+if(NOT imgui_POPULATED)
+    FetchContent_Populate(imgui)
+    add_library(imgui_core STATIC
+        ${imgui_SOURCE_DIR}/imgui.cpp
+        ${imgui_SOURCE_DIR}/imgui_draw.cpp
+        ${imgui_SOURCE_DIR}/imgui_tables.cpp
+        ${imgui_SOURCE_DIR}/imgui_widgets.cpp
+        ${imgui_SOURCE_DIR}/backends/imgui_impl_glfw.cpp
+        ${imgui_SOURCE_DIR}/backends/imgui_impl_vulkan.cpp)
+    target_include_directories(imgui_core PUBLIC ${imgui_SOURCE_DIR}
+                                                 ${imgui_SOURCE_DIR}/backends)
+    target_link_libraries(imgui_core PUBLIC glfw Vulkan::Vulkan)
+    target_compile_options(imgui_core PRIVATE -Wno-attributes)
+endif()
+
+# ---- engine libraries -------------------------------------------------------
+add_library(vf_platform STATIC src/platform/window.cpp)
+target_include_directories(vf_platform PUBLIC src)
+target_link_libraries(vf_platform PUBLIC glfw Vulkan::Vulkan vf_glm spdlog::spdlog)
+
+add_library(vf_core STATIC src/core/camera.cpp src/voxel/volume.cpp src/voxel/world.cpp)
+target_include_directories(vf_core PUBLIC src)
+target_link_libraries(vf_core PUBLIC vf_glm spdlog::spdlog vf_platform)
+
+add_library(vf_rhi STATIC src/rhi/context.cpp src/rhi/resources.cpp src/rhi/swapchain.cpp)
+target_link_libraries(vf_rhi PUBLIC vf_platform vf_vma spdlog::spdlog)
+
+add_library(vf_render STATIC src/render/raymarch_pass.cpp src/render/splat_pass.cpp src/render/svo_pass.cpp)
+target_compile_definitions(vf_render PUBLIC
+    VOXELFORGE_SHADER_DIR="${CMAKE_CURRENT_BINARY_DIR}/shaders")
+target_link_libraries(vf_render PUBLIC vf_rhi)
+add_dependencies(vf_render vf_shaders)
+
+# ---- shaders ------------------------------------------------------------------
+find_program(GLSLANG_VALIDATOR NAMES glslangValidator glslang REQUIRED)
+file(MAKE_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}/shaders)
+
+set(VF_SHADER_SRCS ${CMAKE_CURRENT_SOURCE_DIR}/shaders/raymarch.comp
+    ${CMAKE_CURRENT_SOURCE_DIR}/shaders/svo_raymarch.comp
+    ${CMAKE_CURRENT_SOURCE_DIR}/shaders/splat.vert
+    ${CMAKE_CURRENT_SOURCE_DIR}/shaders/splat.frag)
+set(VF_SHADER_SPVS "")
+foreach(src_file ${VF_SHADER_SRCS})
+    get_filename_component(name "${src_file}" NAME)
+    set(out_file ${CMAKE_CURRENT_BINARY_DIR}/shaders/${name}.spv)
+    add_custom_command(OUTPUT ${out_file}
+        COMMAND ${GLSLANG_VALIDATOR} -V --target-env vulkan1.3 -o ${out_file} ${src_file}
+        DEPENDS ${src_file}
+        COMMENT "glslangValidator ${name}")
+    list(APPEND VF_SHADER_SPVS ${out_file})
+endforeach()
+add_custom_target(vf_shaders ALL DEPENDS ${VF_SHADER_SPVS})
+
+# ---- app ------------------------------------------------------------------------
+add_executable(voxelforge src/app/main.cpp)
+target_compile_definitions(voxelforge PRIVATE
+    VOXELFORGE_SHADER_DIR="${CMAKE_CURRENT_BINARY_DIR}/shaders")
+target_link_libraries(voxelforge PRIVATE vf_render vf_core imgui_core)
+add_dependencies(voxelforge vf_shaders)
+
+# ---- tests -------------------------------------------------------------------------
+enable_testing()
+add_executable(vf_tests tests/main.cpp tests/test_volume.cpp tests/test_camera.cpp tests/test_world.cpp)
+target_link_libraries(vf_tests PRIVATE vf_core vf_doctest)
+target_compile_definitions(vf_tests PRIVATE DOCTEST_CONFIG_NO_MULTITHREADING)
+add_test(NAME unit_tests COMMAND vf_tests)

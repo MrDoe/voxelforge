@@ -1,0 +1,210 @@
+#version 460
+// Voxelforge M1 - dense SDF sphere-tracer.
+// One thread per pixel; marches the trilinearly-filtered snorm8 SDF volume.
+// Shading model kept identical to svo_raymarch.comp for backend parity.
+
+layout(local_size_x = 8, local_size_y = 8, local_size_z = 1) in;
+
+layout(set = 0, binding = 0) uniform sampler3D uSDF;    // R8_SNORM linear
+layout(set = 0, binding = 1) uniform sampler3D uAlbedo; // R8G8B8_UNORM nearest
+layout(set = 0, binding = 2, rgba8) uniform writeonly image2D uOut;
+
+layout(push_constant) uniform PC {
+    vec4 camPos;
+    vec4 camRight;
+    vec4 camUp;
+    vec4 camFwd;
+    vec4 a; // tanHalfFov, aspect, extentX, extentY
+    vec4 b; // worldSize, maxEncodedDist, voxelSize, frameIdx
+    vec4 sunDir; // normalized direction TOWARD the sun
+} pc;
+
+vec3 kSunDir = normalize(vec3(0.42, 0.78, 0.30)); // set from push in main()
+const vec3 kSunCol = vec3(1.00, 0.95, 0.84) * 2.7;
+const vec3 kZenith = vec3(0.20, 0.36, 0.62);
+const vec3 kHorizon = vec3(0.72, 0.80, 0.90);
+const float kWaterLevel = -0.9;
+
+float sdfAt(vec3 p)
+{
+    vec3 uvw = p / pc.b.x + 0.5;
+    if (any(lessThan(uvw, vec3(0.0))) || any(greaterThan(uvw, vec3(1.0))))
+        return pc.b.y; // treat outside as "far solid-free"
+    return texture(uSDF, uvw).r * pc.b.y;
+}
+
+vec3 calcNormal(vec3 p)
+{
+    float e = pc.b.z * 1.25;
+    return normalize(vec3(sdfAt(p + vec3(e, 0, 0)) - sdfAt(p - vec3(e, 0, 0)),
+                          sdfAt(p + vec3(0, e, 0)) - sdfAt(p - vec3(0, e, 0)),
+                          sdfAt(p + vec3(0, 0, e)) - sdfAt(p - vec3(0, 0, e))));
+}
+
+float softShadow(vec3 ro, vec3 rd)
+{
+    float res = 1.0;
+    float t = 0.02;
+    for (int i = 0; i < 24; ++i) {
+        float s = sdfAt(ro + rd * t);
+        res = min(res, 9.0 * s / t);
+        t += clamp(s, 0.015, 0.22);
+        if (res < 0.004 || t > 11.0)
+            break;
+    }
+    return clamp(res, 0.0, 1.0);
+}
+
+vec3 skyColor(vec3 d)
+{
+    float h = clamp(d.y * 0.5 + 0.5, 0.0, 1.0);
+    vec3 col = mix(kHorizon, kZenith, pow(h, 0.65));
+    float sun = max(dot(d, kSunDir), 0.0);
+    col += kSunCol * 0.28 * pow(sun, 350.0);  // disc
+    col += vec3(1.0, 0.85, 0.6) * 0.18 * pow(sun, 6.0); // glow
+    return col;
+}
+
+// --- landscape helpers (mirror common.hpp / svo_raymarch.comp) ---------------
+float streamCross(vec2 xz){ return abs(xz.y - 16.0*sin(xz.x*0.05)) / (2.1 + 0.6*sin(xz.x*0.11+2.0)); }
+bool inChannel(vec2 xz, float lim){ return streamCross(xz) < lim; }
+
+vec3 grassDetail(vec3 alb, vec3 p, inout vec3 n)
+{
+    float g = fract(sin(dot(floor(p.xz*14.0), vec2(12.9898,78.233))) * 43758.5453);
+    n = normalize(n + 0.18*vec3(g-0.5, 0.0, fract(g*7.31)-0.5));
+    return alb * (0.82 + 0.36*g);
+}
+
+// analytic water surface hit along ray; returns t or -1
+float waterHit(vec3 ro, vec3 rd, float tMax)
+{
+    if (rd.y > -0.001) return -1.0;
+    float tw = (kWaterLevel - ro.y) / rd.y;
+    if (tw < 0.0 || tw > tMax) return -1.0;
+    vec3 pw = ro + rd * tw;
+    return inChannel(pw.xz, 1.35) ? tw : -1.0;
+}
+
+vec3 aces(vec3 x){
+    return clamp((x*(2.51*x+0.03))/(x*(2.43*x+0.59)+0.14),0.0,1.0);
+}
+
+bool rayAABB(vec3 ro, vec3 invRd, out float t0, out float t1)
+{
+    vec3 half_ = vec3(pc.b.x * 0.5);
+    vec3 tv0 = (-half_ - ro) * invRd;
+    vec3 tv1 = (half_ - ro) * invRd;
+    vec3 tsm = min(tv0, tv1), tbg = max(tv0, tv1);
+    t0 = max(max(tsm.x, tsm.y), tsm.z);
+    t1 = min(min(tbg.x, tbg.y), tbg.z);
+    return t1 >= max(t0, 0.0);
+}
+
+vec3 shadeTerrain(vec3 p, vec3 rd, vec3 alb)
+{
+    vec3 n = calcNormal(p);
+
+    float sh = softShadow(p + n * pc.b.z * 1.5, kSunDir);
+    float ndl = max(dot(n, kSunDir), 0.0);
+    vec3 amb = mix(kHorizon, kZenith, 0.5) * (n.y * 0.5 + 0.5) * 0.55;
+    vec3 bounce = vec3(0.30, 0.25, 0.18) * max(-n.y, 0.0) * 0.35;
+    if (alb.g > alb.r * 1.15) { // vegetation: micro detail
+        alb = grassDetail(alb, p, n);
+        sh = min(sh, softShadow(p + n * pc.b.z * 0.8, kSunDir) + 0.15);
+    }
+    vec3 col = alb * (kSunCol * ndl * sh + amb + bounce);
+
+    if (p.y < kWaterLevel && inChannel(p.xz, 1.35)) {
+        float depth = kWaterLevel - p.y;
+        col *= exp(-depth * vec3(0.35, 0.18, 0.12) * 3.0);
+        col = mix(col, vec3(0.05, 0.14, 0.13), clamp(depth * 0.8, 0.0, 0.85));
+    }
+    return col;
+}
+
+void main()
+{
+    kSunDir = normalize(pc.sunDir.xyz);
+    ivec2 pix = ivec2(gl_GlobalInvocationID.xy);
+    if (pix.x >= int(pc.a.z) || pix.y >= int(pc.a.w))
+        return;
+
+    vec2 ndc = (gl_GlobalInvocationID.xy + 0.5) / vec2(pc.a.z, pc.a.w) * 2.0 - 1.0;
+    vec2 uv = vec2(ndc.x, -ndc.y); // image row 0 is the TOP row -> NDC +Y
+    vec3 rd = normalize(pc.camFwd.xyz + uv.x * pc.a.x * pc.a.y * pc.camRight.xyz +
+                        uv.y * pc.a.x * pc.camUp.xyz);
+    vec3 ro = pc.camPos.xyz;
+
+    vec3 col;
+    float t0, t1;
+    if (!rayAABB(ro, 1.0 / rd, t0, t1)) {
+        col = skyColor(rd);
+    } else {
+        float t = max(t0, 0.0);
+        bool hit = false;
+        const int kMaxSteps = 192;
+        for (int i = 0; i < kMaxSteps; ++i) {
+            vec3 p = ro + rd * t;
+            float s = sdfAt(p);
+            if (s < pc.b.z * 0.45) { // hit threshold ~ half voxel
+                hit = true;
+                break;
+            }
+            t += max(s * 0.92, pc.b.z * 0.35); // relaxed march, never sub-voxel stall
+            if (t > t1)
+                break;
+        }
+
+        if (hit) {
+            vec3 p = ro + rd * t;
+            vec3 albedo = texture(uAlbedo, p / pc.b.x + 0.5).rgb; // rgba8 sampled, .rgb used
+
+            // water surface between camera and terrain?
+            float tWater = waterHit(ro, rd, min(t1, t));
+            bool waterView = false;
+            if (tWater > 0.0 && t <= t1) {
+                vec3 pw = ro + rd * tWater;
+                t = tWater; hit = true; waterView = true;
+            }
+
+            if (waterView) {
+                vec3 pw = ro + rd * tWater;
+                float r1 = sin(pw.x*9.0 + pc.b.w*0.7)*0.5 + sin(pw.z*13.0 - pw.x*5.0)*0.5;
+                vec3 n = normalize(vec3(r1*0.06, 1.0, sin(pw.x*7.0 - pw.z*11.0)*0.06));
+                vec3 R = reflect(rd, n);
+                R.y = abs(R.y);
+                vec3 rc = skyColor(R);
+                float rt = max(t0,0.0); bool rh=false;
+                vec3 rp2 = pw;
+                for (int i=0;i<64;++i){
+                    float s=sdfAt(rp2);
+                    if (s<0.03){rh=true;break;}
+                    rp2 += R * max(s*0.85, 0.05);
+                    if (dot(rp2,rp2) > 26000.0) break;
+                }
+                if (rh){
+                    vec3 hp2 = rp2;
+                    vec3 hn = calcNormal(hp2);
+                    rc = shadeTerrain(hp2, R, texture(uAlbedo, hp2 / pc.b.x + 0.5).rgb);
+                }
+                float fres = 0.02 + 0.98*pow(1.0 - max(dot(-rd,n),0.0), 5.0);
+                float sunGlint = pow(max(dot(R,kSunDir),0.0), 420.0);
+                col = mix(vec3(0.04,0.10,0.09), rc, clamp(fres+0.25,0.0,1.0))
+                      + kSunCol * sunGlint * 3.0;
+                col = mix(col, kHorizon*1.05, 1.0-exp(-tWater*0.004));
+            } else {
+                col = shadeTerrain(p, rd, albedo);
+            }
+
+            float fog = 1.0 - exp(-max(t - t0, 0.0) * 0.006);
+            col = mix(col, kHorizon * 1.05, fog);
+        } else {
+            col = skyColor(rd);
+        }
+    }
+
+    col = aces(col * 1.25);
+    col = pow(col, vec3(1.0 / 2.2)); // gamma
+    imageStore(uOut, pix, vec4(col, 1.0));
+}

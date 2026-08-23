@@ -1,0 +1,21 @@
+# ninja log v5
+1	26	1787468229604740459	spdlog-populate-prefix/src/spdlog-populate-stamp/spdlog-populate-mkdir	84f9b2ee6ab5dd16
+1	26	1787468229604740459	/home/christoph/code/voxelforge/build-dbg/_deps/spdlog-subbuild/spdlog-populate-prefix/src/spdlog-populate-stamp/spdlog-populate-mkdir	84f9b2ee6ab5dd16
+26	2541	1787468232120640661	spdlog-populate-prefix/src/spdlog-populate-stamp/spdlog-populate-download	36155702854e046e
+26	2541	1787468232120640661	/home/christoph/code/voxelforge/build-dbg/_deps/spdlog-subbuild/spdlog-populate-prefix/src/spdlog-populate-stamp/spdlog-populate-download	36155702854e046e
+2541	2563	0	spdlog-populate-prefix/src/spdlog-populate-stamp/spdlog-populate-update	4272315b751c710b
+2541	2563	0	/home/christoph/code/voxelforge/build-dbg/_deps/spdlog-subbuild/spdlog-populate-prefix/src/spdlog-populate-stamp/spdlog-populate-update	4272315b751c710b
+2563	2586	1787468232165638877	spdlog-populate-prefix/src/spdlog-populate-stamp/spdlog-populate-patch	5dd990330d7f9bb0
+2563	2586	1787468232165638877	/home/christoph/code/voxelforge/build-dbg/_deps/spdlog-subbuild/spdlog-populate-prefix/src/spdlog-populate-stamp/spdlog-populate-patch	5dd990330d7f9bb0
+2586	2607	1787468232186638044	spdlog-populate-prefix/src/spdlog-populate-stamp/spdlog-populate-configure	614f131abd2fcc04
+2586	2607	1787468232186638044	/home/christoph/code/voxelforge/build-dbg/_deps/spdlog-subbuild/spdlog-populate-prefix/src/spdlog-populate-stamp/spdlog-populate-configure	614f131abd2fcc04
+2607	2630	1787468232208637172	spdlog-populate-prefix/src/spdlog-populate-stamp/spdlog-populate-build	c10448d7ad15cffd
+2607	2630	1787468232208637172	/home/christoph/code/voxelforge/build-dbg/_deps/spdlog-subbuild/spdlog-populate-prefix/src/spdlog-populate-stamp/spdlog-populate-build	c10448d7ad15cffd
+2630	2653	1787468232231636260	spdlog-populate-prefix/src/spdlog-populate-stamp/spdlog-populate-install	c40859f94eed1651
+2630	2653	1787468232231636260	/home/christoph/code/voxelforge/build-dbg/_deps/spdlog-subbuild/spdlog-populate-prefix/src/spdlog-populate-stamp/spdlog-populate-install	c40859f94eed1651
+2653	2674	1787468232253635387	spdlog-populate-prefix/src/spdlog-populate-stamp/spdlog-populate-test	e5ce68703cb509de
+2653	2674	1787468232253635387	/home/christoph/code/voxelforge/build-dbg/_deps/spdlog-subbuild/spdlog-populate-prefix/src/spdlog-populate-stamp/spdlog-populate-test	e5ce68703cb509de
+2674	2722	1787468232300633524	CMakeFiles/spdlog-populate-complete	930e8c6d6f9bf1d7
+2674	2722	1787468232300633524	spdlog-populate-prefix/src/spdlog-populate-stamp/spdlog-populate-done	930e8c6d6f9bf1d7
+2674	2722	1787468232300633524	/home/christoph/code/voxelforge/build-dbg/_deps/spdlog-subbuild/CMakeFiles/spdlog-populate-complete	930e8c6d6f9bf1d7
+2674	2722	1787468232300633524	/home/christoph/code/voxelforge/build-dbg/_deps/spdlog-subbuild/spdlog-populate-prefix/src/spdlog-populate-stamp/spdlog-populate-done	930e8c6d6f9bf1d7

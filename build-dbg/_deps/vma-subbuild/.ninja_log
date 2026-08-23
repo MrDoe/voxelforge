@@ -1,0 +1,21 @@
+# ninja log v5
+1	30	1787468250598909237	vma-populate-prefix/src/vma-populate-stamp/vma-populate-mkdir	44c88c8dd9de0d08
+1	30	1787468250598909237	/home/christoph/code/voxelforge/build-dbg/_deps/vma-subbuild/vma-populate-prefix/src/vma-populate-stamp/vma-populate-mkdir	44c88c8dd9de0d08
+30	4196	1787468254765744663	vma-populate-prefix/src/vma-populate-stamp/vma-populate-download	a68c2d772e66fd86
+30	4196	1787468254765744663	/home/christoph/code/voxelforge/build-dbg/_deps/vma-subbuild/vma-populate-prefix/src/vma-populate-stamp/vma-populate-download	a68c2d772e66fd86
+4196	4220	0	vma-populate-prefix/src/vma-populate-stamp/vma-populate-update	a21352462bf97ab3
+4196	4220	0	/home/christoph/code/voxelforge/build-dbg/_deps/vma-subbuild/vma-populate-prefix/src/vma-populate-stamp/vma-populate-update	a21352462bf97ab3
+4220	4242	1787468254811742847	vma-populate-prefix/src/vma-populate-stamp/vma-populate-patch	6bee27109278ccd3
+4220	4242	1787468254811742847	/home/christoph/code/voxelforge/build-dbg/_deps/vma-subbuild/vma-populate-prefix/src/vma-populate-stamp/vma-populate-patch	6bee27109278ccd3
+4242	4265	1787468254834741939	vma-populate-prefix/src/vma-populate-stamp/vma-populate-configure	a4c4fa8103c829c3
+4242	4265	1787468254834741939	/home/christoph/code/voxelforge/build-dbg/_deps/vma-subbuild/vma-populate-prefix/src/vma-populate-stamp/vma-populate-configure	a4c4fa8103c829c3
+4265	4287	1787468254856741070	vma-populate-prefix/src/vma-populate-stamp/vma-populate-build	f2a82f0560e74515
+4265	4287	1787468254856741070	/home/christoph/code/voxelforge/build-dbg/_deps/vma-subbuild/vma-populate-prefix/src/vma-populate-stamp/vma-populate-build	f2a82f0560e74515
+4287	4315	1787468254884739965	vma-populate-prefix/src/vma-populate-stamp/vma-populate-install	aa45231a7ae5d8c8
+4287	4315	1787468254884739965	/home/christoph/code/voxelforge/build-dbg/_deps/vma-subbuild/vma-populate-prefix/src/vma-populate-stamp/vma-populate-install	aa45231a7ae5d8c8
+4315	4340	1787468254908739017	vma-populate-prefix/src/vma-populate-stamp/vma-populate-test	177a481c95bc6731
+4315	4340	1787468254908739017	/home/christoph/code/voxelforge/build-dbg/_deps/vma-subbuild/vma-populate-prefix/src/vma-populate-stamp/vma-populate-test	177a481c95bc6731
+4340	4381	1787468254950737359	CMakeFiles/vma-populate-complete	db6baf7d47de2
+4340	4381	1787468254950737359	vma-populate-prefix/src/vma-populate-stamp/vma-populate-done	db6baf7d47de2
+4340	4381	1787468254950737359	/home/christoph/code/voxelforge/build-dbg/_deps/vma-subbuild/CMakeFiles/vma-populate-complete	db6baf7d47de2
+4340	4381	1787468254950737359	/home/christoph/code/voxelforge/build-dbg/_deps/vma-subbuild/vma-populate-prefix/src/vma-populate-stamp/vma-populate-done	db6baf7d47de2

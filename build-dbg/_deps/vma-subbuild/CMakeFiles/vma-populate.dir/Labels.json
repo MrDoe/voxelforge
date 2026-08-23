@@ -1,0 +1,46 @@
+{
+	"sources" : 
+	[
+		{
+			"file" : "/home/christoph/code/voxelforge/build-dbg/_deps/vma-subbuild/CMakeFiles/vma-populate"
+		},
+		{
+			"file" : "/home/christoph/code/voxelforge/build-dbg/_deps/vma-subbuild/CMakeFiles/vma-populate.rule"
+		},
+		{
+			"file" : "/home/christoph/code/voxelforge/build-dbg/_deps/vma-subbuild/CMakeFiles/vma-populate-complete.rule"
+		},
+		{
+			"file" : "/home/christoph/code/voxelforge/build-dbg/_deps/vma-subbuild/vma-populate-prefix/src/vma-populate-stamp/vma-populate-build.rule"
+		},
+		{
+			"file" : "/home/christoph/code/voxelforge/build-dbg/_deps/vma-subbuild/vma-populate-prefix/src/vma-populate-stamp/vma-populate-configure.rule"
+		},
+		{
+			"file" : "/home/christoph/code/voxelforge/build-dbg/_deps/vma-subbuild/vma-populate-prefix/src/vma-populate-stamp/vma-populate-download.rule"
+		},
+		{
+			"file" : "/home/christoph/code/voxelforge/build-dbg/_deps/vma-subbuild/vma-populate-prefix/src/vma-populate-stamp/vma-populate-install.rule"
+		},
+		{
+			"file" : "/home/christoph/code/voxelforge/build-dbg/_deps/vma-subbuild/vma-populate-prefix/src/vma-populate-stamp/vma-populate-mkdir.rule"
+		},
+		{
+			"file" : "/home/christoph/code/voxelforge/build-dbg/_deps/vma-subbuild/vma-populate-prefix/src/vma-populate-stamp/vma-populate-patch.rule"
+		},
+		{
+			"file" : "/home/christoph/code/voxelforge/build-dbg/_deps/vma-subbuild/vma-populate-prefix/src/vma-populate-stamp/vma-populate-test.rule"
+		},
+		{
+			"file" : "/home/christoph/code/voxelforge/build-dbg/_deps/vma-subbuild/vma-populate-prefix/src/vma-populate-stamp/vma-populate-update.rule"
+		}
+	],
+	"target" : 
+	{
+		"labels" : 
+		[
+			"vma-populate"
+		],
+		"name" : "vma-populate"
+	}
+}

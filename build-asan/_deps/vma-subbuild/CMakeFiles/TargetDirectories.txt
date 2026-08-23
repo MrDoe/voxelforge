@@ -1,0 +1,3 @@
+/home/christoph/code/voxelforge/build-asan/_deps/vma-subbuild/CMakeFiles/vma-populate.dir
+/home/christoph/code/voxelforge/build-asan/_deps/vma-subbuild/CMakeFiles/edit_cache.dir
+/home/christoph/code/voxelforge/build-asan/_deps/vma-subbuild/CMakeFiles/rebuild_cache.dir
