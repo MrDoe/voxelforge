@@ -310,6 +310,62 @@ bool App::initVulkan()
                         sd.colors.emplace_back(c, 1.0f);
                     }
                 }
+        // Water surface splats for dense mode (analytic plane not in SDF)
+        if (denseIsPrimary) {
+            const float ext = 30.0f;
+            const float waterSpacing = 0.45f;
+            const glm::vec3 sunColD = glm::vec3(1.0f, 0.95f, 0.84f) * 2.7f;
+            const glm::vec3 ambBaseD = (glm::vec3(0.72f, 0.80f, 0.90f) + glm::vec3(0.20f, 0.36f, 0.62f)) * 0.5f * 0.55f;
+            const vf::voxel::HeightMap& hmD = vf::voxel::sharedHeightmap();
+            const glm::vec3 waterBaseD(0.06f, 0.22f, 0.28f);
+            const float splatRadW = 0.31f * 1.25f * 1.1f;
+            int WN = int(2 * ext / waterSpacing);
+            for (int zi = 0; zi < WN; ++zi) for (int xi = 0; xi < WN; ++xi) {
+                float x = -ext + (xi + 0.5f) * waterSpacing;
+                float z = -ext + (zi + 0.5f) * waterSpacing;
+                float H = hmD.sample(x, z);
+                if (H > vf::voxel::WATER_LEVEL) continue;
+                glm::vec3 p(x, vf::voxel::WATER_LEVEL, z);
+                float depth = vf::voxel::WATER_LEVEL - H;
+                glm::vec3 albedo = glm::mix(waterBaseD * 0.7f, waterBaseD, glm::clamp(depth * 0.6f, 0.0f, 1.0f));
+                float ndl = glm::max(glm::dot(glm::vec3(0,1,0), glm::vec3(m_sunDir)), 0.0f);
+                glm::vec3 amb = ambBaseD * 1.0f;
+                sd.posRadius.emplace_back(p, splatRadW);
+                sd.colors.emplace_back(albedo * (sunColD * ndl * 0.9f + amb), 1.0f);
+            }
+            // Supplement missing thin objects (house/trees) that the 0.4m dense volume undersamples
+            const float ext2 = 30.0f;
+            const int SN2 = 96;
+            const float spacing2 = (2 * ext2) / float(SN2);
+            const float r2 = spacing2 * 0.9f;
+            const glm::vec3 sunCol2 = glm::vec3(1.0f, 0.95f, 0.84f) * 2.7f;
+            const glm::vec3 ambBase2 = (glm::vec3(0.72f, 0.80f, 0.90f) + glm::vec3(0.20f, 0.36f, 0.62f)) * 0.5f * 0.55f;
+            const auto& hm2 = vf::voxel::sharedHeightmap();
+            for (int zi = 0; zi < SN2; ++zi) for (int yi = 0; yi < SN2; ++yi) for (int xi = 0; xi < SN2; ++xi) {
+                glm::vec3 p(glm::mix(-ext2, ext2, (xi + 0.5f) / SN2),
+                            glm::mix(-2.f, 12.f, (yi + 0.5f) / SN2),
+                            glm::mix(-ext2, ext2, (zi + 0.5f) / SN2));
+                auto s = vf::voxel::scene(p);
+                if (std::abs(s.d) > 0.22f) continue;
+                if (s.mat != 6 && s.mat != 7 && s.mat != 8) continue;
+                glm::vec2 g = hm2.gradient(p.x, p.z);
+                glm::vec3 n = glm::normalize(glm::vec3(-g.x, 1.0f, -g.y));
+                // for objects, use object normal if closer
+                float dObj = std::min({vf::voxel::houseAt(p).d, vf::voxel::treesAt(p).d, vf::voxel::rocksAt(p).d, vf::voxel::bushesAt(p).d});
+                if (dObj + 0.01f < p.y - hm2.sample(p.x, p.z)) {
+                    // approximate object normal via central differences of object distance
+                    float eo = 0.03f;
+                    auto od = [&](glm::vec3 q){ return std::min({vf::voxel::houseAt(q).d, vf::voxel::treesAt(q).d, vf::voxel::rocksAt(q).d, vf::voxel::bushesAt(q).d}); };
+                    n = glm::normalize(glm::vec3(od(p+glm::vec3(eo,0,0))-od(p-glm::vec3(eo,0,0)),
+                                                 od(p+glm::vec3(0,eo,0))-od(p-glm::vec3(0,eo,0)),
+                                                 od(p+glm::vec3(0,0,eo))-od(p-glm::vec3(0,0,eo))));
+                }
+                float ndl = glm::max(glm::dot(n, glm::vec3(m_sunDir)), 0.0f);
+                glm::vec3 amb = ambBase2 * (n.y * 0.5f + 0.5f);
+                sd.posRadius.emplace_back(p, r2);
+                sd.colors.emplace_back(vf::voxel::kPalette[s.mat] * (sunCol2 * ndl + amb), 1.0f);
+            }
+        }
     }
 
     if (buildSvo) {
@@ -380,16 +436,10 @@ bool App::initVulkan()
                 sd.colors.emplace_back(albedo * (sunCol * ndl + amb), 1.0f);
             }
         };
-        if (fromFile && !wf.voxels.empty()) {
-            for (const vf::voxel::VoxelRecord& v : wf.voxels) {
-                if ((v.x % 3u) != 1u || (v.z % 3u) != 1u)
-                    continue; // decimate 0.1 m records to ~0.3 m lattice
-                glm::vec3 p = v.position(wf.meta);
-                if (std::abs(p.x) > ext || std::abs(p.z) > ext || p.y < -8.f || p.y > 24.f)
-                    continue;
-                addSplat(p, glm::vec3(v.r, v.g, v.b) / 255.0f);
-            }
-        } else {
+        // SVO splats: sample the full scene SDF (terrain + house/trees/rocks/bushes)
+        // so the house appears in splat mode. Decimated file records are
+        // terrain-only, so we always resample the scene here.
+        {
             const int SN = 192;
             for (int zi = 0; zi < SN; ++zi)
                 for (int yi = 0; yi < SN; ++yi)
@@ -397,10 +447,35 @@ bool App::initVulkan()
                         glm::vec3 p(glm::mix(-ext, ext, (xi + 0.5f) / SN),
                                     glm::mix(-8.f, 24.f, (yi + 0.5f) / SN),
                                     glm::mix(-ext, ext, (zi + 0.5f) / SN));
-                        if (std::abs(p.y - hm.sample(p.x, p.z)) > 0.22f)
+                        auto s = vf::voxel::scene(p);
+                        if (std::abs(s.d) > 0.22f)
                             continue;
-                        addSplat(p, vf::voxel::kPalette[vf::voxel::scene(p).mat]);
+                        addSplat(p, vf::voxel::kPalette[s.mat]);
                     }
+        }
+        // Water surface splats (analytic plane) — terrain SDF does not contain water
+        {
+            const float waterSpacing = 0.45f;
+            const int WN = int(2 * ext / waterSpacing);
+            const glm::vec3 waterBase(0.06f, 0.22f, 0.28f);
+            for (int zi = 0; zi < WN; ++zi)
+                for (int xi = 0; xi < WN; ++xi) {
+                    float x = -ext + (xi + 0.5f) * waterSpacing;
+                    float z = -ext + (zi + 0.5f) * waterSpacing;
+                    float H = hm.sample(x, z);
+                    if (H > vf::voxel::WATER_LEVEL) continue;
+                    glm::vec3 p(x, vf::voxel::WATER_LEVEL, z);
+                    // simple depth-tinted water albedo
+                    float depth = vf::voxel::WATER_LEVEL - H;
+                    glm::vec3 albedo = glm::mix(waterBase * 0.7f, waterBase, glm::clamp(depth * 0.6f, 0.0f, 1.0f));
+                    if (!denseIsPrimary) {
+                        // water normal is up
+                        float ndl = glm::max(glm::dot(glm::vec3(0,1,0), glm::vec3(m_sunDir)), 0.0f);
+                        glm::vec3 amb = ambBase * 1.0f;
+                        sd.posRadius.emplace_back(p, splatRadius * 1.1f);
+                        sd.colors.emplace_back(albedo * (sunCol * ndl * 0.9f + amb), 1.0f);
+                    }
+                }
         }
     }
 
