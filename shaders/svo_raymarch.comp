@@ -87,7 +87,7 @@ float brickSample(uint bi, vec3 p, vec3 mn, vec3 sz)
     float s111 = brickVoxelSdf(bi, i0 + ivec3(1, 1, 1));
     float c00 = mix(s000, s100, f.x), c10 = mix(s010, s110, f.x);
     float c01 = mix(s001, s101, f.x), c11 = mix(s011, s111, f.x);
-    return mix(mix(c00, c10, f.y), mix(c01, c11, f.y), f.z);
+    return mix(mix(c00, c10, f.y), mix(c01, c11, f.y), f.z) - 0.025;
 }
 
 float map(vec3 p)
@@ -418,7 +418,7 @@ void main()
         float t = max(t0, 0.0);
         bool hit = false;
         float eps = pc.b.y * 0.45;
-        for (int i = 0; i < 640 && t <= t1; ++i) {
+        for (int i = 0; i < 900 && t <= t1; ++i) {
             float s = map(ro + rd * t);
             if (s < eps) {
                 // refine: bisect back toward the last clear sample so relaxed
@@ -483,7 +483,7 @@ void main()
                 col = mix(col, kHorizon*1.05, 1.0-exp(-tWater*0.004));
             } else {
                 col = shadeTerrain(p, rd, brickAlbedo(p));
-                float fog = 1.0 - exp(-max(t - t0, 0.0) * 0.002);
+                float fog = 1.0 - exp(-max(t - t0, 0.0) * 0.0012);
                 col = mix(col, kHorizon * 1.05, fog);
             }
         } else {

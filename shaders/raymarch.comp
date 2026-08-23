@@ -348,7 +348,7 @@ void main()
                 col = shadeTerrain(p, rd, albedo);
             }
 
-            float fog = 1.0 - exp(-max(t - t0, 0.0) * 0.002);
+            float fog = 1.0 - exp(-max(t - t0, 0.0) * 0.0012);
             col = mix(col, kHorizon * 1.05, fog);
         } else {
             col = skyColor(rd);
