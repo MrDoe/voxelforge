@@ -17,6 +17,7 @@ struct Image3D {
     VkImageView view = VK_NULL_HANDLE;
     VkExtent3D extent {};
     VkFormat format = VK_FORMAT_UNDEFINED;
+    uint32_t mipLevels = 1;
 };
 
 Buffer makeBuffer(const Context& ctx, VkDeviceSize size, VkBufferUsageFlags usage,

@@ -177,10 +177,10 @@ different scenes and `--compare` could never agree. `vol.worldSize` is now set t
 - [ ] Visual iteration pass on screenshots in `tests/screenshots/` (fine-tuning)
 
 ### Phase P1 — realism upgrades (was M5)
-- [ ] Sky model (Hosek-Wilkie or Preetham) replacing gradient sky
+- [x] Sky model (Hosek-Wilkie/Preetham via Perez distribution, turbidity 2.2) replacing gradient sky
 - [ ] 1-bounce diffuse GI: half-res temporal accumulation + variance-guided filter
 - [ ] TAA with reprojection from depth/normal history
-- [ ] PBR-ish material model per palette entry (roughness/metallic/emissive bytes in brick)
+- [x] PBR-ish material model per palette entry (roughness/reflectivity from second brick word via kMatRefl, Blinn-Phong specular in shadeTerrain)
 
 ### Phase P2 — dynamic world (was M3/M4)
 - [ ] GPU-side chunk builds off a dirty-chunk queue (editing groundwork)
