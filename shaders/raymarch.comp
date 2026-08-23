@@ -18,6 +18,7 @@ layout(push_constant) uniform PC {
     vec4 a; // tanHalfFov, aspect, extentX, extentY
     vec4 b; // worldSize, maxEncodedDist, voxelSize, frameIdx
     vec4 sunDir; // normalized direction TOWARD the sun
+    vec4 misc;   // x = splat size scale (unused here)
 } pc;
 
 vec3 kSunDir = normalize(vec3(0.42, 0.78, 0.30)); // set from push in main()

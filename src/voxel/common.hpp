@@ -25,6 +25,16 @@ inline const std::array<glm::vec3, 6> kPalette {
     glm::vec3 { 0.50f, 0.48f, 0.46f }, // 5 light rock
 };
 
+// per-material surface attributes, 0-255: x = reflectivity, y = roughness
+inline const std::array<glm::vec2, 6> kMaterialReflection {
+    glm::vec2 { 35.f, 235.f },  // 0 grass dark
+    glm::vec2 { 40.f, 230.f },  // 1 grass light
+    glm::vec2 { 55.f, 225.f },  // 2 soil
+    glm::vec2 { 130.f, 190.f }, // 3 sand
+    glm::vec2 { 95.f, 150.f },  // 4 rock
+    glm::vec2 { 115.f, 135.f }, // 5 light rock
+};
+
 inline constexpr float WATER_LEVEL = -0.9f;
 
 // --- deterministic value noise -------------------------------------------
@@ -62,31 +72,33 @@ struct SceneSample {
     uint8_t mat;
 };
 
+// material selection shared by scene(), worldgen and the worldfile generator
+inline uint8_t materialAt(float x, float z, float H)
+{
+    const HeightMap& hm = sharedHeightmap();
+    float wd = WATER_LEVEL - H; // >0: column submerged
+    float slope = glm::length(hm.gradient(x, z));
+    float n = fbm2(x * 0.35f, z * 0.35f);
+
+    if (wd > 0.55f)
+        return n > 0.0f ? uint8_t(5) : uint8_t(4); // deeper bed: rock
+    if (wd > -0.02f)
+        return 3;                                  // gravel bed / waterline sand
+    if (wd > -0.45f)
+        return n > 0.15f ? uint8_t(3) : uint8_t(2); // damp shore: sand & soil
+    if (slope > 0.85f)
+        return n > 0.0f ? uint8_t(4) : uint8_t(5); // steep slopes: rock
+    if (wd > -1.2f)
+        return 2;                                  // floodplain soil band
+    return n > 0.25f ? uint8_t(1) : uint8_t(0);    // grass
+}
+
 inline SceneSample scene(glm::vec3 p)
 {
     const HeightMap& hm = sharedHeightmap();
     float H = hm.sample(p.x, p.z);
     float d = p.y - H;
-
-    float wd = WATER_LEVEL - H; // >0: column submerged
-    float slope = glm::length(hm.gradient(p.x, p.z));
-    float n = fbm2(p.x * 0.35f, p.z * 0.35f);
-
-    uint8_t mat;
-    if (wd > 0.55f)
-        mat = n > 0.0f ? uint8_t(5) : uint8_t(4); // deeper bed: rock
-    else if (wd > -0.02f)
-        mat = 3;                                  // gravel bed / waterline sand
-    else if (wd > -0.45f)
-        mat = n > 0.15f ? uint8_t(3) : uint8_t(2); // damp shore: sand & soil
-    else if (slope > 0.85f)
-        mat = n > 0.0f ? uint8_t(4) : uint8_t(5); // steep slopes: rock
-    else if (wd > -1.2f)
-        mat = 2;                                  // floodplain soil band
-    else
-        mat = n > 0.25f ? uint8_t(1) : uint8_t(0); // grass
-
-    return { d, mat };
+    return { d, materialAt(p.x, p.z, H) };
 }
 
 // snorm8 helpers shared with GPU encodings

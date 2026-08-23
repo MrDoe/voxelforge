@@ -5,11 +5,13 @@
 //   childBase[] : per node, index of its 8 contiguous child handles
 //   payload[]   : per node { validMask bits0..7, solidMask bits8..15 }
 //   handles[]   : uint32 child handles
-//   bricks[]    : packed voxel data { r | g<<8 | b<<16 | sdfByte<<24 }, 512/node
+//   bricks[]    : 2 x uint32 per voxel (1024 per brick):
+//                 word0 { r | g<<8 | b<<16 | sdfByte<<24 }
+//                 word1 { a | refl<<8 | rough<<16 | matId<<24 }
 //
 // Handle encoding (low 2 bits):
 //   0b00 node   -> index = h >> 2 (into childBase/payload)
-//   0b01 brick  -> index = h >> 2 (into bricks, in units of 512 uint32)
+//   0b01 brick  -> index = h >> 2 (into bricks, in units of 1024 uint32)
 //   0b10 solid  -> terminal fully-solid cell
 //   0xFFFFFFFF  -> empty terminal
 #include "voxel/common.hpp"
@@ -23,6 +25,7 @@ constexpr uint32_t kEmptyHandle = 0xFFFFFFFFu;
 constexpr uint32_t kSolidHandle = 0xFFFFFFFEu;
 constexpr int BRICK_N = 8;
 constexpr int BRICK_VOXELS = BRICK_N * BRICK_N * BRICK_N;
+constexpr int BRICK_WORDS = BRICK_VOXELS * 2;
 
 inline bool handleIsNode(uint32_t h) { return (h & 3) == 0; }
 inline bool handleIsBrick(uint32_t h) { return (h & 3) == 1; }

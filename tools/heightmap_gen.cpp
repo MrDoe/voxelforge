@@ -1,7 +1,11 @@
-// Offline terrain heightmap generator: hills + meandering river valley.
-// Writes a 16-bit grayscale PNG (filter 0, stored deflate - no dependencies).
+// Offline terrain asset generator: hills + meandering river valley.
+// Writes the 16-bit heightmap PNG (stored deflate - no dependencies), then
+// builds the full chunked-SVO world from it and serializes assets/world.vxw
+// (VXW v1: GPU buffers with RGBA/reflection voxels + surface voxel records).
 #include "voxel/common.hpp"
 #include "voxel/heightmap.hpp"
+#include "voxel/world.hpp"
+#include "voxel/worldfile.hpp"
 #include <cmath>
 #include <cstdio>
 #include <cstring>
@@ -166,6 +170,7 @@ bool writePng16(const char* path, const std::vector<uint16_t>& px, uint32_t w, u
 int main(int argc, char** argv)
 {
     const char* out = argc > 1 ? argv[1] : "assets/heightmap.png";
+    const char* worldOut = argc > 2 ? argv[2] : "assets/world.vxw";
     std::vector<uint16_t> px(size_t(kHmSize) * kHmSize);
     float mn = 1e30f, mx = -1e30f;
     size_t water = 0;
@@ -189,5 +194,66 @@ int main(int argc, char** argv)
     }
     std::printf("heightmap %s: %ux%u, h in [%.2f, %.2f] m, water coverage %.1f%%\n",
                 out, kHmSize, kHmSize, mn, mx, 100.0 * double(water) / double(px.size()));
+
+    // ---- build the full voxel world from the freshly generated heightmap ----
+    vf::voxel::HeightMap hm;
+    if (!hm.loadFromFile(out))
+        return 1;
+    vf::voxel::setSharedHeightmap(&hm);
+
+    vf::voxel::World world;
+    world.build();
+    auto st = world.stats();
+    std::printf("world built: nodes=%zu bricks=%zu activeChunks=%zu in %.2fs\n",
+                st.nodes, st.bricks, st.activeChunks, double(st.buildSeconds));
+
+    // explicit surface-band voxel records across the whole world
+    vf::voxel::WorldFileData data;
+    data.meta = { WORLD, VOXEL, WATER_LEVEL, uint32_t(GRID_N), 8 };
+    const auto& g = world.gpu();
+    data.chunkGrid = g.chunkGrid;
+    data.childBase = g.childBase;
+    data.payload = g.payload;
+    data.handles = g.handles;
+    data.bricks = g.bricks;
+
+    constexpr float kBAND = 0.20f;
+    const int N = int(WORLD / VOXEL);
+    data.voxels.reserve(6u << 20);
+    for (int iz = 0; iz < N; ++iz) {
+        float wz = -0.5f * WORLD + (iz + 0.5f) * VOXEL;
+        for (int ix = 0; ix < N; ++ix) {
+            float wx = -0.5f * WORLD + (ix + 0.5f) * VOXEL;
+            float H = terrainHeightAt(wx, wz);
+            int yc = int((H + 0.5f * WORLD) / VOXEL);
+            int y0 = glm::clamp(yc - 3, 0, N - 1), y1 = glm::clamp(yc + 3, 0, N - 1);
+            for (int iy = y0; iy <= y1; ++iy) {
+                float wy = -0.5f * WORLD + (iy + 0.5f) * VOXEL;
+                if (std::fabs(wy - H) > kBAND)
+                    continue;
+                uint8_t mat = materialAt(wx, wz, H);
+                const glm::vec3& c = kPalette[mat];
+                const glm::vec2& rr = kMaterialReflection[mat];
+                vf::voxel::VoxelRecord v;
+                v.x = uint16_t(ix);
+                v.y = uint16_t(iy);
+                v.z = uint16_t(iz);
+                v.r = uint8_t(c.r * 255.0f);
+                v.g = uint8_t(c.g * 255.0f);
+                v.b = uint8_t(c.b * 255.0f);
+                v.a = 255;
+                v.reflectivity = uint8_t(rr.x);
+                v.roughness = uint8_t(rr.y);
+                v.materialId = mat;
+                data.voxels.push_back(v);
+            }
+        }
+    }
+    if (!vf::voxel::worldfile::write(worldOut, data)) {
+        std::fprintf(stderr, "failed to write %s\n", worldOut);
+        return 1;
+    }
+    std::printf("world %s: %zu voxel records, svo buffers %zu words\n", worldOut,
+                data.voxels.size(), data.bricks.size() + data.handles.size());
     return 0;
 }

@@ -7,7 +7,9 @@
 #include "render/splat_pass.hpp"
 #include "render/svo_pass.hpp"
 #include "voxel/world.hpp"
+#include "voxel/worldfile.hpp"
 #include "voxel/volume.hpp"
+#include <algorithm>
 
 #include <imgui.h>
 #include <backends/imgui_impl_glfw.h>
@@ -39,6 +41,7 @@ struct Args {
     bool camSet=false;
     float sunElev=56.5f, sunAzim=54.5f; // degrees; default reproduces prior sun
     bool sunSet=false;
+    float splatScale=1.0f;
 };
 
 Args parseArgs(int argc, char** argv)
@@ -72,6 +75,8 @@ Args parseArgs(int argc, char** argv)
         } else if (s == "--sun" && i + 2 < argc) {
             a.sunElev = atof(argv[++i]); a.sunAzim = atof(argv[++i]);
             a.sunSet = true;
+        } else if (s == "--splatscale" && i + 1 < argc) {
+            a.splatScale = atof(argv[++i]);
         }
     }
     return a;
@@ -136,7 +141,7 @@ private:
     uint64_t m_frameIdx = 0;
     bool m_showControls = true;
     bool m_fWasDown = false;
-    uint32_t m_nextAcquire = 0;
+    float m_splatScale = 1.0f;    uint32_t m_nextAcquire = 0;
 };
 
 bool App::initWindow(const Args& args)
@@ -296,54 +301,95 @@ bool App::initVulkan()
     }
 
     if (buildSvo) {
-        vf::voxel::World world;
-        world.build();
-        auto st = world.stats();
-        spdlog::info("SVO world built in {:.2f}s: {} nodes, {} bricks, {}/{} chunks active,"
-                     " {:.1f} MB",
-                     st.buildSeconds, st.nodes, st.bricks, st.activeChunks,
-                     vf::voxel::GRID_N * vf::voxel::GRID_N * vf::voxel::GRID_N,
-                     world.gpu().memoryBytes() / (1024.0 * 1024.0));
-        if (!m_svoPass.init(m_ctx))
-            return false;
-        const auto& g = world.gpu();
-        m_svoPass.setWorld(g.chunkGrid, g.childBase, g.payload, g.handles, g.bricks);
+        // canonical world asset first; procedural build only as fallback
+        vf::voxel::WorldFileData wf;
+        const std::string worldPath =
+            std::string(VOXELFORGE_ASSET_DIR) + "/world.vxw";
+        bool fromFile = vf::voxel::worldfile::read(worldPath, wf) &&
+                        wf.meta.worldSize == vf::voxel::WORLD &&
+                        wf.meta.voxelSize == vf::voxel::VOXEL &&
+                        wf.meta.gridN == uint32_t(vf::voxel::GRID_N);
+        size_t nodes = 0, bricks = 0, activeChunks = 0;
+        double mb = 0.0;
+        if (fromFile) {
+            nodes = wf.payload.size();
+            bricks = wf.bricks.size() / (vf::voxel::BRICK_WORDS);
+            activeChunks = size_t(std::count_if(wf.chunkGrid.begin(), wf.chunkGrid.end(),
+                                                [](int32_t h) { return h >= 0; }));
+            mb = double((wf.childBase.size() + wf.payload.size() + wf.handles.size() +
+                         wf.bricks.size() + wf.chunkGrid.size()) *
+                        4) /
+                 (1024.0 * 1024.0);
+            spdlog::info("SVO world loaded from {}: {} nodes, {} bricks, {}/{} chunks,"
+                         " {:.1f} MB",
+                         worldPath, nodes, bricks, activeChunks,
+                         vf::voxel::GRID_N * vf::voxel::GRID_N * vf::voxel::GRID_N, mb);
+            if (!m_svoPass.init(m_ctx))
+                return false;
+            m_svoPass.setWorld(wf.chunkGrid, wf.childBase, wf.payload, wf.handles,
+                               wf.bricks);
+        } else {
+            vf::voxel::World world;
+            world.build();
+            auto st = world.stats();
+            spdlog::info("SVO world built in {:.2f}s: {} nodes, {} bricks, {}/{} chunks"
+                         " active, {:.1f} MB",
+                         st.buildSeconds, st.nodes, st.bricks, st.activeChunks,
+                         vf::voxel::GRID_N * vf::voxel::GRID_N * vf::voxel::GRID_N,
+                         world.gpu().memoryBytes() / (1024.0 * 1024.0));
+            if (!m_svoPass.init(m_ctx))
+                return false;
+            const auto& g = world.gpu();
+            m_svoPass.setWorld(g.chunkGrid, g.childBase, g.payload, g.handles, g.bricks);
+        }
 
         m_pushBSvo = glm::vec4(vf::voxel::WORLD, vf::voxel::VOXEL, float(vf::voxel::GRID_N), 0);
 
-        // derive preview splats on a dense lattice over the terrain surface;
+        // derive preview splats on a ~0.3 m lattice over the terrain surface;
         // radius derives from lattice spacing so adjacent splats overlap even
         // across slopes; colors bake the same direct+ambient terms as the
-        // raymarch shading so both modes match in brightness
-        const int SN = 192;
+        // raymarch shading so both modes match in brightness.
+        // Source: world.vxw surface records when available, else the lattice.
         const float ext = 30.0f;
-        const float spacing = (2.0f * ext) / float(SN - 1);
+        const float spacing = 0.31f;
         const float splatRadius = spacing * 1.25f;
         const glm::vec3 sunCol = glm::vec3(1.0f, 0.95f, 0.84f) * 2.7f;
         const glm::vec3 ambBase = (glm::vec3(0.72f, 0.80f, 0.90f) +
                                    glm::vec3(0.20f, 0.36f, 0.62f)) *
                                   0.5f * 0.55f;
         const vf::voxel::HeightMap& hm = vf::voxel::sharedHeightmap();
-        for (int zi = 0; zi < SN; ++zi)
-            for (int yi = 0; yi < SN; ++yi)
-                for (int xi = 0; xi < SN; ++xi) {
-                    glm::vec3 p(glm::mix(-ext, ext, (xi + 0.5f) / SN),
-                                glm::mix(-8.f, 24.f, (yi + 0.5f) / SN),
-                                glm::mix(-ext, ext, (zi + 0.5f) / SN));
-                    float d = p.y - hm.sample(p.x, p.z);
-                    if (std::abs(d) > 0.22f)
-                        continue;
-                    vf::voxel::SceneSample s = vf::voxel::scene(p);
-                    if (!denseIsPrimary) {
-                        glm::vec2 g = hm.gradient(p.x, p.z);
-                        glm::vec3 n = glm::normalize(glm::vec3(-g.x, 1.0f, -g.y));
-                        float ndl = glm::max(glm::dot(n, glm::vec3(m_sunDir)), 0.0f);
-                        glm::vec3 amb = ambBase * (n.y * 0.5f + 0.5f);
-                        sd.posRadius.emplace_back(p, splatRadius);
-                        sd.colors.emplace_back(
-                            vf::voxel::kPalette[s.mat] * (sunCol * ndl + amb), 1.0f);
+        auto addSplat = [&](const glm::vec3& p, const glm::vec3& albedo) {
+            if (!denseIsPrimary) {
+                glm::vec2 g = hm.gradient(p.x, p.z);
+                glm::vec3 n = glm::normalize(glm::vec3(-g.x, 1.0f, -g.y));
+                float ndl = glm::max(glm::dot(n, glm::vec3(m_sunDir)), 0.0f);
+                glm::vec3 amb = ambBase * (n.y * 0.5f + 0.5f);
+                sd.posRadius.emplace_back(p, splatRadius);
+                sd.colors.emplace_back(albedo * (sunCol * ndl + amb), 1.0f);
+            }
+        };
+        if (fromFile && !wf.voxels.empty()) {
+            for (const vf::voxel::VoxelRecord& v : wf.voxels) {
+                if ((v.x % 3u) != 1u || (v.z % 3u) != 1u)
+                    continue; // decimate 0.1 m records to ~0.3 m lattice
+                glm::vec3 p = v.position(wf.meta);
+                if (std::abs(p.x) > ext || std::abs(p.z) > ext || p.y < -8.f || p.y > 24.f)
+                    continue;
+                addSplat(p, glm::vec3(v.r, v.g, v.b) / 255.0f);
+            }
+        } else {
+            const int SN = 192;
+            for (int zi = 0; zi < SN; ++zi)
+                for (int yi = 0; yi < SN; ++yi)
+                    for (int xi = 0; xi < SN; ++xi) {
+                        glm::vec3 p(glm::mix(-ext, ext, (xi + 0.5f) / SN),
+                                    glm::mix(-8.f, 24.f, (yi + 0.5f) / SN),
+                                    glm::mix(-ext, ext, (zi + 0.5f) / SN));
+                        if (std::abs(p.y - hm.sample(p.x, p.z)) > 0.22f)
+                            continue;
+                        addSplat(p, vf::voxel::kPalette[vf::voxel::scene(p).mat]);
                     }
-                }
+        }
     }
 
     m_pushB = pushBFor(m_backend);
@@ -409,6 +455,7 @@ void App::drawHud()
         ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1.0f, 0.75f, 0.35f, 1.0f));
         ImGui::TextWrapped("Preview: isotropic surface point-splats (unsorted). True 3DGS lands in M7.");
         ImGui::PopStyleColor();
+        ImGui::Text("Splat scale x%.2f  [+ / -]", m_splatScale);
     }
 
     ImGui::Text("Cam  %.1f %.1f %.1f", m_camera.pos.x, m_camera.pos.y, m_camera.pos.z);
@@ -536,6 +583,7 @@ bool App::runCompare()
                            float(m_offscreen.extent.width), float(m_offscreen.extent.height));
         push.b = glm::vec4(pushBFor(be).x, pushBFor(be).y, pushBFor(be).z, 0);
         push.sunDir = m_sunDir;
+        push.misc = glm::vec4(m_splatScale, 0.0f, 0.0f, 0.0f);
         if (be == Backend::Svo)
             m_svoPass.record(fr.cmd, push);
         else
@@ -608,6 +656,7 @@ int App::run(const Args& args)
         m_sunDir = glm::vec4(
             glm::normalize(glm::vec3(cosf(e) * sinf(a), sinf(e), cosf(e) * cosf(a))), 0.0f);
     }
+    m_splatScale = std::clamp(args.splatScale, 0.25f, 4.0f);
     if (!vf::voxel::sharedHeightmap().loaded()) {
         spdlog::critical("assets/heightmap.png missing - build & run heightmap_gen first");
         return 1;
@@ -715,6 +764,23 @@ int App::run(const Args& args)
             m_fWasDown = false;
         }
 
+        // +/- adjust the global splat size multiplier (hold to slide)
+        {
+            GLFWwindow* win = m_window.handle();
+            bool up = glfwGetKey(win, GLFW_KEY_EQUAL) == GLFW_PRESS ||
+                      glfwGetKey(win, GLFW_KEY_KP_ADD) == GLFW_PRESS;
+            bool down = glfwGetKey(win, GLFW_KEY_MINUS) == GLFW_PRESS ||
+                        glfwGetKey(win, GLFW_KEY_KP_SUBTRACT) == GLFW_PRESS;
+            float prev = m_splatScale;
+            if (up)
+                m_splatScale *= std::exp2(1.6f * dt);
+            if (down)
+                m_splatScale *= std::exp2(-1.6f * dt);
+            m_splatScale = std::clamp(m_splatScale, 0.25f, 4.0f);
+            if (m_splatScale != prev && m_renderMode == RenderMode::GaussianSplats)
+                spdlog::info("splat scale x{:.2f}", m_splatScale);
+        }
+
         if (m_window.resized()) {
             m_window.clearResized();
             handleResize();
@@ -745,6 +811,7 @@ int App::run(const Args& args)
                                float(m_offscreen.extent.height));
             push.b = glm::vec4(m_pushB.x, m_pushB.y, m_pushB.z, float(m_frameIdx % 1024));
             push.sunDir = m_sunDir;
+            push.misc = glm::vec4(m_splatScale, 0.0f, 0.0f, 0.0f);
             const bool hSplat = m_renderMode == RenderMode::GaussianSplats && m_splatPass.count() > 0;
             if (hSplat) {
                 vf::transitionImage(fr.cmd, m_offscreen.img, VK_IMAGE_ASPECT_COLOR_BIT,
@@ -850,6 +917,7 @@ int App::run(const Args& args)
                            float(m_offscreen.extent.width), float(m_offscreen.extent.height));
         push.b = glm::vec4(m_pushB.x, m_pushB.y, m_pushB.z, float(m_frameIdx % 1024));
         push.sunDir = m_sunDir;
+        push.misc = glm::vec4(m_splatScale, 0.0f, 0.0f, 0.0f);
 
         const bool splatView =
             m_renderMode == RenderMode::GaussianSplats && m_splatPass.count() > 0;

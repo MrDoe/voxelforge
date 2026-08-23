@@ -82,24 +82,24 @@ target_include_directories(vf_platform PUBLIC src)
 target_link_libraries(vf_platform PUBLIC glfw Vulkan::Vulkan vf_glm spdlog::spdlog)
 
 add_library(vf_core STATIC src/core/camera.cpp src/voxel/volume.cpp src/voxel/world.cpp
-                           src/voxel/heightmap.cpp)
+                           src/voxel/heightmap.cpp src/voxel/worldfile.cpp)
 target_include_directories(vf_core PUBLIC src PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/external)
 target_compile_definitions(vf_core PUBLIC
     VOXELFORGE_ASSET_DIR="${CMAKE_CURRENT_SOURCE_DIR}/assets")
 target_link_libraries(vf_core PUBLIC vf_glm spdlog::spdlog vf_platform)
 
-# ---- heightmap asset -----------------------------------------------------------
+# ---- heightmap + world assets ---------------------------------------------------
 add_executable(heightmap_gen tools/heightmap_gen.cpp)
 target_include_directories(heightmap_gen PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
-target_link_libraries(heightmap_gen PRIVATE vf_glm)
+target_link_libraries(heightmap_gen PRIVATE vf_core)
 set(VF_HEIGHTMAP_PNG ${CMAKE_CURRENT_SOURCE_DIR}/assets/heightmap.png)
-add_custom_command(OUTPUT ${VF_HEIGHTMAP_PNG}
-    COMMAND heightmap_gen ${VF_HEIGHTMAP_PNG}
+set(VF_WORLD_VXW ${CMAKE_CURRENT_SOURCE_DIR}/assets/world.vxw)
+add_custom_command(OUTPUT ${VF_HEIGHTMAP_PNG} ${VF_WORLD_VXW}
+    COMMAND heightmap_gen ${VF_HEIGHTMAP_PNG} ${VF_WORLD_VXW}
     DEPENDS heightmap_gen
-    COMMENT "heightmap_gen -> assets/heightmap.png"
+    COMMENT "heightmap_gen -> assets/heightmap.png + world.vxw"
     VERBATIM)
-add_custom_target(vf_heightmap DEPENDS ${VF_HEIGHTMAP_PNG})
-add_dependencies(vf_core vf_heightmap)
+add_custom_target(vf_heightmap DEPENDS ${VF_HEIGHTMAP_PNG} ${VF_WORLD_VXW})
 
 add_library(vf_rhi STATIC src/rhi/context.cpp src/rhi/resources.cpp src/rhi/swapchain.cpp)
 target_link_libraries(vf_rhi PUBLIC vf_platform vf_vma spdlog::spdlog)
@@ -135,11 +135,13 @@ add_executable(voxelforge src/app/main.cpp)
 target_compile_definitions(voxelforge PRIVATE
     VOXELFORGE_SHADER_DIR="${CMAKE_CURRENT_BINARY_DIR}/shaders")
 target_link_libraries(voxelforge PRIVATE vf_render vf_core imgui_core)
-add_dependencies(voxelforge vf_shaders)
+add_dependencies(voxelforge vf_shaders vf_heightmap)
 
 # ---- tests -------------------------------------------------------------------------
 enable_testing()
-add_executable(vf_tests tests/main.cpp tests/test_volume.cpp tests/test_camera.cpp tests/test_world.cpp)
+add_executable(vf_tests tests/main.cpp tests/test_volume.cpp tests/test_camera.cpp
+                        tests/test_world.cpp tests/test_worldfile.cpp)
 target_link_libraries(vf_tests PRIVATE vf_core vf_doctest)
 target_compile_definitions(vf_tests PRIVATE DOCTEST_CONFIG_NO_MULTITHREADING)
+add_dependencies(vf_tests vf_heightmap)
 add_test(NAME unit_tests COMMAND vf_tests)

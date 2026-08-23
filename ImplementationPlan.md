@@ -82,11 +82,23 @@ headless self-tests for CI-style verification.
 | Suite | Status |
 |---|---|
 | Unit tests (doctest): builder determinism/pruning, point-query vs analytic SDF,
-dense volume, snorm8 roundtrip, camera math | ✅ 13/13 cases |
+dense volume, snorm8 roundtrip, camera math, worldfile roundtrip/corruption | ✅ 16/16 cases |
 | GPU selftests (`--selftest`) SVO / dense / splat | ✅ PASS |
-| Backend equivalence (`--compare`): mean channel diff 27.14/255 (SVO 0.1 m vs dense 0.4 m), coverage parity | ✅ PASS |
+| Backend equivalence (`--compare`): mean channel diff 4.32/255 (heightmap normals +
+shared heightfield shadows + 640-step budget), coverage parity | ✅ PASS |
 | Smoke runs (headless frame loops) | ✅ 0.04–0.19 ms/frame |
 | Interactive stability | ✅ ~150 fps, no stalls (post-fix) |
+
+**World asset pipeline (2026-08-23):** `tools/heightmap_gen` generates the 16-bit
+heightmap PNG **and** builds the real chunked-SVO world from it, then serializes
+`assets/world.vxw` (**VXW v1**): header (meta + CRC32) → GPU SVO buffers with
+**2 words per voxel** (`rgb+sdf` | `a+refl+rough+matId`, see `kMaterialReflection`)
+→ explicit surface-band voxel records (u16³ grid pos, RGBA, reflectivity, roughness,
+material). The app loads the file directly at startup — no CPU build on the boot path
+(262 MB GPU buffers + 4.1 M surface records) — and falls back to procedural
+`World::build()` if the file is missing/stale. Splats derive straight from the records.
+Generation remains heightmap-driven end-to-end; splats are an alternative rendering
+mode only.
 
 Hard-won fixes baked in: null pipeline layout (NVIDIA compiler segfault), NVIDIA/X11
 MAILBOX present deadlock (→ IMMEDIATE default + per-image acquire semaphores), NDC flip

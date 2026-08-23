@@ -56,8 +56,14 @@ glm::vec2 HeightMap::gradient(float x, float z) const
              (sample(x, z + e) - sample(x, z - e)) / (2.0f * e) };
 }
 
+namespace {
+const HeightMap* g_override = nullptr;
+} // namespace
+
 const HeightMap& sharedHeightmap()
 {
+    if (g_override)
+        return *g_override;
     static HeightMap instance = [] {
         HeightMap m;
         if (!m.loadFromFile(std::string(VOXELFORGE_ASSET_DIR) + "/heightmap.png"))
@@ -66,5 +72,7 @@ const HeightMap& sharedHeightmap()
     }();
     return instance;
 }
+
+void setSharedHeightmap(const HeightMap* m) { g_override = m; }
 
 } // namespace vf::voxel

@@ -35,4 +35,7 @@ private:
 // Lazily loads VOXELFORGE_ASSET_DIR "/heightmap.png" on first use.
 const HeightMap& sharedHeightmap();
 
+// Offline tools can inject their own instance before building worlds.
+void setSharedHeightmap(const HeightMap* m);
+
 } // namespace vf::voxel

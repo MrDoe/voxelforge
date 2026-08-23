@@ -32,8 +32,8 @@ void World::build()
         }
         uint32_t emitBrick(const uint32_t* data)
         {
-            bricks.insert(bricks.end(), data, data + BRICK_VOXELS);
-            return uint32_t(((bricks.size() / BRICK_VOXELS) - 1) << 2 | 1);
+            bricks.insert(bricks.end(), data, data + BRICK_WORDS);
+            return uint32_t(((bricks.size() / BRICK_WORDS) - 1) << 2 | 1);
         }
     };
     std::vector<Pool> pools(numChunks);
@@ -60,7 +60,7 @@ void World::build()
                 return kSolidHandle;
 
             if (d == kMaxDepth) {
-                uint32_t data[BRICK_VOXELS];
+                uint32_t data[BRICK_WORDS];
                 for (int bz = 0; bz < BRICK_N; ++bz)
                     for (int by = 0; by < BRICK_N; ++by)
                         for (int bx = 0; bx < BRICK_N; ++bx) {
@@ -71,14 +71,17 @@ void World::build()
                             uint32_t sb = encodeSnormByte(
                                 glm::clamp(s.d / VOXEL, -127.0f, 127.0f));
                             const glm::vec3& c = kPalette[s.mat];
-                            data[(bz * BRICK_N + by) * BRICK_N + bx] =
-                                uint32_t(c.r * 255.0f) | (uint32_t(c.g * 255.0f) << 8) |
-                                (uint32_t(c.b * 255.0f) << 16) | (sb << 24);
+                            const glm::vec2 refl = kMaterialReflection[s.mat];
+                            size_t i = (size_t(bz * BRICK_N + by) * BRICK_N + bx) * 2;
+                            data[i] = uint32_t(c.r * 255.0f) | (uint32_t(c.g * 255.0f) << 8) |
+                                      (uint32_t(c.b * 255.0f) << 16) | (sb << 24);
+                            data[i + 1] = 255u | (uint32_t(refl.x) << 8) |
+                                          (uint32_t(refl.y) << 16) | (uint32_t(s.mat) << 24);
                         }
                 return pools[ci].emitBrick(data);
             }
 
-            Pool& pool = pools[ci];
+        Pool& pool = pools[ci];
             uint32_t nodeH = pool.allocNode();
             uint32_t base = pool.childBase[nodeIndexOf(nodeH)];
             uint32_t validMask = 0, solidMask = 0;
@@ -147,11 +150,11 @@ void World::build()
         m_gpu.bricks.insert(m_gpu.bricks.end(), p.bricks.begin(), p.bricks.end());
         nodeOff += p.payload.size();
         hOff += p.handles.size();
-        bOff += p.bricks.size() / BRICK_VOXELS;
+        bOff += p.bricks.size() / BRICK_WORDS;
     }
 
     m_stats.nodes = m_gpu.payload.size();
-    m_stats.bricks = m_gpu.bricks.size() / BRICK_VOXELS;
+    m_stats.bricks = m_gpu.bricks.size() / BRICK_WORDS;
     m_stats.activeChunks = size_t(std::count_if(m_gpu.chunkGrid.begin(), m_gpu.chunkGrid.end(),
                                                 [](int32_t v) { return v >= 0; }));
     m_stats.buildSeconds =
@@ -186,9 +189,11 @@ float World::sample(glm::vec3 p) const
             glm::vec3 f = g - glm::vec3(i0);
             auto at = [&](glm::ivec3 c) {
                 c = glm::clamp(c, glm::ivec3(0), glm::ivec3(BRICK_N - 1));
-                uint32_t v = m_gpu.bricks[bi * BRICK_VOXELS +
-                                          size_t(c.z) * BRICK_N * BRICK_N +
-                                          size_t(c.y) * BRICK_N + c.x];
+                size_t base = bi * BRICK_WORDS;
+                uint32_t v = m_gpu.bricks[base +
+                                          (size_t(c.z) * BRICK_N * BRICK_N +
+                                           size_t(c.y) * BRICK_N + c.x) *
+                                              2];
                 return decodeSnormByte(v >> 24) * VOXEL;
             };
             float c00 = glm::mix(at({ i0.x, i0.y, i0.z }), at({ i0.x + 1, i0.y, i0.z }), f.x);
