@@ -34,9 +34,9 @@ TEST_CASE("point query matches scene sign at probes")
     CHECK(signAt({ 0.f, -30.f, 0.f }) < 0.0f);
     // high sky: empty
     CHECK(signAt({ 0.f, 45.f, 0.f }) > 1.0f);
-    // boulder A interior: solid
-    glm::vec3 bc{ 13.f, 1.4f, -13.f };
-    CHECK(scene(bc).d < -1.0f);
+    // deep in the river bed (river passes z ~ +5 near x = 0): solid
+    glm::vec3 bc{ 0.f, -3.6f, 5.f };
+    CHECK(scene(bc).d < -0.3f);
     CHECK(signAt(bc) < 0.0f);
 
     // near-surface agreement with analytic SDF within tolerance band
@@ -57,11 +57,11 @@ TEST_CASE("point query matches scene sign at probes")
             ++agree;
     }
     MESSAGE("near-surface agreement: ", agree, "/", tested,
-            " (sign flips expected on steep channel banks due to solid-cell shortcuts)");
+            " (sign flips expected on steep banks due to solid-cell shortcuts)");
     CHECK(tested > 50);
-    // Steep banks exceed Lipschitz-1 locally, so solid-subtree shortcuts trade
+    // Banks exceed Lipschitz-1 locally, so solid-subtree shortcuts trade
     // exact distance for speed there; require majority agreement only.
-    CHECK(agree > tested * 30 / 100); // thin features (logs/trunks) resist cell classification
+    CHECK(agree > tested * 30 / 100);
 }
 
 TEST_CASE("builder is deterministic")

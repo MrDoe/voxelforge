@@ -20,6 +20,7 @@ public:
                   const std::vector<uint32_t>& bricks);
 
     void updateDescriptors(const Image3D& outImage);
+    void setHeightmapView(VkImageView view);
     void record(VkCommandBuffer cmd, const RaymarchPush& push) const;
 
 private:
@@ -38,6 +39,7 @@ private:
     VkDescriptorSet m_set = VK_NULL_HANDLE;
 
     Ssbo m_grid, m_childBase, m_payload, m_handles, m_bricks;
+    VkImageView m_heightView = VK_NULL_HANDLE;
 };
 
 } // namespace vf

@@ -81,9 +81,25 @@ add_library(vf_platform STATIC src/platform/window.cpp)
 target_include_directories(vf_platform PUBLIC src)
 target_link_libraries(vf_platform PUBLIC glfw Vulkan::Vulkan vf_glm spdlog::spdlog)
 
-add_library(vf_core STATIC src/core/camera.cpp src/voxel/volume.cpp src/voxel/world.cpp)
-target_include_directories(vf_core PUBLIC src)
+add_library(vf_core STATIC src/core/camera.cpp src/voxel/volume.cpp src/voxel/world.cpp
+                           src/voxel/heightmap.cpp)
+target_include_directories(vf_core PUBLIC src PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/external)
+target_compile_definitions(vf_core PUBLIC
+    VOXELFORGE_ASSET_DIR="${CMAKE_CURRENT_SOURCE_DIR}/assets")
 target_link_libraries(vf_core PUBLIC vf_glm spdlog::spdlog vf_platform)
+
+# ---- heightmap asset -----------------------------------------------------------
+add_executable(heightmap_gen tools/heightmap_gen.cpp)
+target_include_directories(heightmap_gen PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
+target_link_libraries(heightmap_gen PRIVATE vf_glm)
+set(VF_HEIGHTMAP_PNG ${CMAKE_CURRENT_SOURCE_DIR}/assets/heightmap.png)
+add_custom_command(OUTPUT ${VF_HEIGHTMAP_PNG}
+    COMMAND heightmap_gen ${VF_HEIGHTMAP_PNG}
+    DEPENDS heightmap_gen
+    COMMENT "heightmap_gen -> assets/heightmap.png"
+    VERBATIM)
+add_custom_target(vf_heightmap DEPENDS ${VF_HEIGHTMAP_PNG})
+add_dependencies(vf_core vf_heightmap)
 
 add_library(vf_rhi STATIC src/rhi/context.cpp src/rhi/resources.cpp src/rhi/swapchain.cpp)
 target_link_libraries(vf_rhi PUBLIC vf_platform vf_vma spdlog::spdlog)

@@ -107,6 +107,7 @@ private:
     vf::Swapchain m_swapchain;
 
     vf::Image3D m_sdfVol, m_albedoVol, m_offscreen;
+    vf::Image3D m_heightImg;
     VkSampler m_sdfSampler = VK_NULL_HANDLE, m_albedoSampler = VK_NULL_HANDLE;
     vf::RaymarchPass m_pass;
     vf::SvoPass m_svoPass;
@@ -199,6 +200,30 @@ bool App::initVulkan()
     }
     if (!m_swapchain.init(m_ctx, uint32_t(fb.x), uint32_t(fb.y), policy))
         return false;
+
+    // terrain heightmap -> R32F storage image, kept in GENERAL for shader reads
+    {
+        const vf::voxel::HeightMap& hm = vf::voxel::sharedHeightmap();
+        m_heightImg = vf::makeImage3D(m_ctx, hm.width(), hm.height(), 1,
+                                      VK_FORMAT_R32_SFLOAT,
+                                      VK_IMAGE_USAGE_TRANSFER_DST_BIT |
+                                          VK_IMAGE_USAGE_STORAGE_BIT);
+        if (!m_heightImg.img)
+            return false;
+        if (!vf::uploadToImage3D(m_ctx, m_heightImg, hm.data(), hm.bytes()))
+            return false;
+        m_ctx.immediateSubmit([&](VkCommandBuffer cmd) {
+            vf::transitionImage(cmd, m_heightImg.img, VK_IMAGE_ASPECT_COLOR_BIT,
+                                VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+                                VK_IMAGE_LAYOUT_GENERAL,
+                                VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT,
+                                VK_ACCESS_2_MEMORY_READ_BIT | VK_ACCESS_2_MEMORY_WRITE_BIT,
+                                VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
+                                VK_ACCESS_2_SHADER_STORAGE_READ_BIT);
+        });
+        m_pass.setHeightmapView(m_heightImg.view);
+        m_svoPass.setHeightmapView(m_heightImg.view);
+    }
 
     // volume -----------------------------------------------------------
     const bool useDense = m_backend == Backend::Dense;
@@ -568,6 +593,10 @@ int App::run(const Args& args)
         m_sunDir = glm::vec4(
             glm::normalize(glm::vec3(cosf(e) * sinf(a), sinf(e), cosf(e) * cosf(a))), 0.0f);
     }
+    if (!vf::voxel::sharedHeightmap().loaded()) {
+        spdlog::critical("assets/heightmap.png missing - build & run heightmap_gen first");
+        return 1;
+    }
     if (!initWindow(args)) {
         spdlog::critical("window init failed");
         return 1;
@@ -627,7 +656,7 @@ int App::run(const Args& args)
         m_camera.pitch = asin(dir.y);
         m_camera.speed = 6.0f;
     } else {
-        m_camera.pos = { 0.f, 14.f, -40.f }; // south of arch, facing scene center
+        m_camera.pos = { 0.f, 14.f, -40.f }; // elevated view over the river valley
         m_camera.yaw = glm::half_pi<float>();
         m_camera.pitch = -0.15f;
     }
@@ -955,6 +984,7 @@ void App::destroy()
     vf::destroySampler(m_ctx, m_albedoSampler);
     vf::destroyImage3D(m_ctx, m_sdfVol);
     vf::destroyImage3D(m_ctx, m_albedoVol);
+    vf::destroyImage3D(m_ctx, m_heightImg);
     vf::destroyImage3D(m_ctx, m_offscreen);
     m_swapchain.destroy();
     m_ctx.shutdown();

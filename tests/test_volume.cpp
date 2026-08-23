@@ -46,10 +46,10 @@ TEST_CASE("inside/outside sanity on shared scene")
     // high above is empty
     CHECK(v.sampleTrilinear({ 0.f, 10.f, 0.f }) > 1.0f);
 
-    // boulder A core is solid (center from common.hpp)
-    glm::vec3 bc{ 13.f, 1.4f, -13.f };
+    // deep in the river bed (river passes z ~ +5 near x = 0) is solid
+    glm::vec3 bc{ 0.f, -3.6f, 5.f };
     float analytic = scene(bc).d;
-    CHECK(analytic < -1.0f);
+    CHECK(analytic < -0.3f);
     CHECK(v.sampleTrilinear(bc) < 0.f);
 
     // agreement with analytic SDF near surface
@@ -75,7 +75,7 @@ TEST_CASE("exactly one surface crossing along outward ray")
 {
     DenseVolume v;
     v.generate();
-    glm::vec3 origin{ 13.f, 1.4f, -13.f }; // boulder A core
+    glm::vec3 origin{ 0.f, -3.6f, 5.f }; // river bed, below the surface
     glm::vec3 dir = glm::vec3(0.0f, 1.0f, 0.0f); // straight up: one clean exit
 
     int crossings = 0;

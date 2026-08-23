@@ -11,6 +11,7 @@ layout(std430, set = 0, binding = 2) readonly buffer ChildBase { uint uChildBase
 layout(std430, set = 0, binding = 3) readonly buffer Payload { uint uPayload[]; };
 layout(std430, set = 0, binding = 4) readonly buffer Handles { uint uHandles[]; };
 layout(std430, set = 0, binding = 5) readonly buffer Bricks { uint uBricks[]; };
+layout(set = 0, binding = 6, r32f) uniform readonly highp image2D uHeight;
 
 layout(push_constant) uniform PC {
     vec4 camPos;
@@ -25,11 +26,29 @@ layout(push_constant) uniform PC {
 const uint kEmpty = 0xFFFFFFFFu;
 const uint kSolid = 0xFFFFFFFEu;
 const int BRICK_N = 8;
+const float kWaterLevel = -0.9;
 
 vec3 kSunDir = normalize(vec3(0.42, 0.78, 0.30)); // set from push in main()
 const vec3 kSunCol = vec3(1.00, 0.95, 0.84) * 2.7;
 const vec3 kZenith = vec3(0.20, 0.36, 0.62);
 const vec3 kHorizon = vec3(0.72, 0.80, 0.90);
+
+// bilinear height sample from the shared terrain heightmap
+float heightAt(vec2 xz)
+{
+    ivec2 sz = imageSize(uHeight);
+    vec2 tc = clamp(xz / pc.b.x + 0.5, vec2(0.0), vec2(1.0)) * vec2(sz - 1);
+    ivec2 i0 = ivec2(floor(tc));
+    ivec2 i1 = min(i0 + 1, sz - 1);
+    vec2 f = tc - vec2(i0);
+    float h00 = imageLoad(uHeight, ivec2(i0.x, i0.y)).r;
+    float h10 = imageLoad(uHeight, ivec2(i1.x, i0.y)).r;
+    float h01 = imageLoad(uHeight, ivec2(i0.x, i1.y)).r;
+    float h11 = imageLoad(uHeight, ivec2(i1.x, i1.y)).r;
+    return mix(mix(h00, h10, f.x), mix(h01, h11, f.x), f.y);
+}
+
+bool underWater(vec2 xz) { return heightAt(xz) < kWaterLevel; }
 
 
 float brickVoxelSdf(uint bi, ivec3 c)
@@ -108,10 +127,7 @@ float map(vec3 p)
 }
 
 
-// ---- landscape helpers (mirror common.hpp) ---------------------------------
-float streamCross(vec2 xz){ return abs(xz.y - 16.0*sin(xz.x*0.05)) / (2.1 + 0.6*sin(xz.x*0.11+2.0)); }
-bool inChannel(vec2 xz, float lim){ return streamCross(xz) < lim; }
-
+// ---- landscape helpers ------------------------------------------------------
 vec3 grassDetail(vec3 alb, vec3 p, inout vec3 n)
 {
     float g = fract(sin(dot(floor(p.xz*14.0), vec2(12.9898,78.233))) * 43758.5453);
@@ -123,28 +139,32 @@ vec3 grassDetail(vec3 alb, vec3 p, inout vec3 n)
 float waterHit(vec3 ro, vec3 rd, float tMax)
 {
     if (rd.y > -0.001) return -1.0;
-    float tw = (pc.b.w == -1.0 ? -1.0 : ((-0.9 - ro.y) / rd.y));
+    float tw = (kWaterLevel - ro.y) / rd.y;
     if (tw < 0.0 || tw > tMax) return -1.0;
     vec3 pw = ro + rd * tw;
-    return inChannel(pw.xz, 1.35) ? tw : -1.0;
+    return underWater(pw.xz) ? tw : -1.0;
 }
 
 vec3 calcNormal(vec3 p)
 {
-    float e = pc.b.y * 1.25;
-    return normalize(vec3(map(p + vec3(e, 0, 0)) - map(p - vec3(e, 0, 0)),
-                          map(p + vec3(0, e, 0)) - map(p - vec3(0, e, 0)),
-                          map(p + vec3(0, 0, e)) - map(p - vec3(0, 0, e))));
+    // analytic heightfield normal - identical in both backends so shading
+    // stays independent of each field's sampling resolution
+    float e = 0.35;
+    return normalize(vec3(heightAt(p.xz - vec2(e, 0)) - heightAt(p.xz + vec2(e, 0)),
+                          2.0 * e,
+                          heightAt(p.xz - vec2(0, e)) - heightAt(p.xz + vec2(0, e))));
 }
 
 float softShadow(vec3 ro, vec3 rd)
 {
+    // heightfield shadow march - identical in both backends for parity
     float res = 1.0;
     float t = 0.05;
     for (int i = 0; i < 28; ++i) {
-        float s = map(ro + rd * t);
+        vec3 sp = ro + rd * t;
+        float s = sp.y - heightAt(sp.xz);
         res = min(res, 9.0 * s / t);
-        t += clamp(s, pc.b.y * 0.5, 1.2);
+        t += clamp(s * 0.85, 0.05, 1.2);
         if (res < 0.004 || t > 40.0)
             break;
     }
@@ -217,17 +237,19 @@ vec3 brickAlbedo(vec3 p)
 vec3 shadeTerrain(vec3 p, vec3 rd, vec3 alb)
 {
     vec3 n = calcNormal(p);
-    float sh = softShadow(p + n * pc.b.y * 1.5, kSunDir);
+    float sh = softShadow(p + n * 0.35, kSunDir);
     float ndl = max(dot(n, kSunDir), 0.0);
+    
     vec3 amb = mix(kHorizon, kZenith, 0.5) * (n.y * 0.5 + 0.5) * 0.55;
     vec3 bounce = vec3(0.30, 0.25, 0.18) * max(-n.y, 0.0) * 0.35;
     if (alb.g > alb.r * 1.15) { // vegetation: micro detail
         alb = grassDetail(alb, p, n);
-        sh = min(sh, softShadow(p + n * pc.b.y * 0.8, kSunDir) + 0.15);
+        sh = min(sh, softShadow(p + n * 0.35, kSunDir) + 0.15);
     }
+    
     vec3 col = alb * (kSunCol * ndl * sh + amb + bounce);
-    if (p.y < -0.9 && inChannel(p.xz, 1.35)) {
-        float depth = -0.9 - p.y;
+    if (p.y < kWaterLevel && underWater(p.xz)) {
+        float depth = kWaterLevel - p.y;
         col *= exp(-depth * vec3(0.35, 0.18, 0.12) * 3.0);
         col = mix(col, vec3(0.05, 0.14, 0.13), clamp(depth * 0.8, 0.0, 0.85));
     }
@@ -254,9 +276,20 @@ void main()
         float t = max(t0, 0.0);
         bool hit = false;
         float eps = pc.b.y * 0.45;
-        for (int i = 0; i < 320 && t <= t1; ++i) {
+        for (int i = 0; i < 480 && t <= t1; ++i) {
             float s = map(ro + rd * t);
             if (s < eps) {
+                // refine: bisect back toward the last clear sample so relaxed
+                // stepping / empty-cell skips cannot leave us deep inside
+                float lo = max(t - 2.0, 0.0), hi = t;
+                for (int k = 0; k < 6; ++k) {
+                    float mid = (lo + hi) * 0.5;
+                    if (map(ro + rd * mid) < eps)
+                        hi = mid;
+                    else
+                        lo = mid;
+                }
+                t = hi;
                 hit = true;
                 break;
             }
@@ -269,9 +302,7 @@ void main()
         vec3 pw = ro;
         if (tWater > 0.0 && t <= t1) {
             pw = ro + rd * tWater;
-            if (map(pw + vec3(0,-0.25,0)) < 0.0 || true) {
-                t = tWater; hit = true; waterView = true;
-            }
+            t = tWater; hit = true; waterView = true;
         }
 
             if (hit) {

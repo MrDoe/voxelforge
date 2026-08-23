@@ -26,6 +26,7 @@ public:
     void updateDescriptors(const Image3D& sdfVol, VkSampler sdfSampler,
                            const Image3D& albedoVol, VkSampler albedoSampler,
                            const Image3D& outImage);
+    void setHeightmapView(VkImageView view);
 
     void record(VkCommandBuffer cmd, const RaymarchPush& push) const;
 
@@ -36,6 +37,7 @@ private:
     VkDescriptorSetLayout m_setLayout = VK_NULL_HANDLE;
     VkDescriptorPool m_pool = VK_NULL_HANDLE;
     VkDescriptorSet m_set = VK_NULL_HANDLE;
+    VkImageView m_heightView = VK_NULL_HANDLE;
 };
 
 } // namespace vf

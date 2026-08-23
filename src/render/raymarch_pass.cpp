@@ -39,16 +39,18 @@ bool RaymarchPass::init(const Context& ctx)
     VkDevice dev = ctx.device();
 
     // --- descriptor set layout -----------------------------------------
-    VkDescriptorSetLayoutBinding bindings[3] = {};
+    VkDescriptorSetLayoutBinding bindings[4] = {};
     bindings[0] = { 0, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1,
                     VK_SHADER_STAGE_COMPUTE_BIT, nullptr };
     bindings[1] = { 1, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1,
                     VK_SHADER_STAGE_COMPUTE_BIT, nullptr };
     bindings[2] = { 2, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 1,
                     VK_SHADER_STAGE_COMPUTE_BIT, nullptr };
+    bindings[3] = { 3, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 1,
+                    VK_SHADER_STAGE_COMPUTE_BIT, nullptr };
 
     VkDescriptorSetLayoutCreateInfo li { VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO };
-    li.bindingCount = 3;
+    li.bindingCount = 4;
     li.pBindings = bindings;
     if (vkCreateDescriptorSetLayout(dev, &li, nullptr, &m_setLayout) != VK_SUCCESS) {
         spdlog::critical("raymarch: descriptor layout failed");
@@ -89,7 +91,7 @@ bool RaymarchPass::init(const Context& ctx)
     // --- pool & set -------------------------------------------------------
     VkDescriptorPoolSize sizes[] = {
         { VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 2 },
-        { VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 1 },
+        { VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 2 },
     };
     VkDescriptorPoolCreateInfo pi { VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO };
     pi.maxSets = 1;
@@ -109,6 +111,8 @@ bool RaymarchPass::init(const Context& ctx)
     return true;
 }
 
+void RaymarchPass::setHeightmapView(VkImageView view) { m_heightView = view; }
+
 void RaymarchPass::updateDescriptors(const Image3D& sdfVol, VkSampler sdfSampler,
                                      const Image3D& albedoVol, VkSampler albedoSampler,
                                      const Image3D& outImage)
@@ -117,15 +121,18 @@ void RaymarchPass::updateDescriptors(const Image3D& sdfVol, VkSampler sdfSampler
     VkDescriptorImageInfo s1 { albedoSampler, albedoVol.view,
                                VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL };
     VkDescriptorImageInfo s2 { VK_NULL_HANDLE, outImage.view, VK_IMAGE_LAYOUT_GENERAL };
+    VkDescriptorImageInfo s3 { VK_NULL_HANDLE, m_heightView, VK_IMAGE_LAYOUT_GENERAL };
 
-    VkWriteDescriptorSet w[3] = {};
+    VkWriteDescriptorSet w[4] = {};
     w[0] = { VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, nullptr, m_set, 0, 0, 1,
              VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, &s0, nullptr, nullptr };
     w[1] = { VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, nullptr, m_set, 1, 0, 1,
              VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, &s1, nullptr, nullptr };
     w[2] = { VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, nullptr, m_set, 2, 0, 1,
              VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, &s2, nullptr, nullptr };
-    vkUpdateDescriptorSets(m_ctx->device(), 3, w, 0, nullptr);
+    w[3] = { VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, nullptr, m_set, 3, 0, 1,
+             VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, &s3, nullptr, nullptr };
+    vkUpdateDescriptorSets(m_ctx->device(), 4, w, 0, nullptr);
 }
 
 void RaymarchPass::record(VkCommandBuffer cmd, const RaymarchPush& push) const
