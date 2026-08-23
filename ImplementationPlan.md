@@ -181,6 +181,7 @@ different scenes and `--compare` could never agree. `vol.worldSize` is now set t
 - [ ] 1-bounce diffuse GI: half-res temporal accumulation + variance-guided filter
 - [ ] TAA with reprojection from depth/normal history
 - [x] PBR-ish material model per palette entry (roughness/reflectivity from second brick word via kMatRefl, Blinn-Phong specular in shadeTerrain)
+- [ ] Highly realistic foliage — leaf-cluster SDF warp (fbm-eroded clumps, twig spheres), two-sided SSS back-light + thickness-attenuated bleed + waxy specular, per-leaf albedo variation, wind vertex displacement (pc.misc.y), view-dependent thickness
 
 ### Phase P2 — dynamic world (was M3/M4)
 - [ ] GPU-side chunk builds off a dirty-chunk queue (editing groundwork)

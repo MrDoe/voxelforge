@@ -865,12 +865,17 @@ int App::run(const Args& args)
         m_animTime += dt;
 
         // +/- adjust the global splat size multiplier (hold to slide)
+        // German QWERTZ '+' is RIGHT_BRACKET / APOSTROPHE, US '+' is EQUAL with Shift —
+        // also handle keypad. Char callback below covers all layouts as fallback.
         {
             GLFWwindow* win = m_window.handle();
             bool up = glfwGetKey(win, GLFW_KEY_EQUAL) == GLFW_PRESS ||
-                      glfwGetKey(win, GLFW_KEY_KP_ADD) == GLFW_PRESS;
+                      glfwGetKey(win, GLFW_KEY_KP_ADD) == GLFW_PRESS ||
+                      glfwGetKey(win, GLFW_KEY_RIGHT_BRACKET) == GLFW_PRESS ||
+                      glfwGetKey(win, GLFW_KEY_APOSTROPHE) == GLFW_PRESS;
             bool down = glfwGetKey(win, GLFW_KEY_MINUS) == GLFW_PRESS ||
-                        glfwGetKey(win, GLFW_KEY_KP_SUBTRACT) == GLFW_PRESS;
+                        glfwGetKey(win, GLFW_KEY_KP_SUBTRACT) == GLFW_PRESS ||
+                        glfwGetKey(win, GLFW_KEY_SLASH) == GLFW_PRESS;
             float prev = m_splatScale;
             if (up)
                 m_splatScale *= std::exp2(1.6f * dt);
