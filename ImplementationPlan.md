@@ -84,8 +84,10 @@ headless self-tests for CI-style verification.
 | Unit tests (doctest): builder determinism/pruning, point-query vs analytic SDF,
 dense volume, snorm8 roundtrip, camera math, worldfile roundtrip/corruption | ✅ 16/16 cases |
 | GPU selftests (`--selftest`) SVO / dense / splat | ✅ PASS |
-| Backend equivalence (`--compare`): mean channel diff 4.32/255 (heightmap normals +
-shared heightfield shadows + 640-step budget), coverage parity | ✅ PASS |
+| Backend equivalence (`--compare`): measured 7.37/255, thresholds tightened to
+  <14/255 + <8% coverage delta (was a lenient 32/255 that hid real divergence) | ✅ PASS |
+| Visual regression (`tests/visual_check.py`, ctest `visual_check`): canonical shots
+  assert black-in-silhouette <5%, coverage range, blue sky probe | ✅ PASS |
 | Smoke runs (headless frame loops) | ✅ 0.04–0.19 ms/frame |
 | Interactive stability | ✅ ~150 fps, no stalls (post-fix) |
 

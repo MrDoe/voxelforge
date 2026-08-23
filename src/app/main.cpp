@@ -651,7 +651,8 @@ bool App::runCompare()
     // restore primary backend descriptors on offscreen
     createOffscreen(m_offscreen.extent.width, m_offscreen.extent.height);
 
-    const bool ok = meanDiff < 32.0 && std::abs(covSvo - covDense) < 0.15f;
+    // tightened after heightmap-parity work: measured ~7.4/255, delta ~6%
+    const bool ok = meanDiff < 14.0 && std::abs(covSvo - covDense) < 0.08f;
     spdlog::info("compare {}", ok ? "PASSED" : "FAILED");
     return ok;
 }

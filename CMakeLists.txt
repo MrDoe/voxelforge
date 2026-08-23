@@ -145,3 +145,8 @@ target_link_libraries(vf_tests PRIVATE vf_core vf_doctest)
 target_compile_definitions(vf_tests PRIVATE DOCTEST_CONFIG_NO_MULTITHREADING)
 add_dependencies(vf_tests vf_heightmap)
 add_test(NAME unit_tests COMMAND vf_tests)
+
+find_package(Python3 COMPONENTS Interpreter REQUIRED)
+add_test(NAME visual_check
+    COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/tests/visual_check.py
+            $<TARGET_FILE:voxelforge>)
