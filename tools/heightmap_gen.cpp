@@ -227,7 +227,13 @@ int main(int argc, char** argv)
 
     constexpr float kBAND = 0.20f;
     const int N = int(WORLD / VOXEL);
-    data.voxels.reserve(6u << 20);
+    data.voxels.reserve(8u << 20);
+    auto nearObject = [&](float wx, float wz) -> bool {
+        if (std::hypot(wx - kHousePos.x, wz - kHousePos.y) < 6.5f) return true;
+        for (auto &s : kTreeSpots) if (std::hypot(wx - s.x, wz - s.y) < 4.8f) return true;
+        for (auto &s : kRockSpots) if (std::hypot(wx - s.x, wz - s.y) < 2.8f) return true;
+        return false;
+    };
     for (int iz = 0; iz < N; ++iz) {
         float wz = -0.5f * WORLD + (iz + 0.5f) * VOXEL;
         for (int ix = 0; ix < N; ++ix) {
@@ -235,11 +241,19 @@ int main(int argc, char** argv)
             float H = terrainHeightAt(wx, wz);
             int yc = int((H + 0.5f * WORLD) / VOXEL);
             int y0 = glm::clamp(yc - 3, 0, N - 1), y1 = glm::clamp(yc + 3, 0, N - 1);
+            bool near = nearObject(wx, wz);
+            if (near) {
+                int yObj0 = int((kPadY - 0.5f + 0.5f * WORLD) / VOXEL);
+                int yObj1 = int((kPadY + 8.8f + 0.5f * WORLD) / VOXEL);
+                y0 = glm::clamp(std::min(y0, yObj0), 0, N - 1);
+                y1 = glm::clamp(std::max(y1, yObj1), 0, N - 1);
+            }
             for (int iy = y0; iy <= y1; ++iy) {
                 float wy = -0.5f * WORLD + (iy + 0.5f) * VOXEL;
-                if (std::fabs(wy - H) > kBAND)
-                    continue;
-                uint8_t mat = materialAt(wx, wz, H);
+                glm::vec3 p(wx, wy, wz);
+                auto s = scene(p);
+                if (std::fabs(s.d) > kBAND) continue;
+                uint8_t mat = s.mat;
                 const glm::vec3& c = kPalette[mat];
                 const glm::vec2& rr = kMaterialReflection[mat];
                 vf::voxel::VoxelRecord v;

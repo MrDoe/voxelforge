@@ -306,7 +306,7 @@ bool App::initVulkan()
                                 (z + 0.5f) / n * vol.worldSize - 0.5f * vol.worldSize);
                     const glm::vec3& c = vf::voxel::kPalette[vol.matId[i]];
                     if (denseIsPrimary) {
-                        sd.posRadius.emplace_back(p + vol.originOffset, 0.145f);
+                        sd.posRadius.emplace_back(p + vol.originOffset, 0.38f);
                         sd.colors.emplace_back(c, 1.0f);
                     }
                 }
@@ -417,9 +417,11 @@ bool App::initVulkan()
         // radius derives from lattice spacing so adjacent splats overlap even
         // across slopes; colors bake the same direct+ambient terms as the
         // raymarch shading so both modes match in brightness.
-        // Source: world.vxw surface records when available, else the lattice.
+        // In splat mode we use a much denser lattice and a fine subgrid
+        // with interpolated positions so no gaps remain up close.
         const float ext = 30.0f;
-        const float spacing = 0.31f;
+        const bool denseSplats = (m_renderMode == RenderMode::GaussianSplats);
+        const float spacing = denseSplats ? 0.21f : 0.31f;
         const float splatRadius = spacing * 1.25f;
         const glm::vec3 sunCol = glm::vec3(1.0f, 0.95f, 0.84f) * 2.7f;
         const glm::vec3 ambBase = (glm::vec3(0.72f, 0.80f, 0.90f) +
@@ -436,11 +438,30 @@ bool App::initVulkan()
                 sd.colors.emplace_back(albedo * (sunCol * ndl + amb), 1.0f);
             }
         };
-        // SVO splats: sample the full scene SDF (terrain + house/trees/rocks/bushes)
-        // so the house appears in splat mode. Decimated file records are
-        // terrain-only, so we always resample the scene here.
-        {
-            const int SN = 192;
+        // SVO splats: single source is the voxel file. When the file is
+        // available we derive splats directly from its surface records
+        // (decimated to ~0.3 m); otherwise we resample the procedural scene.
+        // In splat mode a denser subgrid with interpolated neighbours is added.
+        if (fromFile && !wf.voxels.empty()) {
+            const float sub = spacing * 0.25f;
+            for (const auto& v : wf.voxels) {
+                if ((v.x % 3u) != 1u || (v.z % 3u) != 1u) continue;
+                glm::vec3 p = v.position(wf.meta);
+                if (std::abs(p.x) > ext || std::abs(p.z) > ext || p.y < -8.f || p.y > 24.f) continue;
+                glm::vec3 albedo(v.r, v.g, v.b); albedo /= 255.0f;
+                addSplat(p, albedo);
+                if (denseSplats) {
+                    for (int dz = -1; dz <= 1; dz += 2) for (int dy = -1; dy <= 1; dy += 2) for (int dx = -1; dx <= 1; dx += 2) {
+                        if (dx==-1 && dy==-1 && dz==-1) continue;
+                        glm::vec3 ps = p + glm::vec3(dx * sub, dy * sub, dz * sub);
+                        // keep sub-splat near surface (use file as source, so approximate with same mat)
+                        addSplat(ps, albedo);
+                    }
+                }
+            }
+        } else {
+            const int SN = int(2 * ext / spacing + 0.5f);
+            const float sub = spacing * 0.25f;
             for (int zi = 0; zi < SN; ++zi)
                 for (int yi = 0; yi < SN; ++yi)
                     for (int xi = 0; xi < SN; ++xi) {
@@ -451,11 +472,20 @@ bool App::initVulkan()
                         if (std::abs(s.d) > 0.22f)
                             continue;
                         addSplat(p, vf::voxel::kPalette[s.mat]);
+                        if (denseSplats) {
+                            for (int dz = -1; dz <= 1; dz += 2) for (int dy = -1; dy <= 1; dy += 2) for (int dx = -1; dx <= 1; dx += 2) {
+                                if (dx==-1 && dy==-1 && dz==-1) continue;
+                                glm::vec3 ps = p + glm::vec3(dx * sub, dy * sub, dz * sub);
+                                auto ss = vf::voxel::scene(ps);
+                                if (std::abs(ss.d) > 0.22f) continue;
+                                addSplat(ps, vf::voxel::kPalette[ss.mat]);
+                            }
+                        }
                     }
         }
         // Water surface splats (analytic plane) — terrain SDF does not contain water
         {
-            const float waterSpacing = 0.45f;
+            const float waterSpacing = denseSplats ? 0.30f : 0.45f;
             const int WN = int(2 * ext / waterSpacing);
             const glm::vec3 waterBase(0.06f, 0.22f, 0.28f);
             for (int zi = 0; zi < WN; ++zi)

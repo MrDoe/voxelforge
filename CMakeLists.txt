@@ -136,7 +136,8 @@ add_executable(voxelforge src/app/main.cpp)
 target_compile_definitions(voxelforge PRIVATE
     VOXELFORGE_SHADER_DIR="${CMAKE_CURRENT_BINARY_DIR}/shaders")
 target_link_libraries(voxelforge PRIVATE vf_render vf_core imgui_core)
-add_dependencies(voxelforge vf_shaders vf_heightmap)
+add_dependencies(voxelforge vf_shaders)
+add_custom_target(world DEPENDS ${VF_HEIGHTMAP_PNG} ${VF_WORLD_VXW})
 
 # ---- tests -------------------------------------------------------------------------
 enable_testing()

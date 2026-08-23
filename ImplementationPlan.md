@@ -91,16 +91,20 @@ dense volume, snorm8 roundtrip, camera math, worldfile roundtrip/corruption | �
 | Smoke runs (headless frame loops) | ✅ 0.04–0.19 ms/frame |
 | Interactive stability | ✅ ~150 fps, no stalls (post-fix) |
 
-**World asset pipeline (2026-08-23):** `tools/heightmap_gen` generates the 16-bit
-heightmap PNG **and** builds the real chunked-SVO world from it, then serializes
+**World asset pipeline (2026-08-23, on-demand):** `tools/heightmap_gen` is the **once on-demand**
+terrain generator (`ninja world` or `heightmap_gen assets/heightmap.png assets/world.vxw`).
+It builds the 16-bit heightmap PNG, then the full chunked-SVO world from the
+procedural scene (terrain + house/trees/rocks/bushes) and serializes the **single**
 `assets/world.vxw` (**VXW v1**): header (meta + CRC32) → GPU SVO buffers with
 **2 words per voxel** (`rgb+sdf` | `a+refl+rough+matId`, see `kMaterialReflection`)
 → explicit surface-band voxel records (u16³ grid pos, RGBA, reflectivity, roughness,
-material). The app loads the file directly at startup — no CPU build on the boot path
-(262 MB GPU buffers + 4.1 M surface records) — and falls back to procedural
-`World::build()` if the file is missing/stale. Splats derive straight from the records.
-Generation remains heightmap-driven end-to-end; splats are an alternative rendering
-mode only.
+material, **unified scale for landscape + all objects**). The voxel file is the
+**single source of truth** — the app loads it directly at startup (262 MB GPU
+buffers + 4.4 M surface records) and uses it as the template for further editing;
+no CPU build on the boot path, fallback to procedural only if the file is missing.
+Splats are strictly derived from the voxel scene (lattice `scene()` SDF, `±0.22 m`
+band, plus an 8-neighbour interpolated subgrid in splat mode for a much denser
+`~1.5 M` splat set) — just another rasterization of the same voxels.
 
 Hard-won fixes baked in: null pipeline layout (NVIDIA compiler segfault), NVIDIA/X11
 MAILBOX present deadlock (→ IMMEDIATE default + per-image acquire semaphores), NDC flip
