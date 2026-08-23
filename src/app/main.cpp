@@ -914,6 +914,7 @@ int App::run(const Args& args)
             push.misc = glm::vec4(m_splatScale, m_animTime, 0.0f, 0.0f);
             const bool hSplat = m_renderMode == RenderMode::GaussianSplats && m_splatPass.count() > 0;
             if (hSplat) {
+                m_splatPass.updateSorting(m_camera.pos, m_camera.forward());
                 vf::transitionImage(fr.cmd, m_offscreen.img, VK_IMAGE_ASPECT_COLOR_BIT,
                                     VK_IMAGE_LAYOUT_UNDEFINED,
                                     VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
@@ -1021,6 +1022,7 @@ int App::run(const Args& args)
 
         const bool splatView =
             m_renderMode == RenderMode::GaussianSplats && m_splatPass.count() > 0;
+        if (splatView) m_splatPass.updateSorting(m_camera.pos, m_camera.forward());
         if (splatView) {
             // offscreen -> color attachment for sprite blending
             vf::transitionImage(fr.cmd, m_offscreen.img, VK_IMAGE_ASPECT_COLOR_BIT,

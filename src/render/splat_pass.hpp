@@ -21,6 +21,7 @@ public:
     void setOutputView(VkImageView view) { m_outView = view; }
     void record(VkCommandBuffer cmd, VkExtent2D extent, const RaymarchPush& push) const;
     size_t count() const { return m_count; }
+    void updateSorting(const glm::vec3& camPos, const glm::vec3& camFwd);
 
 private:
     const Context* m_ctx = nullptr;
@@ -33,6 +34,8 @@ private:
     VmaAllocation m_alloc = VK_NULL_HANDLE;
     VkImageView m_outView = VK_NULL_HANDLE;
     size_t m_count = 0;
+    std::vector<glm::vec4> m_origPos;
+    std::vector<glm::vec4> m_origCol;
 };
 
 } // namespace vf

@@ -2,6 +2,8 @@
 #include "rhi/resources.hpp"
 #include <core/log.hpp>
 #include <fstream>
+#include <algorithm>
+#include <numeric>
 
 namespace vf {
 
@@ -43,6 +45,9 @@ bool SplatPass::init(const Context& ctx, VkFormat colorFormat, const SplatVertex
         return false;
     }
 
+    m_origPos = data.posRadius;
+    m_origCol = data.colors;
+
     // interleaved SSBO: posRadius[i], colors[i]
     std::vector<glm::vec4> packed(m_count * 2);
     for (size_t i = 0; i < m_count; ++i) {
@@ -55,10 +60,11 @@ bool SplatPass::init(const Context& ctx, VkFormat colorFormat, const SplatVertex
                    VMA_MEMORY_USAGE_AUTO_PREFER_HOST, true);
     memcpy(staging.mapped, packed.data(), packed.size() * sizeof(glm::vec4));
 
-    m_buf = makeBuffer(ctx, packed.size() * sizeof(glm::vec4),
-                       VK_BUFFER_USAGE_TRANSFER_DST_BIT | VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
-                       VMA_MEMORY_USAGE_AUTO_PREFER_DEVICE, false)
-                .buf;
+    auto bufTmp = makeBuffer(ctx, packed.size() * sizeof(glm::vec4),
+                             VK_BUFFER_USAGE_TRANSFER_DST_BIT | VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
+                             VMA_MEMORY_USAGE_AUTO_PREFER_DEVICE, false);
+    m_buf = bufTmp.buf;
+    m_alloc = bufTmp.alloc;
     if (!m_buf) {
         spdlog::critical("splat ssbo alloc failed");
         return false;
@@ -239,6 +245,35 @@ void SplatPass::record(VkCommandBuffer cmd, VkExtent2D extent, const RaymarchPus
     vkCmdDraw(cmd, uint32_t(m_count), 1, 0, 0);
 
     vkCmdEndRendering(cmd);
+}
+
+void SplatPass::updateSorting(const glm::vec3& camPos, const glm::vec3& camFwd)
+{
+    if (m_count == 0 || m_origPos.empty()) return;
+    std::vector<uint32_t> idx(m_count);
+    std::iota(idx.begin(), idx.end(), 0u);
+    // back-to-front: far first so near splats blend on top (front covers far)
+    std::sort(idx.begin(), idx.end(), [&](uint32_t a, uint32_t b){
+        float da = glm::dot(glm::vec3(m_origPos[a]) - camPos, camFwd);
+        float db = glm::dot(glm::vec3(m_origPos[b]) - camPos, camFwd);
+        return da > db;
+    });
+    std::vector<glm::vec4> packed(m_count * 2);
+    for (size_t i = 0; i < m_count; ++i) {
+        uint32_t s = idx[i];
+        packed[2*i+0] = m_origPos[s];
+        packed[2*i+1] = m_origCol[s];
+    }
+    Buffer staging = makeBuffer(*m_ctx, packed.size()*sizeof(glm::vec4),
+                                VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
+                                VMA_MEMORY_USAGE_AUTO_PREFER_HOST, true);
+    memcpy(staging.mapped, packed.data(), packed.size()*sizeof(glm::vec4));
+    m_ctx->immediateSubmit([&](VkCommandBuffer cmd){
+        VkBufferCopy c{0,0, packed.size()*sizeof(glm::vec4)};
+        vkCmdCopyBuffer(cmd, staging.buf, m_buf, 1, &c);
+    });
+    destroyBuffer(*m_ctx, staging);
+    // ensure copy completes before next draw (immediateSubmit is synchronous)
 }
 
 void SplatPass::destroy()
