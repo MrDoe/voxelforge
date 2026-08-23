@@ -52,8 +52,90 @@ float sdfAt(vec3 p)
     return texture(uSDF, uvw).r * pc.b.y;
 }
 
+// --- riverside objects (mirror common.hpp; layered bottom-up) ---------------
+const vec2 kHousePosG = vec2(6.5, 12.5);
+const vec2 kTreePosG  = vec2(10.5, 11.5);
+const float kPadYG = -0.40;
+
+float sdBoxF(vec3 p, vec3 c, vec3 b)
+{
+    vec3 q = abs(p - c) - b;
+    return length(max(q, vec3(0.0))) + min(max(q.x, max(q.y, q.z)), 0.0);
+}
+float sdLogX(vec3 p, float cx, float halfLen, float y, float zOff, float r)
+{
+    float dx = abs(p.x - cx) - halfLen;
+    return length(vec2(max(dx, 0.0), length(vec2(p.y - y, p.z - zOff)))) - r;
+}
+float sdLogZ(vec3 p, float cz, float halfLen, float y, float xOff, float r)
+{
+    float dz = abs(p.z - cz) - halfLen;
+    return length(vec2(max(dz, 0.0), length(vec2(p.y - y, p.x - xOff)))) - r;
+}
+float sdCylY(vec3 p, vec2 c, float y0, float y1, float r)
+{
+    float qr = length(p.xz - c) - r;
+    float qy = max(y0 - p.y, p.y - y1);
+    return length(max(vec2(qr, qy), vec2(0.0))) + min(max(qr, qy), 0.0);
+}
+float houseDistance(vec3 p)
+{
+    vec3 q = vec3(p.x - kHousePosG.x, p.y - kPadYG, p.z - kHousePosG.y);
+    const float hx = 2.6, hz = 2.0;
+    float best = sdBoxF(q, vec3(0.0, 0.05, 0.0), vec3(hx + 0.28, 0.30, hz + 0.28));
+    const float lr = 0.145, pitch = 0.27;
+    float wall = 1e9;
+    for (int k = 0; k < 8; ++k) {
+        float y = 0.42 + lr + float(k) * pitch;
+        if (k % 2 == 0)
+            wall = min(wall, min(sdLogX(q, 0.0, hx, y, hz, lr),
+                                 sdLogX(q, 0.0, hx, y, -hz, lr)));
+        else
+            wall = min(wall, min(sdLogZ(q, 0.0, hz, y, hx, lr),
+                                 sdLogZ(q, 0.0, hz, y, -hx, lr)));
+    }
+    float door = sdBoxF(q, vec3(-0.7, 1.30, -hz), vec3(0.52, 0.95, 0.6));
+    float winA = sdBoxF(q, vec3(-hx, 1.62, 0.75), vec3(0.6, 0.42, 0.45));
+    float winB = sdBoxF(q, vec3(hx, 1.62, 0.75), vec3(0.6, 0.42, 0.45));
+    wall = max(wall, max(-door, max(-winA, -winB)));
+    best = min(best, wall);
+    float ry0 = 0.42 + lr + 7.0 * pitch + 0.22;
+    for (int i = 0; i < 10; ++i) {
+        float rz = mix(hz + 0.66, 0.14, float(i) / 9.0);
+        best = min(best, sdBoxF(q, vec3(0.0, ry0 + float(i) * 0.145, 0.0),
+                                vec3(hx + 0.58, 0.09, rz)));
+    }
+    best = min(best, sdBoxF(q, vec3(1.55, ry0 + 0.85, 0.75), vec3(0.30, 1.45, 0.30)));
+    return best;
+}
+float treeDistance(vec3 p)
+{
+    vec3 q = vec3(p.x - kTreePosG.x, p.y - kPadYG, p.z - kTreePosG.y);
+    float d = sdCylY(q, vec2(0.0), -0.05, 0.20, 0.37);
+    d = min(d, sdCylY(q, vec2(0.0), 0.20, 0.45, 0.28));
+    d = min(d, sdCylY(q, vec2(0.0), 0.45, 1.70, 0.235));
+    d = min(d, sdCylY(q, vec2(0.0), 1.70, 2.70, 0.195));
+    d = min(d, sdCylY(q, vec2(0.0), 2.70, 3.25, 0.165));
+    d = min(d, length(q - vec3(-0.45, 3.75, 0.30)) - 1.50);
+    d = min(d, length(q - vec3(0.50, 4.35, -0.25)) - 1.70);
+    d = min(d, length(q - vec3(0.00, 5.25, 0.10)) - 1.50);
+    d = min(d, length(q - vec3(0.10, 6.05, -0.05)) - 1.05);
+    return d;
+}
+float objectDistance(vec3 p) { return min(houseDistance(p), treeDistance(p)); }
+
 vec3 calcNormal(vec3 p)
 {
+    // objects get exact primitive normals; terrain keeps the heightmap normal
+    if (objectDistance(p) < p.y - heightAt(p.xz) + 0.02) {
+        float eo = 0.03;
+        return normalize(vec3(objectDistance(p + vec3(eo, 0, 0)) -
+                                  objectDistance(p - vec3(eo, 0, 0)),
+                              objectDistance(p + vec3(0, eo, 0)) -
+                                  objectDistance(p - vec3(0, eo, 0)),
+                              objectDistance(p + vec3(0, 0, eo)) -
+                                  objectDistance(p - vec3(0, 0, eo))));
+    }
     // analytic heightfield normal - identical in both backends so shading
     // stays independent of each field's sampling resolution
     float e = 0.35;
@@ -217,7 +299,7 @@ void main()
                 col = shadeTerrain(p, rd, albedo);
             }
 
-            float fog = 1.0 - exp(-max(t - t0, 0.0) * 0.006);
+            float fog = 1.0 - exp(-max(t - t0, 0.0) * 0.002);
             col = mix(col, kHorizon * 1.05, fog);
         } else {
             col = skyColor(rd);

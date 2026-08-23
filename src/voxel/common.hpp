@@ -16,23 +16,29 @@ constexpr int CHUNK_N = 64;
 constexpr float CHUNK_M = float(CHUNK_N) * VOXEL;
 constexpr int GRID_N = int(WORLD / CHUNK_M);
 
-inline const std::array<glm::vec3, 6> kPalette {
+inline const std::array<glm::vec3, 9> kPalette {
     glm::vec3 { 0.32f, 0.46f, 0.22f }, // 0 grass dark
     glm::vec3 { 0.45f, 0.58f, 0.26f }, // 1 grass light
     glm::vec3 { 0.52f, 0.44f, 0.30f }, // 2 soil
     glm::vec3 { 0.62f, 0.55f, 0.42f }, // 3 sand
     glm::vec3 { 0.42f, 0.41f, 0.40f }, // 4 rock
     glm::vec3 { 0.50f, 0.48f, 0.46f }, // 5 light rock
+    glm::vec3 { 0.42f, 0.30f, 0.18f }, // 6 wood (logs/trunk)
+    glm::vec3 { 0.28f, 0.22f, 0.16f }, // 7 roof shingles
+    glm::vec3 { 0.20f, 0.38f, 0.15f }, // 8 foliage
 };
 
 // per-material surface attributes, 0-255: x = reflectivity, y = roughness
-inline const std::array<glm::vec2, 6> kMaterialReflection {
+inline const std::array<glm::vec2, 9> kMaterialReflection {
     glm::vec2 { 35.f, 235.f },  // 0 grass dark
     glm::vec2 { 40.f, 230.f },  // 1 grass light
     glm::vec2 { 55.f, 225.f },  // 2 soil
     glm::vec2 { 130.f, 190.f }, // 3 sand
     glm::vec2 { 95.f, 150.f },  // 4 rock
     glm::vec2 { 115.f, 135.f }, // 5 light rock
+    glm::vec2 { 70.f, 160.f },  // 6 wood
+    glm::vec2 { 60.f, 170.f },  // 7 roof
+    glm::vec2 { 30.f, 235.f },  // 8 foliage
 };
 
 inline constexpr float WATER_LEVEL = -0.9f;
@@ -93,12 +99,149 @@ inline uint8_t materialAt(float x, float z, float H)
     return n > 0.25f ? uint8_t(1) : uint8_t(0);    // grass
 }
 
+// --- riverside objects (built layer for layer, bottom to top) ---------------
+inline constexpr glm::vec2 kHousePos { 6.5f, 12.5f }; // west bank of the river
+inline constexpr glm::vec2 kTreePos { 10.5f, 11.5f };
+inline constexpr float kPadY = -0.40f; // flattened ground level around both
+
+struct ObjHit {
+    float d;
+    uint8_t mat;
+};
+
+inline float sdBoxF(glm::vec3 p, glm::vec3 c, glm::vec3 b)
+{
+    glm::vec3 q = glm::abs(p - c) - b;
+    return glm::length(glm::max(q, glm::vec3(0.0f))) +
+           glm::min(glm::max(q.x, glm::max(q.y, q.z)), 0.0f);
+}
+// horizontal log along X centered at (cx,zOff) at height y
+inline float sdLogX(glm::vec3 p, float cx, float halfLen, float y, float zOff, float r)
+{
+    float dx = std::abs(p.x - cx) - halfLen;
+    return glm::length(glm::vec2(glm::max(dx, 0.0f), std::hypot(p.y - y, p.z - zOff))) - r;
+}
+// horizontal log along Z
+inline float sdLogZ(glm::vec3 p, float cz, float halfLen, float y, float xOff, float r)
+{
+    float dz = std::abs(p.z - cz) - halfLen;
+    return glm::length(glm::vec2(std::max(dz, 0.0f), std::hypot(p.y - y, p.x - xOff))) - r;
+}
+// vertical cylinder between y0..y1
+inline float sdCylY(glm::vec3 p, glm::vec2 c, float y0, float y1, float r)
+{
+    float qr = std::hypot(p.x - c.x, p.z - c.y) - r;
+    float qy = glm::max(y0 - p.y, p.y - y1);
+    return glm::length(glm::vec2(glm::max(qr, 0.0f), glm::max(qy, 0.0f))) +
+           glm::min(glm::max(qr, qy), 0.0f);
+}
+
+// log cabin: stone foundation -> alternating log courses -> carved openings ->
+// stepped shingle layers -> chimney. ~5.2 x 4.5 m footprint, ridge ~3.9 m.
+inline ObjHit houseAt(glm::vec3 p)
+{
+    glm::vec3 q(p.x - kHousePos.x, p.y - kPadY, p.z - kHousePos.y);
+    const float hx = 2.6f, hz = 2.0f;
+    ObjHit best { 1e9f, 4u };
+
+    // L0: stone foundation slab, proud of the walls by a hand's width
+    best.d = sdBoxF(q, glm::vec3(0.f, 0.05f, 0.f),
+                    glm::vec3(hx + 0.28f, 0.30f, hz + 0.28f));
+    best.mat = 4;
+
+    // L1..L8: stacked log courses, orientation alternates like real blockwork
+    const float lr = 0.145f, pitch = 0.27f;
+    float wall = 1e9f;
+    for (int k = 0; k < 8; ++k) {
+        float y = 0.42f + lr + float(k) * pitch;
+        if (k % 2 == 0)
+            wall = glm::min(wall, glm::min(sdLogX(q, 0.f, hx, y, hz, lr),
+                                           sdLogX(q, 0.f, hx, y, -hz, lr)));
+        else
+            wall = glm::min(wall, glm::min(sdLogZ(q, 0.f, hz, y, hx, lr),
+                                           sdLogZ(q, 0.f, hz, y, -hx, lr)));
+    }
+    // door opening on the river side (-z), two windows on the long walls
+    float door = sdBoxF(q, glm::vec3(-0.7f, 1.30f, -hz), glm::vec3(0.52f, 0.95f, 0.6f));
+    float winA = sdBoxF(q, glm::vec3(-hx, 1.62f, 0.75f), glm::vec3(0.6f, 0.42f, 0.45f));
+    float winB = sdBoxF(q, glm::vec3(hx, 1.62f, 0.75f), glm::vec3(0.6f, 0.42f, 0.45f));
+    wall = glm::max(wall, glm::max(-door, glm::max(-winA, -winB)));
+    if (wall < best.d) {
+        best.d = wall;
+        best.mat = 6;
+    }
+
+    // L9..: stepped shingle layers from eaves to ridge (gable along X)
+    float ry0 = 0.42f + lr + 7.f * pitch + 0.22f;
+    for (int i = 0; i < 10; ++i) {
+        float t = float(i) / 9.0f;
+        float rz = glm::mix(hz + 0.66f, 0.14f, t);
+        float dslab = sdBoxF(q, glm::vec3(0.f, ry0 + float(i) * 0.145f, 0.f),
+                             glm::vec3(hx + 0.58f, 0.09f, rz));
+        if (dslab < best.d) {
+            best.d = dslab;
+            best.mat = 7;
+        }
+    }
+
+    // chimney through the roof on the east side
+    float chim = sdBoxF(q, glm::vec3(1.55f, ry0 + 0.85f, 0.75f),
+                        glm::vec3(0.30f, 1.45f, 0.30f));
+    if (chim < best.d) {
+        best.d = chim;
+        best.mat = 4;
+    }
+    return best;
+}
+
+// broadleaf tree: root flare -> tapered trunk -> four foliage tiers (~7.5 m)
+inline ObjHit treeAt(glm::vec3 p)
+{
+    glm::vec3 q(p.x - kTreePos.x, p.y - kPadY, p.z - kTreePos.y);
+    ObjHit best { 1e9f, 6u };
+
+    best.d = sdCylY(q, glm::vec2(0.f), -0.05f, 0.20f, 0.37f);      // root flare
+    float d = sdCylY(q, glm::vec2(0.f), 0.20f, 0.45f, 0.28f);
+    if (d < best.d) best.d = d;
+    d = sdCylY(q, glm::vec2(0.f), 0.45f, 1.70f, 0.235f);
+    if (d < best.d) best.d = d;
+    d = sdCylY(q, glm::vec2(0.f), 1.70f, 2.70f, 0.195f);
+    if (d < best.d) best.d = d;
+    d = sdCylY(q, glm::vec2(0.f), 2.70f, 3.25f, 0.165f);
+    if (d < best.d) best.d = d;
+
+    auto tier = [&](glm::vec3 c, float r) {
+        float ds = glm::length(q - c) - r;
+        if (ds < best.d) {
+            best.d = ds;
+            best.mat = 8;
+        }
+    };
+    tier(glm::vec3(-0.45f, 3.75f, 0.30f), 1.50f);
+    tier(glm::vec3(0.50f, 4.35f, -0.25f), 1.70f);
+    tier(glm::vec3(0.00f, 5.25f, 0.10f), 1.50f);
+    tier(glm::vec3(0.10f, 6.05f, -0.05f), 1.05f);
+    return best;
+}
+
 inline SceneSample scene(glm::vec3 p)
 {
     const HeightMap& hm = sharedHeightmap();
     float H = hm.sample(p.x, p.z);
     float d = p.y - H;
-    return { d, materialAt(p.x, p.z, H) };
+    uint8_t mat = materialAt(p.x, p.z, H);
+
+    ObjHit house = houseAt(p);
+    ObjHit tree = treeAt(p);
+    if (tree.d < house.d) {
+        house.d = tree.d;
+        house.mat = tree.mat;
+    }
+    if (house.d < d) {
+        d = house.d;
+        mat = house.mat;
+    }
+    return { d, mat };
 }
 
 // snorm8 helpers shared with GPU encodings

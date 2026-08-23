@@ -58,8 +58,16 @@ float terrainHeightAt(float x, float z)
     // channel bowl down to a level bed so the water plane stays consistent
     float bowl = 1.f - smoothstepf(0.30f, 0.95f, t);
     float bed = WATER_LEVEL - 2.1f + fbm2(x * 0.23f, z * 0.23f) * 0.12f;
-    return glm::clamp(glm::mix(floorH, bed, bowl), kHmMinMeters + 0.05f,
-                      kHmMaxMeters - 0.05f);
+    float h = glm::mix(floorH, bed, bowl);
+
+    // building pads: flatten ground under the riverside house & tree
+    auto pad = [&](glm::vec2 c, float r0, float r1) {
+        float dd = glm::length(glm::vec2(x, z) - c);
+        h = glm::mix(kPadY, h, smoothstepf(r0, r1, dd));
+    };
+    pad(kHousePos, 4.6f, 7.5f);
+    pad(kTreePos, 2.0f, 4.2f);
+    return glm::clamp(h, kHmMinMeters + 0.05f, kHmMaxMeters - 0.05f);
 }
 
 // ---- minimal PNG writer (16-bit gray, zlib stored blocks) --------------------

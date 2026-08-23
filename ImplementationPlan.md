@@ -149,18 +149,23 @@ different scenes and `--compare` could never agree. `vol.worldSize` is now set t
 
 ### Phase P0 — finish photorealism batch
 - [x] **SVO renders the full valley** (sphere-stub `map()` + brick decode fixed) and matches
-      the dense reference → `--compare` green (27.14/255, coverage parity)
+      the dense reference → `--compare` green (now 6.06/255 after heightmap normals +
+      shared shadows + 640-step budget)
 - [x] Duplicate water + ACES into dense backend → backend parity restored
-- [ ] Visual iteration pass on screenshots in `tests/screenshots/` (`m2_valley`, `m2_stream`,
-      `m2_hut`, `cmp_svo`/`cmp_dense`): tune water mask edges (channel lim), hut proportions,
-      sun angle/warmth
-- [x] **Sun control**: `--sun <elev> <azim>` (degrees) threads a normalized sun direction
-      through `RaymarchPush` (now 112 B) into both SVO + dense shaders; default (56.5°,54.5°)
-      reproduces the prior sun exactly → `--compare`/`--selftest` stay green
-- [x] **Ripple animation fixed**: water ripple phase now reads `pc.b.w` (frameIdx) instead of
-      `pc.a.w` (extentY), so ripples animate in live (non-headless) mode
+- [x] **Heightfield scene** (`M8`): terrain from `assets/heightmap.png` (hills + carved,
+      level-bed river); hut/pines/boulders deleted; materials from slope/shore bands
+- [x] **Riverside objects, layered bottom-up**: log cabin on west bank (stone foundation →
+      8 alternating log courses → door+windows carved → 10 stepped shingle layers →
+      chimney) and broadleaf tree (root flare → tapered trunk → 4 foliage tiers);
+      exact-primitive SDFs + analytic object normals in both backends; ground pads
+      flattened in the generator; palette extended (wood/shingles/foliage)
+- [x] **Constant-mist fix**: distance fog density 0.006 → 0.002 in both backends;
+      terrain luminance spread at the canonical view widened 23 → 39 (p5 214→196)
+- [ ] Visual iteration pass on screenshots in `tests/screenshots/`: water mask edges,
+      object placement fine-tuning
 - [ ] Water flow polish: foam lines at banks, depth-based color gradient
 - [ ] Exposure/saturation grading pass
+- [ ] Objects don't cast shadow-march shadows yet (softShadow is heightfield-only)
 - [ ] More pines + deciduous variant; scattered rocks/grass tufts as instanced details
 
 ### Phase P1 — realism upgrades (was M5)

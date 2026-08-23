@@ -42,6 +42,8 @@ struct Args {
     float sunElev=56.5f, sunAzim=54.5f; // degrees; default reproduces prior sun
     bool sunSet=false;
     float splatScale=1.0f;
+    bool probeSet=false;
+    glm::vec3 probe { 0.f };
 };
 
 Args parseArgs(int argc, char** argv)
@@ -77,6 +79,11 @@ Args parseArgs(int argc, char** argv)
             a.sunSet = true;
         } else if (s == "--splatscale" && i + 1 < argc) {
             a.splatScale = atof(argv[++i]);
+        } else if (s == "--probe" && i + 3 < argc) {
+            a.probe = { float(atof(argv[i + 1])), float(atof(argv[i + 2])),
+                        float(atof(argv[i + 3])) };
+            i += 3;
+            a.probeSet = true;
         }
     }
     return a;
@@ -657,6 +664,13 @@ int App::run(const Args& args)
             glm::normalize(glm::vec3(cosf(e) * sinf(a), sinf(e), cosf(e) * cosf(a))), 0.0f);
     }
     m_splatScale = std::clamp(args.splatScale, 0.25f, 4.0f);
+    if (args.probeSet) {
+        auto s = vf::voxel::scene(args.probe);
+        spdlog::info("probe({:.2f},{:.2f},{:.2f}): d={:+.3f} mat={} ({})", args.probe.x,
+                     args.probe.y, args.probe.z, s.d, int(s.mat),
+                     int(vf::voxel::kPalette.size()) > int(s.mat) ? "ok" : "OOR");
+        return 0;
+    }
     if (!vf::voxel::sharedHeightmap().loaded()) {
         spdlog::critical("assets/heightmap.png missing - build & run heightmap_gen first");
         return 1;
