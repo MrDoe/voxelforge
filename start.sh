@@ -179,6 +179,8 @@ else
   if command -v nvidia-smi >/dev/null 2>&1; then
     nvidia-smi --query-gpu=memory.used,memory.total --format=csv,noheader 2>/dev/null | awk -F', ' '{printf "[start] VRAM %s / %s used after launch\n",$1,$2}' || true
   fi
+  fi
+ fi
 fi
 
 # 4) pick model that is actually available — prefer already-loaded to avoid OOM swap
@@ -206,11 +208,13 @@ if [[ -n "$AVAILABLE" ]]; then
       LLM_MODEL="$FALLBACK"
     fi
   elif [[ -n "$LOADED" ]] && ! echo "$LOADED" | grep -qx "$LLM_MODEL"; then
-    # requested exists but is unloaded — if another model is already loaded, keep it to avoid OOM eviction
-    # (user can force with VF_LLM_MODEL=... LLAMA_MODELS_MAX=1 will swap on first chat)
-    echo "[start] $LLM_MODEL is unloaded, but $LOADED is already resident — keeping $LLM_MODEL (will swap on demand, may OOM if VRAM tight)"
-    echo "[start] hint: to keep resident model, run VF_LLM_MODEL=$(echo "$LOADED" | head -n1) ./start.sh"
-    echo "[start] hint: to force swap, ensure LLAMA_MODELS_MAX=1 and LLAMA_CTX<=8192 (current ctx $LLAMA_CTX)"
+    # requested exists but is unloaded — another model already occupies VRAM (10GB).
+    # Auto-pick resident to avoid on-demand swap that would OOM (needs 7–8GB extra).
+    # This also enforces "never run second server": reuse existing instead of launching duplicate for other model.
+    _RESIDENT="$(echo "$LOADED" | head -n1)"
+    echo "[start] $LLM_MODEL is unloaded, but $_RESIDENT is already resident — using $_RESIDENT to avoid OOM/duplicate"
+    echo "[start] hint: to force $LLM_MODEL, restart server: pkill -f llama-server; VF_LLM_MODEL=$LLM_MODEL LLAMA_CTX=$LLAMA_CTX LLAMA_MODELS_MAX=1 ./start.sh"
+    LLM_MODEL="$_RESIDENT"
   fi
 fi
 
