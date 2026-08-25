@@ -4,6 +4,8 @@
 #include <spdlog/spdlog.h>
 #include <atomic>
 #include <chrono>
+#include <cmath>
+#include <cstdlib>
 #include <cstring>
 #include <functional>
 #include <thread>
@@ -117,6 +119,7 @@ struct BuildCtx {
     const int16_t* colTop = nullptr;                  // kLatN*kLatN landscape tops
     const uint8_t* blockSolid = nullptr;              // global presence grid (records+interior)
     std::vector<std::vector<uint32_t>> chunkRecords;  // per-chunk record indices
+    uint64_t enabledMask = ~0ull;                     // object enable mask for scene()
     uint32_t ugLo = 0, ugHi = 0;                      // underground interior words
     uint32_t waterLo = 0, waterHi = 0;                // submerged volume words
 };
@@ -175,7 +178,7 @@ void fillBrick(const BuildCtx& c, uint32_t* data, int bx0, int by0, int bz0)
         for (int by = 0; by < BRICK_N; ++by)
             for (int bx = 0; bx < BRICK_N; ++bx) {
                 int cx = bx0 + bx, cy = by0 + by, cz = bz0 + bz;
-                SceneSample h = scene(worldOf(cx, cy, cz));
+                 SceneSample h = scene(worldOf(cx, cy, cz), c.enabledMask);
                 uint32_t w[2];
 
                 if (h.d < 0.0f) {
@@ -205,6 +208,54 @@ void fillBrick(const BuildCtx& c, uint32_t* data, int bx0, int by0, int bz0)
                 data[i * 2] = w[0];
                 data[i * 2 + 1] = w[1];
             }
+}
+
+// Object enable mask derived from the enabled layer set. The cabin has no
+// layer entry of its own, so it is always on.
+inline uint64_t maskFromLayers(const std::vector<worldfile::WorldLayer>& layers)
+{
+    uint64_t m = OB_HOUSE;
+    for (const auto& l : layers) {
+        const std::string& n = l.name;
+        if (n.rfind("tree", 0) == 0) {
+            int i = std::atoi(n.c_str() + 4) - 1;
+            if (i >= 0 && i < int(kTreeSpots.size()))
+                m |= treeBit(i);
+        } else if (n.rfind("rock", 0) == 0) {
+            int i = std::atoi(n.c_str() + 4) - 1;
+            if (i >= 0 && i < int(kRockSpots.size()))
+                m |= rockBit(i);
+        } else if (n == "bushes")
+            m |= OB_BUSHES;
+        else if (n == "fence1")
+            m |= OB_FENCE;
+        else if (n == "alpaca")
+            m |= OB_ALPACA;
+        else if (n == "ai_edits")
+            m |= OB_AI;
+    }
+    return m;
+}
+
+// World-space AABB -> set of chunk indices (with a margin so SDF tails at the
+// chunk boundary are rebuilt too).
+inline std::vector<int> chunkRangeFromAABB(const WorldAABB& b)
+{
+    std::vector<int> out;
+    auto clampC = [](int c) { return c < 0 ? 0 : (c > GRID_N - 1 ? GRID_N - 1 : c); };
+    auto toChunk = [&](float x) {
+        int c = int(std::floor((x + 0.5f * WORLD) / CHUNK_N));
+        return clampC(c);
+    };
+    int margin = 2;
+    int cx0 = clampC(toChunk(b.lo.x) - margin), cx1 = clampC(toChunk(b.hi.x) + margin);
+    int cy0 = clampC(toChunk(b.lo.y) - margin), cy1 = clampC(toChunk(b.hi.y) + margin);
+    int cz0 = clampC(toChunk(b.lo.z) - margin), cz1 = clampC(toChunk(b.hi.z) + margin);
+    for (int cz = cz0; cz <= cz1; ++cz)
+        for (int cy = cy0; cy <= cy1; ++cy)
+            for (int cx = cx0; cx <= cx1; ++cx)
+                out.push_back(cx + cy * GRID_N + cz * GRID_N * GRID_N);
+    return out;
 }
 
 } // namespace
@@ -241,6 +292,18 @@ bool LayeredWorld::load(const std::string& manifestPath)
     };
 
     addSig(manifestPath);
+
+    // per-layer record AABB + enabled-state, used to derive the dirty chunk set
+    // for incremental rebuilds.
+    std::map<std::string, WorldAABB> curBox;
+    std::map<std::string, bool> curEnabled;
+    std::string landscapeFile;
+    for (const auto& l : manifest) {
+        curEnabled[l.file] = l.enabled;
+        if (l.name == "landscape" || l.file == "landscape.vxw")
+            landscapeFile = l.file;
+    }
+
     for (const worldfile::WorldLayer& l : manifest) {
         if (l.role == "packed" || !l.enabled)
             continue;
@@ -257,11 +320,15 @@ bool LayeredWorld::load(const std::string& manifestPath)
         }
         addSig(l.file);
         m_layersMeta.push_back(l);
-        const bool isLandscape = l.role == "landscape";
+        const bool isLandscape = (l.name == "landscape" || l.file == "landscape.vxw");
+        WorldAABB& box = curBox[l.file];
         for (VoxelRecord& v : data.voxels) {
             uint32_t key = cellKey(v.x, v.y, v.z);
             if (claimed.insert(key).second)
                 m_records.push_back(v);
+            glm::vec3 wp = v.position(expected);
+            box.lo = glm::min(box.lo, wp);
+            box.hi = glm::max(box.hi, wp);
             if (isLandscape) {
                 int16_t& top = m_colTop[size_t(v.z) * kLatN + size_t(v.x)];
                 if (v.y > top)
@@ -273,10 +340,63 @@ bool LayeredWorld::load(const std::string& manifestPath)
         }
     }
 
-    if (!synthesize()) {
+    m_enabledObjMask = maskFromLayers(m_layersMeta);
+
+    // --- decide full vs incremental rebuild -------------------------------
+    bool full = !m_hasFullBuild;
+    WorldAABB dirty;
+    bool dirtyValid = false;
+    for (const auto& kv : curEnabled) {
+        bool changed = true;
+        auto pit = m_prevEnabled.find(kv.first);
+        if (pit != m_prevEnabled.end() && pit->second == kv.second) {
+            auto pbox = m_prevBox.find(kv.first);
+            auto cbox = curBox.find(kv.first);
+            if (pbox != m_prevBox.end() && cbox != curBox.end() &&
+                pbox->second.lo == cbox->second.lo && pbox->second.hi == cbox->second.hi)
+                changed = false;
+        }
+        if (changed) {
+            if (kv.first == landscapeFile)
+                full = true;
+            auto cbox = curBox.find(kv.first);
+            if (cbox != curBox.end()) {
+                dirty.lo = glm::min(dirty.lo, cbox->second.lo);
+                dirty.hi = glm::max(dirty.hi, cbox->second.hi);
+                dirtyValid = true;
+            }
+        }
+    }
+    for (const auto& kv : m_prevEnabled) {
+        if (curEnabled.find(kv.first) == curEnabled.end()) {
+            auto pbox = m_prevBox.find(kv.first);
+            if (pbox != m_prevBox.end()) {
+                dirty.lo = glm::min(dirty.lo, pbox->second.lo);
+                dirty.hi = glm::max(dirty.hi, pbox->second.hi);
+                dirtyValid = true;
+            }
+            if (kv.first == landscapeFile)
+                full = true;
+        }
+    }
+
+    std::vector<int> dirtyChunks;
+    if (dirtyValid && !full) {
+        dirtyChunks = chunkRangeFromAABB(dirty);
+        if (dirtyChunks.empty() || dirtyChunks.size() > 1024)
+            full = true;
+    }
+    if (full)
+        dirtyChunks.clear();
+
+    if (!synthesize(full, dirtyChunks)) {
         m_loaded = false;
         return false;
     }
+
+    m_prevBox = std::move(curBox);
+    m_prevEnabled = std::move(curEnabled);
+    m_hasFullBuild = true;
     m_loaded = true;
     return true;
 }
@@ -297,7 +417,7 @@ bool LayeredWorld::reloadIfChanged()
     return false;
 }
 
-bool LayeredWorld::synthesize()
+bool LayeredWorld::synthesize(bool full, const std::vector<int>& dirty)
 {
     auto t0 = std::chrono::steady_clock::now();
     if (m_records.empty()) {
@@ -312,6 +432,7 @@ bool LayeredWorld::synthesize()
     ctx.records = &m_records;
     ctx.map = &map;
     ctx.colTop = m_colTop.data();
+    ctx.enabledMask = m_enabledObjMask;
     ctx.chunkRecords.resize(size_t(GRID_N) * GRID_N * GRID_N);
     ctx.ugLo = paletteWordLo(2);
     ctx.ugHi = paletteWordHi(2);
@@ -423,11 +544,10 @@ bool LayeredWorld::synthesize()
         markBlock(v.x, v.y, v.z);
 
     // Extend octree presence into enclosed interiors by sampling the analytic
-    // scene() SDF. scene() is negative inside every solid, so we mark any block
-    // whose centre or a corner lies inside (or within VOXEL of) the surface.
-    // This reaches the house interior and other object volumes without the old
-    // flood-fill that leaked through carved openings (door/windows) and left
-    // hollow holes. Seeded by the component boxes so we only touch object regions.
+    // scene() SDF (layer-aware via ctx.enabledMask). scene() is negative inside
+    // every solid, so we mark any block whose centre or a corner lies inside (or
+    // within VOXEL of) the surface. Seeded by the component boxes so we only
+    // touch object regions.
     auto worldOf = [](int vx, int vy, int vz) {
         return glm::vec3(-0.5f * WORLD + (float(vx) + 0.5f) * VOXEL,
                          -0.5f * WORLD + (float(vy) + 0.5f) * VOXEL,
@@ -454,13 +574,13 @@ bool LayeredWorld::synthesize()
                                 int vx = vbx + cx * (kBlockSize - 1);
                                 int vy = vby + cy * (kBlockSize - 1);
                                 int vz = vbz + cz * (kBlockSize - 1);
-                                if (scene(worldOf(vx, vy, vz)).d < kMark)
-                                    hit = true;
+                                 if (scene(worldOf(vx, vy, vz), ctx.enabledMask).d < kMark)
+                                     hit = true;
                             }
                     if (!hit) {
                         // block centre catches a thin wall passing through the middle
                         int vc = kBlockSize / 2;
-                        if (scene(worldOf(vbx + vc, vby + vc, vbz + vc)).d < kMark)
+                        if (scene(worldOf(vbx + vc, vby + vc, vbz + vc), ctx.enabledMask).d < kMark)
                             hit = true;
                     }
                     if (hit)
@@ -479,24 +599,15 @@ bool LayeredWorld::synthesize()
     }
 
     const size_t numChunks = ctx.chunkRecords.size();
+    if (m_pools.size() != numChunks) {
+        m_pools.clear();
+        m_pools.resize(numChunks); // default-constructed (null) unique_ptrs
+    }
+    if (full)
+        for (auto& p : m_pools)
+            p.reset();
 
-    struct Pool {
-        std::vector<uint32_t> childBase, payload, handles, bricks;
-        uint32_t allocNode()
-        {
-            payload.push_back(0);
-            childBase.push_back(uint32_t(handles.size()));
-            handles.resize(handles.size() + 8, kEmptyHandle);
-            return uint32_t((payload.size() - 1) << 2);
-        }
-        uint32_t emitBrick(const uint32_t* data)
-        {
-            bricks.insert(bricks.end(), data, data + BRICK_WORDS);
-            return uint32_t(((bricks.size() / BRICK_WORDS) - 1) << 2 | 1);
-        }
-    };
-    std::vector<Pool*> pools(numChunks, nullptr);
-    std::vector<int32_t> chunkGrid(numChunks, -1);
+    std::unordered_set<int> dirtySet(dirty.begin(), dirty.end());
 
     std::atomic<size_t> next{ 0 };
     unsigned hc = std::max(1u, std::thread::hardware_concurrency());
@@ -507,16 +618,21 @@ bool LayeredWorld::synthesize()
                 size_t ci = next.fetch_add(1);
                 if (ci >= numChunks)
                     return;
-                if (ctx.chunkRecords[ci].empty())
-                    continue; // resolved after the merge (solid-or-empty)
-
+                // reuse the cached pool unless this chunk must be rebuilt
+                if (!full && dirtySet.find(int(ci)) == dirtySet.end())
+                    continue;
+                if (ctx.chunkRecords[ci].empty()) {
+                    // no records: drop any previous geometry (the post-process
+                    // step may promote fully-below-ground chunks to solid)
+                    m_pools[ci].reset();
+                    continue;
+                }
                 int cz = int(ci / (GRID_N * GRID_N));
                 int cy = int((ci / GRID_N) % GRID_N);
                 int cx = int(ci % GRID_N);
                 int x0 = cx * CHUNK_N, y0 = cy * CHUNK_N, z0 = cz * CHUNK_N;
 
-                Pool* pool = new Pool();
-                pools[ci] = pool;
+                auto pool = std::make_unique<ChunkPool>();
 
                 std::function<int32_t(int, int, int, int)> build =
                     [&](int bx, int by, int bz, int side) -> int32_t {
@@ -552,46 +668,51 @@ bool LayeredWorld::synthesize()
                     pool->payload[nodeIndexOf(nodeH)] = validMask | (solidMask << 8);
                     return int32_t(nodeH);
                 };
-                chunkGrid[ci] = build(x0, y0, z0, CHUNK_N);
+                pool->root = build(x0, y0, z0, CHUNK_N);
+                m_pools[ci] = std::move(pool);
             }
         });
     for (auto& th : threads)
         th.join();
 
-    // deterministic merge across per-chunk pools
+    // --- deterministic merge across per-chunk pools (non-mutating) ---
     m_gpu = GpuWorld{};
-    m_gpu.chunkGrid = std::move(chunkGrid);
+    m_gpu.chunkGrid.assign(numChunks, -1);
     size_t nodeOff = 0, hOff = 0, bOff = 0;
     for (size_t ci = 0; ci < numChunks; ++ci) {
-        Pool* pp = pools[ci];
-        if (!pp)
+        ChunkPool* pp = m_pools[ci].get();
+        if (!pp || pp->root < 0) {
+            m_gpu.chunkGrid[ci] = -1;
             continue;
-        Pool& p = *pp;
-        for (uint32_t& h : p.handles) {
+        }
+        // copy + offset-adjust handles into m_gpu; the pool stays pristine so it
+        // can be reused in a later incremental rebuild.
+        size_t hStart = m_gpu.handles.size();
+        m_gpu.handles.insert(m_gpu.handles.end(), pp->handles.begin(), pp->handles.end());
+        for (size_t k = hStart; k < m_gpu.handles.size(); ++k) {
+            uint32_t& h = m_gpu.handles[k];
             if (handleIsNode(h))
                 h += uint32_t(nodeOff << 2);
             else if (handleIsBrick(h))
                 h += uint32_t(bOff << 2);
         }
-        uint32_t r = uint32_t(m_gpu.chunkGrid[ci]);
+        uint32_t r = uint32_t(pp->root);
         if (handleIsNode(r))
             r += uint32_t(nodeOff << 2);
         else if (handleIsBrick(r))
             r += uint32_t(bOff << 2);
         m_gpu.chunkGrid[ci] = r == kEmptyHandle ? -1 : int32_t(r);
-        for (uint32_t& cb : p.childBase)
-            cb += uint32_t(hOff);
-        m_gpu.handles.insert(m_gpu.handles.end(), p.handles.begin(), p.handles.end());
-        m_gpu.childBase.insert(m_gpu.childBase.end(), p.childBase.begin(),
-                               p.childBase.end());
-        m_gpu.payload.insert(m_gpu.payload.end(), p.payload.begin(), p.payload.end());
-        m_gpu.bricks.insert(m_gpu.bricks.end(), p.bricks.begin(), p.bricks.end());
-        nodeOff += p.payload.size();
-        hOff += p.handles.size();
-        bOff += p.bricks.size() / BRICK_WORDS;
-        delete pp;
+        size_t cStart = m_gpu.childBase.size();
+        m_gpu.childBase.insert(m_gpu.childBase.end(), pp->childBase.begin(),
+                               pp->childBase.end());
+        for (size_t k = cStart; k < m_gpu.childBase.size(); ++k)
+            m_gpu.childBase[k] += uint32_t(hOff);
+        m_gpu.payload.insert(m_gpu.payload.end(), pp->payload.begin(), pp->payload.end());
+        m_gpu.bricks.insert(m_gpu.bricks.end(), pp->bricks.begin(), pp->bricks.end());
+        nodeOff += pp->payload.size();
+        hOff += pp->handles.size();
+        bOff += pp->bricks.size() / BRICK_WORDS;
     }
-    pools.clear();
 
     // chunks without any record: fully-below-ground becomes a solid terminal,
     // everything else stays an empty root
@@ -630,12 +751,14 @@ bool LayeredWorld::synthesize()
     }
 
     spdlog::info("layered_world: {} records -> {} nodes, {} bricks, {}/{} chunks"
-                 " active, {:.1f} MB in {:.2f}s",
+                 " active, {:.1f} MB in {:.2f}s{}",
                  m_stats.records, m_stats.nodes, m_stats.bricks, m_stats.activeChunks,
                  GRID_N * GRID_N * GRID_N,
-                 double(m_stats.memoryBytes) / (1024.0 * 1024.0), m_stats.buildSeconds);
+                 double(m_stats.memoryBytes) / (1024.0 * 1024.0), m_stats.buildSeconds,
+                 full ? "" : " (incremental)");
 
     // temporary synthesis grids no longer needed once the SVO is built
+    // (m_pools is kept resident for incremental rebuilds)
     m_blockSolid.clear();
     m_blockSolid.shrink_to_fit();
     m_objCells.clear();
@@ -644,5 +767,7 @@ bool LayeredWorld::synthesize()
     m_objMats.shrink_to_fit();
     return true;
 }
+
+LayeredWorld::~LayeredWorld() = default;
 
 } // namespace vf::voxel

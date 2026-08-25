@@ -27,10 +27,38 @@
 #include "voxel/world.hpp"
 #include "voxel/worldfile.hpp"
 #include <filesystem>
+#include <map>
 #include <string>
 #include <vector>
 
 namespace vf::voxel {
+
+// Per-chunk SVO octree pool. Kept resident across reloads so that only the
+// chunks touched by a changed layer need to be rebuilt (incremental update).
+struct ChunkPool {
+    std::vector<uint32_t> childBase, payload, handles, bricks;
+    int32_t root = -1; // chunk root handle (-1 = empty)
+
+    uint32_t allocNode()
+    {
+        payload.push_back(0);
+        childBase.push_back(uint32_t(handles.size()));
+        handles.resize(handles.size() + 8, kEmptyHandle);
+        return uint32_t((payload.size() - 1) << 2);
+    }
+    uint32_t emitBrick(const uint32_t* data)
+    {
+        bricks.insert(bricks.end(), data, data + BRICK_WORDS);
+        return uint32_t(((bricks.size() / BRICK_WORDS) - 1) << 2 | 1);
+    }
+};
+
+// World-space AABB of a layer's records, used to derive dirty chunks.
+struct WorldAABB {
+    glm::vec3 lo{ 1e9f, 1e9f, 1e9f };
+    glm::vec3 hi{ -1e9f, -1e9f, -1e9f };
+    bool valid() const { return hi.x >= lo.x; }
+};
 
 class LayeredWorld {
 public:
@@ -57,11 +85,16 @@ public:
     const std::vector<worldfile::WorldLayer>& layers() const { return m_layersMeta; }
     const Stats& stats() const { return m_stats; }
 
+    ~LayeredWorld();
+
 private:
-    bool synthesize();
+    // Build the SVO. When `full` is false only the chunks in `dirty` are
+    // rebuilt; the rest are reused from the cached per-chunk pools.
+    bool synthesize(bool full = true, const std::vector<int>& dirty = {});
 
     std::string m_manifestPath;
     bool m_loaded = false;
+    bool m_hasFullBuild = false;
 
     GpuWorld m_gpu;
     std::vector<VoxelRecord> m_records;                    // priority-merged union
@@ -73,6 +106,14 @@ private:
     std::vector<uint32_t> m_objCells;
     std::vector<uint8_t> m_objMats;                        // material per object cell (parallel to m_objCells)
     std::vector<uint8_t> m_blockSolid;                     // global presence grid (records+interior)
+
+    // cached per-chunk SVO pools (kept across reloads for incremental updates)
+    std::vector<std::unique_ptr<ChunkPool>> m_pools;
+
+    // dirty-tracking state for incremental rebuilds
+    std::map<std::string, WorldAABB> m_prevBox;            // layer file -> record AABB
+    std::map<std::string, bool> m_prevEnabled;             // layer file -> enabled
+    uint64_t m_enabledObjMask = ~0ull;                     // current object enable mask
 
     struct Signature {
         std::string path;
