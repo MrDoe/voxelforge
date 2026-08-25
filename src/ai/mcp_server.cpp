@@ -3,9 +3,9 @@
 //
 // Lets any MCP client (opencode, Claude Desktop-style hosts, gemma bridges)
 // inspect and modify the layered voxel world. All edits land in the
-// ai_edits.vxw layer via EditableWorld, so they persist, join the manifest,
-// and show up in splat rendering on the next launch - exactly like in-game
-// AI-chat edits.
+// ai_edits.vxw layer via EditableWorld, so they persist and join the manifest.
+// The running voxelforge instance watches the layer files and hot-reloads its
+// SVO + splats within a second - no external repack step involved.
 //
 // Tools:
 //   list_layers                       -> manifest layers + enabled state
@@ -139,25 +139,6 @@ struct Server {
 
     void init() { editable.load(); }
 
-    // Rebuild the merged cache (world.vxw) so ray-march sees AI edits.
-    // Runs as a detached shell child (must outlive this short-lived server
-    // process); flock serializes concurrent bakes. The packer never writes
-    // ai_edits.vxw itself, so edits appended during a bake are picked up by
-    // the NEXT repack instead of being stomped.
-    void queueRepack()
-    {
-        if (getenv("VF_MCP_NOREPACK"))
-            return;
-        std::string assets = VOXELFORGE_ASSET_DIR;
-        size_t slash = assets.find_last_of("/\\");
-        std::string root = slash == std::string::npos ? "." : assets.substr(0, slash);
-        std::string cmd =
-            "cd \"" + root + "\" && flock /tmp/opencode/vf_mcp_repack.lock "
-            "ninja -C build world >>/tmp/opencode/vf_repack.log 2>&1 &";
-        if (std::system(cmd.c_str()) != 0)
-            spdlog::warn("mcp repack spawn failed");
-    }
-
     ToolResult listLayers()
     {
         std::vector<voxel::worldfile::WorldLayer> layers;
@@ -204,9 +185,8 @@ struct Server {
             return { "no such layer: " + layerName, true };
         if (!voxel::worldfile::writeManifest(manifestPath, layers))
             return { "failed to write manifest", true };
-        queueRepack();
         return { "layer " + layerName + (enabledInt ? " enabled" : " disabled") +
-                     "; merged cache rebuild queued",
+                     "; the running app hot-reloads within ~1 s",
                  false };
     }
 
@@ -324,11 +304,10 @@ struct Server {
         size_t added = editable.append(recs);
         if (added == 0)
             return { "nothing added (all cells overlap existing edits)", true };
-        queueRepack();
-        char buf[192];
+        char buf[224];
         snprintf(buf, sizeof(buf), "%zu voxels added at anchor [%d %d %d]; "
-                                   "merged cache rebuild queued (~15 s, then "
-                                   "visible in both render modes)",
+                                   "the running app hot-reloads within ~1 s "
+                                   "(visible in every render mode)",
                  added, anchor.x, anchor.y, anchor.z);
         return { buf, false };
     }
@@ -415,8 +394,8 @@ ToolResult callTool(Server& srv, const std::string& name, std::string args)
         return srv.ground(args);
     if (canonical == "clear_edits") {
         srv.editable.clear();
-        srv.queueRepack();
-        return { "all AI edits cleared; merged cache rebuild queued", false };
+        return { "all AI edits cleared; the running app hot-reloads within ~1 s",
+                 false };
     }
     if (canonical.rfind("add_", 0) == 0)
         return srv.addShape(canonical, args);

@@ -82,9 +82,10 @@ target_include_directories(vf_platform PUBLIC src)
 target_link_libraries(vf_platform PUBLIC glfw Vulkan::Vulkan vf_glm spdlog::spdlog)
 
 add_library(vf_core STATIC src/core/camera.cpp src/voxel/volume.cpp src/voxel/world.cpp
-                           src/voxel/heightmap.cpp src/voxel/worldfile.cpp
-                           src/voxel/picking.cpp src/voxel/editable_world.cpp
-                           src/ai/ollama_client.cpp)
+                          src/voxel/layered_world.cpp
+                          src/voxel/heightmap.cpp src/voxel/worldfile.cpp
+                          src/voxel/picking.cpp src/voxel/editable_world.cpp
+                          src/ai/ollama_client.cpp)
 target_include_directories(vf_core PUBLIC src PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/external)
 target_compile_definitions(vf_core PUBLIC
     VOXELFORGE_ASSET_DIR="${CMAKE_CURRENT_SOURCE_DIR}/assets")
@@ -106,7 +107,6 @@ target_include_directories(vf_mcp PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
 target_link_libraries(vf_mcp PRIVATE vf_core)
 
 set(VF_HEIGHTMAP_PNG ${CMAKE_CURRENT_SOURCE_DIR}/assets/heightmap.png)
-set(VF_WORLD_VXW ${CMAKE_CURRENT_SOURCE_DIR}/assets/world.vxw)
 set(VF_WORLD_LAYERS ${CMAKE_CURRENT_SOURCE_DIR}/assets/world.json
     ${CMAKE_CURRENT_SOURCE_DIR}/assets/landscape.vxw
     ${CMAKE_CURRENT_SOURCE_DIR}/assets/house.vxw
@@ -118,12 +118,12 @@ set(VF_WORLD_LAYERS ${CMAKE_CURRENT_SOURCE_DIR}/assets/world.json
     ${CMAKE_CURRENT_SOURCE_DIR}/assets/bushes.vxw
     ${CMAKE_CURRENT_SOURCE_DIR}/assets/alpaca.vxw
     ${CMAKE_CURRENT_SOURCE_DIR}/assets/fence1.vxw)
-add_custom_command(OUTPUT ${VF_HEIGHTMAP_PNG} ${VF_WORLD_VXW} ${VF_WORLD_LAYERS}
-    COMMAND heightmap_gen ${VF_HEIGHTMAP_PNG} ${VF_WORLD_VXW}
+add_custom_command(OUTPUT ${VF_HEIGHTMAP_PNG} ${VF_WORLD_LAYERS}
+    COMMAND heightmap_gen ${VF_HEIGHTMAP_PNG} ${CMAKE_CURRENT_SOURCE_DIR}/assets/world.vxw
     DEPENDS heightmap_gen
-    COMMENT "heightmap_gen -> assets/heightmap.png + world.vxw + world.json layers"
+    COMMENT "heightmap_gen -> assets/heightmap.png + layer family + world.json"
     VERBATIM)
-add_custom_target(vf_heightmap DEPENDS ${VF_HEIGHTMAP_PNG} ${VF_WORLD_VXW})
+add_custom_target(vf_heightmap DEPENDS ${VF_HEIGHTMAP_PNG} ${VF_WORLD_LAYERS})
 
 add_library(vf_rhi STATIC src/rhi/context.cpp src/rhi/resources.cpp src/rhi/swapchain.cpp)
 target_link_libraries(vf_rhi PUBLIC vf_platform vf_vma spdlog::spdlog)
@@ -163,7 +163,7 @@ target_compile_definitions(voxelforge PRIVATE
     VOXELFORGE_SHADER_DIR="${CMAKE_CURRENT_BINARY_DIR}/shaders")
 target_link_libraries(voxelforge PRIVATE vf_render vf_core imgui_core tbb)
 add_dependencies(voxelforge vf_shaders)
-add_custom_target(world DEPENDS ${VF_HEIGHTMAP_PNG} ${VF_WORLD_VXW})
+add_custom_target(world DEPENDS ${VF_HEIGHTMAP_PNG} ${VF_WORLD_LAYERS})
 
 # ---- tests -------------------------------------------------------------------------
 enable_testing()

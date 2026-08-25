@@ -23,6 +23,7 @@
 #include "app/chat_ui.hpp"
 #include "voxel/picking.hpp"
 #include "voxel/editable_world.hpp"
+#include "voxel/layered_world.hpp"
 
 #include <algorithm>
 #include <chrono>
@@ -141,9 +142,10 @@ private:
     bool runCompare();
     bool rebuildSplats();
     vf::SplatVertexData buildSplatData(int density);
-    bool refreshWorldLayers(std::vector<vf::voxel::VoxelRecord>& out);
+    void syncWorldLayerList();
     void persistWorldLayers();
     void rescanWorldLayers();
+    void applyWorldReload();
 
     Args m_args;
     vf::Window m_window;
@@ -172,6 +174,11 @@ private:
     // layered world state (GUI)
     std::vector<vf::voxel::worldfile::WorldLayer> m_worldLayers;
     bool m_layeredSplats = false;
+
+    // single world source for every renderer path (SVO + splats)
+    vf::voxel::LayeredWorld m_layers;
+    float m_layerPollT = 0.f;
+    bool m_pendingWorldReload = false;
 
     glm::vec4 pushBFor(Backend b) const { return b == Backend::Svo ? m_pushBSvo : m_pushBDense; }
 
@@ -308,20 +315,19 @@ vf::SplatVertexData App::buildSplatData(int density) {
         float ao=computeAO(p,n); uint8_t mat=vf::voxel::scene(p).mat;
         sd.posRadius.emplace_back(p, splatRadius); sd.albedoAO.emplace_back(albedo, ao); sd.normalMat.emplace_back(n, float(mat)); sd.shadeParams.emplace_back(shadeForMat(mat)); sd.colors.emplace_back(albedo*ao,1.0f);
     };
-    vf::voxel::WorldFileData wf; const std::string worldPath=std::string(VOXELFORGE_ASSET_DIR)+"/world.vxw";
-    std::vector<vf::voxel::VoxelRecord> layerRecords;
+    vf::voxel::WorldFileData wf;
     bool fromFile = false;
-    if (refreshWorldLayers(layerRecords)) {
-        // live layered world: splats always reflect the latest layer edits
+    if (m_layers.loaded()) {
+        // single world source: splats derive from the same merged layer
+        // records that back the SVO, so both modes always render one world
         wf.meta = { vf::voxel::WORLD, vf::voxel::VOXEL, vf::voxel::WATER_LEVEL,
                     uint32_t(vf::voxel::GRID_N), 8 };
-        wf.voxels = std::move(layerRecords);
+        wf.voxels = m_layers.records();
         fromFile = true;
         m_layeredSplats = true;
-        spdlog::info("splats from layered world.json ({} records)", wf.voxels.size());
+        spdlog::info("splats from layered world ({} records)", wf.voxels.size());
     } else {
         m_layeredSplats = false;
-        fromFile = vf::voxel::worldfile::read(worldPath,wf) && wf.meta.worldSize==vf::voxel::WORLD && wf.meta.voxelSize==vf::voxel::VOXEL && wf.meta.gridN==uint32_t(vf::voxel::GRID_N);
     }
     if (fromFile && !wf.voxels.empty()) {
         std::unordered_set<uint32_t> occ; occ.reserve(wf.voxels.size()*2);
@@ -608,45 +614,30 @@ bool App::initVulkan()
     }
 
     if (buildSvo) {
-        // canonical world asset first; procedural build only as fallback
-        vf::voxel::WorldFileData wf;
-        const std::string worldPath =
-            std::string(VOXELFORGE_ASSET_DIR) + "/world.vxw";
-        bool fromFile = vf::voxel::worldfile::read(worldPath, wf) &&
-                        wf.meta.worldSize == vf::voxel::WORLD &&
-                        wf.meta.voxelSize == vf::voxel::VOXEL &&
-                        wf.meta.gridN == uint32_t(vf::voxel::GRID_N);
-        if (fromFile) {
-            // live layers win for splat records; SVO stays on the merged cache
-            std::vector<vf::voxel::VoxelRecord> layerRecords;
-            if (refreshWorldLayers(layerRecords)) {
-                wf.voxels = std::move(layerRecords);
-                m_layeredSplats = true;
-                spdlog::info("splats from layered world.json ({} records)",
-                             wf.voxels.size());
-            } else {
-                m_layeredSplats = false;
-            }
-        }
+        // layered world is the single source: the SVO is synthesized directly
+        // from the enabled layer files (no merged cache involved)
+        const std::string manifestPath =
+            std::string(VOXELFORGE_ASSET_DIR) + "/world.json";
+        bool fromFile = m_layers.load(manifestPath);
         size_t nodes = 0, bricks = 0, activeChunks = 0;
         double mb = 0.0;
         if (fromFile) {
-            nodes = wf.payload.size();
-            bricks = wf.bricks.size() / (vf::voxel::BRICK_WORDS);
-            activeChunks = size_t(std::count_if(wf.chunkGrid.begin(), wf.chunkGrid.end(),
-                                                [](int32_t h) { return h >= 0; }));
-            mb = double((wf.childBase.size() + wf.payload.size() + wf.handles.size() +
-                         wf.bricks.size() + wf.chunkGrid.size()) *
-                        4) /
-                 (1024.0 * 1024.0);
-            spdlog::info("SVO world loaded from {}: {} nodes, {} bricks, {}/{} chunks,"
-                         " {:.1f} MB",
-                         worldPath, nodes, bricks, activeChunks,
+            const auto& st = m_layers.stats();
+            nodes = st.nodes;
+            bricks = st.bricks;
+            activeChunks = st.activeChunks;
+            mb = double(st.memoryBytes) / (1024.0 * 1024.0);
+            spdlog::info("SVO world synthesized from layers: {} nodes, {} bricks,"
+                         " {}/{} chunks, {:.1f} MB",
+                         nodes, bricks, activeChunks,
                          vf::voxel::GRID_N * vf::voxel::GRID_N * vf::voxel::GRID_N, mb);
             if (!m_svoPass.init(m_ctx))
                 return false;
-            m_svoPass.setWorld(wf.chunkGrid, wf.childBase, wf.payload, wf.handles,
-                               wf.bricks);
+            const auto& g = m_layers.gpu();
+            m_svoPass.setWorld(g.chunkGrid, g.childBase, g.payload, g.handles, g.bricks);
+            // every layer (incl. MCP-added ai_edits) is listed in the GUI
+            syncWorldLayerList();
+            rescanWorldLayers();
         } else {
             vf::voxel::World world;
             world.build();
@@ -745,11 +736,19 @@ bool App::initVulkan()
             sd.shadeParams.emplace_back(shadeForMat(mat));
             sd.colors.emplace_back(albedo * ao, 1.0f); // legacy fallback
         };
-        // SVO splats: single source is the voxel file. When the file is
-        // available we derive splats directly from its surface records
-        // (decimated to ~0.3 m); otherwise we resample the procedural scene.
+        // SVO splats: single source is the layered world. When it is loaded we
+        // derive splats directly from its merged surface records (decimated to
+        // ~0.3 m); otherwise we resample the procedural scene.
         // Normals are from 6-neighbour occupancy for stability when view rotates.
-        if (fromFile && !wf.voxels.empty()) {
+        vf::voxel::WorldFileData wf;
+        wf.meta = { vf::voxel::WORLD, vf::voxel::VOXEL, vf::voxel::WATER_LEVEL,
+                    uint32_t(vf::voxel::GRID_N), 8 };
+        if (m_layers.loaded()) {
+            wf.voxels = m_layers.records(); // same records that back the SVO
+            m_layeredSplats = true;
+            spdlog::info("splats from layered world ({} records)", wf.voxels.size());
+        }
+        if (!wf.voxels.empty()) {
             // build occupancy hash for neighbour checks (10 bits per axis)
             std::unordered_set<uint32_t> occ;
             occ.reserve(wf.voxels.size()*2);
@@ -958,18 +957,13 @@ bool App::initVulkan()
     return true;
 }
 
-bool App::refreshWorldLayers(std::vector<vf::voxel::VoxelRecord>& out)
+void App::syncWorldLayerList()
 {
-    const std::string manifestPath = std::string(VOXELFORGE_ASSET_DIR) + "/world.json";
-    vf::voxel::WorldFileMeta expected { vf::voxel::WORLD, vf::voxel::VOXEL,
-                                        vf::voxel::WATER_LEVEL,
-                                        uint32_t(vf::voxel::GRID_N), 8 };
-    if (!vf::voxel::worldfile::readLayered(manifestPath, expected, out))
-        return false;
-    std::vector<vf::voxel::worldfile::WorldLayer> l;
-    if (!vf::voxel::worldfile::loadManifest(manifestPath, l))
-        return true; // records loaded but manifest unreadable: keep old list
-    // retain previously discovered folder entries that are still unlisted
+    if (!m_layers.loaded())
+        return;
+    // every manifest layer shows up in the GUI, plus previously discovered
+    // folder entries that are still unlisted (shown as "(new)")
+    std::vector<vf::voxel::worldfile::WorldLayer> l = m_layers.layers();
     for (const auto& u : m_worldLayers)
         if (!u.listed && std::none_of(l.begin(), l.end(),
                                       [&](const vf::voxel::worldfile::WorldLayer& e) {
@@ -977,7 +971,20 @@ bool App::refreshWorldLayers(std::vector<vf::voxel::VoxelRecord>& out)
                                       }))
             l.push_back(u);
     m_worldLayers = std::move(l);
-    return true;
+}
+
+void App::applyWorldReload()
+{
+    if (!m_layers.loaded())
+        return;
+    // swap the freshly synthesized SVO buffers under an idle device; splats
+    // are rebuilt from the same merged records on the next frame
+    vkDeviceWaitIdle(m_ctx.device());
+    const auto& g = m_layers.gpu();
+    m_svoPass.setWorld(g.chunkGrid, g.childBase, g.payload, g.handles, g.bricks);
+    syncWorldLayerList();
+    rescanWorldLayers(); // layers dropped into assets/ while running show up too
+    requestSplatRebuild();
 }
 
 void App::persistWorldLayers()
@@ -1064,37 +1071,34 @@ void App::drawHud()
                 const std::string label =
                     l.name.empty() ? l.file : l.name + "  (" + l.file + ")";
                 bool en = l.enabled;
-                if (l.role == "landscape") {
-                    ImGui::BeginDisabled();
-                    ImGui::Checkbox(id.c_str(), &en); // locked on
-                    ImGui::EndDisabled();
-                    ImGui::SameLine();
-                    ImGui::TextUnformatted(label.c_str());
+                const bool isLandscape = l.role == "landscape";
+                if (ImGui::Checkbox(id.c_str(), &en)) {
+                    l.enabled = en;
+                    if (en)
+                        l.listed = true; // newly added layers join the manifest
+                    persistWorldLayers();
+                    // one world for all paths: reload the SVO too, not
+                    // just the splats
+                    m_pendingWorldReload = true;
+                }
+                ImGui::SameLine();
+                ImGui::TextUnformatted(label.c_str());
+                if (isLandscape) {
                     ImGui::SameLine();
                     ImGui::TextDisabled("[terrain]");
-                } else {
-                    if (ImGui::Checkbox(id.c_str(), &en)) {
-                        l.enabled = en;
-                        if (en)
-                            l.listed = true; // newly added layers join the manifest
-                        persistWorldLayers();
-                        if (m_renderMode == RenderMode::GaussianSplats && m_layeredSplats)
-                            requestSplatRebuild();
-                    }
+                }
+                if (!l.listed) {
                     ImGui::SameLine();
-                    ImGui::TextUnformatted(label.c_str());
-                    if (!l.listed) {
-                        ImGui::SameLine();
-                        ImGui::TextDisabled("(new)");
-                    }
+                    ImGui::TextDisabled("(new)");
                 }
             }
         }
         if (ImGui::Button("Rescan assets folder"))
             rescanWorldLayers();
         ImGui::SameLine();
-        ImGui::TextDisabled("%s", m_layeredSplats ? "splats live" : "legacy world.vxw");
-        ImGui::TextDisabled("splats apply instantly; ray-march view syncs via 'ninja -C build world'");
+        ImGui::TextDisabled("%s", m_layers.loaded() ? "live layered world"
+                                                    : "procedural fallback");
+        ImGui::TextDisabled("toggles & edits hot-reload every render mode");
     }
     ImGui::End();
 
@@ -1308,6 +1312,8 @@ int App::run(const Args& args)
     m_splatScale = std::clamp(args.splatScale, 0.25f, 4.0f);
     m_animTime = args.animTime;
     if (args.probeSet) {
+        // probes must see MCP/chat edits: register ai_edits into scene truth
+        m_editable.load();
         auto s = vf::voxel::scene(args.probe);
         spdlog::info("probe({:.2f},{:.2f},{:.2f}): d={:+.3f} mat={} ({})", args.probe.x,
                      args.probe.y, args.probe.z, s.d, int(s.mat),
@@ -1455,7 +1461,12 @@ int App::run(const Args& args)
             m_fWasDown = false;
         }
 
-        m_animTime += dt;
+        // animation clock only advances interactively - headless shots stay
+        // deterministic (misc.y feeds wind/grass shading)
+        const bool headlessMode =
+            args.selftest || args.compare || args.smokeFrames > 0 || !args.shot.empty();
+        if (!headlessMode)
+            m_animTime += dt;
 
         // +/- adjust the global splat size multiplier (hold to slide)
         // German QWERTZ '+' is RIGHT_BRACKET / APOSTROPHE, US '+' is EQUAL with Shift —
@@ -1558,8 +1569,21 @@ int App::run(const Args& args)
                     break;
                 }
             }
-            if (m_renderMode == RenderMode::GaussianSplats && m_layeredSplats)
-                rebuildSplats();
+            m_pendingWorldReload = true;
+        }
+
+        // live world reload: MCP/chat edits and layer toggles land in the
+        // layer files; poll for changes and swap SVO + splats in-place
+        m_layerPollT += dt;
+        if (m_layers.loaded() && m_layerPollT >= 0.5f) {
+            m_layerPollT = 0.f;
+            if (m_layers.reloadIfChanged())
+                applyWorldReload();
+        }
+        if (m_pendingWorldReload) {
+            m_pendingWorldReload = false;
+            m_layers.load(std::string(VOXELFORGE_ASSET_DIR) + "/world.json");
+            applyWorldReload();
         }
 
         // Voxel picking: Ctrl+LMB

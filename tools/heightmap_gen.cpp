@@ -1,7 +1,7 @@
 // Offline terrain asset generator: hills + meandering river valley.
 // Writes the 16-bit heightmap PNG (stored deflate - no dependencies), then
-// builds the full chunked-SVO world from it and serializes assets/world.vxw
-// (VXW v1: GPU buffers with RGBA/reflection voxels + surface voxel records).
+// sweeps the layer family (record-only .vxw files) + manifest from it. There
+// is no merged cache: the app synthesizes its SVO directly from these layers.
 #include "voxel/common.hpp"
 #include "voxel/heightmap.hpp"
 #include "voxel/world.hpp"
@@ -210,8 +210,9 @@ int main(int argc, char** argv)
         return 1;
     vf::voxel::setSharedHeightmap(&hm);
 
-    // pre-existing AI/user edits join CPU truth BEFORE the SVO bake so they
-    // are baked into bricks like any other geometry
+    // pre-existing AI/user edits join the layer family so they are part of
+    // the world like any other geometry (also registered into scene truth
+    // above for probes/splats)
     std::vector<vf::voxel::VoxelRecord> aiRecords;
     {
         std::string adir = worldOut;
@@ -229,24 +230,12 @@ int main(int argc, char** argv)
         }
     }
 
-    vf::voxel::World world;
-    world.build();
-    auto st = world.stats();
-    std::printf("world built: nodes=%zu bricks=%zu activeChunks=%zu in %.2fs\n",
-                st.nodes, st.bricks, st.activeChunks, double(st.buildSeconds));
-
     // ---- layered world output -------------------------------------------------
-    // The static world is described by a family of record-only .vxw layers plus
-    // a JSON manifest. world.vxw remains the merged cache (full-scene SVO +
-    // deduped union of all layers) that the renderer loads directly.
+    // The world is described by a family of record-only .vxw layers plus a
+    // JSON manifest. No merged cache is produced: the renderer synthesizes
+    // its SVO from these layers directly.
     vf::voxel::WorldFileData data;
     data.meta = { WORLD, VOXEL, WATER_LEVEL, uint32_t(GRID_N), 8 };
-    const auto& g = world.gpu();
-    data.chunkGrid = g.chunkGrid;
-    data.childBase = g.childBase;
-    data.payload = g.payload;
-    data.handles = g.handles;
-    data.bricks = g.bricks;
 
     struct LayerOut {
         std::string file, role, name;
@@ -443,19 +432,6 @@ int main(int argc, char** argv)
                     aiL.file.c_str(), aiL.voxels.size());
     }
 
-    // -- dedupe into the merged cache: earlier layers win (objects > terrain) --
-    {
-        std::unordered_set<uint32_t> claimed;
-        claimed.reserve(layers.size() * 1024u);
-        for (const LayerOut& L : layers)
-            for (const vf::voxel::VoxelRecord& v : L.voxels) {
-                uint32_t key =
-                    (uint32_t(v.x) << 20) | (uint32_t(v.y) << 10) | uint32_t(v.z);
-                if (claimed.insert(key).second)
-                    data.voxels.push_back(v);
-            }
-    }
-
     // -- write layer files + manifest ------------------------------------------
     std::string dir = worldOut;
     {
@@ -484,19 +460,13 @@ int main(int argc, char** argv)
         manifestLayers.push_back({ L.file, L.role, L.name,
                                    { L.pos.x, L.pos.y, L.pos.z }, 0.f });
     }
-    manifestLayers.push_back(
-        { "world.vxw", "packed", "combined", { 0.f, 0.f, 0.f }, 0.f });
     if (!vf::voxel::worldfile::writeManifest(dir + "world.json", manifestLayers)) {
         std::fprintf(stderr, "failed to write %sworld.json\n", dir.c_str());
         return 1;
     }
 
-    if (!vf::voxel::worldfile::write(worldOut, data)) {
-        std::fprintf(stderr, "failed to write %s\n", worldOut);
-        return 1;
-    }
-    std::printf("world %s: %zu voxel records, svo buffers %zu words\n", worldOut,
-                data.voxels.size(), data.bricks.size() + data.handles.size());
+    std::printf("layers written to %s: %zu total records\n", dir.c_str(),
+                totalRecords);
     for (const LayerOut& L : layers)
         std::printf("  layer %-14s %8zu records (%s)\n", L.file.c_str(),
                     L.voxels.size(), L.role.c_str());
