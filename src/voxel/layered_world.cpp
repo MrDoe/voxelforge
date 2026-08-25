@@ -1,5 +1,6 @@
 #include "voxel/layered_world.hpp"
 #include "voxel/common.hpp"
+#include <algorithm>
 #include <spdlog/spdlog.h>
 #include <atomic>
 #include <chrono>
@@ -15,6 +16,7 @@ namespace {
 constexpr int kLatN = int(WORLD / VOXEL);
 constexpr int kBlockSize = 4; // presence-block granularity (cells)
 constexpr int kBlocksPerAxis = CHUNK_N / kBlockSize;
+constexpr int kGBlocks = GRID_N * kBlocksPerAxis; // global blocks per world axis
 
 inline uint32_t cellKey(uint32_t x, uint32_t y, uint32_t z)
 {
@@ -113,6 +115,8 @@ struct BuildCtx {
     const std::vector<VoxelRecord>* records = nullptr;
     const CellMap* map = nullptr;
     const int16_t* colTop = nullptr;                  // kLatN*kLatN landscape tops
+    const uint64_t* objSolid = nullptr;               // interior-solid bitmap
+    const uint8_t* blockSolid = nullptr;              // global presence grid (records+interior)
     std::vector<std::vector<uint32_t>> chunkRecords;  // per-chunk record indices
     uint32_t ugLo = 0, ugHi = 0;                      // underground interior words
     uint32_t waterLo = 0, waterHi = 0;                // submerged volume words
@@ -130,8 +134,7 @@ int classifyBox(const BuildCtx& c, const uint8_t* blocks, bool anyKnown, int x0,
         for (int gz = bz0; gz < bz0 + bn && !any; ++gz)
             for (int gy = by0; gy < by0 + bn && !any; ++gy)
                 for (int gx = bx0; gx < bx0 + bn && !any; ++gx)
-                    any |= blocks[(size_t(gz) * kBlocksPerAxis + size_t(gy)) *
-                                      kBlocksPerAxis +
+                    any |= blocks[(size_t(gz) * kGBlocks + size_t(gy)) * kGBlocks +
                                   size_t(gx)] != 0;
     }
     if (any)
@@ -177,6 +180,10 @@ void fillBrick(const BuildCtx& c, uint32_t* data, int bx0, int by0, int bz0)
         return x >= wx0 && x < wx0 + W && y >= wy0 && y < wy0 + W && z >= wz0 &&
                z < wz0 + W;
     };
+    auto objSolidAt = [&](int x, int y, int z) {
+        uint64_t idx = (uint64_t(z) * kLatN + y) * kLatN + x;
+        return (c.objSolid[idx >> 6] >> (idx & 63)) & 1ull;
+    };
 
     size_t nFront = 0;
     for (int z = wz0; z < wz0 + W; ++z)
@@ -200,6 +207,10 @@ void fillBrick(const BuildCtx& c, uint32_t* data, int bx0, int by0, int bz0)
                         dist[wi] = 0;
                         seed[wi] = -2; // underground seed
                         frontier[nFront++] = uint32_t(wi);
+                    } else if (c.objSolid && objSolidAt(x, y, z)) {
+                        solidB[wi] = 1;
+                        dist[wi] = 0;
+                        seed[wi] = -3; // inside a closed object shell
                     }
                 } else {
                     solidB[wi] = 0;
@@ -234,6 +245,42 @@ void fillBrick(const BuildCtx& c, uint32_t* data, int bx0, int by0, int bz0)
         nFront = nNext;
     }
 
+    // appearance flood for solid object interiors (enclosed by the shell, so a
+    // ray never reaches them, but give them the enclosing material anyway).
+    uint8_t visit[WN];
+    std::fill(visit, visit + WN, 0);
+    size_t nF2 = 0;
+    for (size_t wi = 0; wi < WN; ++wi) {
+        if (solidB[wi] && (seed[wi] >= 0 || seed[wi] == -2) && !visit[wi]) {
+            visit[wi] = 1;
+            frontier[nF2++] = uint32_t(wi);
+        }
+    }
+    static constexpr int dirs2[6][3] = {{1, 0, 0},  {-1, 0, 0}, {0, 1, 0},
+                                        {0, -1, 0}, {0, 0, 1},  {0, 0, -1}};
+    for (int wave = 1; wave <= 8 && nF2; ++wave) {
+        size_t nN2 = 0;
+        for (size_t fi = 0; fi < nF2; ++fi) {
+            size_t wi = frontier[fi];
+            int x = wx0 + int(wi % W);
+            int y = wy0 + int((wi / W) % W);
+            int z = wz0 + int(wi / (W * W));
+            for (auto& d : dirs2) {
+                int nx = x + d[0], ny = y + d[1], nz = z + d[2];
+                if (!inside(nx, ny, nz))
+                    continue;
+                size_t ni = widx(nx, ny, nz);
+                if (solidB[ni] && seed[ni] == -3 && !visit[ni]) {
+                    seed[ni] = seed[wi];
+                    visit[ni] = 1;
+                    nextF[nN2++] = uint32_t(ni);
+                }
+            }
+        }
+        std::memcpy(frontier, nextF, nN2 * sizeof(uint32_t));
+        nF2 = nN2;
+    }
+
     auto worldY = [](int cy) { return -0.5f * WORLD + (float(cy) + 0.5f) * VOXEL; };
 
     for (int bz = 0; bz < BRICK_N; ++bz)
@@ -249,7 +296,14 @@ void fillBrick(const BuildCtx& c, uint32_t* data, int bx0, int by0, int bz0)
                     if (c.map->find(cellKey(uint32_t(cx), uint32_t(cy), uint32_t(cz)),
                                     p, ridx))
                         wordsFromPacked(p, -2, w);
-                    else {
+                    else if (seed[wi] == -2) {
+                        w[0] = c.ugLo | (uint32_t(int32_t(-2) & 0xFF) << 24);
+                        w[1] = c.ugHi;
+                    } else if (seed[wi] >= 0) {
+                        wordsFromPacked(CellMap::pack((*c.records)[size_t(seed[wi])]), -2,
+                                        w);
+                    } else {
+                        // unreached interior (larger than the brick window): invisible
                         w[0] = c.ugLo | (uint32_t(int32_t(-2) & 0xFF) << 24);
                         w[1] = c.ugHi;
                     }
@@ -294,6 +348,9 @@ bool LayeredWorld::load(const std::string& manifestPath)
     m_signatures.clear();
     m_records.clear();
     m_colTop.assign(size_t(kLatN) * kLatN, -1);
+    m_objColX.clear();
+    m_objSolid.clear();
+    m_blockSolid.clear();
 
     std::unordered_set<uint32_t> claimed;
     claimed.reserve(1u << 22);
@@ -332,6 +389,9 @@ bool LayeredWorld::load(const std::string& manifestPath)
                 int16_t& top = m_colTop[size_t(v.z) * kLatN + size_t(v.x)];
                 if (v.y > top)
                     top = int16_t(v.y);
+            } else {
+                m_objColX[(uint32_t(v.y) << 10) | uint32_t(v.z)].push_back(
+                    int16_t(v.x));
             }
         }
     }
@@ -385,6 +445,51 @@ bool LayeredWorld::synthesize()
         ctx.waterHi = 255u | (130u << 8) | (25u << 16) | (9u << 24); // shiny, mat 9
     }
 
+    // --- flood-fill closed object shells into solid interiors (ray-cast parity) ---
+    m_objSolid.assign(size_t(kLatN) * kLatN * kLatN / 64, 0);
+    for (auto& kv : m_objColX) {
+        uint32_t y = kv.first >> 10, z = kv.first & 0x3FFu;
+        std::vector<int16_t>& xs = kv.second;
+        std::sort(xs.begin(), xs.end());
+        int16_t top = m_colTop[size_t(z) * kLatN + size_t(y)];
+        for (size_t k = 0; k + 1 < xs.size(); k += 2) {
+            int xa = int(xs[k]) + 1, xb = int(xs[k + 1]) - 1;
+            if (xb < xa)
+                continue;
+            for (int x = xa; x <= xb; ++x) {
+                if (top >= 0 && int(y) < int(top))
+                    continue; // terrain interior already solid via colTop
+                uint64_t idx = (uint64_t(z) * kLatN + y) * kLatN + x;
+                m_objSolid[idx >> 6] |= (1ull << (idx & 63));
+            }
+        }
+    }
+    // global presence grid (record cells + object interiors) for the SVO builder
+    const size_t gBlocks = size_t(kGBlocks) * kGBlocks * kGBlocks;
+    m_blockSolid.assign(gBlocks, 0);
+    auto markBlock = [&](int x, int y, int z) {
+        size_t bi = (size_t(z / kBlockSize) * kGBlocks + size_t(y / kBlockSize)) *
+                        kGBlocks +
+                    size_t(x / kBlockSize);
+        m_blockSolid[bi] = 1;
+    };
+    for (const VoxelRecord& v : m_records)
+        markBlock(v.x, v.y, v.z);
+    for (size_t w = 0; w < m_objSolid.size(); ++w) {
+        uint64_t bits = m_objSolid[w];
+        while (bits) {
+            int b = __builtin_ctzll(bits);
+            size_t idx = w * 64 + b;
+            int x = int(idx % kLatN);
+            int y = int((idx / kLatN) % kLatN);
+            int z = int(idx / (kLatN * kLatN));
+            markBlock(x, y, z);
+            bits &= bits - 1;
+        }
+    }
+    ctx.objSolid = m_objSolid.data();
+    ctx.blockSolid = m_blockSolid.data();
+
     for (size_t i = 0; i < m_records.size(); ++i) {
         const VoxelRecord& v = m_records[i];
         size_t ci = (size_t(v.z) / CHUNK_N) * GRID_N * GRID_N +
@@ -396,7 +501,6 @@ bool LayeredWorld::synthesize()
 
     struct Pool {
         std::vector<uint32_t> childBase, payload, handles, bricks;
-        std::vector<uint8_t> blocks;
         uint32_t allocNode()
         {
             payload.push_back(0);
@@ -432,23 +536,10 @@ bool LayeredWorld::synthesize()
 
                 Pool* pool = new Pool();
                 pools[ci] = pool;
-                pool->blocks.assign(size_t(kBlocksPerAxis) * kBlocksPerAxis *
-                                        kBlocksPerAxis,
-                                    0);
-                for (uint32_t ri : ctx.chunkRecords[ci]) {
-                    const VoxelRecord& v = (*ctx.records)[ri];
-                    size_t bi =
-                        (size_t((v.z % CHUNK_N) / kBlockSize) * kBlocksPerAxis +
-                         size_t((v.y % CHUNK_N) / kBlockSize)) *
-                            kBlocksPerAxis +
-                        size_t((v.x % CHUNK_N) / kBlockSize);
-                    pool->blocks[bi] = 1;
-                }
 
                 std::function<int32_t(int, int, int, int)> build =
                     [&](int bx, int by, int bz, int side) -> int32_t {
-                    int cls = classifyBox(ctx, pool->blocks.data(), false, bx, by, bz,
-                                          side);
+                    int cls = classifyBox(ctx, ctx.blockSolid, false, bx, by, bz, side);
                     if (cls == 1)
                         return int32_t(kSolidHandle);
                     if (cls == 0)
@@ -562,6 +653,13 @@ bool LayeredWorld::synthesize()
                  m_stats.records, m_stats.nodes, m_stats.bricks, m_stats.activeChunks,
                  GRID_N * GRID_N * GRID_N,
                  double(m_stats.memoryBytes) / (1024.0 * 1024.0), m_stats.buildSeconds);
+
+    // temporary synthesis grids no longer needed once the SVO is built
+    m_objSolid.clear();
+    m_objSolid.shrink_to_fit();
+    m_blockSolid.clear();
+    m_blockSolid.shrink_to_fit();
+    m_objColX.clear();
     return true;
 }
 

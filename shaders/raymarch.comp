@@ -784,6 +784,7 @@ void main()
     vec3 rd = normalize(pc.camFwd.xyz + uv.x * pc.a.x * pc.a.y * pc.camRight.xyz +
                         uv.y * pc.a.x * pc.camUp.xyz);
     vec3 ro = pc.camPos.xyz;
+    gUnderwater = ro.y < kWaterLevel && underWater(ro.xz);
 
     vec3 col;
     float t0, t1;
@@ -809,39 +810,50 @@ void main()
             vec3 p = ro + rd * t;
             vec3 albedo = albedoAt(p);
 
-            // water surface between camera and terrain?
+            // water surface between camera and terrain? (works from above and below)
             float tWater = waterHit(ro, rd, min(t1, t));
             bool waterView = false;
+            vec3 pw = ro;
             if (tWater > 0.0 && t <= t1) {
-                vec3 pw = ro + rd * tWater;
+                pw = ro + rd * tWater;
                 t = tWater; hit = true; waterView = true;
             }
 
             if (waterView) {
-                vec3 pw = ro + rd * tWater;
                 float r1 = sin(pw.x*4.5 + pc.misc.y*0.45)*0.5 + sin(pw.z*6.0 - pw.x*2.5)*0.5;
                 float r2 = sin(pw.x*9.5 + pc.misc.y*0.8 + pw.z*3.5)*0.3 + sin(pw.z*13.0 - pw.x*6.0 + pc.misc.y*0.3)*0.3;
                 vec3 n = normalize(vec3(r1*0.04 + r2*0.05, 1.0, sin(pw.x*7.0 - pw.z*11.0)*0.06 + cos(pw.x*11.0 + pw.z*5.0)*0.045));
-                vec3 R = reflect(rd, n);
-                R.y = abs(R.y);
-                vec3 rc = skyColor(R);
-                float rt = max(t0,0.0); bool rh=false;
-                vec3 rp2 = pw;
-                for (int i=0;i<64;++i){
-                    float s=sdfAt(rp2);
-                    if (s<0.03){rh=true;break;}
-                    rp2 += R * max(s*0.85, 0.05);
-                    if (dot(rp2,rp2) > 26000.0) break;
+                bool fromBelow = ro.y < kWaterLevel;
+                vec3 nFace = fromBelow ? -n : n;
+                float ndv = max(dot(-rd, nFace), 0.0);
+                float fres = 0.02 + 0.98*pow(1.0 - ndv, 5.0);
+                float sunGlint = pow(max(dot(reflect(rd, nFace), kSunDir), 0.0), 420.0);
+
+                if (fromBelow) {
+                    vec3 R = reflect(rd, nFace);
+                    vec3 rc = skyColor(vec3(R.x, -abs(R.y), R.z));
+                    for (int i=0;i<64;++i){
+                        vec3 q = pw + R * (0.05 + 0.1*float(i));
+                        float s = sdfAt(q);
+                        if (s<0.03){ rc = shadeTerrain(q, R, albedoAt(q), kMatRefl[getMaterialId(q)], pw); break; }
+                        if (dot(q,q) > 26000.0) break;
+                    }
+                    vec3 skyT = skyColor(vec3(rd.x, abs(rd.y), rd.z));
+                    skyT *= vec3(0.55, 0.80, 0.85);
+                    col = mix(skyT, rc, fres) + kSunCol * sunGlint * 3.0;
+                } else {
+                    vec3 R = reflect(rd, n);
+                    R.y = abs(R.y);
+                    vec3 rc = skyColor(R);
+                    for (int i=0;i<64;++i){
+                        vec3 q = pw + R * (0.05 + 0.1*float(i));
+                        float s = sdfAt(q);
+                        if (s<0.03){ rc = shadeTerrain(q, R, albedoAt(q), kMatRefl[getMaterialId(q)], pw); break; }
+                        if (dot(q,q) > 26000.0) break;
+                    }
+                    col = mix(vec3(0.04,0.10,0.09), rc, clamp(fres+0.25,0.0,1.0))
+                          + kSunCol * sunGlint * 3.0;
                 }
-                if (rh){
-                    vec3 hp2 = rp2;
-                    vec3 hn = calcNormal(hp2);
-                    rc = shadeTerrain(hp2, R, albedoAt(hp2), kMatRefl[getMaterialId(hp2)], pw);
-                }
-                float fres = 0.02 + 0.98*pow(1.0 - max(dot(-rd,n),0.0), 5.0);
-                float sunGlint = pow(max(dot(R,kSunDir),0.0), 420.0);
-                col = mix(vec3(0.04,0.10,0.09), rc, clamp(fres+0.25,0.0,1.0))
-                      + kSunCol * sunGlint * 3.0;
                 // shoreline foam: thin streaks hugging the waterline
                 float bedH = heightAt(pw.xz);
                 float shoreF = 1.0 - smoothstep(0.02, 0.26, kWaterLevel - bedH);
@@ -853,10 +865,23 @@ void main()
                 col = shadeTerrain(p, rd, albedo, kMatRefl[getMaterialId(p)], ro);
             }
 
+            // underwater volumetric: camera below the fixed water plane
+            if (gUnderwater) {
+                float tU = waterView ? tWater : t;
+                col *= exp(-tU * vec3(0.35,0.18,0.12) * 3.0);
+                col = mix(col, vec3(0.05,0.14,0.13), clamp(tU*0.8, 0.0, 0.85));
+            }
+
             float fog = 1.0 - exp(-max(t - t0, 0.0) * 0.0012);
             col = mix(col, fogColor(rd, p), fog);
         } else {
             col = skyColor(rd);
+            if (gUnderwater) {
+                float tExit = (rd.y > 0.001) ? (kWaterLevel - ro.y)/rd.y : t1;
+                float tU = max(0.0, min(tExit, t1));
+                col *= exp(-tU * vec3(0.35,0.18,0.12) * 3.0);
+                col = mix(col, vec3(0.05,0.14,0.13), clamp(tU*0.8, 0.0, 0.85));
+            }
         }
     }
 

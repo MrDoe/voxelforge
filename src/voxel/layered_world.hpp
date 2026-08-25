@@ -11,9 +11,13 @@
 // Synthesis rules (records are truth):
 //   - every record cell is solid (surface shells, band +-0.2 m around the
 //     generator surfaces),
+//   - object shells are flood-filled into solid volumes: for each (y,z) column
+//     a cell is "inside" an object when an odd number of object-record cells
+//     lie between it and the +X world edge (ray-cast parity over closed
+//     shells), so tree trunks/foliage, house walls, rocks and AI edits read as
+//     solid, not hollow, at every distance,
 //   - cells strictly below the lowest landscape-layer record of their column
 //     are underground (terrain interior) so downward normals stay correct,
-//     houses/trees stay hollow like their shell,
 //   - remaining air cells get a small-window BFS distance to the nearest
 //     solid cell for sphere tracing, plus the seed's appearance so brick
 //     albedo lookups near hit points resolve to the right material,
@@ -65,6 +69,12 @@ private:
     std::vector<VoxelRecord> m_records;                    // priority-merged union
     std::vector<worldfile::WorldLayer> m_layersMeta;       // enabled manifest entries
     std::vector<int16_t> m_colTop;                         // per-column landscape top (lattice y)
+
+    // object-record x positions grouped by (y<<10|z) column, used to flood-fill
+    // closed shells into solid interiors via ray-cast parity.
+    std::unordered_map<uint32_t, std::vector<int16_t>> m_objColX;
+    std::vector<uint64_t> m_objSolid;                      // per-cell interior-solid bitmap
+    std::vector<uint8_t> m_blockSolid;                     // global presence grid (records+interior)
 
     struct Signature {
         std::string path;
