@@ -19,12 +19,21 @@
 #include <glm/glm.hpp>
 #include <spdlog/spdlog.h>
 
+#include "ai/ollama_client.hpp"
+#include "app/chat_ui.hpp"
+#include "voxel/picking.hpp"
+#include "voxel/editable_world.hpp"
+
 #include <algorithm>
 #include <chrono>
 #include <cmath>
 #include <cstring>
+#include <filesystem>
 #include <string>
 #include <vector>
+#include <unordered_set>
+#include <random>
+#include <execution>
 
 namespace {
 
@@ -45,6 +54,11 @@ struct Args {
     float animTime=0.0f;
     bool probeSet=false;
     glm::vec3 probe { 0.f };
+    int splatDensity = 0; // 0=auto (1 for preview, 2 for splat), 1,2,4,8 interpolation factor
+    int splatShadows = -1; // -1 auto, 0 off, 1 on
+    int splatAO = -1; // -1 auto, 0 off, 1 on
+    std::string llmUrl = "http://127.0.0.1:11434";
+    std::string llmModel = "gemma4:12b";
 };
 
 Args parseArgs(int argc, char** argv)
@@ -85,8 +99,20 @@ Args parseArgs(int argc, char** argv)
                         float(atof(argv[i + 3])) };
             i += 3;
             a.probeSet = true;
-        }
+        } else if ((s == "--splatdensity" || s == "--splat-density" || s=="--density") && i+1<argc) {
+            a.splatDensity = atoi(argv[++i]);
+            if(a.splatDensity!=1 && a.splatDensity!=2 && a.splatDensity!=4 && a.splatDensity!=8) a.splatDensity=2;
+        } else if (s=="--shadows" && i+1<argc) { a.splatShadows = atoi(argv[++i])?1:0; }
+        else if (s=="--noshadows") a.splatShadows=0;
+        else if (s=="--noshadow") a.splatShadows=0;
+        else if (s=="--ao" && i+1<argc) { a.splatAO = atoi(argv[++i])?1:0; }
+        else if (s=="--noao") a.splatAO=0;
+        else if (s=="--no-ao") a.splatAO=0;
+        else if ((s=="--llm-url" || s=="--ollama-url") && i+1<argc) a.llmUrl = argv[++i];
+        else if ((s=="--llm-model" || s=="--ollama-model") && i+1<argc) a.llmModel = argv[++i];
     }
+    if (const char* e = getenv("VF_LLM_URL")) a.llmUrl = e;
+    if (const char* e = getenv("VF_LLM_MODEL")) a.llmModel = e;
     return a;
 }
 
@@ -113,6 +139,11 @@ private:
     void drawHud();
     bool runSelftest();
     bool runCompare();
+    bool rebuildSplats();
+    vf::SplatVertexData buildSplatData(int density);
+    bool refreshWorldLayers(std::vector<vf::voxel::VoxelRecord>& out);
+    void persistWorldLayers();
+    void rescanWorldLayers();
 
     Args m_args;
     vf::Window m_window;
@@ -138,6 +169,10 @@ private:
     glm::vec4 m_pushBSvo { 1.0f };   // cached per backend
     glm::vec4 m_pushBDense { 1.0f };
 
+    // layered world state (GUI)
+    std::vector<vf::voxel::worldfile::WorldLayer> m_worldLayers;
+    bool m_layeredSplats = false;
+
     glm::vec4 pushBFor(Backend b) const { return b == Backend::Svo ? m_pushBSvo : m_pushBDense; }
 
     // Direction TOWARD the sun, derived from --sun elevation/azimuth (degrees).
@@ -159,10 +194,27 @@ private:
     bool m_oWasDown = false;
     float m_splatScale = 1.0f;
     float m_animTime = 0.0f;
-    int m_splatShadingMode = 0; // 0 = BBSplats, 1 = 3DGS
+    int m_splatShadingMode = 1; // 0 = BBSplats, 1 = GaussianShader (HDR)
     bool m_splatAO = true;
+    int m_splatDensity = 2; // interpolation factor 1,2,4,8 (GaussianShader denser field)
+    bool m_iWasDown = false;
+    bool m_splatShadows = true; // minimal raytracing shadows per splat
+    bool m_hWasDown = false;
     uint32_t m_nextAcquire = 0;
-};
+
+    // AI chat + picking + editable world
+    vf::voxel::EditableWorld m_editable { std::string(VOXELFORGE_ASSET_DIR) };
+    vf::ai::ChatUi m_chatUi;
+    vf::voxel::PickHit m_hoverHit;
+    vf::voxel::PickHit m_selectedHit;
+    bool m_hasSelection = false;
+    bool m_ctrlLmbWasDown = false;
+    bool m_chatInitialized = false;
+    bool m_pendingSplatRebuild = false;
+public:
+    bool rebuildSplatsFromChat() { m_pendingSplatRebuild = true; return true; }
+    void requestSplatRebuild() { m_pendingSplatRebuild = true; }
+    };
 
 bool App::initWindow(const Args& args)
 {
@@ -222,6 +274,132 @@ void App::handleResize()
     ensureAcquireSemaphores();
 }
 
+vf::SplatVertexData App::buildSplatData(int density) {
+    vf::SplatVertexData sd;
+    const float ext = 30.0f;
+    const bool isSplatMode = (m_renderMode == RenderMode::GaussianSplats);
+    // density 1,2,4,8
+    int interp = density;
+    if (interp!=1 && interp!=2 && interp!=4 && interp!=8) interp=2;
+    const float baseSpacing = 0.30f;
+    const float spacing = baseSpacing / float(interp);
+    const float splatRadius = (isSplatMode ? 0.1875f : spacing*1.25f);
+    size_t earlyBudget=2500000; if(interp==1) earlyBudget=1500000; else if(interp==2) earlyBudget=2500000; else if(interp==4) earlyBudget=5000000; else if(interp==8) earlyBudget=10000000;
+    const glm::vec3 sunCol = glm::vec3(1.0f, 0.95f, 0.84f) * 2.7f;
+    const glm::vec3 ambBase = (glm::vec3(0.72f, 0.80f, 0.90f) + glm::vec3(0.20f, 0.36f, 0.62f))*0.5f*0.55f;
+    const vf::voxel::HeightMap& hm = vf::voxel::sharedHeightmap();
+    auto shadeForMat = [&](uint8_t mat)->glm::vec4{
+        const glm::vec2 rm = vf::voxel::kMaterialReflection[std::min(int(mat),8)];
+        float refl = rm.x/255.0f; float rough = rm.y/255.0f;
+        glm::vec3 tint = glm::vec3(refl, refl*0.92f, refl*0.88f);
+        if(mat==8) tint.g *=1.08f; if(mat==0||mat==1) tint.g*=1.05f;
+        return glm::vec4(tint, rough);
+    };
+    auto shadeForWater = [&]()->glm::vec4{ return glm::vec4(0.75f,0.78f,0.82f,0.15f); };
+    auto computeAO = [&](const glm::vec3& p, const glm::vec3& n)->float{
+        float occ=0; const glm::vec3 dirs[6]={glm::vec3(0.8,0.2,0.1),glm::vec3(-0.7,0.3,0.4),glm::vec3(0.2,0.15,0.9),glm::vec3(-0.3,0.25,-0.8),glm::vec3(0.1,0.9,0.2),glm::vec3(0.0,0.6,-0.7)};
+        for(int i=0;i<6;++i){ glm::vec3 d=glm::normalize(dirs[i]); if(glm::dot(d,n)<0) d=-d; glm::vec3 sp=p+n*0.06f+d*0.38f; float sdv=vf::voxel::scene(sp).d; float w=1.0f-glm::clamp(sdv/0.38f,0.0f,1.0f); occ+=w*(1.0f/(1.0f+sdv*sdv*4.0f)); }
+        return glm::clamp(1.0f-occ*0.18f,0.0f,1.0f);
+    };
+    auto addSplat = [&](const glm::vec3& p, const glm::vec3& albedo){
+        if(sd.posRadius.size()>=earlyBudget) return;
+        glm::vec3 n; float dObj=std::min({vf::voxel::houseAt(p).d, vf::voxel::treesAt(p).d, vf::voxel::rocksAt(p).d, vf::voxel::bushesAt(p).d, vf::voxel::fenceAt(p).d, vf::voxel::alpacaAt(p).d}); float dTerrain=p.y-hm.sample(p.x,p.z);
+        if(dObj+0.01f<dTerrain){ float eo=0.03f; auto od=[&](glm::vec3 q){ return std::min({vf::voxel::houseAt(q).d, vf::voxel::treesAt(q).d, vf::voxel::rocksAt(q).d, vf::voxel::bushesAt(q).d, vf::voxel::fenceAt(q).d, vf::voxel::alpacaAt(q).d}); }; n=glm::normalize(glm::vec3(od(p+glm::vec3(eo,0,0))-od(p-glm::vec3(eo,0,0)), od(p+glm::vec3(0,eo,0))-od(p-glm::vec3(0,eo,0)), od(p+glm::vec3(0,0,eo))-od(p-glm::vec3(0,0,eo)))); } else { glm::vec2 g=hm.gradient(p.x,p.z); n=glm::normalize(glm::vec3(-g.x,1.0f,-g.y)); }
+        float ao=computeAO(p,n); uint8_t mat=vf::voxel::scene(p).mat;
+        sd.posRadius.emplace_back(p, splatRadius); sd.albedoAO.emplace_back(albedo, ao); sd.normalMat.emplace_back(n, float(mat)); sd.shadeParams.emplace_back(shadeForMat(mat)); sd.colors.emplace_back(albedo*ao,1.0f);
+    };
+    vf::voxel::WorldFileData wf; const std::string worldPath=std::string(VOXELFORGE_ASSET_DIR)+"/world.vxw";
+    std::vector<vf::voxel::VoxelRecord> layerRecords;
+    bool fromFile = false;
+    if (refreshWorldLayers(layerRecords)) {
+        // live layered world: splats always reflect the latest layer edits
+        wf.meta = { vf::voxel::WORLD, vf::voxel::VOXEL, vf::voxel::WATER_LEVEL,
+                    uint32_t(vf::voxel::GRID_N), 8 };
+        wf.voxels = std::move(layerRecords);
+        fromFile = true;
+        m_layeredSplats = true;
+        spdlog::info("splats from layered world.json ({} records)", wf.voxels.size());
+    } else {
+        m_layeredSplats = false;
+        fromFile = vf::voxel::worldfile::read(worldPath,wf) && wf.meta.worldSize==vf::voxel::WORLD && wf.meta.voxelSize==vf::voxel::VOXEL && wf.meta.gridN==uint32_t(vf::voxel::GRID_N);
+    }
+    if (fromFile && !wf.voxels.empty()) {
+        std::unordered_set<uint32_t> occ; occ.reserve(wf.voxels.size()*2);
+        for(auto &v:wf.voxels) occ.insert((uint32_t(v.x)<<20)|(uint32_t(v.y)<<10)|uint32_t(v.z));
+        auto voxelNormal=[&](glm::vec3 p)->glm::vec3{ int ix=int(std::floor((p.x+0.5f*wf.meta.worldSize)/wf.meta.voxelSize)); int iy=int(std::floor((p.y+0.5f*wf.meta.worldSize)/wf.meta.voxelSize)); int iz=int(std::floor((p.z+0.5f*wf.meta.worldSize)/wf.meta.voxelSize)); glm::vec3 n(0); const int dirs[6][3]={{1,0,0},{-1,0,0},{0,1,0},{0,-1,0},{0,0,1},{0,0,-1}}; for(auto &d:dirs){ uint32_t k=(uint32_t(ix+d[0])<<20)|(uint32_t(iy+d[1])<<10)|uint32_t(iz+d[2]); if(occ.find(k)==occ.end()) n+=glm::vec3(float(d[0]),float(d[1]),float(d[2])); } if(glm::length(n)<0.1f) return glm::vec3(0,1,0); return glm::normalize(n); };
+        std::vector<size_t> voxOrder(wf.voxels.size()); std::iota(voxOrder.begin(), voxOrder.end(), 0); { std::mt19937 rng(42); std::shuffle(voxOrder.begin(), voxOrder.end(), rng); }
+        for(size_t oi: voxOrder){
+            if(sd.posRadius.size()>=earlyBudget) break;
+            const auto& v = wf.voxels[oi];
+            if (interp==1){ if((v.x%3u)!=1u || (v.z%3u)!=1u) continue; } else if (interp==2) { if((v.x%2u)!=0u || (v.z%2u)!=0u) continue; } else if (interp==4) { if((v.x%2u)!=0u) continue; } else { /* 8x keep all */ }
+            glm::vec3 p=v.position(wf.meta); if(std::abs(p.x)>ext||std::abs(p.z)>ext||p.y<-8.f||p.y>24.f) continue;
+            glm::vec3 albedo(v.r,v.g,v.b); albedo/=255.0f; glm::vec3 n=voxelNormal(p); uint8_t mat=v.materialId;
+            sd.posRadius.emplace_back(p, splatRadius); sd.albedoAO.emplace_back(albedo,1.0f); sd.normalMat.emplace_back(n,float(mat)); sd.shadeParams.emplace_back(shadeForMat(mat)); sd.colors.emplace_back(albedo,1.0f);
+            if(interp>1){
+                if(sd.posRadius.size()>=earlyBudget) break;
+                const float sub = wf.meta.voxelSize * 0.5f;
+                float subR=splatRadius*0.9f;
+                for(int dz=-1; dz<=1; dz+=2) for(int dy=-1; dy<=1; dy+=2) for(int dx=-1; dx<=1; dx+=2){
+                    if(sd.posRadius.size()>=earlyBudget) break;
+                    glm::vec3 ps=p+glm::vec3(dx*sub, dy*sub, dz*sub);
+                    if(std::abs(vf::voxel::scene(ps).d)>0.22f) continue;
+                    glm::vec3 ns=voxelNormal(ps); sd.posRadius.emplace_back(ps,subR); sd.albedoAO.emplace_back(albedo,1.0f); sd.normalMat.emplace_back(ns,float(mat)); sd.shadeParams.emplace_back(shadeForMat(mat)); sd.colors.emplace_back(albedo,1.0f);
+                }
+            }
+        }
+    } else {
+        const int SN=int(2*ext/spacing+0.5f);
+        for(int zi=0;zi<SN;++zi){ if(sd.posRadius.size()>=earlyBudget) break; for(int yi=0;yi<SN;++yi){ if(sd.posRadius.size()>=earlyBudget) break; for(int xi=0;xi<SN;++xi){ if(sd.posRadius.size()>=earlyBudget) break; glm::vec3 p(glm::mix(-ext,ext,(xi+0.5f)/SN), glm::mix(-8.f,24.f,(yi+0.5f)/SN), glm::mix(-ext,ext,(zi+0.5f)/SN)); auto s=vf::voxel::scene(p); if(std::abs(s.d)>0.22f) continue; addSplat(p, vf::voxel::kPalette[s.mat]); } } }
+    }
+    // water
+    {
+        const float waterSpacing=0.45f/float(interp);
+        const int WN=int(2*ext/waterSpacing);
+        const glm::vec3 waterBase(0.06f,0.22f,0.28f);
+        for(int zi=0;zi<WN;++zi){ if(sd.posRadius.size()>=earlyBudget) break; for(int xi=0;xi<WN;++xi){ if(sd.posRadius.size()>=earlyBudget) break; float x=-ext+(xi+0.5f)*waterSpacing; float z=-ext+(zi+0.5f)*waterSpacing; float H=hm.sample(x,z); if(H>vf::voxel::WATER_LEVEL) continue; glm::vec3 p(x,vf::voxel::WATER_LEVEL,z); float depth=vf::voxel::WATER_LEVEL-H; glm::vec3 albedo=glm::mix(waterBase*0.7f,waterBase,glm::clamp(depth*0.6f,0.0f,1.0f)); glm::vec3 n(0,1,0); sd.posRadius.emplace_back(p,splatRadius*1.1f); sd.albedoAO.emplace_back(albedo,1.0f); sd.normalMat.emplace_back(n,3.0f); sd.shadeParams.emplace_back(shadeForWater()); sd.colors.emplace_back(albedo,1.0f); } }
+    }
+    // Minimal raytracing shadows for buildSplatData
+    {
+        auto softShadow = [&](glm::vec3 ro, glm::vec3 rd)->float{
+            float res=1.0f; float t=0.05f;
+            for(int i=0;i<16;++i){
+                glm::vec3 sp = ro + rd*t;
+                float d = vf::voxel::scene(sp).d;
+                res = std::min(res, 9.0f*d/t);
+                t += glm::clamp(d*0.85f, 0.05f, 1.2f);
+                if(res<0.004f || t>40.0f) break;
+            }
+            return glm::clamp(res,0.0f,1.0f);
+        };
+        glm::vec3 sunDir = glm::vec3(m_sunDir);
+        sd.shadow.resize(sd.posRadius.size());
+        for(size_t i=0;i<sd.posRadius.size();++i){
+            glm::vec3 pp = glm::vec3(sd.posRadius[i]);
+            glm::vec3 nn = glm::vec3(sd.normalMat[i]);
+            if(glm::length(nn)<0.1f) nn=glm::vec3(0,1,0); else nn=glm::normalize(nn);
+            glm::vec3 ro = pp + nn*0.06f;
+            float soft = softShadow(ro, sunDir);
+            sd.shadow[i] = 1.0f - soft;
+        }
+    }
+    // budget scales with interp
+    size_t kSplatBudget=2500000; if(interp==1) kSplatBudget=1500000; else if(interp==2) kSplatBudget=2500000; else if(interp==4) kSplatBudget=5000000; else if(interp==8) kSplatBudget=10000000;
+    if(sd.posRadius.size()>kSplatBudget){ spdlog::warn("splat budget {} exceeds {} (interp {}x), truncating", sd.posRadius.size(), kSplatBudget, interp); sd.posRadius.resize(kSplatBudget); sd.albedoAO.resize(kSplatBudget); sd.normalMat.resize(kSplatBudget); if(sd.shadeParams.size()>kSplatBudget) sd.shadeParams.resize(kSplatBudget); if(sd.shadow.size()>kSplatBudget) sd.shadow.resize(kSplatBudget); sd.colors.resize(std::min(sd.colors.size(),kSplatBudget)); }
+    return sd;
+}
+
+bool App::rebuildSplats() {
+    vkDeviceWaitIdle(m_ctx.device());
+    m_splatPass.destroy();
+    auto sd = buildSplatData(m_splatDensity);
+    spdlog::info("rebuild splats density {}x -> {} splats", m_splatDensity, sd.posRadius.size());
+    if(sd.posRadius.empty()) return false;
+    if(!m_splatPass.init(m_ctx, VK_FORMAT_R8G8B8A8_UNORM, sd)) return false;
+    m_splatPass.setOutputView(m_offscreen.view);
+    // rebind offscreen if needed (already)
+    return true;
+}
+
 bool App::initVulkan()
 {
     if (!m_ctx.init(m_window.handle(), true))
@@ -272,6 +450,18 @@ bool App::initVulkan()
     const bool buildDense = useDense || m_compareMode;
     const bool buildSvo = !useDense || m_compareMode;
     const bool denseIsPrimary = useDense;
+    auto shadeForMatGlobal = [&](uint8_t mat)->glm::vec4{
+        const glm::vec2 rm = vf::voxel::kMaterialReflection[std::min(int(mat),8)];
+        float refl = rm.x/255.0f;
+        float rough = rm.y/255.0f;
+        glm::vec3 tint = glm::vec3(refl, refl*0.92f, refl*0.88f);
+        if(mat==8) tint.g *= 1.08f;
+        if(mat==0 || mat==1) tint.g *= 1.05f;
+        return glm::vec4(tint, rough);
+    };
+    auto shadeForWaterGlobal = [&]()->glm::vec4{
+        return glm::vec4(0.75f, 0.78f, 0.82f, 0.15f);
+    };
 
     vf::SplatVertexData sd;
 
@@ -334,11 +524,11 @@ bool App::initVulkan()
                         const auto& hm = vf::voxel::sharedHeightmap();
                         glm::vec2 g = hm.gradient(p.x, p.z);
                         glm::vec3 n = glm::normalize(glm::vec3(-g.x, 1.0f, -g.y));
-                        float dObj = std::min({vf::voxel::houseAt(p).d, vf::voxel::treesAt(p).d, vf::voxel::rocksAt(p).d, vf::voxel::bushesAt(p).d});
+                        float dObj = std::min({vf::voxel::houseAt(p).d, vf::voxel::treesAt(p).d, vf::voxel::rocksAt(p).d, vf::voxel::bushesAt(p).d, vf::voxel::fenceAt(p).d, vf::voxel::alpacaAt(p).d});
                         float dT = p.y - hm.sample(p.x, p.z);
                         if (dObj + 0.01f < dT) {
                             float eo=0.03f;
-                            auto od = [&](glm::vec3 q){ return std::min({vf::voxel::houseAt(q).d, vf::voxel::treesAt(q).d, vf::voxel::rocksAt(q).d, vf::voxel::bushesAt(q).d}); };
+                            auto od = [&](glm::vec3 q){ return std::min({vf::voxel::houseAt(q).d, vf::voxel::treesAt(q).d, vf::voxel::rocksAt(q).d, vf::voxel::bushesAt(q).d, vf::voxel::fenceAt(q).d, vf::voxel::alpacaAt(q).d}); };
                             n = glm::normalize(glm::vec3(od(p+glm::vec3(eo,0,0))-od(p-glm::vec3(eo,0,0)),
                                                           od(p+glm::vec3(0,eo,0))-od(p-glm::vec3(0,eo,0)),
                                                           od(p+glm::vec3(0,0,eo))-od(p-glm::vec3(0,0,eo))));
@@ -353,6 +543,7 @@ bool App::initVulkan()
                         sd.posRadius.emplace_back(p + vol.originOffset, 0.38f);
                         sd.albedoAO.emplace_back(c, ao);
                         sd.normalMat.emplace_back(n, float(vol.matId[i]));
+                        sd.shadeParams.emplace_back(shadeForMatGlobal(uint8_t(vol.matId[i])));
                         sd.colors.emplace_back(c * ao, 1.0f);
                     }
                 }
@@ -374,10 +565,11 @@ bool App::initVulkan()
                 glm::vec3 p(x, vf::voxel::WATER_LEVEL, z);
                 float depth = vf::voxel::WATER_LEVEL - H;
                 glm::vec3 albedo = glm::mix(waterBaseD * 0.7f, waterBaseD, glm::clamp(depth * 0.6f, 0.0f, 1.0f));
-                float ndl = glm::max(glm::dot(glm::vec3(0,1,0), glm::vec3(m_sunDir)), 0.0f);
-                glm::vec3 amb = ambBaseD * 1.0f;
                 sd.posRadius.emplace_back(p, splatRadW);
-                sd.colors.emplace_back(albedo * (sunColD * ndl * 0.9f + amb), 1.0f);
+                sd.albedoAO.emplace_back(albedo, 1.0f);
+                sd.normalMat.emplace_back(glm::vec3(0,1,0), 3.0f);
+                sd.shadeParams.emplace_back(shadeForWaterGlobal());
+                sd.colors.emplace_back(albedo, 1.0f);
             }
             // Supplement missing thin objects (house/trees) that the 0.4m dense volume undersamples
             const float ext2 = 30.0f;
@@ -397,21 +589,20 @@ bool App::initVulkan()
                 glm::vec2 g = hm2.gradient(p.x, p.z);
                 glm::vec3 n = glm::normalize(glm::vec3(-g.x, 1.0f, -g.y));
                 // for objects, use object normal if closer
-                float dObj = std::min({vf::voxel::houseAt(p).d, vf::voxel::treesAt(p).d, vf::voxel::rocksAt(p).d, vf::voxel::bushesAt(p).d});
+                float dObj = std::min({vf::voxel::houseAt(p).d, vf::voxel::treesAt(p).d, vf::voxel::rocksAt(p).d, vf::voxel::bushesAt(p).d, vf::voxel::fenceAt(p).d, vf::voxel::alpacaAt(p).d});
                 if (dObj + 0.01f < p.y - hm2.sample(p.x, p.z)) {
                     // approximate object normal via central differences of object distance
                     float eo = 0.03f;
-                    auto od = [&](glm::vec3 q){ return std::min({vf::voxel::houseAt(q).d, vf::voxel::treesAt(q).d, vf::voxel::rocksAt(q).d, vf::voxel::bushesAt(q).d}); };
+                    auto od = [&](glm::vec3 q){ return std::min({vf::voxel::houseAt(q).d, vf::voxel::treesAt(q).d, vf::voxel::rocksAt(q).d, vf::voxel::bushesAt(q).d, vf::voxel::fenceAt(q).d, vf::voxel::alpacaAt(q).d}); };
                     n = glm::normalize(glm::vec3(od(p+glm::vec3(eo,0,0))-od(p-glm::vec3(eo,0,0)),
                                                  od(p+glm::vec3(0,eo,0))-od(p-glm::vec3(0,eo,0)),
                                                  od(p+glm::vec3(0,0,eo))-od(p-glm::vec3(0,0,eo))));
                 }
-                float ndl = glm::max(glm::dot(n, glm::vec3(m_sunDir)), 0.0f);
-                glm::vec3 amb = ambBase2 * (n.y * 0.5f + 0.5f);
                 sd.posRadius.emplace_back(p, r2);
                 sd.albedoAO.emplace_back(vf::voxel::kPalette[s.mat], 1.0f);
                 sd.normalMat.emplace_back(n, float(s.mat));
-                sd.colors.emplace_back(vf::voxel::kPalette[s.mat] * (sunCol2 * ndl + amb), 1.0f);
+                sd.shadeParams.emplace_back(shadeForMatGlobal(s.mat));
+                sd.colors.emplace_back(vf::voxel::kPalette[s.mat], 1.0f);
             }
         }
     }
@@ -425,6 +616,18 @@ bool App::initVulkan()
                         wf.meta.worldSize == vf::voxel::WORLD &&
                         wf.meta.voxelSize == vf::voxel::VOXEL &&
                         wf.meta.gridN == uint32_t(vf::voxel::GRID_N);
+        if (fromFile) {
+            // live layers win for splat records; SVO stays on the merged cache
+            std::vector<vf::voxel::VoxelRecord> layerRecords;
+            if (refreshWorldLayers(layerRecords)) {
+                wf.voxels = std::move(layerRecords);
+                m_layeredSplats = true;
+                spdlog::info("splats from layered world.json ({} records)",
+                             wf.voxels.size());
+            } else {
+                m_layeredSplats = false;
+            }
+        }
         size_t nodes = 0, bricks = 0, activeChunks = 0;
         double mb = 0.0;
         if (fromFile) {
@@ -467,15 +670,37 @@ bool App::initVulkan()
         // raymarch shading so both modes match in brightness.
         // In splat mode we use a much denser lattice and a fine subgrid
         // with interpolated positions so no gaps remain up close.
+        // No radius increase per user request - gaps closed via interpolation factor.
         const float ext = 30.0f;
+        const int interp = m_splatDensity; // 1,2,4,8 interpolation factor (no radius boost)
         const bool denseSplats = (m_renderMode == RenderMode::GaussianSplats);
-        const float spacing = denseSplats ? 0.21f : 0.31f;
-        const float splatRadius = spacing * 1.25f;
+        // spacing scales inversely with interp: 1x=0.30m, 2x=0.15m, 4x=0.075m, 8x=0.0375m
+        const float baseSpacing = 0.30f;
+        const float spacing = baseSpacing / float(interp);
+        // keep radius constant for splat mode (no far boost, gaps closed via density, not size)
+        const float splatRadius = (m_renderMode==RenderMode::GaussianSplats ? 0.1875f : spacing*1.25f);
+        size_t earlyBudget = 2500000;
+        if (interp==1) earlyBudget=1500000; else if(interp==2) earlyBudget=2500000; else if(interp==4) earlyBudget=5000000; else if(interp==8) earlyBudget=10000000;
         const glm::vec3 sunCol = glm::vec3(1.0f, 0.95f, 0.84f) * 2.7f;
         const glm::vec3 ambBase = (glm::vec3(0.72f, 0.80f, 0.90f) +
                                    glm::vec3(0.20f, 0.36f, 0.62f)) *
                                   0.5f * 0.55f;
         const vf::voxel::HeightMap& hm = vf::voxel::sharedHeightmap();
+        auto shadeForMat = [&](uint8_t mat)->glm::vec4{
+            // kMaterialReflection: x=reflectivity, y=roughness (0-255)
+            const glm::vec2 rm = vf::voxel::kMaterialReflection[std::min(int(mat),8)];
+            float refl = rm.x/255.0f;
+            float rough = rm.y/255.0f;
+            // specular tint is grayscale refl modulated slightly per channel for dielectrics
+            glm::vec3 tint = glm::vec3(refl, refl*0.92f, refl*0.88f);
+            // foliage/grass gets slightly more green tint
+            if(mat==8) tint.g *= 1.08f;
+            if(mat==0 || mat==1) tint.g *= 1.05f;
+            return glm::vec4(tint, rough);
+        };
+        auto shadeForWater = [&]()->glm::vec4{
+            return glm::vec4(0.75f, 0.78f, 0.82f, 0.15f); // high specular, low roughness
+        };
         auto computeAO = [&](const glm::vec3& p, const glm::vec3& n) -> float {
             float occ = 0.0f;
             // 6 hemisphere samples
@@ -497,12 +722,13 @@ bool App::initVulkan()
         auto addSplat = [&](const glm::vec3& p, const glm::vec3& albedo) {
             if (denseIsPrimary) return;
             // normal: terrain gradient or object SDF central diff if near object
+            // This normal is the shortest axis v (GaussianShader §3.3 flattened disk)
             glm::vec3 n;
-            float dObj = std::min({vf::voxel::houseAt(p).d, vf::voxel::treesAt(p).d, vf::voxel::rocksAt(p).d, vf::voxel::bushesAt(p).d});
+            float dObj = std::min({vf::voxel::houseAt(p).d, vf::voxel::treesAt(p).d, vf::voxel::rocksAt(p).d, vf::voxel::bushesAt(p).d, vf::voxel::fenceAt(p).d, vf::voxel::alpacaAt(p).d});
             float dTerrain = p.y - hm.sample(p.x, p.z);
             if (dObj + 0.01f < dTerrain) {
                 float eo=0.03f;
-                auto od = [&](glm::vec3 q){ return std::min({vf::voxel::houseAt(q).d, vf::voxel::treesAt(q).d, vf::voxel::rocksAt(q).d, vf::voxel::bushesAt(q).d}); };
+                auto od = [&](glm::vec3 q){ return std::min({vf::voxel::houseAt(q).d, vf::voxel::treesAt(q).d, vf::voxel::rocksAt(q).d, vf::voxel::bushesAt(q).d, vf::voxel::fenceAt(q).d, vf::voxel::alpacaAt(q).d}); };
                 n = glm::normalize(glm::vec3(od(p+glm::vec3(eo,0,0))-od(p-glm::vec3(eo,0,0)),
                                               od(p+glm::vec3(0,eo,0))-od(p-glm::vec3(0,eo,0)),
                                               od(p+glm::vec3(0,0,eo))-od(p-glm::vec3(0,0,eo))));
@@ -516,35 +742,91 @@ bool App::initVulkan()
             sd.posRadius.emplace_back(p, splatRadius);
             sd.albedoAO.emplace_back(albedo, ao);
             sd.normalMat.emplace_back(n, float(mat));
+            sd.shadeParams.emplace_back(shadeForMat(mat));
             sd.colors.emplace_back(albedo * ao, 1.0f); // legacy fallback
         };
         // SVO splats: single source is the voxel file. When the file is
         // available we derive splats directly from its surface records
         // (decimated to ~0.3 m); otherwise we resample the procedural scene.
-        // In splat mode a denser subgrid with interpolated neighbours is added.
+        // Normals are from 6-neighbour occupancy for stability when view rotates.
         if (fromFile && !wf.voxels.empty()) {
-            const float sub = spacing * 0.25f;
-            for (const auto& v : wf.voxels) {
-                if ((v.x % 3u) != 1u || (v.z % 3u) != 1u) continue;
+            // build occupancy hash for neighbour checks (10 bits per axis)
+            std::unordered_set<uint32_t> occ;
+            occ.reserve(wf.voxels.size()*2);
+            for (auto &v: wf.voxels) occ.insert((uint32_t(v.x)<<20)|(uint32_t(v.y)<<10)|uint32_t(v.z));
+            auto voxelNormal = [&](glm::vec3 p)->glm::vec3{
+                int ix = int(std::floor((p.x + 0.5f*wf.meta.worldSize)/wf.meta.voxelSize));
+                int iy = int(std::floor((p.y + 0.5f*wf.meta.worldSize)/wf.meta.voxelSize));
+                int iz = int(std::floor((p.z + 0.5f*wf.meta.worldSize)/wf.meta.voxelSize));
+                glm::vec3 n(0);
+                const int dirs[6][3]={{1,0,0},{-1,0,0},{0,1,0},{0,-1,0},{0,0,1},{0,0,-1}};
+                for(auto &d: dirs){
+                    uint32_t k = (uint32_t(ix+d[0])<<20)|(uint32_t(iy+d[1])<<10)|uint32_t(iz+d[2]);
+                    if (occ.find(k)==occ.end()){
+                        n += glm::vec3(float(d[0]), float(d[1]), float(d[2]));
+                    }
+                }
+                if (glm::length(n) < 0.1f) return glm::vec3(0,1,0);
+                return glm::normalize(n);
+            };
+            // interp factor controls decimation and subgrid interpolation (no radius boost)
+            // shuffled order for uniform budget when truncating
+            std::vector<size_t> voxOrder(wf.voxels.size());
+            std::iota(voxOrder.begin(), voxOrder.end(), 0);
+            { std::mt19937 rng(42); std::shuffle(voxOrder.begin(), voxOrder.end(), rng); }
+            for (size_t oi : voxOrder) {
+                if (sd.posRadius.size() >= earlyBudget) break;
+                const auto& v = wf.voxels[oi];
+                // decimation: 1x sparse 1/9, 2x/4x/8x keep 1/4 (budget controls total)
+                if (interp == 1) {
+                    if ((v.x % 3u) != 1u || (v.z % 3u) != 1u) continue;
+                } else if (interp == 2) {
+                    if ((v.x % 2u) != 0u || (v.z % 2u) != 0u) continue;
+                } else if (interp == 4) {
+                    if ((v.x % 2u) != 0u) continue;
+                } else {
+                    // 8x keep all
+                }
                 glm::vec3 p = v.position(wf.meta);
                 if (std::abs(p.x) > ext || std::abs(p.z) > ext || p.y < -8.f || p.y > 24.f) continue;
                 glm::vec3 albedo(v.r, v.g, v.b); albedo /= 255.0f;
-                addSplat(p, albedo);
-                if (denseSplats) {
-                    for (int dz = -1; dz <= 1; dz += 2) for (int dy = -1; dy <= 1; dy += 2) for (int dx = -1; dx <= 1; dx += 2) {
-                        if (dx==-1 && dy==-1 && dz==-1) continue;
-                        glm::vec3 ps = p + glm::vec3(dx * sub, dy * sub, dz * sub);
-                        // keep sub-splat near surface (use file as source, so approximate with same mat)
-                        addSplat(ps, albedo);
+                glm::vec3 n = voxelNormal(p);
+                float ao = computeAO(p,n);
+                uint8_t mat = v.materialId;
+                sd.posRadius.emplace_back(p, splatRadius);
+                sd.albedoAO.emplace_back(albedo, ao);
+                sd.normalMat.emplace_back(n, float(mat));
+                sd.shadeParams.emplace_back(shadeForMat(mat));
+                sd.colors.emplace_back(albedo, 1.0f);
+                if (sd.posRadius.size() >= earlyBudget) break;
+                if (interp > 1) {
+                    // fixed 8 corners for all densities >1 (density via decimation, not per-voxel explosion)
+                    const float sub = wf.meta.voxelSize * 0.5f;
+                    float subRadius = splatRadius * 0.9f;
+                    for (int dz=-1; dz<=1; dz+=2) for (int dy=-1; dy<=1; dy+=2) for (int dx=-1; dx<=1; dx+=2) {
+                        if (sd.posRadius.size() >= earlyBudget) break;
+                        glm::vec3 ps = p + glm::vec3(dx*sub, dy*sub, dz*sub);
+                        if (std::abs(vf::voxel::scene(ps).d) > 0.22f) continue;
+                        glm::vec3 ns = voxelNormal(ps);
+                        float ao2 = computeAO(ps, ns);
+                        sd.posRadius.emplace_back(ps, subRadius);
+                        sd.albedoAO.emplace_back(albedo, ao2);
+                        sd.normalMat.emplace_back(ns, float(mat));
+                        sd.shadeParams.emplace_back(shadeForMat(mat));
+                        sd.colors.emplace_back(albedo, 1.0f);
                     }
+                    if (sd.posRadius.size() >= earlyBudget) break;
                 }
             }
         } else {
+            // fallback lattice: SN already scaled via spacing =0.30/interp
             const int SN = int(2 * ext / spacing + 0.5f);
-            const float sub = spacing * 0.25f;
-            for (int zi = 0; zi < SN; ++zi)
-                for (int yi = 0; yi < SN; ++yi)
+            for (int zi = 0; zi < SN; ++zi) {
+                if (sd.posRadius.size() >= earlyBudget) break;
+                for (int yi = 0; yi < SN; ++yi) {
+                    if (sd.posRadius.size() >= earlyBudget) break;
                     for (int xi = 0; xi < SN; ++xi) {
+                        if (sd.posRadius.size() >= earlyBudget) break;
                         glm::vec3 p(glm::mix(-ext, ext, (xi + 0.5f) / SN),
                                     glm::mix(-8.f, 24.f, (yi + 0.5f) / SN),
                                     glm::mix(-ext, ext, (zi + 0.5f) / SN));
@@ -552,40 +834,83 @@ bool App::initVulkan()
                         if (std::abs(s.d) > 0.22f)
                             continue;
                         addSplat(p, vf::voxel::kPalette[s.mat]);
-                        if (denseSplats) {
-                            for (int dz = -1; dz <= 1; dz += 2) for (int dy = -1; dy <= 1; dy += 2) for (int dx = -1; dx <= 1; dx += 2) {
-                                if (dx==-1 && dy==-1 && dz==-1) continue;
-                                glm::vec3 ps = p + glm::vec3(dx * sub, dy * sub, dz * sub);
-                                auto ss = vf::voxel::scene(ps);
-                                if (std::abs(ss.d) > 0.22f) continue;
-                                addSplat(ps, vf::voxel::kPalette[ss.mat]);
-                            }
-                        }
+                        // for interp>1, fallback lattice already denser via SN, no extra subgrid needed
                     }
+                }
+            }
         }
         // Water surface splats (analytic plane) — terrain SDF does not contain water
+        // GaussianShader: water highly specular, density scales with interp (no radius boost)
         {
-            const float waterSpacing = denseSplats ? 0.30f : 0.45f;
+            const float waterSpacing = 0.45f / float(interp);
             const int WN = int(2 * ext / waterSpacing);
             const glm::vec3 waterBase(0.06f, 0.22f, 0.28f);
-            for (int zi = 0; zi < WN; ++zi)
+            for (int zi = 0; zi < WN; ++zi) {
+                if (sd.posRadius.size() >= earlyBudget) break;
                 for (int xi = 0; xi < WN; ++xi) {
+                    if (sd.posRadius.size() >= earlyBudget) break;
                     float x = -ext + (xi + 0.5f) * waterSpacing;
                     float z = -ext + (zi + 0.5f) * waterSpacing;
                     float H = hm.sample(x, z);
                     if (H > vf::voxel::WATER_LEVEL) continue;
                     glm::vec3 p(x, vf::voxel::WATER_LEVEL, z);
-                    // simple depth-tinted water albedo
                     float depth = vf::voxel::WATER_LEVEL - H;
                     glm::vec3 albedo = glm::mix(waterBase * 0.7f, waterBase, glm::clamp(depth * 0.6f, 0.0f, 1.0f));
                     if (!denseIsPrimary) {
-                        // water normal is up
-                        float ndl = glm::max(glm::dot(glm::vec3(0,1,0), glm::vec3(m_sunDir)), 0.0f);
-                        glm::vec3 amb = ambBase * 1.0f;
+                        glm::vec3 n(0,1,0);
+                        float ao = 1.0f;
                         sd.posRadius.emplace_back(p, splatRadius * 1.1f);
-                        sd.colors.emplace_back(albedo * (sunCol * ndl * 0.9f + amb), 1.0f);
+                        sd.albedoAO.emplace_back(albedo, ao);
+                        sd.normalMat.emplace_back(n, 3.0f);
+                        sd.shadeParams.emplace_back(shadeForWater());
+                        sd.colors.emplace_back(albedo, 1.0f);
                     }
                 }
+            }
+        }
+        // Minimal raytracing shadows: one ray per splat against SDF proxy (no shadow maps)
+        // Toggle via H key; parallel for high density
+        if(m_splatShadows){
+            auto softShadow = [&](glm::vec3 ro, glm::vec3 rd)->float{
+                float res=1.0f; float t=0.05f;
+                for(int i=0;i<8;++i){
+                    glm::vec3 sp = ro + rd*t;
+                    float d = vf::voxel::scene(sp).d;
+                    res = std::min(res, 9.0f*d/t);
+                    t += glm::clamp(d*0.85f, 0.05f, 1.2f);
+                    if(res<0.004f || t>40.0f) break;
+                }
+                return glm::clamp(res,0.0f,1.0f);
+            };
+            glm::vec3 sunDir = glm::vec3(m_sunDir);
+            sd.shadow.resize(sd.posRadius.size());
+            std::vector<size_t> idx(sd.posRadius.size());
+            std::iota(idx.begin(), idx.end(), 0);
+            std::for_each(std::execution::par, idx.begin(), idx.end(), [&](size_t i){
+                glm::vec3 pp = glm::vec3(sd.posRadius[i]);
+                glm::vec3 nn = glm::vec3(sd.normalMat[i]);
+                if(glm::length(nn)<0.1f) nn=glm::vec3(0,1,0); else nn=glm::normalize(nn);
+                glm::vec3 ro = pp + nn*0.06f;
+                float soft = softShadow(ro, sunDir);
+                sd.shadow[i] = 1.0f - soft;
+            });
+        } else {
+            sd.shadow.assign(sd.posRadius.size(), 0.0f);
+        }
+        // Global splat budget cap scales with interp (no radius increase, so need more splats)
+        size_t kSplatBudget = 2500000;
+        if (interp==1) kSplatBudget = 1500000;
+        else if (interp==2) kSplatBudget = 2500000;
+        else if (interp==4) kSplatBudget = 5000000;
+        else if (interp==8) kSplatBudget = 10000000;
+        if (sd.posRadius.size() > kSplatBudget) {
+            spdlog::warn("splat budget {} exceeds {} (interp {}x), truncating", sd.posRadius.size(), kSplatBudget, interp);
+            sd.posRadius.resize(kSplatBudget);
+            sd.albedoAO.resize(kSplatBudget);
+            sd.normalMat.resize(kSplatBudget);
+            if(sd.shadeParams.size() > kSplatBudget) sd.shadeParams.resize(kSplatBudget);
+            if(sd.shadow.size()>kSplatBudget) sd.shadow.resize(kSplatBudget);
+            sd.colors.resize(std::min(sd.colors.size(), kSplatBudget));
         }
     }
 
@@ -633,6 +958,63 @@ bool App::initVulkan()
     return true;
 }
 
+bool App::refreshWorldLayers(std::vector<vf::voxel::VoxelRecord>& out)
+{
+    const std::string manifestPath = std::string(VOXELFORGE_ASSET_DIR) + "/world.json";
+    vf::voxel::WorldFileMeta expected { vf::voxel::WORLD, vf::voxel::VOXEL,
+                                        vf::voxel::WATER_LEVEL,
+                                        uint32_t(vf::voxel::GRID_N), 8 };
+    if (!vf::voxel::worldfile::readLayered(manifestPath, expected, out))
+        return false;
+    std::vector<vf::voxel::worldfile::WorldLayer> l;
+    if (!vf::voxel::worldfile::loadManifest(manifestPath, l))
+        return true; // records loaded but manifest unreadable: keep old list
+    // retain previously discovered folder entries that are still unlisted
+    for (const auto& u : m_worldLayers)
+        if (!u.listed && std::none_of(l.begin(), l.end(),
+                                      [&](const vf::voxel::worldfile::WorldLayer& e) {
+                                          return e.file == u.file;
+                                      }))
+            l.push_back(u);
+    m_worldLayers = std::move(l);
+    return true;
+}
+
+void App::persistWorldLayers()
+{
+    std::vector<vf::voxel::worldfile::WorldLayer> out;
+    out.reserve(m_worldLayers.size());
+    for (const auto& l : m_worldLayers)
+        if (l.listed)
+            out.push_back(l);
+    vf::voxel::worldfile::writeManifest(std::string(VOXELFORGE_ASSET_DIR) + "/world.json",
+                                        out);
+}
+
+void App::rescanWorldLayers()
+{
+    namespace fs = std::filesystem;
+    const fs::path dir = std::string(VOXELFORGE_ASSET_DIR);
+    std::error_code ec;
+    for (fs::directory_iterator it(dir, ec), end; !ec && it != end; it.increment(ec)) {
+        std::string f = it->path().filename().string();
+        if (it->path().extension() != ".vxw" || f == "world.vxw")
+            continue;
+        bool known = false;
+        for (const auto& l : m_worldLayers)
+            known |= (l.file == f);
+        if (known)
+            continue;
+        vf::voxel::worldfile::WorldLayer nl;
+        nl.file = f;
+        nl.name = it->path().stem().string();
+        nl.role = "object";
+        nl.listed = false;
+        nl.enabled = false;
+        m_worldLayers.push_back(nl);
+    }
+}
+
 void App::drawHud()
 {
     ImGuiIO& io = ImGui::GetIO();
@@ -652,10 +1034,10 @@ void App::drawHud()
     ImGui::Text("Mode: %s", modeName);
     if (m_renderMode == RenderMode::GaussianSplats) {
         ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1.0f, 0.75f, 0.35f, 1.0f));
-        ImGui::TextWrapped("Preview: isotropic surface point-splats. Press B to toggle shading, O for AO.");
+        ImGui::TextWrapped("Splats: flattened disks + HDR + minimal raytraced shadows. B shading, O AO, I density, H shadows.");
         ImGui::PopStyleColor();
-        ImGui::Text("Splat scale x%.2f  [+ / -]  Shading: %s [B]  AO: %s [O]",
-                    m_splatScale, m_splatShadingMode ? "3DGS" : "BBSplats", m_splatAO ? "on" : "off");
+        ImGui::Text("Scale x%.2f[+/-] Shading:%s[B] AO:%s[O] Dens:%dx[I/1-8] Shadows:%s[H]",
+                    m_splatScale, m_splatShadingMode ? "3DGS" : "BBSplats", m_splatAO ? "on" : "off", m_splatDensity, m_splatShadows?"on":"off");
     }
 
     ImGui::Text("Cam  %.1f %.1f %.1f", m_camera.pos.x, m_camera.pos.y, m_camera.pos.z);
@@ -667,8 +1049,52 @@ void App::drawHud()
         ImGui::BulletText("WASD move, Q/E down/up");
         ImGui::BulletText("RMB hold: look");
         ImGui::BulletText("Wheel: speed, Shift/Ctrl boost/slow");
-        ImGui::BulletText("F: toggle voxel/splat  B: shading  O: AO  +/-: size");
-        ImGui::BulletText("ESC: quit");
+        ImGui::BulletText("F: voxel/splat  B: shading  O: AO  +/-: size  I: density  H: shadows");
+        ImGui::BulletText("1/2/4/8: direct density  ESC: quit");
+    }
+
+    if (ImGui::CollapsingHeader("World objects", ImGuiTreeNodeFlags_DefaultOpen)) {
+        if (m_worldLayers.empty()) {
+            ImGui::TextDisabled("no world.json manifest found");
+        } else {
+            for (auto& l : m_worldLayers) {
+                if (l.role == "packed")
+                    continue;
+                const std::string id = "##layer_" + l.file;
+                const std::string label =
+                    l.name.empty() ? l.file : l.name + "  (" + l.file + ")";
+                bool en = l.enabled;
+                if (l.role == "landscape") {
+                    ImGui::BeginDisabled();
+                    ImGui::Checkbox(id.c_str(), &en); // locked on
+                    ImGui::EndDisabled();
+                    ImGui::SameLine();
+                    ImGui::TextUnformatted(label.c_str());
+                    ImGui::SameLine();
+                    ImGui::TextDisabled("[terrain]");
+                } else {
+                    if (ImGui::Checkbox(id.c_str(), &en)) {
+                        l.enabled = en;
+                        if (en)
+                            l.listed = true; // newly added layers join the manifest
+                        persistWorldLayers();
+                        if (m_renderMode == RenderMode::GaussianSplats && m_layeredSplats)
+                            requestSplatRebuild();
+                    }
+                    ImGui::SameLine();
+                    ImGui::TextUnformatted(label.c_str());
+                    if (!l.listed) {
+                        ImGui::SameLine();
+                        ImGui::TextDisabled("(new)");
+                    }
+                }
+            }
+        }
+        if (ImGui::Button("Rescan assets folder"))
+            rescanWorldLayers();
+        ImGui::SameLine();
+        ImGui::TextDisabled("%s", m_layeredSplats ? "splats live" : "legacy world.vxw");
+        ImGui::TextDisabled("splats apply instantly; ray-march view syncs via 'ninja -C build world'");
     }
     ImGui::End();
 
@@ -677,6 +1103,28 @@ void App::drawHud()
         ImVec2 c(io.DisplaySize.x * 0.5f, io.DisplaySize.y * 0.085f);
         dl->AddText(ImVec2(c.x - 190, c.y), IM_COL32(255, 200, 120, 220),
                     "[F] Splat preview - true 3DGS in M7");
+    }
+    // AI Chat (pass picking state, rebuild callback - deferred)
+    {
+        auto rebuildFn = [this](){ this->requestSplatRebuild(); };
+        m_chatUi.draw(m_editable, m_hoverHit.hit ? &m_hoverHit : nullptr,
+                      m_hasSelection ? &m_selectedHit : nullptr, m_hasSelection, rebuildFn);
+        // hover highlight (world->screen)
+        if (m_hoverHit.hit) {
+            // project hover voxel center to screen for a tiny reticle
+            // simple: draw crosshair at mouse cursor when Ctrl held
+            // plus small text already via ChatUi; keep for debug
+        }
+        // selected voxel world-space reticle via ImGui foreground
+        if (m_hasSelection) {
+            glm::vec3 selW = vf::voxel::voxelCenter(m_selectedHit.voxel);
+            // project using same logic as push: need view-proj
+            // Instead draw at screen center when picked via Ctrl+LMB? Provide feedback via overlay
+            ImDrawList* dl = ImGui::GetForegroundDrawList();
+            ImVec2 center(io.DisplaySize.x * 0.5f, io.DisplaySize.y * 0.5f);
+            dl->AddText(ImVec2(center.x - 40, center.y + 20), IM_COL32(80,255,80,220), "● selected");
+            (void)selW;
+        }
     }
 }
 
@@ -879,6 +1327,17 @@ int App::run(const Args& args)
     m_compareMode = args.compare;
     if (args.mode == "splat")
         m_renderMode = RenderMode::GaussianSplats;
+    // interpolation density: 1x,2x,4x,8x (no radius increase per user request)
+    if (args.splatDensity != 0) m_splatDensity = args.splatDensity;
+    else m_splatDensity = (m_renderMode == RenderMode::GaussianSplats ? 2 : 1);
+    if (args.splatShadows != -1) m_splatShadows = args.splatShadows ? true : false;
+    if (args.splatAO != -1) m_splatAO = args.splatAO ? true : false;
+    spdlog::info("splat density factor {}x shadows {} AO {}", m_splatDensity, m_splatShadows?"on":"off", m_splatAO?"on":"off");
+    // persistent AI edits: survives restarts, hot-reload via layered splats
+    m_editable.load();
+    m_editable.ensureManifest();
+    // m_args stored for chat ui
+    m_args = args;
     if (!initVulkan()) {
         spdlog::critical("vulkan init failed");
         destroy();
@@ -912,6 +1371,11 @@ int App::run(const Args& args)
     };
     ImGui_ImplVulkan_Init(&vi);
     ImGui_ImplVulkan_CreateFontsTexture();
+    // AI chat
+    if (!m_chatInitialized) {
+        m_chatUi.init(args.llmUrl, args.llmModel);
+        m_chatInitialized = true;
+    }
 
     // per-backend camera spawn
     if (args.compare) {
@@ -944,6 +1408,19 @@ int App::run(const Args& args)
     }
 
     const bool shotMode = !args.shot.empty();
+    // "frames:path": after N presented frames, dump the swapchain (incl. HUD)
+    uint64_t hudShotFrame = 0;
+    std::string hudShotPath;
+    if (const char* hs = getenv("VF_HUD_SHOT")) {
+        char* endp = nullptr;
+        hudShotFrame = strtoull(hs, &endp, 10);
+        if (!endp || *endp != ':' || hudShotFrame == 0) {
+            hudShotFrame = 0;
+            spdlog::warn("bad VF_HUD_SHOT, expected frames:path");
+        } else {
+            hudShotPath = endp + 1;
+        }
+    }
     const float tanHalfFov = tanf(glm::radians(60.0f) * 0.5f);
     auto last = std::chrono::steady_clock::now();
 
@@ -961,7 +1438,8 @@ int App::run(const Args& args)
         m_minMs = std::min(m_minMs, m_lastFrameMs);
         m_maxMs = std::max(m_maxMs, m_lastFrameMs);
 
-        if (glfwGetKey(m_window.handle(), GLFW_KEY_F) == GLFW_PRESS) {
+        bool chatWantsKeys = m_chatInitialized && m_chatUi.wantsCaptureKeyboard();
+        if (!chatWantsKeys && glfwGetKey(m_window.handle(), GLFW_KEY_F) == GLFW_PRESS) {
             if (!m_fWasDown) {
                 m_renderMode = m_renderMode == RenderMode::VoxelRaymarch
                                    ? RenderMode::GaussianSplats
@@ -971,6 +1449,8 @@ int App::run(const Args& args)
                                                                        : "gaussian splats");
             }
             m_fWasDown = true;
+        } else if (chatWantsKeys) {
+            m_fWasDown = glfwGetKey(m_window.handle(), GLFW_KEY_F)==GLFW_PRESS;
         } else {
             m_fWasDown = false;
         }
@@ -980,7 +1460,7 @@ int App::run(const Args& args)
         // +/- adjust the global splat size multiplier (hold to slide)
         // German QWERTZ '+' is RIGHT_BRACKET / APOSTROPHE, US '+' is EQUAL with Shift —
         // also handle keypad. Char callback below covers all layouts as fallback.
-        {
+        if (!chatWantsKeys) {
             GLFWwindow* win = m_window.handle();
             bool up = glfwGetKey(win, GLFW_KEY_EQUAL) == GLFW_PRESS ||
                       glfwGetKey(win, GLFW_KEY_KP_ADD) == GLFW_PRESS ||
@@ -998,8 +1478,15 @@ int App::run(const Args& args)
             if (m_splatScale != prev && m_renderMode == RenderMode::GaussianSplats)
                 spdlog::info("splat scale x{:.2f}", m_splatScale);
         }
-        // B toggles BBSplats / 3DGS shading, O toggles AO
-        {
+        // B toggles BBSplats / 3DGS shading, O toggles AO, I/1-8 density (no radius boost)
+        // skip when chat input has focus — typing must not trigger toggles
+        if (m_chatInitialized && m_chatUi.wantsCaptureKeyboard()) {
+            // consume edge state so release is not seen as press after typing
+            m_bWasDown = glfwGetKey(m_window.handle(), GLFW_KEY_B)==GLFW_PRESS;
+            m_oWasDown = glfwGetKey(m_window.handle(), GLFW_KEY_O)==GLFW_PRESS;
+            m_iWasDown = glfwGetKey(m_window.handle(), GLFW_KEY_I)==GLFW_PRESS;
+            m_hWasDown = glfwGetKey(m_window.handle(), GLFW_KEY_H)==GLFW_PRESS;
+        } else {
             GLFWwindow* win = m_window.handle();
             bool bDown = glfwGetKey(win, GLFW_KEY_B) == GLFW_PRESS;
             bool oDown = glfwGetKey(win, GLFW_KEY_O) == GLFW_PRESS;
@@ -1013,6 +1500,43 @@ int App::run(const Args& args)
                 spdlog::info("splat AO {}", m_splatAO ? "on" : "off");
             }
             m_oWasDown = oDown;
+            bool iDown = glfwGetKey(win, GLFW_KEY_I) == GLFW_PRESS;
+            int newDensity = 0;
+            if (iDown && !m_iWasDown) {
+                if (m_splatDensity==1) newDensity=2; else if (m_splatDensity==2) newDensity=4; else if (m_splatDensity==4) newDensity=8; else newDensity=1;
+                if (newDensity!=m_splatDensity) {
+                    m_splatDensity=newDensity;
+                    spdlog::info("splat density -> {}x (rebuild)", m_splatDensity);
+                    rebuildSplats();
+                }
+            }
+            m_iWasDown = iDown;
+            // direct keys 1,2,4,8 with edge debounce
+            {
+                static bool was1=false, was2=false, was4=false, was8=false;
+                bool is1 = glfwGetKey(win, GLFW_KEY_1)==GLFW_PRESS;
+                bool is2 = glfwGetKey(win, GLFW_KEY_2)==GLFW_PRESS;
+                bool is4 = glfwGetKey(win, GLFW_KEY_4)==GLFW_PRESS;
+                bool is8 = glfwGetKey(win, GLFW_KEY_8)==GLFW_PRESS;
+                int direct=0;
+                if (is1 && !was1) direct=1;
+                else if (is2 && !was2) direct=2;
+                else if (is4 && !was4) direct=4;
+                else if (is8 && !was8) direct=8;
+                was1=is1; was2=is2; was4=is4; was8=is8;
+                if (direct!=0 && direct!=m_splatDensity) {
+                    m_splatDensity=direct;
+                    spdlog::info("splat density -> {}x (rebuild direct)", m_splatDensity);
+                    rebuildSplats();
+                }
+            }
+            bool hDown = glfwGetKey(win, GLFW_KEY_H)==GLFW_PRESS;
+            if (hDown && !m_hWasDown) {
+                m_splatShadows = !m_splatShadows;
+                spdlog::info("splat shadows {}", m_splatShadows ? "on" : "off");
+                rebuildSplats();
+            }
+            m_hWasDown = hDown;
         }
 
         if (m_window.resized()) {
@@ -1020,7 +1544,71 @@ int App::run(const Args& args)
             handleResize();
         }
 
-        m_camera.update(m_window, dt);
+        // GUI test hook: toggle one layer exactly like the checkbox does
+        static const char* guiTestName = getenv("VF_GUI_TEST");
+        if (guiTestName && *guiTestName && m_frameIdx == 20 && !m_worldLayers.empty()) {
+            for (auto& l : m_worldLayers) {
+                if (l.role != "landscape" && l.name == guiTestName) {
+                    l.enabled = !l.enabled;
+                    if (l.enabled)
+                        l.listed = true;
+                    persistWorldLayers();
+                    spdlog::info("VF_GUI_TEST: {} -> {}", l.name,
+                                 l.enabled ? "enabled" : "disabled");
+                    break;
+                }
+            }
+            if (m_renderMode == RenderMode::GaussianSplats && m_layeredSplats)
+                rebuildSplats();
+        }
+
+        // Voxel picking: Ctrl+LMB
+        {
+            ImGuiIO& pickIo = ImGui::GetIO();
+            bool wantMouse = pickIo.WantCaptureMouse;
+            bool ctrl = glfwGetKey(m_window.handle(), GLFW_KEY_LEFT_CONTROL)==GLFW_PRESS ||
+                        glfwGetKey(m_window.handle(), GLFW_KEY_RIGHT_CONTROL)==GLFW_PRESS;
+            double mx=0,my=0;
+            glfwGetCursorPos(m_window.handle(), &mx, &my);
+            glm::ivec2 fb = m_window.framebufferSize();
+            bool lmb = glfwGetMouseButton(m_window.handle(), GLFW_MOUSE_BUTTON_LEFT)==GLFW_PRESS;
+            // hover when Ctrl held (update 15Hz throttled implicitly every frame okay)
+            if (ctrl && !wantMouse && fb.x>0 && fb.y>0) {
+                float tanHalf = tanHalfFov;
+                float aspect = float(fb.x)/float(fb.y);
+                glm::vec3 rd = vf::voxel::screenRayDir(mx,my,fb.x,fb.y,tanHalf,aspect,
+                                                       m_camera.forward(), m_camera.right(), m_camera.up());
+                m_hoverHit = vf::voxel::rayPick(m_camera.pos, rd);
+            } else {
+                m_hoverHit.hit = false;
+            }
+            bool justPressed = lmb && !m_ctrlLmbWasDown && ctrl && !wantMouse;
+            m_ctrlLmbWasDown = lmb;
+            if (justPressed && m_hoverHit.hit) {
+                m_selectedHit = m_hoverHit;
+                m_hasSelection = true;
+                glm::vec3 w = vf::voxel::voxelCenter(m_selectedHit.voxel);
+                spdlog::info("pick selected {} {} {} world {:.2f} {:.2f} {:.2f} mat {}", 
+                    m_selectedHit.voxel.x, m_selectedHit.voxel.y, m_selectedHit.voxel.z, w.x,w.y,w.z, int(m_selectedHit.mat));
+            }
+        }
+
+        // camera: skip WASD when chat input focused
+        bool chatCaptures = m_chatInitialized && m_chatUi.wantsCaptureKeyboard();
+        // also skip B/O/I/H/F toggles when typing
+        bool blockToggles = chatCaptures;
+        if (chatCaptures) {
+            // still allow RMB look? No, block camera move while typing
+            // consume mouse delta to avoid jump after typing
+            double _dx,_dy; m_window.getMouseDelta(_dx,_dy);
+        } else {
+            m_camera.update(m_window, dt);
+        }
+
+        if (m_pendingSplatRebuild) {
+            m_pendingSplatRebuild = false;
+            rebuildSplats();
+        }
 
         uint32_t f = m_frameIdx % kMaxFramesInFlight;
         FrameSync& fr = m_frames[f];
@@ -1281,6 +1869,46 @@ int App::run(const Args& args)
         ImGui::Render();
         ImGui_ImplVulkan_RenderDrawData(ImGui::GetDrawData(), fr.cmd);
 
+        // VF_HUD_SHOT: blit the composed frame (HUD included) back to offscreen
+        if (hudShotFrame && m_frameIdx + 1 >= hudShotFrame) {
+            VkImageCopy region {};
+            region.srcSubresource = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1 };
+            region.dstSubresource = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1 };
+            region.extent = { m_swapchain.extent().width, m_swapchain.extent().height, 1 };
+            vf::transitionImage(fr.cmd, m_swapchain.image(imgIdx),
+                                VK_IMAGE_ASPECT_COLOR_BIT,
+                                VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+                                VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+                                VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT,
+                                VK_ACCESS_2_MEMORY_WRITE_BIT,
+                                VK_PIPELINE_STAGE_2_TRANSFER_BIT,
+                                VK_ACCESS_2_TRANSFER_READ_BIT);
+            vf::transitionImage(fr.cmd, m_offscreen.img, VK_IMAGE_ASPECT_COLOR_BIT,
+                                VK_IMAGE_LAYOUT_GENERAL,
+                                VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+                                VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT,
+                                VK_ACCESS_2_MEMORY_READ_BIT | VK_ACCESS_2_MEMORY_WRITE_BIT,
+                                VK_PIPELINE_STAGE_2_TRANSFER_BIT,
+                                VK_ACCESS_2_TRANSFER_WRITE_BIT);
+            vkCmdCopyImage(fr.cmd, m_swapchain.image(imgIdx),
+                           VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, m_offscreen.img,
+                           VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &region);
+            vf::transitionImage(fr.cmd, m_swapchain.image(imgIdx),
+                                VK_IMAGE_ASPECT_COLOR_BIT,
+                                VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+                                VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+                                VK_PIPELINE_STAGE_2_TRANSFER_BIT,
+                                VK_ACCESS_2_TRANSFER_READ_BIT,
+                                VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT,
+                                VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT);
+            vf::transitionImage(fr.cmd, m_offscreen.img, VK_IMAGE_ASPECT_COLOR_BIT,
+                                VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+                                VK_IMAGE_LAYOUT_GENERAL,
+                                VK_PIPELINE_STAGE_2_TRANSFER_BIT,
+                                VK_ACCESS_2_TRANSFER_WRITE_BIT,
+                                VK_PIPELINE_STAGE_2_NONE, VK_ACCESS_2_NONE);
+        }
+
         vf::transitionImage(fr.cmd, m_swapchain.image(imgIdx), VK_IMAGE_ASPECT_COLOR_BIT,
                             VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
                             VK_IMAGE_LAYOUT_PRESENT_SRC_KHR,
@@ -1315,6 +1943,22 @@ int App::run(const Args& args)
             handleResize();
 
         ++m_frameIdx;
+        if (hudShotFrame && m_frameIdx >= hudShotFrame) {
+            vkQueueWaitIdle(m_ctx.graphicsQueue());
+            std::vector<uint8_t> px;
+            vf::readbackImage2D(m_ctx, m_offscreen.img, m_swapchain.extent().width,
+                                m_swapchain.extent().height, px);
+            FILE* fp = fopen(hudShotPath.c_str(), "wb");
+            if (fp) {
+                fprintf(fp, "P6\n%u %u\n255\n", m_swapchain.extent().width,
+                        m_swapchain.extent().height);
+                for (size_t i = 0; i < px.size(); i += 4)
+                    fwrite(&px[i], 3, 1, fp);
+                fclose(fp);
+                spdlog::info("hud shot written: {}", hudShotPath);
+            }
+            return 0;
+        }
         if (args.smokeFrames > 0 && m_frameIdx % 200 == 0)
             spdlog::info("smoke progress: {} frames, avg {:.2f} ms", m_frameIdx, m_avgMs);
 
@@ -1337,6 +1981,7 @@ int App::run(const Args& args)
 
 void App::destroy()
 {
+    m_chatUi.shutdown();
     if (!m_ctx.device()) {
         // init failed before device creation: only tear down what exists
         m_swapchain.destroy();

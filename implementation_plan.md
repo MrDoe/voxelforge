@@ -146,14 +146,34 @@ Suitable for:
 
 ---
 
-## **6. Optional Extensions**
+## **6. GaussianShader Integration (Tier 1 implemented, Tier 3 deferred)**
+
+Tier 1 (real-time, no training) implemented `2026-08-23`:
+- Flattened disks: `scale (sx=sy=spacing*1.25, sz=VOXEL*0.55)`, shortest axis `v = normal` (`Fig.4`), `n=±v` flip `Eq.5` with `Δn=0` in frag; foreshortening `mix(0.55,1,|N·V|)` in `splat.vert`.
+- Shade `Eq.3` with `c_r=0`: `c=γ(c_d + s⊙Ls)`, `s,ρ` from `kMaterialReflection`, `Ls` via GGX-prefiltered HDR `6×64×64` cubemap (`Eq.4`, `lod=ρ*6`, `256` Hammersley samples per mip in `SplatPass::createEnvCubemap`), Schlick `F`, `aces`+gamma. Water variant `ρ=0.15` high specular.
+- Denser `spacing 0.15m` (was `0.21`), water `0.22m`, budget `2.5M`, stride `4×vec4` `Splat{posRadius,albedoAO,normalMat,shadeParams}`.
+- HDR `assets/env.hdr` loaded via `stb_image` equirect→cubemap, fallback procedural Hosek sky if missing.
+- Residual SH kept `0` (training-needed; plumbing reserved for `vec4 shadeParams` → `+SH9` later).
+
+Tier 3 (deferred, doc-only): differentiable training of `c_d,s,ρ,c_r(SH3),Δn1/2,env` via `tools/train_gs/` (`L = L_color+0.01L_normal+0.001L_sparse+0.001L_reg` `Eq.9`, `30k` Adam, `0.58h`), dataset capture `tools/capture_dataset --dump-train`.
+
+## **7. Minimal Raytracing Shadows — Implemented 2026-08-24**
+
+**Status: ✅ Implemented** — one visibility ray per splat against SDF proxy (heightmap + `scene()`), no shadow maps.
+
+*   **Splat data:** `SplatVertexData::shadow` `float 0..1` (0 lit, 1 shadowed) packed as `vec4` in `Splat{posRadius,albedoAO,normalMat,shadeParams,shadow}` stride `5×vec4` (`src/render/splat_pass.hpp:14`, `src/render/splat_pass.cpp:406` always `5` when `hasNew`).
+*   **Proxy ray:** CPU `softShadow(ro+ N*0.06, sunDir)` 12 steps `res=min(res,9*d/t)`, `t+=clamp(d*0.85,0.05,1.2)`, `d=scene(sp).d` (`src/app/main.cpp:620` `buildSplatData` + `src/app/main.cpp: ~750` `initVulkan`), parallel `std::execution::par` via `tbb` (`CMakeLists.txt:140` `tbb`), toggle `H` / `--shadows` / `--noshadows` (`src/app/main.cpp:178` `m_splatShadows`, `src/app/main.cpp:1315`).
+*   **Shading:** `splat.frag:28` `shadowDark=1-shadow*0.65`, `diffuse * shadowDark`, `specularEnv * shadowDark`, `spec * shadowDark` (`shaders/splat.frag:45`).
+*   **Density-aware:** `earlyBudget` `1.5M/2.5M/5M/10M` for `1x/2x/4x/8x`, shuffled `voxOrder` for uniform, `SDF|d|<0.22` filter for subgrid, `waterSpacing=0.45/interp`.
+*   **Performance:** `2.5M` `8.6s` with shadows (vs `5s` without) — `12` steps `par`; `H` rebuild via `rebuildSplats()` `vkDeviceWaitIdle`.
+
+## **8. Optional Extensions**
 
 You may add:
 
-- soft shadows
-- multi‑light support
-- temporal smoothing
-- hierarchical proxy structures
+- multi‑light support (extend `shadow` to per-light)
+- temporal smoothing (accumulate `shadow` over frames)
+- hierarchical proxy structures (SVO/BVH already available as proxy alternative to SDF)
 
 All extensions must preserve the minimal‑raytracing philosophy.
 

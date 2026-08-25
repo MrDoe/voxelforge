@@ -10,6 +10,7 @@
 #include <cstdio>
 #include <cstring>
 #include <string>
+#include <unordered_set>
 #include <vector>
 
 using namespace vf::voxel;
@@ -209,13 +210,35 @@ int main(int argc, char** argv)
         return 1;
     vf::voxel::setSharedHeightmap(&hm);
 
+    // pre-existing AI/user edits join CPU truth BEFORE the SVO bake so they
+    // are baked into bricks like any other geometry
+    std::vector<vf::voxel::VoxelRecord> aiRecords;
+    {
+        std::string adir = worldOut;
+        size_t aslash = adir.find_last_of("/\\");
+        adir = aslash == std::string::npos ? std::string() : adir.substr(0, aslash + 1);
+        vf::voxel::WorldFileData ai;
+        if (vf::voxel::worldfile::read(adir + "ai_edits.vxw", ai) &&
+            !ai.voxels.empty() && ai.meta.worldSize == WORLD &&
+            ai.meta.voxelSize == VOXEL) {
+            aiRecords = std::move(ai.voxels);
+            for (auto& v : aiRecords)
+                vf::voxel::aiEditsRegister(v.x, v.y, v.z, v.materialId);
+            std::printf("  ai_edits: %zu records registered into scene truth\n",
+                        aiRecords.size());
+        }
+    }
+
     vf::voxel::World world;
     world.build();
     auto st = world.stats();
     std::printf("world built: nodes=%zu bricks=%zu activeChunks=%zu in %.2fs\n",
                 st.nodes, st.bricks, st.activeChunks, double(st.buildSeconds));
 
-    // explicit surface-band voxel records across the whole world
+    // ---- layered world output -------------------------------------------------
+    // The static world is described by a family of record-only .vxw layers plus
+    // a JSON manifest. world.vxw remains the merged cache (full-scene SVO +
+    // deduped union of all layers) that the renderer loads directly.
     vf::voxel::WorldFileData data;
     data.meta = { WORLD, VOXEL, WATER_LEVEL, uint32_t(GRID_N), 8 };
     const auto& g = world.gpu();
@@ -225,57 +248,259 @@ int main(int argc, char** argv)
     data.handles = g.handles;
     data.bricks = g.bricks;
 
+    struct LayerOut {
+        std::string file, role, name;
+        glm::vec3 pos { 0.f, 0.f, 0.f };
+        std::vector<vf::voxel::VoxelRecord> voxels;
+    };
+    std::vector<LayerOut> layers;
+
     constexpr float kBAND = 0.20f;
     const int N = int(WORLD / VOXEL);
-    data.voxels.reserve(8u << 20);
-    auto nearObject = [&](float wx, float wz) -> bool {
-        if (std::hypot(wx - kHousePos.x, wz - kHousePos.y) < 6.5f) return true;
-        for (auto &s : kTreeSpots) if (std::hypot(wx - s.x, wz - s.y) < 4.8f) return true;
-        for (auto &s : kRockSpots) if (std::hypot(wx - s.x, wz - s.y) < 2.8f) return true;
-        return false;
+    auto lattice = [&](int ix, int iy, int iz) {
+        return glm::vec3(-0.5f * WORLD + (ix + 0.5f) * VOXEL,
+                         -0.5f * WORLD + (iy + 0.5f) * VOXEL,
+                         -0.5f * WORLD + (iz + 0.5f) * VOXEL);
     };
-    for (int iz = 0; iz < N; ++iz) {
-        float wz = -0.5f * WORLD + (iz + 0.5f) * VOXEL;
+    auto record = [&](vf::voxel::VoxelRecord v, glm::vec3 p, uint8_t mat) {
+        const glm::vec3& c = kPalette[mat];
+        const glm::vec2& rr = kMaterialReflection[mat];
+        v.r = uint8_t(c.r * 255.0f);
+        v.g = uint8_t(c.g * 255.0f);
+        v.b = uint8_t(c.b * 255.0f);
+        v.a = 255;
+        v.reflectivity = uint8_t(rr.x);
+        v.roughness = uint8_t(rr.y);
+        v.materialId = mat;
+        (void)p;
+        return v;
+    };
+    // sweep an axis-aligned box of lattice cells, keeping the |d| <= kBAND shell
+    auto sweep = [&](LayerOut& L, auto&& objFn, int ix0, int ix1, int iy0, int iy1,
+                     int iz0, int iz1) {
+        for (int iz = glm::max(iz0, 0); iz <= glm::min(iz1, N - 1); ++iz)
+            for (int iy = glm::max(iy0, 0); iy <= glm::min(iy1, N - 1); ++iy)
+                for (int ix = glm::max(ix0, 0); ix <= glm::min(ix1, N - 1); ++ix) {
+                    glm::vec3 p = lattice(ix, iy, iz);
+                    vf::voxel::ObjHit s = objFn(p);
+                    if (std::fabs(s.d) > kBAND)
+                        continue;
+                    vf::voxel::VoxelRecord v;
+                    v.x = uint16_t(ix);
+                    v.y = uint16_t(iy);
+                    v.z = uint16_t(iz);
+                    L.voxels.push_back(record(v, p, s.mat));
+                }
+    };
+    auto cellOf = [&](float w) { return int((w + 0.5f * WORLD) / VOXEL); };
+
+    // -- object layers (evaluated alone so records attribute cleanly) ----------
+    auto& houseL = layers.emplace_back();
+    houseL.file = "house.vxw";
+    houseL.role = "object";
+    houseL.name = "house";
+    houseL.pos = { kHousePos.x, kPadY, kHousePos.y };
+    sweep(houseL, [](glm::vec3 p) { return vf::voxel::houseAt(p); },
+          cellOf(kHousePos.x - 5.f), cellOf(kHousePos.x + 5.f),
+          cellOf(kPadY - 1.f), cellOf(kPadY + 5.f),
+          cellOf(kHousePos.y - 5.f), cellOf(kHousePos.y + 5.f));
+
+    for (size_t t = 0; t < kTreeSpots.size(); ++t) {
+        auto& L = layers.emplace_back();
+        L.file = "tree" + std::to_string(t + 1) + ".vxw";
+        L.role = "object";
+        L.name = "tree" + std::to_string(t + 1);
+        L.pos = { kTreeSpots[t].x, 0.f, kTreeSpots[t].y };
+        const HeightMap& hm = sharedHeightmap();
+        float gr = hm.sample(kTreeSpots[t].x, kTreeSpots[t].y);
+        sweep(L,
+              [&, t](glm::vec3 p) {
+                  return vf::voxel::treeAt(p, kTreeSpots[t], gr);
+              },
+              cellOf(kTreeSpots[t].x - 2.3f), cellOf(kTreeSpots[t].x + 2.3f),
+              cellOf(gr - 0.5f), cellOf(gr + 8.6f),
+              cellOf(kTreeSpots[t].y - 2.3f), cellOf(kTreeSpots[t].y + 2.3f));
+    }
+
+    for (size_t r = 0; r < kRockSpots.size(); ++r) {
+        auto& L = layers.emplace_back();
+        L.file = "rock" + std::to_string(r + 1) + ".vxw";
+        L.role = "object";
+        L.name = "rock" + std::to_string(r + 1);
+        L.pos = { kRockSpots[r].x, 0.f, kRockSpots[r].y };
+        const HeightMap& hm = sharedHeightmap();
+        glm::vec2 s = kRockSpots[r];
+        float rad = kRockRadii[r];
+        sweep(L,
+              [&, r](glm::vec3 p) {
+                  // half-buried boulder, mirroring rocksAt
+                  float dx = p.x - s.x, dz = p.z - s.y;
+                  if (dx * dx + dz * dz > (rad + 0.4f) * (rad + 0.4f))
+                      return vf::voxel::ObjHit { 1e9f, 4u };
+                  float cy = hm.sample(s.x, s.y) + rad * 0.30f;
+                  float d = glm::length(glm::vec3(dx, p.y - cy, dz)) - rad;
+                  return vf::voxel::ObjHit { d, uint8_t(r == 1 ? 5 : 4) };
+              },
+              cellOf(s.x - rad - 0.6f), cellOf(s.x + rad + 0.6f),
+              cellOf(hm.sample(s.x, s.y) - rad), cellOf(hm.sample(s.x, s.y) + 2.f * rad),
+              cellOf(s.y - rad - 0.6f), cellOf(s.y + rad + 0.6f));
+    }
+
+    auto& alpacaL = layers.emplace_back();
+    alpacaL.file = "alpaca.vxw";
+    alpacaL.role = "object";
+    alpacaL.name = "alpaca";
+    alpacaL.pos = { kAlpacaSpot.x, 0.f, kAlpacaSpot.y };
+    {
+        const HeightMap& hm = sharedHeightmap();
+        float ga = hm.sample(kAlpacaSpot.x, kAlpacaSpot.y);
+        alpacaL.pos.y = ga;
+        sweep(alpacaL, [](glm::vec3 p) { return vf::voxel::alpacaAt(p); },
+              cellOf(kAlpacaSpot.x - 1.25f), cellOf(kAlpacaSpot.x + 1.25f),
+              cellOf(ga - 0.3f), cellOf(ga + 1.7f),
+              cellOf(kAlpacaSpot.y - 1.25f), cellOf(kAlpacaSpot.y + 1.25f));
+    }
+
+    auto& fenceL = layers.emplace_back();
+    fenceL.file = "fence1.vxw";
+    fenceL.role = "object";
+    fenceL.name = "fence1";
+    fenceL.pos = { 0.5f * (kPaddockMin.x + kPaddockMax.x), 0.f,
+                   0.5f * (kPaddockMin.y + kPaddockMax.y) };
+    sweep(fenceL, [](glm::vec3 p) { return vf::voxel::fenceAt(p); },
+          cellOf(kPaddockMin.x - 0.5f), cellOf(kPaddockMax.x + 0.5f),
+          cellOf(-1.5f), cellOf(3.5f),
+          cellOf(kPaddockMin.y - 0.5f), cellOf(kPaddockMax.y + 0.5f));
+
+    auto& bushL = layers.emplace_back();
+    bushL.file = "bushes.vxw";
+    bushL.role = "scatter";
+    bushL.name = "bushes";
+    {
+        // iterate bush CELLS directly (not the voxel lattice): mirrors the
+        // hash placement in bushesAt so only real bushes get swept
+        const HeightMap& hm = sharedHeightmap();
+        const float cell = kBushCell;
+        int nc = int(WORLD / cell) + 1;
+        for (int cz = -1; cz <= nc; ++cz)
+            for (int cx = -1; cx <= nc; ++cx) {
+                float hCell = vf::voxel::hash2(float(cx) * 19.1f, float(cz) * 37.7f);
+                if (hCell < 0.62f) continue;
+                float jx = vf::voxel::hash2(float(cx) * 7.3f, float(cz) * 11.1f);
+                float jz = vf::voxel::hash2(float(cx) * 13.7f, float(cz) * 17.3f);
+                float hr = vf::voxel::hash2(float(cx) * 23.1f, float(cz) * 29.7f);
+                glm::vec2 bc((cx + jx) * cell, (cz + jz) * cell);
+                if (fabs(bc.x) > 0.5f * WORLD || fabs(bc.y) > 0.5f * WORLD) continue;
+                float H = hm.sample(bc.x, bc.y);
+                uint8_t mat = materialAt(bc.x, bc.y, H);
+                if (mat != 0 && mat != 1) continue;
+                if (glm::length(hm.gradient(bc.x, bc.y)) > 0.9f) continue;
+                float r = 0.35f + hr * 0.45f;
+                glm::vec3 c(bc.x, H + r * 0.55f, bc.y);
+                sweep(bushL,
+                      [&](glm::vec3 p) {
+                          return vf::voxel::ObjHit { glm::length(p - c) - r, mat };
+                      },
+                      cellOf(c.x - r - 0.3f), cellOf(c.x + r + 0.3f),
+                      cellOf(c.y - r - 0.3f), cellOf(c.y + r + 1.2f),
+                      cellOf(c.z - r - 0.3f), cellOf(c.z + r + 0.3f));
+            }
+    }
+
+    // -- landscape layer: terrain-only shell over the whole valley -------------
+    auto& landL = layers.emplace_back();
+    landL.file = "landscape.vxw";
+    landL.role = "landscape";
+    landL.name = "landscape";
+    for (int iz = 0; iz < N; ++iz)
         for (int ix = 0; ix < N; ++ix) {
             float wx = -0.5f * WORLD + (ix + 0.5f) * VOXEL;
-            float H = terrainHeightAt(wx, wz);
+            float wz = -0.5f * WORLD + (iz + 0.5f) * VOXEL;
+            float H = sharedHeightmap().sample(wx, wz);
+            uint8_t tm = materialAt(wx, wz, H);
             int yc = int((H + 0.5f * WORLD) / VOXEL);
-            int y0 = glm::clamp(yc - 3, 0, N - 1), y1 = glm::clamp(yc + 3, 0, N - 1);
-            bool near = nearObject(wx, wz);
-            if (near) {
-                int yObj0 = int((kPadY - 0.5f + 0.5f * WORLD) / VOXEL);
-                int yObj1 = int((kPadY + 8.8f + 0.5f * WORLD) / VOXEL);
-                y0 = glm::clamp(std::min(y0, yObj0), 0, N - 1);
-                y1 = glm::clamp(std::max(y1, yObj1), 0, N - 1);
-            }
-            for (int iy = y0; iy <= y1; ++iy) {
+            for (int iy = glm::max(yc - 3, 0); iy <= glm::min(yc + 3, N - 1); ++iy) {
                 float wy = -0.5f * WORLD + (iy + 0.5f) * VOXEL;
-                glm::vec3 p(wx, wy, wz);
-                auto s = scene(p);
-                if (std::fabs(s.d) > kBAND) continue;
-                uint8_t mat = s.mat;
-                const glm::vec3& c = kPalette[mat];
-                const glm::vec2& rr = kMaterialReflection[mat];
+                if (std::fabs(wy - H) > kBAND) continue;
                 vf::voxel::VoxelRecord v;
                 v.x = uint16_t(ix);
                 v.y = uint16_t(iy);
                 v.z = uint16_t(iz);
-                v.r = uint8_t(c.r * 255.0f);
-                v.g = uint8_t(c.g * 255.0f);
-                v.b = uint8_t(c.b * 255.0f);
-                v.a = 255;
-                v.reflectivity = uint8_t(rr.x);
-                v.roughness = uint8_t(rr.y);
-                v.materialId = mat;
-                data.voxels.push_back(v);
+                landL.voxels.push_back(record(v, glm::vec3(wx, wy, wz), tm));
             }
         }
+
+    // -- ai_edits.vxw: user/AI edits are the highest-priority layer ------------
+    // Already registered into scene truth above; here they join the layer
+    // family (first = highest dedupe priority) so they also reach splats.
+    if (!aiRecords.empty()) {
+        LayerOut& aiL = *layers.insert(layers.begin(), LayerOut{});
+        aiL.file = "ai_edits.vxw";
+        aiL.role = "object";
+        aiL.name = "ai_edits";
+        aiL.voxels = aiRecords;
+        std::printf("  merged %s: %zu records (highest priority)\n",
+                    aiL.file.c_str(), aiL.voxels.size());
     }
+
+    // -- dedupe into the merged cache: earlier layers win (objects > terrain) --
+    {
+        std::unordered_set<uint32_t> claimed;
+        claimed.reserve(layers.size() * 1024u);
+        for (const LayerOut& L : layers)
+            for (const vf::voxel::VoxelRecord& v : L.voxels) {
+                uint32_t key =
+                    (uint32_t(v.x) << 20) | (uint32_t(v.y) << 10) | uint32_t(v.z);
+                if (claimed.insert(key).second)
+                    data.voxels.push_back(v);
+            }
+    }
+
+    // -- write layer files + manifest ------------------------------------------
+    std::string dir = worldOut;
+    {
+        size_t slash = dir.find_last_of("/\\");
+        dir = slash == std::string::npos ? std::string() : dir.substr(0, slash + 1);
+    }
+    std::vector<vf::voxel::worldfile::WorldLayer> manifestLayers;
+    size_t totalRecords = 0;
+    for (const LayerOut& L : layers) {
+        // NEVER write ai_edits.vxw back: the packer only consumes it. Writing
+        // would stomp edits appended while this bake was running.
+        if (L.file == "ai_edits.vxw") {
+            totalRecords += L.voxels.size();
+            manifestLayers.push_back({ L.file, L.role, L.name,
+                                       { L.pos.x, L.pos.y, L.pos.z }, 0.f });
+            continue;
+        }
+        vf::voxel::WorldFileData ld;
+        ld.meta = data.meta;
+        ld.voxels = L.voxels;
+        if (!vf::voxel::worldfile::write(dir + L.file, ld)) {
+            std::fprintf(stderr, "failed to write %s\n", (dir + L.file).c_str());
+            return 1;
+        }
+        totalRecords += L.voxels.size();
+        manifestLayers.push_back({ L.file, L.role, L.name,
+                                   { L.pos.x, L.pos.y, L.pos.z }, 0.f });
+    }
+    manifestLayers.push_back(
+        { "world.vxw", "packed", "combined", { 0.f, 0.f, 0.f }, 0.f });
+    if (!vf::voxel::worldfile::writeManifest(dir + "world.json", manifestLayers)) {
+        std::fprintf(stderr, "failed to write %sworld.json\n", dir.c_str());
+        return 1;
+    }
+
     if (!vf::voxel::worldfile::write(worldOut, data)) {
         std::fprintf(stderr, "failed to write %s\n", worldOut);
         return 1;
     }
     std::printf("world %s: %zu voxel records, svo buffers %zu words\n", worldOut,
                 data.voxels.size(), data.bricks.size() + data.handles.size());
+    for (const LayerOut& L : layers)
+        std::printf("  layer %-14s %8zu records (%s)\n", L.file.c_str(),
+                    L.voxels.size(), L.role.c_str());
+    std::printf("manifest %sworld.json: %zu layers, %zu total records\n", dir.c_str(),
+                manifestLayers.size(), totalRecords);
     return 0;
 }

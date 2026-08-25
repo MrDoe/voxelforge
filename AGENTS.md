@@ -1,0 +1,102 @@
+# AGENTS.md
+
+## Build
+- Requires Vulkan 1.3, `glslangValidator`, CMake ≥3.24, Ninja, Python3 (for `visual_check`).
+- Primary build dir is `build` (`build-asan`/`build-dbg` also exist). All deps via `FetchContent` (`spdlog`, `glfw`, `glm`, `VMA`, `doctest`, `imgui`) — no manual install.
+- `ninja -C build` — builds binary + compiles shaders to `build/shaders/*.spv` (target `vf_shaders`, `--target-env vulkan1.3`). Shader dir is injected via `VOXELFORGE_SHADER_DIR` (`build/shaders`); `VOXELFORGE_ASSET_DIR` points to `assets`.
+- Incremental rebuild is fast; for asset changes run generation explicitly (see below).
+
+## Assets — on-demand, gitignored
+- `assets/heightmap.png` and `assets/world.vxw` are gitignored (`build/`, `build-*/`, `assets/*.png`, `assets/*.vxw`), as is the layer manifest `assets/world.json`.
+- Generated together by `tools/heightmap_gen.cpp`: `heightmap_gen assets/heightmap.png assets/world.vxw` — writes 2048² 16-bit grayscale PNG (5 cm/texel, range `-8..32 m` → `h=-8+u/65535*32`) plus the **layered world family**: record-only `landscape.vxw`, `house.vxw`, `tree1..6.vxw`, `rock1..3.vxw`, `bushes.vxw`, `alpaca.vxw`, `fence1.vxw` + manifest `world.json` (layer order = dedupe priority, first layer wins a cell) + merged cache `world.vxw` (full-scene SVO + deduped union) that the renderer loads directly. Editing/adding object `.vxw` files or the manifest needs **no recompile**: splats read the live layers at startup; raymarch SVO reads `world.vxw` until the next regen.
+- App loads `world.vxw` directly (~276 MB GPU buffers); falls back to procedural `World::build()` only if missing (slow).
+- `ninja -C build world` (alias `vf_heightmap`) triggers generation. Not a default build dependency — after clean checkout or `rm assets/*.png assets/*.vxw assets/world.json` you must run it or the binary exits with `heightmap.png missing`.
+- Don't hand-edit `world.vxw` (it's derived); edit terrain in `tools/heightmap_gen.cpp:terrainHeightAt()`, scene in `src/voxel/common.hpp:scene()` then regenerate — or edit/add object `.vxw` layers directly for data-only changes.
+- `assets/ai_edits.vxw` (chat/MCP edits) is consumed by the packer — never written back by it — and registered into `scene()` truth (`aiEditsRegister`, common.hpp), so edits bake into SVO bricks and are ray-march visible after any repack. `vf_mcp` queues a flock-serialized background repack automatically; the packer must NEVER write `ai_edits.vxw` (start-of-bake snapshot would stomp concurrent edits).
+
+## Run
+- `./build/voxelforge` — SVO landscape (default hero cam `-16,6.5,-14` → `6.5,0.8,11`, sun `34°/238°`). Interactive: `WASD/QE` move, `RMB+mouse` look, `wheel` speed, `F` voxel↔splat, `B` shading, `O` AO, `+/-` splat scale (German QWERTZ: `+/-` also on `RIGHT_BRACKET`/`APOSTROPHE`/`SLASH` + keypad, hold to slide `exp2(1.6*dt)`), `ESC` quit.
+- Headless (no window interaction, still needs display/Xvfb): `./build/voxelforge --selftest --width 640 --height 360`, `--compare`, `--smoke 400`, `--shot out.ppm --cam X Y Z TX TY TZ`, `--probe X Y Z`, `--sun <elev> <azim>`, `--animtime <s>` (deterministic), `--splatscale <f>`, `--mode splat`, `--width/--height`. `--compare` renders SVO and dense offscreen and exits after 30 warmup frames.
+- AI chat backend: any OpenAI-compatible server works (`VF_LLM_URL=http://host:8080/v1 VF_LLM_MODEL=qwen2.5 ./build/voxelforge`) alongside Ollama defaults; endpoint auto-detected and sticky, tool-call parsing handles Ollama object args, llama.cpp escaped-string args, and content-embedded JSON calls (models without native function calling). For native tool templates start llama-server with `--jinja`; without it the normalizer in `src/ai/tools.hpp` still maps fuzzy/inline calls. MCP clients: `./build/vf_mcp` (stdio), registered in `.opencode/opencode.json`.
+- Present quirk: default is `IMMEDIATE` (MAILBOX deadlocks on NVIDIA+X11); per-swapchain-image acquire semaphores fix it (`src/rhi/swapchain.cpp:53`). Override with `VF_PRESENT=immediate|mailbox` env.
+
+## Tests & verification — run in order
+- `ctest --test-dir build` — runs `unit_tests` (doctest, ~32 s) + `visual_check` (headless PPM, ~13 s). Must pass before any shader/scene change is considered done.
+- Single suite/case: `./build/vf_tests` or `ctest -R unit_tests -V`; doctest filter: `./build/vf_tests --test-case="*worldfile*"`.
+- `python3 tests/visual_check.py build/voxelforge` — stdlib-only PPM parser; checks 3 canonical shots (`hero`/`house`/`water` at `480×270`) for coverage `3-97%`, `black-in-silhouette <5%`, blue sky probe. Tightened `compare` thresholds: `meanDiff <14/255` + `|covSvo-covDense| <0.08` (`src/app/main.cpp:879`) — the old `32/0.15` hid the hollow-voxel bug.
+- GPU selftests: `--selftest` asserts sky probe + green terrain; `--compare` asserts tight diff. Debug dumps: `VF_DUMP_PPM=1` + `VF_TRACE=1`.
+
+## Architecture
+- `src/voxel/common.hpp` — CPU truth (`WORLD=102.4`, `VOXEL=0.1`, `CHUNK_N=64` → `CHUNK_M=6.4`, `GRID_N=16`, `BRICK_N=8`, `WATER_LEVEL=-0.9`, `kPalette[9]`/`kMaterialReflection[9]`/`kHousePos`/`kTreeSpots[6]`/`kRockSpots[3]`/`kBushCell=6`). `scene(p)` = `heightmap` SDF + `houseAt`/`treesAt`/`rocksAt`/`bushesAt` min. `sharedHeightmap()` lazy-loads `assets/heightmap.png`.
+- `src/voxel/world.cpp` (`World::build`, `kMaxDepth=3`, `classifyMargin=0.75*|cellSize|`) → `src/voxel/worldfile.{hpp,cpp}` (VXW v1), `src/voxel/heightmap.{hpp,cpp}`, `src/voxel/volume.cpp` (dense 256³ @ `0.4 m` over full `WORLD` for fair `--compare`).
+- `src/rhi/` (Vulkan 1.3 + VMA, context/resources/swapchain), `src/render/` (`RaymarchPass` dense, `SvoPass` chunked-SVO, `SplatPass` point-sprites, `TaaPass`), `src/app/main.cpp` (`Args`, `RaymarchPush`, camera), `src/platform/window.cpp` (GLFW), `shaders/` (`raymarch.comp`, `svo_raymarch.comp`, `splat.vert/.frag`, `taa_resolve.comp`), `tools/heightmap_gen.cpp`.
+
+## Shaders & parity — easy to break
+- `RaymarchPush` is exactly `128 B` (`alignas(16)`): `camPos/Right/Up/Fwd`, `a=(tanHalfFov,aspect,extentX,extentY)`, `b=(worldSize,voxelSize/MAX_ENCODED_DIST,gridN,frameIdx)`, `sunDir` (toward sun), `misc=(splatScale, animTime_s, shadingMode, aoEnabled)`. `animTime` is `misc.y` (`m_animTime += dt`); `frameIdx` legacy in `b.w` — don't reuse `a.w` (was frozen ripples bug). `kSunDir` is mutable global set from push in both shaders.
+- Brick packing: `word0=r|g<<8|b<<16|sdfByte<<24` (`sdfByte=int8(sdf/VOXEL)`, decode `raw*VOXEL` not `raw/127*VOXEL`), `word1=a|refl<<8|rough<<16|mat<<24`. SVO `map()` empty-cell fallback is `max(-sdBox(p,cmin,cmax), VOXEL*0.5)` + 6-step bisection — `6.0` constant causes tunneling/hollow voxels.
+- **Keep `shaders/svo_raymarch.comp` and `shaders/raymarch.comp` in parity**: water plane `y=-0.9`, fog `0.0012`, ACES, `softShadow`/`calcNormal`/`heightAt` must match or `--compare` fails. `splat.frag` is `ONE/ONE_MINUS_SRC_ALPHA` premultiplied — needs `SplatPass::updateSorting()` `stable_sort` back-to-front (`dot(camFwd)`) with `0.005` tie-breaker before each `record`.
+- Dense volume mip chain is CPU box-filtered 9-level 3-D with `int8` min-abs SDF + `textureLod(dist*0.015)` at far distance (`src/rhi/resources.cpp`, `shaders/raymarch.comp:47`) — don't remove or distant shimmer returns.
+
+## Gotchas
+- `WORLD/VOXEL/GRID_N/BRICK_N` are load-bearing; changing one without updating heightmap encode, `worldfile` meta check (`src/app/main.cpp:424`), and shader `BRICK_WORDS` breaks load and `compare`.
+- `heightmap_gen` stored-deflate PNG writer is hand-rolled; `rowBytes = 1+w*2` (not `(1+w)*2`) was a past bug.
+- `vf_tests` depends on `vf_heightmap` — deleting assets then running `ctest` without `ninja world` will fail at build step, not at test runtime.
+- No validation layers installed on dev machine; rely on `selftest`/`compare`/`visual_check` + `VF_TRACE`.
+- Docs: `ImplementationPlan.md` §5 (Physically-Based Billboards, PBR/WBOIT/HG backlog) and `implementation_plan.md` (minimal-raytrace: one ray/splat → proxy → `color*=(1-s)`) are the splat roadmap — keep splats derived from `scene()` SDF (`|d|<0.22 m` band + 8-neighbour `spacing*0.25` subgrid in splat mode, radius `spacing*1.25`, cap `512 px`).
+
+## References
+- Design history: `THREAD_SUMMARY.md` (session fixes, world constants, push layout, asset pipeline).
+- Roadmap/backlog: `ImplementationPlan.md`, `implementation_plan.md`.
+
+<!-- BEGIN opencode-rag -->
+## Code Navigation
+
+ALWAYS use OpenCodeRAG tools before reading or editing:
+- **Search first** — `search_semantic(query)` instead of grep/glob
+- **Skeleton before read** — `get_file_skeleton(filePath)` then read specific lines
+- **Usages before edit** — `find_usages(symbolName)` before modifying any symbol
+- **Images via describe** — `describe_image(filePath, systemPrompt?)` — never read raw bytes
+- **Recall quirks** — `recall_quirks(query)` when you hit a known pitfall
+- **Add quirks** — `add_quirk(content)` when you discover a non-obvious fact
+- **Fix quirks** — `update_quirk(id, ...)` / `delete_quirk(id)` when a stored quirk is outdated or wrong
+
+If no results, run `opencode-rag index`.
+
+### Decision tree — ALWAYS follow this order
+1. User mentions code behavior/architecture → `search_semantic(query)`
+2. User mentions a file path → `get_file_skeleton(filePath)` THEN `read` on specific lines
+3. User mentions a function/class/variable to edit → `find_usages(symbolName)` THEN `search_semantic` THEN `edit`
+4. User asks a code question → `search_semantic` to gather context before answering
+5. User asks about an image or visual asset → `describe_image(filePath)` (optionally pass `systemPrompt` to focus on specific features) to retrieve its generated description, then optionally `search_semantic` for related code
+6. You encounter an error or need to recall a known pitfall → `recall_quirks(query)`
+7. You discover a non-obvious fact or workaround → `add_quirk(content)` to persist it for future sessions
+8. A recalled quirk is outdated or wrong → `update_quirk(id, ...)` to fix it, or `delete_quirk(id)` if it no longer applies
+
+### Proactive triggers — you MUST call these tools when
+- User asks about code behavior, architecture, or implementation details
+- User asks to edit, refactor, or fix code — call `find_usages` first
+- User references files or functions you haven't read yet
+- User says "find", "search", "look up", "where is", "how does"
+- User refers to an image, screenshot, diagram, or visual asset
+- Before answering ANY code-related question, retrieve context first
+- Before reading ANY file, call `get_file_skeleton` to orient first
+
+### Anti-patterns — NEVER do these
+- Reading full files without calling `get_file_skeleton` first (wastes tokens)
+- Editing a function without calling `find_usages` first (breaks call sites)
+- Answering code questions without calling `search_semantic` first (you guess at behavior)
+- Using `grep`/`glob` when `search_semantic` would find the answer faster
+- Treating image files as text — use `describe_image` instead of reading raw bytes
+- Using `npx opencode-rag quirk` shell commands instead of the built-in quirk tools (`add_quirk` / `recall_quirks` / `update_quirk` / `delete_quirk`) (the tools are faster, already loaded in-process, and go through the trust monitor)
+
+### MANDATORY quirk capture rules — you MUST call `add_quirk` when
+- A build, test, or type-check command fails and you resolve it
+- You discover an undocumented library constraint, peer dep, or workaround
+- You learn an environment-specific requirement (OS, tool version, etc.)
+- You make a design decision that future sessions should remember
+- You resolve a gotcha that cost more than one attempt
+
+### MANDATORY quirk hygiene — you MUST call `update_quirk` or `delete_quirk` when
+- A stored quirk is outdated, wrong, or has been fixed — update it or delete it instead of adding a contradicting duplicate
+- NEVER finish a coding session without adding quirks for resolved errors.
+<!-- END opencode-rag -->

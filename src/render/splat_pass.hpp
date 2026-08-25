@@ -7,10 +7,12 @@
 namespace vf {
 
 struct SplatVertexData {
-    std::vector<glm::vec4> posRadius; // xyz + radius
-    std::vector<glm::vec4> colors;    // legacy baked (kept for compat)
-    std::vector<glm::vec4> albedoAO;  // rgb albedo, a = AO
-    std::vector<glm::vec4> normalMat; // xyz normal, w = matId
+    std::vector<glm::vec4> posRadius;  // xyz + radius
+    std::vector<glm::vec4> colors;     // legacy baked (kept for compat)
+    std::vector<glm::vec4> albedoAO;   // rgb albedo, a = AO
+    std::vector<glm::vec4> normalMat;  // xyz normal (= shortest axis v), w = matId
+    std::vector<glm::vec4> shadeParams; // xyz specular tint s, w = roughness ρ (GaussianShader)
+    std::vector<float> shadow;          // per-splat shadow factor 0=lit 1=shadowed (minimal raytracing)
 };
 
 // Renders surface point-splats as Gaussian sprites into the offscreen image.
@@ -26,6 +28,15 @@ public:
     void updateSorting(const glm::vec3& camPos, const glm::vec3& camFwd);
 
 private:
+    bool createEnvCubemap();
+    void destroyEnvCubemap();
+    // HDR cubemap helpers
+    static glm::vec3 cubemapDir(int face, float u, float v);
+    static glm::vec3 sampleCubemapDir(const glm::vec3& dir,
+                                      const std::vector<std::vector<glm::vec4>>& faces,
+                                      int baseSize);
+    bool loadOrGenerateEnvFaces(std::vector<std::vector<glm::vec4>>& outFaces, int size);
+
     const Context* m_ctx = nullptr;
     VkPipeline m_pipeline = VK_NULL_HANDLE;
     VkPipelineLayout m_layout = VK_NULL_HANDLE;
@@ -40,6 +51,19 @@ private:
     std::vector<glm::vec4> m_origCol;
     std::vector<glm::vec4> m_origAlbedoAO;
     std::vector<glm::vec4> m_origNormalMat;
+    std::vector<glm::vec4> m_origShadeParams;
+    std::vector<float> m_origShadow;
+    // sorting cache for high-density (avoid per-frame O(N log N) when camera static)
+    glm::vec3 m_lastSortPos{1e9f};
+    glm::vec3 m_lastSortFwd{0,0,1};
+    uint64_t m_lastSortFrame = 0;
+
+    // GaussianShader HDR env cubemap (6×64, GGX prefiltered mips)
+    VkImage m_envCube = VK_NULL_HANDLE;
+    VmaAllocation m_envAlloc = VK_NULL_HANDLE;
+    VkImageView m_envView = VK_NULL_HANDLE;
+    VkSampler m_envSampler = VK_NULL_HANDLE;
+    uint32_t m_envMips = 1;
 };
 
 } // namespace vf

@@ -22,6 +22,7 @@
 
 namespace vf::voxel {
 
+
 struct WorldFileMeta {
     float worldSize = 0.f;
     float voxelSize = 0.f;
@@ -59,6 +60,33 @@ inline constexpr uint32_t kVersion = 1;
 
 bool write(const std::string& path, const WorldFileData& data);
 bool read(const std::string& path, WorldFileData& out); // validates magic+version+CRC
+
+// --- layered worlds ---------------------------------------------------------
+// The static world is described by a set of record-only .vxw layer files plus
+// a JSON manifest (assets/world.json). Each layer holds voxels already in
+// WORLD-lattice coordinates; the optional pos/rot fields document where the
+// layer was placed by the packer (tools/heightmap_gen) and are applied there,
+// not at runtime. A layer with role "packed" (combined.vxw) carries the merged
+// SVO used for ray-marching; it is regenerated whenever any layer changes.
+struct WorldLayer {
+    std::string file;   // relative to the manifest directory
+    std::string role;   // "landscape" | "object" | "scatter" | "packed"
+    std::string name;   // human-readable id (e.g. "alpaca")
+    float pos[3] = { 0.f, 0.f, 0.f }; // world-space placement (informational)
+    float rotDeg = 0.f;               // Y rotation applied by the packer
+    bool enabled = true;              // false = kept on disk, excluded from merges
+    bool listed = true;               // runtime-only: false = discovered folder entry
+};
+
+bool loadManifest(const std::string& path, std::vector<WorldLayer>& out);
+bool writeManifest(const std::string& path, const std::vector<WorldLayer>& layers);
+
+// Read every layer listed in the manifest (skipping "packed" entries) into one
+// record set. Earlier layers win on cell collisions (manifest order =
+// priority). Returns false if the manifest is missing or any layer fails to
+// load / validate against the expected meta.
+bool readLayered(const std::string& manifestPath, const WorldFileMeta& expected,
+                 std::vector<VoxelRecord>& out);
 } // namespace worldfile
 
 } // namespace vf::voxel

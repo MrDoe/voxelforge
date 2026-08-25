@@ -5,3 +5,4 @@ compile_commands.json
 assets/*.png
 assets/*.vxw
 imgui.ini
+assets/world.json

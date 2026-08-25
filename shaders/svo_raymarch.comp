@@ -72,6 +72,18 @@ float vnoise(vec2 q)
                mix(hashN(i + vec2(0, 1)), hashN(i + vec2(1, 1)), f.x), f.y);
 }
 
+float fbm(vec2 q)
+{
+    float v = 0.0;
+    float amp = 0.5;
+    for (int i = 0; i < 3; ++i) {
+        v += amp * vnoise(q);
+        q = q * 2.03 + vec2(7.7, 3.1);
+        amp *= 0.5;
+    }
+    return v;
+}
+
 
 float sdBox(vec3 p, vec3 bmin, vec3 bmax)
 {
@@ -166,9 +178,223 @@ float map(vec3 p)
 // ---- landscape helpers ------------------------------------------------------
 vec3 grassDetail(vec3 alb, vec3 p, inout vec3 n)
 {
-    float g = fract(sin(dot(floor(p.xz*14.0), vec2(12.9898,78.233))) * 43758.5453);
-    n = normalize(n + 0.18*vec3(g-0.5, 0.0, fract(g*7.31)-0.5));
-    return alb * (0.82 + 0.36*g);
+    float f = fbm(p.xz * 2.3);
+    float blade = vnoise(p.xz * 16.0 + f * 2.4);
+    n = normalize(n + 0.22 * vec3(blade - 0.5, 0.0, fract(blade * 7.31) - 0.5));
+    return alb * (0.74 + 0.45 * blade) * (0.90 + 0.20 * f);
+}
+
+// ---- flora field (deterministic, shared by both backends) ------------------
+// Shading-level micro geometry: tapered grass blades in tufts (kind 0) and
+// irregular leaf clusters with random facet normals (kind 1, bushes/canopy).
+// Evaluated once per shaded hit, NOT per march step, so it is cheap.
+
+struct FloraInfo {
+    vec3  n;     // blade / facet normal (unit)
+    float tip;   // height fraction along blade 0..1 (grass) / 1 (leaves)
+    float mask;  // 0..1 contribution strength
+    float col;   // per-blade color variance
+};
+
+FloraInfo floraField(vec3 p, float groundH, uint kind)
+{
+    FloraInfo fi;
+    fi.n = vec3(0.0, 1.0, 0.0);
+    fi.tip = 0.0;
+    fi.mask = 0.0;
+    fi.col = 1.0;
+    float cell = (kind == 1u) ? 0.50 : 0.20;
+    float dens = (kind == 1u) ? 0.70 : 0.66;
+    float reach = (kind == 1u) ? 0.42 : 0.55;
+    int ix = int(floor(p.x / cell));
+    int iz = int(floor(p.z / cell));
+    float bestD = 1e9;
+    for (int dz = -1; dz <= 1; ++dz)
+    for (int dx = -1; dx <= 1; ++dx) {
+        int cx = ix + dx, cz = iz + dz;
+        if (hashN(vec2(float(cx) * 19.1, float(cz) * 37.7)) > dens) continue;
+        if (kind == 1u) {
+            // leaf cluster: irregular ball with a random facet normal
+            vec3 c = vec3((float(cx) + 0.5 + (hashN(vec2(float(cx)*41.3, float(cz)*53.7)) - 0.5) * 0.8) * cell,
+                          groundH + hashN(vec2(float(cx)*59.9, float(cz)*71.3)) * 0.25,
+                          (float(cz) + 0.5 + (hashN(vec2(float(cx)*79.7, float(cz)*83.9)) - 0.5) * 0.8) * cell);
+            float r = 0.10 + hashN(vec2(float(cx)*97.3, float(cz)*103.1)) * 0.10;
+            float d = length(p - c) - r;
+            if (d > 0.05) continue;
+            float prof = 1.0 - smoothstep(0.0, 0.05, d);
+            if (prof < 0.001) continue;
+            vec3 fn = normalize(vec3(hashN(vec2(float(cx)*113.3, float(cz)*127.1)) - 0.5,
+                                     hashN(vec2(float(cx)*131.9, float(cz)*139.7)) - 0.5,
+                                     hashN(vec2(float(cx)*149.3, float(cz)*151.9)) - 0.5));
+            if (d < bestD) { bestD = d; fi.n = fn; fi.tip = 1.0; fi.mask = prof;
+                             fi.col = 0.80 + 0.40 * hashN(vec2(float(cx)*157.3, float(cz)*173.9)); }
+        } else {
+            // grass tuft: 4-7 thin tapered blades (localized sheets, not stripes)
+            vec2 tuft = vec2((float(cx) + 0.5 + (hashN(vec2(float(cx)*7.3, float(cz)*11.1)) - 0.5) * 0.7) * cell,
+                             (float(cz) + 0.5 + (hashN(vec2(float(cx)*13.7, float(cz)*17.3)) - 0.5) * 0.7) * cell);
+            vec2 q = p.xz - tuft;
+            if (dot(q, q) > reach * reach) continue;
+            int nb = 4 + int(hashN(vec2(float(cx) * 23.1, float(cz) * 29.7)) * 4.0);
+            for (int b = 0; b < 8; ++b) {
+                if (b >= nb) break;
+                float hb1 = hashN(vec2(float(cx) * 43.1 + float(b) * 1.7, float(cz) * 53.3 - float(b) * 0.9));
+                float hb2 = hashN(vec2(float(cx) * 61.9 + float(b) * 3.1, float(cz) * 67.3 - float(b) * 1.3));
+                float az = hb1 * 6.28318;
+                vec2 ldir = vec2(cos(az), sin(az));
+                float hBlade = 0.12 + hb2 * 0.28;
+                float lean = (hashN(vec2(float(cx)*83.3, float(cz)*97.9 + float(b)*2.7)) - 0.5) * 0.45 * hBlade;
+                float wpb = hashN(vec2(float(cx)*89.1 + float(b)*0.5, float(cz)*101.3)) * 6.28318;
+                float wind = 0.06 * hBlade * (sin(pc.misc.y * 1.2 + wpb) + 0.4 * sin(pc.misc.y * 3.7 + wpb * 2.1));
+                vec3 base = vec3(tuft.x + ldir.x * hb1 * 0.05, groundH - 0.02, tuft.y + ldir.y * hb1 * 0.05);
+                vec3 axis = normalize(vec3(ldir.x * (lean + wind), hBlade, ldir.y * (lean + wind)));
+                vec3 nPl = normalize(vec3(-axis.z, 0.0, axis.x));
+                vec3 rel = p - base;
+                float s0 = clamp(dot(rel, axis), 0.0, hBlade);
+                float dseg = length(rel - axis * s0);
+                float wbl = mix(0.007, 0.014, hb2) * (1.0 - 0.6 * s0 / hBlade);
+                float dBlade = dseg - wbl;
+                float prof = 1.0 - smoothstep(0.0, 0.014, dBlade);
+                if (prof < 0.001) continue;
+                if (dBlade < bestD) {
+                    bestD = dBlade;
+                    fi.n = nPl;
+                    fi.tip = s0 / hBlade;
+                    fi.mask = prof;
+                    fi.col = 0.78 + 0.44 * hashN(vec2(float(cx)*157.3 + float(b)*11.3, float(cz)*173.9 - float(b)*7.7));
+                }
+            }
+        }
+    }
+    return fi;
+}
+
+// per-blade hue/luminance variation (grass: dry straw tips; leaves: hue jitter)
+vec3 floraColor(vec3 p, uint mId, float tip, float col)
+{
+    vec3 var = vec3(col);
+    vec3 fine = vec3(0.96 + 0.08 * hashN(p.xz * 113.7));
+    if (mId <= 1u) {
+        float dry = smoothstep(0.40, 0.95, tip) * (0.20 + 0.40 * hashN(p.xz * 91.7));
+        var *= vec3(1.0 + 0.35 * dry, 1.0 - 0.08 * dry, 1.0 - 0.45 * dry);
+    } else {
+        var *= vec3(0.88 + 0.24 * hashN(p.xz * 71.3));
+    }
+    return var * fine;
+}
+
+// ---- high-res grass cards (alpha-tested cross quads) -------------------------
+// Classic grass sprite: two vertical quads per tuft, crossed at a hashed angle.
+// The alpha pattern is analytic (resolution-independent "texture"); the card
+// ray is intersected against the camera ray so cards occlude the terrain.
+
+float tuftAlpha(vec2 uv, float s1, float s2, out float tint)
+{
+    float a = 0.0;
+    tint = 1.0;
+    for (int i = 0; i < 9; ++i) {
+        float f = fract(s1 * 11.17 + float(i) * 0.61803 + s2 * 0.37);
+        float bx = f * 1.25 - 0.125;                  // blade base x offset
+        float bh = 0.62 + 0.38 * fract(f * 7.31);     // per-blade height
+        if (uv.y > bh) continue;
+        float curve = (fract(f * 3.77) - 0.5) * 0.42; // wavy centerline
+        float v = uv.y / bh;
+        float halfw = 0.045 + 0.035 * fract(f * 1.91);
+        halfw *= (1.0 - 0.72 * v);                    // taper toward tip
+        float uc = bx + curve * v;
+        float d = abs(uv.x - uc);
+        float edge = 1.0 - smoothstep(halfw * 0.50, halfw, d);
+        edge *= 1.0 - smoothstep(0.90, 1.0, v);       // wispy rounded tip
+        if (edge >= a) { a = edge; tint = 0.70 + 0.62 * fract(f * 5.13); }
+    }
+    return a;
+}
+
+struct Card {
+    bool  hit;
+    float alpha;
+    vec3  n;
+    vec3  alb;
+    float tip;
+};
+
+void cardPass(vec3 ro, vec3 rd, float tMax, float gh,
+              float cell, float dens, float wBase, float wSpan, float hBase, float hSpan,
+              float seedK, float passPhase, inout float bestT, inout Card c0)
+{
+    vec3 p = ro + rd * tMax;
+    int ix = int(floor(p.x / cell));
+    int iz = int(floor(p.z / cell));
+    float reach2 = (wBase + wSpan) * (wBase + wSpan) * 0.25 + 0.04;
+    for (int dz = -1; dz <= 1; ++dz)
+    for (int dx = -1; dx <= 1; ++dx) {
+        int cx = ix + dx, cz = iz + dz;
+        if (hashN(vec2(float(cx) * 19.1 * seedK, float(cz) * 37.7 * seedK)) > dens) continue;
+        float s1 = hashN(vec2(float(cx) * 7.3 * seedK, float(cz) * 11.1 * seedK));
+        float s2 = hashN(vec2(float(cx) * 13.7 * seedK, float(cz) * 17.3 * seedK));
+        vec2 tpos = vec2((float(cx) + s1) * cell, (float(cz) + s2) * cell);
+        vec2 dq = p.xz - tpos;
+        if (dot(dq, dq) > reach2) continue;
+        float ang = hashN(vec2(float(cx) * 23.1 * seedK, float(cz) * 29.7 * seedK)) * 3.14159;
+        vec3 e1 = vec3(sin(ang), 0.0, cos(ang));
+        vec3 nCard = vec3(e1.z, 0.0, -e1.x);
+        float w = wBase + wSpan * hashN(vec2(float(cx) * 41.3 * seedK, float(cz) * 43.1 * seedK));
+        float h = hBase + hSpan * hashN(vec2(float(cx) * 53.9 * seedK, float(cz) * 61.7 * seedK));
+        vec3 ctr = vec3(tpos.x, gh, tpos.y);
+        // near-field coverage: sample the blade pattern at the GROUND HIT so
+        // steep/near views (where short cards cannot occlude) still get blades
+        vec3 pHit = ro + rd * tMax;
+        float halfW = w * 0.5;
+        vec2 uvH = vec2(dot(pHit - ctr, e1) / halfW * 0.5 + 0.5, (pHit.y - ctr.y) / h);
+        if (uvH.y >= -0.02 && uvH.y <= 1.0) {
+            float ttH;
+            float aaH = tuftAlpha(uvH, s1 * 97.3 + float(cx) * 7.7 + passPhase, s2 * 53.1 + float(cz) * 3.1, ttH);
+            if (aaH > c0.alpha) {
+                float v1h = hashN(vec2(float(cx) * 71.9 * seedK, float(cz) * 83.7 * seedK));
+                vec3 gDk = vec3(0.07, 0.36, 0.06) * (0.70 + 0.45 * v1h);
+                vec3 gLt = vec3(0.36, 0.70, 0.22) * (0.85 + 0.35 * hashN(vec2(float(cx) * 91.3 + passPhase, float(cz) * 97.1)));
+                float tgh = 0.84;
+                c0.hit = true;
+                c0.alpha = aaH;
+                c0.n = nCard;
+                c0.tip = 0.75;
+                c0.alb = min(mix(gDk, gLt, tgh) * ttH * (0.72 + 0.55 * aaH), vec3(0.90));
+            }
+        }
+        float denom = dot(rd, nCard);
+        if (abs(denom) < 0.04) continue;
+        float tc = dot(ctr - ro, nCard) / denom;
+        if (tc <= 0.0 || tc >= bestT) continue;
+        vec3 q = ro + rd * tc;
+        float du = dot(q - ctr, e1);
+        if (abs(du) > halfW) continue;
+        float dv = q.y - ctr.y;
+        if (dv < -0.02 || dv > h) continue;
+        vec2 uv = vec2(du / halfW * 0.5 + 0.5, dv / h);
+        float tt; float aa = tuftAlpha(uv, s1 * 97.3 + float(cx) * 7.7 + passPhase, s2 * 53.1 + float(cz) * 3.1, tt);
+        if (aa < 0.04) continue;
+        bestT = tc;
+        c0.hit = true;
+        c0.alpha = aa;
+        c0.n = nCard;
+        c0.tip = uv.y;
+        float v1 = hashN(vec2(float(cx) * 71.9 * seedK, float(cz) * 83.7 * seedK));
+        vec3 gDark = vec3(0.07, 0.36, 0.06) * (0.70 + 0.45 * v1);
+        vec3 gLit = vec3(0.36, 0.70, 0.22) * (0.85 + 0.35 * hashN(vec2(float(cx) * 91.3 + passPhase, float(cz) * 97.1)));
+        float tg = uv.y * uv.y * (3.0 - 2.0 * uv.y);
+        c0.alb = min(mix(gDark, gLit, tg) * tt * (0.72 + 0.55 * aa), vec3(0.90));
+    }
+}
+
+Card grassCard(vec3 ro, vec3 rd, float tMax, float gh)
+{
+    Card c0;
+    c0.hit = false; c0.alpha = 0.0; c0.n = vec3(0.0, 1.0, 0.0);
+    c0.alb = vec3(0.0); c0.tip = 0.0;
+    float bestT = tMax;
+    // coarse meadow tufts + fine filler cards (decorrelated grids)
+    cardPass(ro, rd, tMax, gh, 0.42, 0.66, 0.50, 0.38, 0.28, 0.40, 1.000, 0.0, bestT, c0);
+    cardPass(ro, rd, tMax, gh, 0.17, 0.88, 0.14, 0.16, 0.12, 0.18, 0.618, 13.37, bestT, c0);
+    return c0;
 }
 
 // analytic water surface hit along ray; returns t or -1
@@ -381,11 +607,17 @@ vec3 calcNormal(vec3 p)
                                   objectDistance(p - vec3(0, 0, eo))));
     }
     // analytic heightfield normal - identical in both backends so shading
-    // stays independent of each field's sampling resolution
+    // stays independent of each field's sampling resolution.
+    // Two scales: fine detail (grass bumps) blended with broad form.
     float e = 0.35;
-    return normalize(vec3(heightAt(p.xz - vec2(e, 0)) - heightAt(p.xz + vec2(e, 0)),
-                          2.0 * e,
-                          heightAt(p.xz - vec2(0, e)) - heightAt(p.xz + vec2(0, e))));
+    vec3 nWide = normalize(vec3(heightAt(p.xz - vec2(e, 0)) - heightAt(p.xz + vec2(e, 0)),
+                                2.0 * e,
+                                heightAt(p.xz - vec2(0, e)) - heightAt(p.xz + vec2(0, e))));
+    float e2 = 0.10;
+    vec3 nFine = normalize(vec3(heightAt(p.xz - vec2(e2, 0)) - heightAt(p.xz + vec2(e2, 0)),
+                                2.0 * e2,
+                                heightAt(p.xz - vec2(0, e2)) - heightAt(p.xz + vec2(0, e2))));
+    return normalize(mix(nFine, nWide, 0.55));
 }
 
 float softShadow(vec3 ro, vec3 rd)
@@ -465,8 +697,8 @@ vec3 brickAlbedo(vec3 p)
             vec3 g = clamp((p - mn) / cellSz - 0.5, vec3(0.0), vec3(BRICK_N - 1.001));
             ivec3 i0 = ivec3(g);
             uint vi = bi * BRICK_WORDS + (uint(i0.z) * BRICK_N * BRICK_N +
-                                          uint(i0.y) * BRICK_N + uint(i0.x)) *
-                                             2;
+                                           uint(i0.y) * BRICK_N + uint(i0.x)) *
+                                              2;
             uint v = uBricks[vi];
             return vec3(float(v & 255u), float((v >> 8) & 255u), float((v >> 16) & 255u)) / 255.0;
         }
@@ -484,33 +716,220 @@ vec3 brickAlbedo(vec3 p)
     return vec3(0.5);
 }
 
-vec3 shadeTerrain(vec3 p, vec3 rd, vec3 alb)
+vec2 brickReflectivity(vec3 p)
 {
+    vec3 wmin = vec3(-pc.b.x * 0.5);
+    vec3 rel = p - wmin;
+    float chunkM = pc.b.x / pc.b.z;
+    ivec3 cc = ivec3(floor(rel / chunkM));
+    cc = clamp(cc, ivec3(0), ivec3(int(pc.b.z) - 1));
+    int root = uGrid[(cc.z * int(pc.b.z) + cc.y) * int(pc.b.z) + cc.x];
+    if (root == -1)
+        return vec2(0.15, 0.9);
+    uint h = uint(root);
+    vec3 mn = wmin + vec3(cc) * chunkM;
+    vec3 sz = vec3(chunkM);
+    for (int guard = 0; guard < 12; ++guard) {
+        if ((h & 3u) == 1u) {
+            uint bi = h >> 2;
+            float cellSz = sz.x / float(BRICK_N);
+            vec3 g = clamp((p - mn) / cellSz - 0.5, vec3(0.0), vec3(BRICK_N - 1.001));
+            ivec3 i0 = ivec3(g);
+            uint vi = bi * BRICK_WORDS + (uint(i0.z) * BRICK_N * BRICK_N +
+                                           uint(i0.y) * BRICK_N + uint(i0.x)) *
+                                              2 + 1;
+            uint v = uBricks[vi];
+            float refl = float((v >> 8) & 255u) / 255.0;
+            float rough = float((v >> 16) & 255u) / 255.0;
+            return vec2(refl, rough);
+        }
+        if ((h & 3u) != 0u)
+            break;
+        uint ni = h >> 2;
+        vec3 halfS = sz * 0.5;
+        vec3 r2 = p - mn;
+        int oct = (r2.x >= halfS.x ? 1 : 0) | (r2.y >= halfS.y ? 2 : 0) |
+                  (r2.z >= halfS.z ? 4 : 0);
+        h = uHandles[uChildBase[ni] + oct];
+        mn += vec3(oct & 1, (oct >> 1) & 1, (oct >> 2) & 1) * halfS;
+        sz = halfS;
+    }
+    return vec2(0.15, 0.9);
+}
+
+// ---- PBR shading helpers (shared identical code in both backends) ----------
+float sceneMap(vec3 p) { return map(p); }
+
+const float PI = 3.14159265;
+
+vec3 fresnelSchlick(vec3 f0, float vdh)
+{
+    return f0 + (1.0 - f0) * pow(1.0 - vdh, 5.0);
+}
+
+float ggxD(float ndh, float a2)
+{
+    float d = ndh * ndh * (a2 - 1.0) + 1.0;
+    return a2 / (PI * d * d);
+}
+
+float smithV(float ndl, float ndv, float a2)
+{
+    float v = 0.5 / max(ndl * sqrt(ndv * ndv * (1.0 - a2) + a2) +
+                        ndv * sqrt(ndl * ndl * (1.0 - a2) + a2), 1e-3);
+    return min(v, 6.0);
+}
+
+vec3 pbrSpec(vec3 n, vec3 v, vec3 l, vec3 f0, float rough)
+{
+    vec3 h = normalize(v + l);
+    float ndl = max(dot(n, l), 0.0);
+    float ndv = max(dot(n, v), 0.0);
+    float ndh = max(dot(n, h), 0.0);
+    float vdh = max(dot(v, h), 0.0);
+    float a2 = rough * rough * rough * rough;
+    return fresnelSchlick(f0, vdh) * ggxD(ndh, a2) * smithV(ndl, ndv, a2);
+}
+
+// multi-scale SDF ambient occlusion with bent normal
+void sdfAO(vec3 p, vec3 n, out float ao, out vec3 bent)
+{
+    const float rad[3] = float[3](0.14, 0.45, 1.25);
+    vec3 tv = cross(n, vec3(0.0001, 1.0, 0.0001));
+    vec3 tang = normalize(tv);
+    vec3 bitan = normalize(cross(n, tang));
+    float occ = 0.0, wsum = 0.0;
+    vec3 bd = n * 0.5;
+    for (int ring = 0; ring < 3; ++ring) {
+        float r = rad[ring];
+        for (int a = 0; a < 4; ++a) {
+            float ang = float(a) * 1.5708 + float(ring) * 0.785;
+            vec3 dir = normalize(n * 0.85 + (cos(ang) * tang + sin(ang) * bitan) * 0.7);
+            float s = sceneMap(p + dir * r);
+            float fall = clamp(1.0 - s / r, 0.0, 1.0);
+            fall = fall * fall * (3.0 - 2.0 * fall);
+            float w = 1.0 / (1.0 + fall * fall * 4.0);
+            occ += w * fall;
+            wsum += w;
+            bd += dir * w * (1.0 - fall);
+        }
+    }
+    ao = clamp(1.0 - 0.85 * occ / max(wsum, 1e-4), 0.0, 1.0);
+    bent = normalize(bd);
+}
+
+// 3-tap analytic-sky irradiance: full hemisphere integral approximated by
+// tilted taps so the ambient follows the sun direction and sky gradient.
+vec3 skyIrradiance(vec3 n)
+{
+    vec3 up = vec3(0.0, 1.0, 0.0);
+    vec3 a = normalize(n * 0.6 + up * 0.4);
+    vec3 b = normalize(n * 0.7 + kSunDir * 0.3);
+    vec3 c = normalize(n * 0.15 + up * 0.85);
+    return skyColor(a) * 0.42 + skyColor(b) * 0.28 + skyColor(c) * 0.30;
+}
+
+// aerial-perspective fog: sky-tinted, sun-warmed, altitude-attenuated
+vec3 fogColor(vec3 rd, vec3 p)
+{
+    vec3 fc = skyColor(rd) * 0.88;
+    fc += vec3(1.0, 0.75, 0.45) * 0.10 * pow(clamp(dot(rd, kSunDir), 0.0, 1.0), 3.0);
+    fc *= clamp(0.60 + 0.40 * clamp((p.y + 1.5) * 0.08, 0.0, 1.0), 0.0, 1.0);
+    return fc;
+}
+
+vec3 shadeTerrain(vec3 p, vec3 rd, vec3 alb, vec2 rr, vec3 ro)
+{
+    uint mId = getMaterialId(p);
     vec3 n = calcNormal(p);
     float sh = softShadow(p + n * 0.35, kSunDir);
-    float ndl = max(dot(n, kSunDir), 0.0);
-    
-    vec3 amb = mix(kHorizon, kZenith, 0.5) * (n.y * 0.5 + 0.5) * 0.55;
-    vec3 bounce = vec3(0.30, 0.25, 0.18) * max(-n.y, 0.0) * 0.35;
-    if (alb.g > alb.r * 1.15) { // vegetation: micro detail
+
+    float ao;
+    vec3 bent;
+    sdfAO(p, n, ao, bent);
+
+    if (alb.g > alb.r * 1.15) { // vegetation: micro detail (far-field fallback)
         alb = grassDetail(alb, p, n);
         sh = min(sh, softShadow(p + n * 0.35, kSunDir) + 0.15);
     }
-    
-    vec3 col = alb * (kSunCol * ndl * sh + amb + bounce);
-    // PBR-ish specular from per-voxel roughness/reflectivity
-    {
-        uint matId = getMaterialId(p);
-        vec2 rr = kMatRefl[matId];
-        float rough = rr.y;
-        float refl = rr.x;
-        vec3 V = -rd;
-        vec3 Hh = normalize(kSunDir + V);
-        float NdotH = max(dot(n, Hh), 0.0);
-        float specPow = mix(128.0, 8.0, rough);
-        float spec = pow(NdotH, specPow) * refl * sh * 0.7;
-        col += kSunCol * spec;
+
+    // ---- flora field: grass cards / leaf clusters (near-field) ----
+    if (mId <= 1u || mId == 8u) {
+        float lod = 1.0 - smoothstep(12.0, 40.0, length(p - ro));
+        if (lod > 0.001) {
+            if (mId <= 1u) {
+                // vertical blade streaks: anisotropic world-space texture (3-4 cm
+                // wide, tall) - reads as blades from every angle, unlike isotropic
+                // per-pixel noise. Wind-sheared via pc.misc.y.
+                float ghS = heightAt(p.xz);
+                float hgt = clamp((p.y - ghS) * 2.2, 0.0, 1.0);
+                float sx1 = p.x * 26.0 + p.z * 13.0;
+                float streak = vnoise(vec2(sx1 + pc.misc.y * 0.45 + fbm(p.xz * 2.1) * 2.0, p.y * 2.9));
+                float blade = 0.55 + 0.45 * fract(hashN(p.xz * 31.7) + streak * 13.1);
+                vec3 gshade = mix(vec3(0.78, 0.90, 0.70), vec3(1.16, 1.19, 0.96), blade);
+                alb *= mix(vec3(1.0), gshade, lod);
+                vec3 bn = normalize(vec3(0.0, 0.85, 0.0)
+                     + 0.45 * vec3(fract(streak * 7.31) - 0.5, 0.0, fract(streak * 11.7) - 0.5));
+                n = normalize(mix(n, bn, 0.60 * lod * hgt * smoothstep(0.20, 0.85, streak)));
+                ao *= mix(0.55, 1.05, hgt);          // dark roots, lit tips
+                // silhouette cards (ray-space crossed alpha sprites)
+                Card cd = grassCard(ro, rd, length(p - ro), ghS);
+                if (cd.hit) {
+                    float m = cd.alpha * lod;
+                    vec3 bn2 = normalize(cd.n * 0.50 + vec3(0.0, 0.80, 0.0));
+                    bn2 = normalize(bn2 + 0.40 * vec3(fract(streak * 7.31) - 0.5, 0.0, fract(streak * 3.17) - 0.5));
+                    n = normalize(mix(n, bn2, m * 0.92));
+                    alb *= cd.alb * (0.90 + 0.20 * streak);
+                    float tg = cd.tip * cd.tip * (3.0 - 2.0 * cd.tip);
+                    ao *= mix(0.50, 1.05, tg);
+                }
+            }
+            float gh = (mId == 8u) ? p.y - 0.12 : heightAt(p.xz);
+            FloraInfo fi = floraField(p, gh, (mId == 8u) ? 1u : 0u);
+            if (fi.mask * lod > 0.02) {
+                vec3 bn = fi.n;
+                if (mId == 8u) {               // two-sided leaves: face the viewer
+                    if (dot(bn, rd) > 0.0) bn = -bn;
+                    bn = normalize(bn * 0.75 + vec3(0.0, 0.25, 0.0));
+                } else {                       // blades: wall-like, up near the base
+                    bn = normalize(mix(vec3(0.0, 0.40, 0.0), bn, 0.35 + fi.tip * 0.65));
+                }
+                float m = fi.mask * lod;
+                n = normalize(mix(n, bn, m * m * (3.0 - 2.0 * m) * 0.9));
+                alb *= floraColor(p, mId, fi.tip, fi.col);
+                // height-graded self-occlusion: dark roots, lit tips
+                float t2 = fi.tip * fi.tip * (3.0 - 2.0 * fi.tip);
+                ao *= mix(0.68, 1.08, t2);
+            }
+        }
     }
+
+    float ndl = max(dot(n, kSunDir), 0.0);
+
+    vec3 amb = skyIrradiance(bent) * (0.28 + 0.30 * ao);
+    float fold = clamp(-n.y, 0.0, 1.0);
+    vec3 bounce = (alb * 0.65 + vec3(0.10, 0.09, 0.07)) * fold * (0.3 + 0.7 * ao);
+
+    vec3 V = -rd;
+    vec3 h = normalize(kSunDir + V);
+    float vdh = max(dot(V, h), 0.0);
+    float rough = clamp(rr.y, 0.05, 1.0);
+    vec3 f0 = vec3(0.04) + vec3(rr.x) * 0.70;
+    vec3 F = fresnelSchlick(f0, vdh);
+    float fAvg = (F.r + F.g + F.b) * 0.3333;
+    vec3 spec = pbrSpec(n, V, kSunDir, f0, rough);
+
+    vec3 col = alb * (1.0 - fAvg) * (kSunCol * ndl * sh + amb + bounce)
+             + spec * kSunCol * ndl * sh
+             + spec * alb * 0.30 * kSunCol * sh; // albedo-scale multi-scatter compensation
+
+    // backlit foliage translucency (canopy scatters light through leaves)
+    if (mId == 8u) {
+        float back = pow(1.0 - max(dot(n, kSunDir), 0.0), 2.0);
+        float thick = clamp(0.5 - sceneMap(p + n * 0.3) * 2.0, 0.0, 1.0);
+        col += alb * kSunCol * back * (1.0 - thick * 0.85) * 0.55;
+    }
+
     if (p.y < kWaterLevel && underWater(p.xz)) {
         float depth = kWaterLevel - p.y;
         col *= exp(-depth * vec3(0.35, 0.18, 0.12) * 3.0);
@@ -574,7 +993,8 @@ void main()
             if (waterView) {
                 // ripple normal (animated in real seconds via pc.misc.y)
                 float r1 = sin(p.x*4.5 + pc.misc.y*0.45)*0.5 + sin(p.z*6.0 - p.x*2.5)*0.5;
-                vec3 n = normalize(vec3(r1*0.04, 1.0, sin(p.x*7.0 - p.z*11.0)*0.06));
+                float r2 = sin(p.x*9.5 + pc.misc.y*0.8 + p.z*3.5)*0.3 + sin(p.z*13.0 - p.x*6.0 + pc.misc.y*0.3)*0.3;
+                vec3 n = normalize(vec3(r1*0.04 + r2*0.05, 1.0, sin(p.x*7.0 - p.z*11.0)*0.06 + cos(p.x*11.0 + p.z*5.0)*0.045));
                 vec3 R = reflect(rd, n);
                 R.y = abs(R.y);
                 // reflected color: short march
@@ -589,7 +1009,7 @@ void main()
                 }
                 if (rh){
                     vec3 hp2 = rp2;
-                    rc = shadeTerrain(hp2, R, brickAlbedo(hp2));
+                    rc = shadeTerrain(hp2, R, brickAlbedo(hp2), brickReflectivity(hp2), pw);
                 }
                 float fres = 0.02 + 0.98*pow(1.0 - max(dot(-rd,n),0.0), 5.0);
                 float sunGlint = pow(max(dot(R,kSunDir),0.0), 420.0);
@@ -601,11 +1021,11 @@ void main()
                 float fp = vnoise(pw.xz * 3.7 + vec2(pc.misc.y * 0.35, -pc.misc.y * 0.22));
                 fp = smoothstep(0.66, 0.90, fp + 0.28 * shoreF - 0.20);
                 col = mix(col, vec3(0.92, 0.94, 0.95), fp * shoreF * 0.50);
-                col = mix(col, kHorizon*1.05, 1.0-exp(-tWater*0.004));
+                col = mix(col, fogColor(rd, pw), 1.0-exp(-tWater*0.004));
             } else {
-                col = shadeTerrain(p, rd, brickAlbedo(p));
+                col = shadeTerrain(p, rd, brickAlbedo(p), brickReflectivity(p), ro);
                 float fog = 1.0 - exp(-max(t - t0, 0.0) * 0.0012);
-                col = mix(col, kHorizon * 1.05, fog);
+                col = mix(col, fogColor(rd, p), fog);
             }
         } else {
             col = skyColor(rd);
@@ -613,7 +1033,14 @@ void main()
     }
 
     col = aces(col);
-    col = clamp(mix(vec3(dot(col, vec3(0.2126, 0.7152, 0.0722))), col, 1.55),
-                vec3(0.0), vec3(1.0));
+    float lumG = dot(col, vec3(0.2126, 0.7152, 0.0722));
+    float mxG = max(col.r, max(col.g, col.b));
+    float mnG = min(col.r, min(col.g, col.b));
+    // vibrance: saturate flat pixels, leave punchy ones alone
+    col = mix(vec3(lumG), col, 1.0 + 0.85 * (1.0 - clamp(mxG - mnG + 0.12, 0.0, 1.0)));
+    // shadow lift with cool tint + highlight warmth
+    float shade = clamp(1.0 - lumG * 2.5, 0.0, 1.0);
+    col = col * (1.0 - 0.06 * shade) + vec3(0.025, 0.035, 0.050) * shade;
+    col = clamp(col, vec3(0.0), vec3(1.0));
     imageStore(uOut, pix, vec4(pow(col, vec3(1.0/2.2)), 1.0));
 }

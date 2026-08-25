@@ -109,3 +109,81 @@ TEST_CASE("worldfile rejects wrong magic")
     CHECK_FALSE(worldfile::read(path, out));
     std::remove(path.c_str());
 }
+
+TEST_CASE("manifest roundtrip and layered dedupe")
+{
+    std::filesystem::path dir = std::filesystem::temp_directory_path() / "vf_layers_test";
+    std::filesystem::create_directories(dir);
+
+    // two record-only layers sharing one cell: first layer must win
+    auto mk = [&](uint16_t x, uint8_t mat) {
+        VoxelRecord v;
+        v.x = x;
+        v.y = 512;
+        v.z = 512;
+        v.materialId = mat;
+        return v;
+    };
+    worldfile::WorldLayer a{ "a.vxw", "object", "a", { 1.f, 2.f, 3.f }, 45.f };
+    worldfile::WorldLayer b{ "b.vxw", "object", "b", {}, 0.f };
+    b.enabled = false; // disabled layers stay on disk but leave the merge
+    CHECK(worldfile::writeManifest((dir / "world.json").string(), { a, b }));
+
+    std::vector<worldfile::WorldLayer> loaded;
+    REQUIRE(worldfile::loadManifest((dir / "world.json").string(), loaded));
+    REQUIRE(loaded.size() == 2);
+    CHECK(loaded[0].file == "a.vxw");
+    CHECK(loaded[0].role == "object");
+    CHECK(loaded[0].name == "a");
+    CHECK(loaded[0].pos[0] == doctest::Approx(1.f));
+    CHECK(loaded[0].rotDeg == doctest::Approx(45.f));
+    CHECK(loaded[0].enabled == true);
+    CHECK(loaded[1].enabled == false); // bool literal parsed back
+
+    WorldFileData da, db;
+    da.meta = db.meta = { WORLD, VOXEL, WATER_LEVEL, uint32_t(GRID_N), 8 };
+    da.voxels = { mk(100, 6), mk(101, 6) };
+    db.voxels = { mk(101, 2), mk(102, 2) }; // 101 overlaps -> b loses there
+    REQUIRE(worldfile::write((dir / "a.vxw").string(), da));
+    REQUIRE(worldfile::write((dir / "b.vxw").string(), db));
+
+    std::vector<VoxelRecord> merged;
+    WorldFileMeta expected{ WORLD, VOXEL, WATER_LEVEL, uint32_t(GRID_N), 8 };
+    REQUIRE(worldfile::readLayered((dir / "world.json").string(), expected, merged));
+    REQUIRE(merged.size() == 2); // only a - b is disabled
+    CHECK(merged[0].materialId == 6);
+    CHECK(merged[1].materialId == 6);
+
+    // re-enable b: overlap cell must go to a (earlier layer wins)
+    loaded[1].enabled = true;
+    CHECK(worldfile::writeManifest((dir / "world.json").string(), loaded));
+    REQUIRE(worldfile::readLayered((dir / "world.json").string(), expected, merged));
+    REQUIRE(merged.size() == 3);
+    CHECK(merged[1].materialId == 6);
+    CHECK(merged[2].materialId == 2);
+
+    // meta mismatch must be rejected
+    expected.voxelSize = 0.5f;
+    CHECK_FALSE(worldfile::readLayered((dir / "world.json").string(), expected, merged));
+
+    std::filesystem::remove_all(dir);
+}
+
+TEST_CASE("record-only layer files are valid VXW (empty SVO sections)")
+{
+    std::string path = tmpPath();
+    WorldFileData d;
+    d.meta = { WORLD, VOXEL, WATER_LEVEL, uint32_t(GRID_N), 8 };
+    VoxelRecord only;
+    only.x = 7;
+    only.materialId = 4;
+    d.voxels.push_back(only);
+    REQUIRE(worldfile::write(path, d));
+    WorldFileData out;
+    REQUIRE(worldfile::read(path, out));
+    CHECK(out.chunkGrid.empty());
+    CHECK(out.bricks.empty());
+    REQUIRE(out.voxels.size() == 1);
+    CHECK(out.voxels[0].x == 7);
+    std::remove(path.c_str());
+}

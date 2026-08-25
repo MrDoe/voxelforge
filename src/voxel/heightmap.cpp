@@ -6,6 +6,7 @@
 
 #define STB_IMAGE_IMPLEMENTATION
 #define STBI_ONLY_PNG
+#define STBI_ONLY_HDR
 #include <stb_image.h>
 
 #ifndef VOXELFORGE_ASSET_DIR

@@ -1,7 +1,9 @@
 #include "voxel/worldfile.hpp"
 #include <spdlog/spdlog.h>
-#include <cstdio>
+#include <cctype>
+#include <cstdlib>
 #include <cstring>
+#include <unordered_set>
 
 namespace vf::voxel::worldfile {
 
@@ -219,6 +221,247 @@ bool read(const std::string& path, WorldFileData& out)
         if (!r.get(tail, 4))
             return false; // mat reserved pad pad
         v.materialId = tail[0];
+    }
+    return true;
+}
+
+// --- manifest (assets/world.json) -------------------------------------------
+// Minimal JSON reader: just enough for the fixed-shape world manifest.
+// Supported values: objects, arrays, strings, numbers, true/false. Comments
+// (// to end of line) are tolerated so humans can annotate the file.
+namespace {
+
+struct Json {
+    const std::string& s;
+    size_t i = 0;
+
+    void skipWs()
+    {
+        while (i < s.size()) {
+            if (std::isspace(unsigned(s[i]))) {
+                ++i;
+            } else if (s[i] == '/' && i + 1 < s.size() && s[i + 1] == '/') {
+                while (i < s.size() && s[i] != '\n') ++i;
+            } else {
+                break;
+            }
+        }
+    }
+    bool eat(char c)
+    {
+        skipWs();
+        if (i < s.size() && s[i] == c) {
+            ++i;
+            return true;
+        }
+        return false;
+    }
+    bool peek(char c)
+    {
+        skipWs();
+        return i < s.size() && s[i] == c;
+    }
+    bool str(std::string& out)
+    {
+        skipWs();
+        if (i >= s.size() || s[i] != '"')
+            return false;
+        ++i;
+        out.clear();
+        while (i < s.size() && s[i] != '"') {
+            if (s[i] == '\\' && i + 1 < s.size())
+                ++i; // naive escape: take next char literally
+            out.push_back(s[i++]);
+        }
+        return i < s.size() && s[i++] == '"';
+    }
+    bool num(float& v)
+    {
+        skipWs();
+        char* end = nullptr;
+        const char* begin = s.c_str() + i;
+        v = std::strtof(begin, &end);
+        if (end == begin)
+            return false;
+        i += size_t(end - begin);
+        return true;
+    }
+    bool boolean(bool& v)
+    {
+        skipWs();
+        if (s.compare(i, 4, "true") == 0) {
+            i += 4;
+            v = true;
+            return true;
+        }
+        if (s.compare(i, 5, "false") == 0) {
+            i += 5;
+            v = false;
+            return true;
+        }
+        return false;
+    }
+    // consume any value (string / number / bool / array / object) without
+    // interpreting it - keeps unknown keys from derailing the parse
+    bool skipValue()
+    {
+        skipWs();
+        if (i >= s.size())
+            return false;
+        char c = s[i];
+        std::string sinkStr;
+        float sinkNum = 0.f;
+        bool sinkBool = false;
+        if (c == '"')
+            return str(sinkStr);
+        if (c == 't' || c == 'f')
+            return boolean(sinkBool);
+        if (c == '[' || c == '{') {
+            char open = c, close = c == '[' ? ']' : '}';
+            int depth = 0;
+            while (i < s.size()) {
+                char d = s[i++];
+                if (d == open)
+                    ++depth;
+                else if (d == close && --depth == 0)
+                    return true;
+            }
+            return false;
+        }
+        return num(sinkNum);
+    }
+};
+
+} // namespace
+
+bool loadManifest(const std::string& path, std::vector<WorldLayer>& out)
+{
+    out.clear();
+    std::FILE* f = std::fopen(path.c_str(), "rb");
+    if (!f)
+        return false;
+    std::string text;
+    char buf[4096];
+    size_t n;
+    while ((n = std::fread(buf, 1, sizeof(buf), f)) > 0)
+        text.append(buf, n);
+    std::fclose(f);
+
+    Json j{ text };
+    if (!j.eat('{'))
+        return false;
+    // top-level: { "layers": [ ... ] } - other keys ignored
+    bool foundLayers = false;
+    while (!j.peek('}') && j.i < text.size()) {
+        std::string key;
+        if (!j.str(key))
+            return false;
+        if (!j.eat(':'))
+            return false;
+        if (key == "layers" && j.eat('[')) {
+            foundLayers = true;
+            while (!j.peek(']') && j.i < text.size()) {
+                WorldLayer layer;
+                if (!j.eat('{'))
+                    return false;
+                while (!j.peek('}') && j.i < text.size()) {
+                    std::string k;
+                    if (!j.str(k) || !j.eat(':'))
+                        return false;
+                    if (k == "file")
+                        j.str(layer.file);
+                    else if (k == "role")
+                        j.str(layer.role);
+                    else if (k == "name")
+                        j.str(layer.name);
+                    else if (k == "rot")
+                        j.num(layer.rotDeg);
+                    else if (k == "enabled")
+                        j.boolean(layer.enabled);
+                    else if (k == "pos") {
+                        if (!j.eat('['))
+                            return false;
+                        for (int c = 0; c < 3; ++c) {
+                            if (!j.num(layer.pos[c]))
+                                return false;
+                            if (c < 2)
+                                j.eat(','); // separators between components
+                        }
+                        if (!j.eat(']'))
+                            return false;
+                    } else {
+                        j.skipValue(); // unsupported key - skip robustly
+                    }
+                    if (!j.eat(','))
+                        break;
+                }
+                j.eat('}');
+                if (!layer.file.empty())
+                    out.push_back(std::move(layer));
+                if (!j.eat(','))
+                    break;
+            }
+            j.eat(']');
+        } else {
+            j.skipValue(); // unsupported top-level key
+        }
+        if (!j.eat(','))
+            break;
+    }
+    j.eat('}');
+    return foundLayers && !out.empty();
+}
+
+bool writeManifest(const std::string& path, const std::vector<WorldLayer>& layers)
+{
+    std::FILE* f = std::fopen(path.c_str(), "wb");
+    if (!f)
+        return false;
+    std::fprintf(f, "{\n  \"version\": 1,\n  \"layers\": [\n");
+    for (size_t i = 0; i < layers.size(); ++i) {
+        const WorldLayer& l = layers[i];
+        std::fprintf(f,
+                     "    { \"file\": \"%s\", \"role\": \"%s\", \"name\": \"%s\", "
+                     "\"pos\": [%.2f, %.2f, %.2f], \"rot\": %.1f, \"enabled\": %s }%s\n",
+                     l.file.c_str(), l.role.c_str(), l.name.c_str(), l.pos[0], l.pos[1],
+                     l.pos[2], l.rotDeg, l.enabled ? "true" : "false",
+                     i + 1 < layers.size() ? "," : "");
+    }
+    std::fprintf(f, "  ]\n}\n");
+    return std::fclose(f) == 0;
+}
+
+bool readLayered(const std::string& manifestPath, const WorldFileMeta& expected,
+                 std::vector<VoxelRecord>& out)
+{
+    std::vector<WorldLayer> layers;
+    if (!loadManifest(manifestPath, layers))
+        return false;
+    std::string dir = manifestPath;
+    size_t slash = dir.find_last_of("/\\");
+    dir = slash == std::string::npos ? std::string() : dir.substr(0, slash + 1);
+
+    out.clear();
+    std::unordered_set<uint32_t> claimed; // x<<20 | y<<10 | z of first claimant
+    for (const WorldLayer& l : layers) {
+        if (l.role == "packed")
+            continue; // merged cache - splats read the live layers instead
+        if (!l.enabled)
+            continue; // GUI-excluded: file stays on disk, out of merges
+        WorldFileData data;
+        if (!read(dir + l.file, data))
+            return false;
+        if (data.meta.worldSize != expected.worldSize ||
+            data.meta.voxelSize != expected.voxelSize ||
+            data.meta.gridN != expected.gridN) {
+            spdlog::error("worldfile: layer '{}' meta mismatch", l.file);
+            return false;
+        }
+        for (VoxelRecord& v : data.voxels) {
+            uint32_t key = (uint32_t(v.x) << 20) | (uint32_t(v.y) << 10) | uint32_t(v.z);
+            if (claimed.insert(key).second)
+                out.push_back(v);
+        }
     }
     return true;
 }

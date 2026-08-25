@@ -5,7 +5,7 @@ river valley with a water stream featuring reflections, foliage and grass, reali
 and a log cabin — built on a fully dynamic chunked sparse-voxel-octree architecture, with a
 Gaussian-splat hybrid path planned on top.
 
-Last updated: 2026-08-23
+Last updated: 2026-08-24
 
 ---
 
@@ -185,6 +185,10 @@ different scenes and `--compare` could never agree. `vol.worldSize` is now set t
 - [ ] 1-bounce diffuse GI: half-res temporal accumulation + variance-guided filter
 - [ ] TAA with reprojection from depth/normal history
 - [x] PBR-ish material model per palette entry (roughness/reflectivity from second brick word via kMatRefl, Blinn-Phong specular in shadeTerrain)
+- [x] **PBR pass 2 (2026-08-24):** GGX Trowbridge-Reitz D + Smith height-correlated V + Schlick F0 (per-material from refl) replacing Blinn-Phong, energy-conserving diffuse (1−Favg), Albedo-Scale multi-scatter compensation; multi-scale SDF AO (3 rings 0.14/0.45/1.25 m, bent normal) replacing the 4-dir voxelAO (and added to dense backend); sky-model-driven ambient via 3 tilted `skyColor` taps + occlusion-scaled ground bounce; aerial-perspective fog (sky-tinted, sun-warmed, altitude-attenuated) replacing constant horizon fog; backlit foliage translucency for canopy (matId 8); two-scale heightmap normals (0.10 m detail blended 55/45 with 0.35 m form); fbm grass albedo/blade detail; 2-octave water ripples; vibrance + split-tone grading. Both backends updated in lockstep — `--compare` 6.76/255, visual_check green, +0.6 ms/frame. Screenshots `hero_pbr/house_pbr/water_pbr/golden_pbr.png`.
+- [x] **Realistic grass & foliage field (2026-08-24):** two-layer procedural flora in `shadeTerrain` (both backends, shading-level, LOD-faded 9→26 m): (1) blade-scale warped-noise micro-grass texture (fbm-warped vnoise @33/m, wind-animated via `pc.misc.y`, ~±14 % luminance + normal jitter) filling gaps; (2) structured tufts — 4–7 tapered leaning blades (0.12–0.40 m, 1.4 cm wide segments, per-blade random azimuth/lean/color, dry straw tips, dark-root/light-tip AO) for grass (matId 0/1) and irregular two-sided leaf clusters (0.5 m cells, facet normals, hue jitter) for canopy/bushes (matId 8). LOD fallback keeps far fields on the fbm `grassDetail` look — no visible seam; `--compare` 6.76/255, visual_check green, ~0 ms/frame. Screenshots `grass_closeup.png`, refreshed `hero_pbr/house_pbr/golden_pbr.png`. Known limit: blades are shading-only (terrain silhouette unchanged; geometry-level blades would need a second collision field).
+- [x] **High-res grass sprite cards (2026-08-24):** replaced the blade-tuft layer for grass with **alpha-tested crossed sprite cards** ray-intersected in the raymarch: two decorrelated grids (coarse meadow tufts 0.42 m cells, 0.50–0.88 m wide; fine filler 0.17 m cells, 0.14–0.30 m), each card = 9-branch analytic `tuftAlpha` pattern (resolution-independent "texture", tapered wavy blades, wispy tips), per-card hash albedo (dark root → lit tip gradient) + two-sided up-biased normals with fbm wrinkle. Cards occlude the ground (`tc < dist`), shaded via existing PBR; gap-filling micro-grass noise + far LOD fallback unchanged. `--compare` 6.76/255, visual_check/selftest green, +0.05 ms/frame. Screenshots `grass_sprites.png` + refreshed trio.
+- [x] **Grass coverage fix + blade streaks (2026-08-24):** the flora/card LOD was computed from `t - t0` where `t0` is the *world-AABB entry distance* — with the camera INSIDE the world volume `t0 < 0`, so `dist` was inflated by ~70 m and the whole grass layer silently disabled (`smoothstep(9,26)` = 0 everywhere). Fixed by computing the true camera distance `length(p - ro)` inside `shadeTerrain` (dropped the `dist` param). Near-field coverage was still patchy because short cards can't occlude steep rays: the blade pattern is now also sampled at the ground hit point (hit-space) and the fill texture switched to **anisotropic world-space vertical blade streaks** (`vnoise` stretched ~9:1 vertically, wind-sheared, 3-4 cm wide) with height-graded root/tip AO — reads as blades from every angle instead of isotropic per-pixel mush. LOD widened to 12→40 m; all green terrain (matId 0/1) is now covered within that range, far fields keep the fbm detail. Specular fireflies fixed via clamped Smith visibility (≤6.0). `--compare` 6.70/255, visual_check/selftest green, +1.6 ms/frame.
 - [ ] Highly realistic foliage — leaf-cluster SDF warp (fbm-eroded clumps, twig spheres), two-sided SSS back-light + thickness-attenuated bleed + waxy specular, per-leaf albedo variation, wind vertex displacement (pc.misc.y), view-dependent thickness
 
 ### Phase P2 — dynamic world (was M3/M4)
@@ -199,10 +203,17 @@ different scenes and `--compare` could never agree. `vol.worldSize` is now set t
 - [ ] Character controller + rigid debris interacting with water buoyancy
 
 ### Phase P4 — Gaussian-splat path (was M7, per `implementation_plan.md`)
-- [ ] Derive anisotropic Gaussians fitted to brick surfaces (replacing point sprites)
-- [ ] Tile-sort + blended splat pass sharing the offscreen/blit pipeline
-- [ ] **Minimal-raytrace shadows per `implementation_plan.md`:** one visibility ray per
-      splat against our SVO proxy (no shadow maps); binary factor → smoothstep softening
+- [x] **GaussianShader Tier 1 (real-time shading, no training):** flattened anisotropic disks
+      (`shortest axis v = normal`, thin `sz=VOXEL*0.55`), shading `c=γ(c_d + s⊙Ls)` with
+      `s,ρ` from `kMaterialReflection`, HDR cubemap `6×64×64` prefiltered GGX per roughness
+      (`Eq.4`, `lod=ρ*6`), Fresnel Schlick, water `ρ=0.15` reflective variant, denser field
+      `spacing 0.15m` + `water 0.22m` + `2.5M` budget. `splat.vert/frag` + `SplatPass` cubemap.
+      Residual `c_r(SH)` kept `0` (training-needed, plumbing reserved). — `2026-08-23`
+- [x] **Splat density without radius boost (gap fix):** constant `splatRadius=0.1875` (no far `grow`), gaps closed via interpolation factor `1x/2x/4x/8x` (`--splatdensity`, `I` cycle + `1`/`2`/`4`/`8` shortkeys, `rebuildSplats()`). Decimation `1/9→1/4→1/2→all` + fixed `8`-corner subgrid + `SDF|d|<0.22` filter + shuffled `earlyBudget` (`1.5M/2.5M/5M/10M`) for uniform coverage. `splat.vert` foreshorten only. Sorting optimized: `std::sort` + static-view skip + bi-frame skip for `>5M`. — `2026-08-24`
+- [ ] Derive anisotropic Gaussians fitted to brick surfaces (replacing point sprites) — *partial via Tier1 disks, full covariance fit pending*
+- [ ] Tile-sort + blended splat pass sharing the offscreen/blit pipeline — *currently `stable_sort` CPU, GPU radix pending*
+- [x] **Minimal-raytrace shadows per `implementation_plan.md`:** one visibility ray per
+      splat against SDF proxy (`scene()` heightmap+objects, 12 steps `9*d/t`, `par` via `tbb`); `shadow` `0..1` in `SplatVertexData`, `splat.frag:28` `* (1 - shadow*0.65)`, toggle `H`/`--noshadows`, rebuild via `rebuildSplats()` — `2026-08-24`
 - [ ] F-key toggle becomes true representation switch; crossfade blend
 - [ ] NSVF-inspired extension (M8): per-brick feature vectors decoded by tiny in-shader
       MLP → view-dependent appearance + splat-parameter generation
@@ -210,6 +221,21 @@ different scenes and `--compare` could never agree. `vol.worldSize` is now set t
       Beer–Lambert front-to-back compositing; **Weighted Blended OIT** to kill pop-in;
       **ray-marched water/fog volume** reusing SVO empty-skip; octree LOD + splat budget +
       8-bit texture quantization for scale.
+
+#### Phase P4-T3 — GaussianShader Differentiable Training (deferred, doc-only)
+**Goal:** paper-faithful `L = L_color +0.01 L_normal +0.001 L_sparse +0.001 L_reg` (`Eq.9`) training of
+`c_d, s, ρ, c_r(SH deg3), Δn1/2, env 6×64×64` on top of Tier1 scaffolding.
+
+*   **Dataset capture:** `tools/capture_dataset` (`--dump-train out/`) uses existing SVO raymarch to emit
+    `images/*.png + poses.json + sunDir` from hero/house/water orbits; reuses `--shot` PPM path (`tests/visual_check.py`).
+*   **Trainer:** new `tools/train_gs/` Python (PyTorch, `diff-gaussian-rasterization` or `nvdiffrast` Vulkan autodiff).
+    Init from SVO splats; learn `Δn` with `Eq.5` flip, shortest-axis prior `Eq.6`, depth-normal consistency `Eq.7`
+    (Sobel on rendered depth vs `n̄`), sparse `Eq.8`, env cubemap as `nn.Parameter`.
+    `30k` Adam steps, `Tab.3` `0.58h` on `RTX 3090` (`vs 23h Ref-NeRF`).
+*   **Export:** splat file (`pos, scale, quat, c_d, s, ρ, SH9×3, Δn`) reloadable by `SplatPass` (stride 5→8); `c_r` enables indirect reflections.
+*   **Validation:** `Tab.1/2` PSNR on `NeRF Synthetic / Shiny Blender`; our `Tab.4` ablations (`w/o L_sparse`, `w/o L_normal`, `w/o c_r`, `w/o v`, `MLP vs Env`).
+*   **Scope guard:** no engine training loop; viewer stays real-time `97 FPS` (`Tab.3`).
+*   **Estimate:** 4–6 weeks; requires `torch` + `FetchContent` `stb_image` already present, no Vulkan validation layers needed.
 
 ### Phase P5 — scale & polish (stretch)
 - [ ] Out-of-core streaming of cold chunks

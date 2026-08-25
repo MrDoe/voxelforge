@@ -1,0 +1,11 @@
+CompileFlags:
+  CompilationDatabase: build
+  Add: [-Wno-unknown-warning-option]
+
+Diagnostics:
+  ClangTidy:
+    Add: [modernize*, performance*, readability*]
+    Remove: [modernize-use-trailing-return-type]
+
+InlayHints:
+  Enabled: No
