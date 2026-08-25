@@ -115,7 +115,6 @@ struct BuildCtx {
     const std::vector<VoxelRecord>* records = nullptr;
     const CellMap* map = nullptr;
     const int16_t* colTop = nullptr;                  // kLatN*kLatN landscape tops
-    const uint64_t* objSolid = nullptr;               // interior-solid bitmap
     const uint8_t* blockSolid = nullptr;              // global presence grid (records+interior)
     std::vector<std::vector<uint32_t>> chunkRecords;  // per-chunk record indices
     uint32_t ugLo = 0, ugHi = 0;                      // underground interior words
@@ -159,170 +158,48 @@ noTerrain:
 
 void fillBrick(const BuildCtx& c, uint32_t* data, int bx0, int by0, int bz0)
 {
-    // window = brick + 2-cell apron for BFS distance + nearest-seed appearance
-    constexpr int APRON = 2;
-    constexpr int W = BRICK_N + 2 * APRON;
-    constexpr int WN = W * W * W;
-    uint8_t dist[WN];
-    int32_t seed[WN]; // >=0 record index, -2 underground, -1 unvisited air
-    uint8_t solidB[WN];
-    uint32_t frontier[WN], nextF[WN];
-    std::fill(dist, dist + WN, 255);
-    std::fill(seed, seed + WN, -1);
-    std::fill(solidB, solidB + WN, 0);
-
-    const int wx0 = bx0 - APRON, wy0 = by0 - APRON, wz0 = bz0 - APRON;
-    const int16_t* colTop = c.colTop;
-    auto widx = [&](int x, int y, int z) {
-        return size_t((z - wz0) * W * W + (y - wy0) * W + (x - wx0));
+    // Bake the analytic signed distance field scene() into the brick. scene()
+    // is negative inside every solid - terrain interior and object shells and
+    // their enclosed interiors - so objects read solid at every distance and
+    // there is no hollow-voxel / flood-leak hole. Appearance is the exact
+    // record colour where one exists, otherwise the palette of scene()'s
+    // material. The SDF is sphere-traced exactly like the dense raymarch path.
+    auto worldOf = [](int vx, int vy, int vz) {
+        return glm::vec3(-0.5f * WORLD + (float(vx) + 0.5f) * VOXEL,
+                         -0.5f * WORLD + (float(vy) + 0.5f) * VOXEL,
+                         -0.5f * WORLD + (float(vz) + 0.5f) * VOXEL);
     };
-    auto inside = [&](int x, int y, int z) {
-        return x >= wx0 && x < wx0 + W && y >= wy0 && y < wy0 + W && z >= wz0 &&
-               z < wz0 + W;
-    };
-    auto objSolidAt = [&](int x, int y, int z) {
-        uint64_t idx = (uint64_t(z) * kLatN + y) * kLatN + x;
-        return (c.objSolid[idx >> 6] >> (idx & 63)) & 1ull;
-    };
-
-    size_t nFront = 0;
-    for (int z = wz0; z < wz0 + W; ++z)
-        for (int y = wy0; y < wy0 + W; ++y)
-            for (int x = wx0; x < wx0 + W; ++x) {
-                size_t wi = widx(x, y, z);
-                uint64_t p;
-                uint32_t ridx;
-                bool inWorld = x >= 0 && x < kLatN && y >= 0 && y < kLatN && z >= 0 &&
-                               z < kLatN;
-                if (inWorld &&
-                    c.map->find(cellKey(uint32_t(x), uint32_t(y), uint32_t(z)), p, ridx)) {
-                    solidB[wi] = 1;
-                    dist[wi] = 0;
-                    seed[wi] = int32_t(ridx); // record seed: color inherits to air
-                    frontier[nFront++] = uint32_t(wi);
-                } else if (inWorld) {
-                    int16_t top = colTop[size_t(z) * kLatN + size_t(x)];
-                    if (top >= 0 && y < top) {
-                        solidB[wi] = 1;
-                        dist[wi] = 0;
-                        seed[wi] = -2; // underground seed
-                        frontier[nFront++] = uint32_t(wi);
-                    } else if (c.objSolid && objSolidAt(x, y, z)) {
-                        solidB[wi] = 1;
-                        dist[wi] = 0;
-                        seed[wi] = -3; // inside a closed object shell
-                    }
-                } else {
-                    solidB[wi] = 0;
-                    dist[wi] = 255;
-                    seed[wi] = -1;
-                }
-            }
-
-    // BFS waves through non-solid cells (6-connected); seeds carry appearance.
-    for (int wave = 1; wave <= 4 && nFront; ++wave) {
-        size_t nNext = 0;
-        for (size_t fi = 0; fi < nFront; ++fi) {
-            size_t wi = frontier[fi];
-            int x = wx0 + int(wi % W);
-            int y = wy0 + int((wi / W) % W);
-            int z = wz0 + int(wi / (W * W));
-            static constexpr int dirs[6][3] = {{1, 0, 0},  {-1, 0, 0}, {0, 1, 0},
-                                               {0, -1, 0}, {0, 0, 1},  {0, 0, -1}};
-            for (auto& d : dirs) {
-                int nx = x + d[0], ny = y + d[1], nz = z + d[2];
-                if (!inside(nx, ny, nz))
-                    continue;
-                size_t ni = widx(nx, ny, nz);
-                if (solidB[ni] || dist[ni] != 255)
-                    continue;
-                dist[ni] = uint8_t(wave);
-                seed[ni] = seed[wi];
-                nextF[nNext++] = uint32_t(ni);
-            }
-        }
-        std::memcpy(frontier, nextF, nNext * sizeof(uint32_t));
-        nFront = nNext;
-    }
-
-    // appearance flood for solid object interiors (enclosed by the shell, so a
-    // ray never reaches them, but give them the enclosing material anyway).
-    uint8_t visit[WN];
-    std::fill(visit, visit + WN, 0);
-    size_t nF2 = 0;
-    for (size_t wi = 0; wi < WN; ++wi) {
-        if (solidB[wi] && (seed[wi] >= 0 || seed[wi] == -2) && !visit[wi]) {
-            visit[wi] = 1;
-            frontier[nF2++] = uint32_t(wi);
-        }
-    }
-    static constexpr int dirs2[6][3] = {{1, 0, 0},  {-1, 0, 0}, {0, 1, 0},
-                                        {0, -1, 0}, {0, 0, 1},  {0, 0, -1}};
-    for (int wave = 1; wave <= 8 && nF2; ++wave) {
-        size_t nN2 = 0;
-        for (size_t fi = 0; fi < nF2; ++fi) {
-            size_t wi = frontier[fi];
-            int x = wx0 + int(wi % W);
-            int y = wy0 + int((wi / W) % W);
-            int z = wz0 + int(wi / (W * W));
-            for (auto& d : dirs2) {
-                int nx = x + d[0], ny = y + d[1], nz = z + d[2];
-                if (!inside(nx, ny, nz))
-                    continue;
-                size_t ni = widx(nx, ny, nz);
-                if (solidB[ni] && seed[ni] == -3 && !visit[ni]) {
-                    seed[ni] = seed[wi];
-                    visit[ni] = 1;
-                    nextF[nN2++] = uint32_t(ni);
-                }
-            }
-        }
-        std::memcpy(frontier, nextF, nN2 * sizeof(uint32_t));
-        nF2 = nN2;
-    }
-
     auto worldY = [](int cy) { return -0.5f * WORLD + (float(cy) + 0.5f) * VOXEL; };
 
     for (int bz = 0; bz < BRICK_N; ++bz)
         for (int by = 0; by < BRICK_N; ++by)
             for (int bx = 0; bx < BRICK_N; ++bx) {
                 int cx = bx0 + bx, cy = by0 + by, cz = bz0 + bz;
-                size_t wi = widx(cx, cy, cz);
+                SceneSample h = scene(worldOf(cx, cy, cz));
                 uint32_t w[2];
-                uint64_t p;
-                uint32_t ridx;
-                if (solidB[wi]) {
-                    // inside surface shell (or terrain interior): -0.2 m
-                    if (c.map->find(cellKey(uint32_t(cx), uint32_t(cy), uint32_t(cz)),
-                                    p, ridx))
-                        wordsFromPacked(p, -2, w);
-                    else if (seed[wi] == -2) {
-                        w[0] = c.ugLo | (uint32_t(int32_t(-2) & 0xFF) << 24);
-                        w[1] = c.ugHi;
-                    } else if (seed[wi] >= 0) {
-                        wordsFromPacked(CellMap::pack((*c.records)[size_t(seed[wi])]), -2,
-                                        w);
-                    } else {
-                        // unreached interior (larger than the brick window): invisible
-                        w[0] = c.ugLo | (uint32_t(int32_t(-2) & 0xFF) << 24);
-                        w[1] = c.ugHi;
+
+                if (h.d < 0.0f) {
+                    // solid: exact record colour if present, else palette material
+                    uint64_t p;
+                    uint32_t ridx;
+                    if (c.map->find(cellKey(uint32_t(cx), uint32_t(cy), uint32_t(cz)), p,
+                                    ridx))
+                        wordsFromPacked(p, int(h.d / VOXEL), w);
+                    else {
+                        w[0] = paletteWordLo(h.mat) |
+                               (uint32_t(int32_t(int(h.d / VOXEL)) & 0xFF) << 24);
+                        w[1] = paletteWordHi(h.mat);
                     }
+                } else if (worldY(cy) < WATER_LEVEL) {
+                    // water volume (shader-only surface at y = WATER_LEVEL)
+                    int sraw = h.d > 32.0f * VOXEL ? 32 : int(h.d / VOXEL);
+                    w[0] = c.waterLo | (uint32_t(sraw & 0xFF) << 24);
+                    w[1] = c.waterHi;
                 } else {
-                    int d = dist[wi] == 255 ? 32 : dist[wi];
-                    if (worldY(cy) < WATER_LEVEL) {
-                        w[0] = c.waterLo | (uint32_t(d) << 24);
-                        w[1] = c.waterHi;
-                    } else if (seed[wi] == -2) {
-                        // nearest seed was an underground cell (bank walls etc.)
-                        w[0] = c.ugLo | (uint32_t(d) << 24);
-                        w[1] = c.ugHi;
-                    } else if (seed[wi] >= 0) {
-                        wordsFromPacked(CellMap::pack((*c.records)[size_t(seed[wi])]), d,
-                                        w);
-                    } else {
-                        w[0] = 0x808080u | (uint32_t(d) << 24);
-                        w[1] = paletteWordHi(0);
-                    }
+                    // air: distance to nearest surface + material for hit shading
+                    int sraw = h.d > 32.0f * VOXEL ? 32 : int(h.d / VOXEL);
+                    w[0] = paletteWordLo(h.mat) | (uint32_t(sraw & 0xFF) << 24);
+                    w[1] = paletteWordHi(h.mat);
                 }
                 size_t i = (size_t(bz) * BRICK_N + size_t(by)) * BRICK_N + bx;
                 data[i * 2] = w[0];
@@ -348,8 +225,8 @@ bool LayeredWorld::load(const std::string& manifestPath)
     m_signatures.clear();
     m_records.clear();
     m_colTop.assign(size_t(kLatN) * kLatN, -1);
-    m_objColX.clear();
-    m_objSolid.clear();
+    m_objCells.clear();
+    m_objMats.clear();
     m_blockSolid.clear();
 
     std::unordered_set<uint32_t> claimed;
@@ -390,8 +267,8 @@ bool LayeredWorld::load(const std::string& manifestPath)
                 if (v.y > top)
                     top = int16_t(v.y);
             } else {
-                m_objColX[(uint32_t(v.y) << 10) | uint32_t(v.z)].push_back(
-                    int16_t(v.x));
+                m_objCells.push_back(cellKey(v.x, v.y, v.z));
+                m_objMats.push_back(v.materialId);
             }
         }
     }
@@ -445,25 +322,94 @@ bool LayeredWorld::synthesize()
         ctx.waterHi = 255u | (130u << 8) | (25u << 16) | (9u << 24); // shiny, mat 9
     }
 
-    // --- flood-fill closed object shells into solid interiors (ray-cast parity) ---
-    m_objSolid.assign(size_t(kLatN) * kLatN * kLatN / 64, 0);
-    for (auto& kv : m_objColX) {
-        uint32_t y = kv.first >> 10, z = kv.first & 0x3FFu;
-        std::vector<int16_t>& xs = kv.second;
-        std::sort(xs.begin(), xs.end());
-        int16_t top = m_colTop[size_t(z) * kLatN + size_t(y)];
-        for (size_t k = 0; k + 1 < xs.size(); k += 2) {
-            int xa = int(xs[k]) + 1, xb = int(xs[k + 1]) - 1;
-            if (xb < xa)
-                continue;
-            for (int x = xa; x <= xb; ++x) {
-                if (top >= 0 && int(y) < int(top))
-                    continue; // terrain interior already solid via colTop
-                uint64_t idx = (uint64_t(z) * kLatN + y) * kLatN + x;
-                m_objSolid[idx >> 6] |= (1ull << (idx & 63));
+    // --- group object records into connected components (26-neighbourhood) ---
+    // The component bounding boxes seed the SDF presence test below (which marks
+    // enclosed interiors solid via scene()), so we only touch object regions.
+    {
+        const size_t nObj = m_objCells.size();
+        size_t cap = 1024;
+        while (cap < nObj * 2)
+            cap <<= 1;
+        std::vector<uint32_t> okey(cap, 0), oval(cap, 0); // key+1 -> record index
+        const size_t omask = cap - 1;
+        auto oplace = [&](uint32_t k, uint32_t v) {
+            size_t i = (size_t(k) * 2654435761u) & omask;
+            while (okey[i]) {
+                if (okey[i] - 1u == k)
+                    return;
+                i = (i + 1) & omask;
             }
+            okey[i] = k + 1;
+            oval[i] = v;
+        };
+        auto ofind = [&](uint32_t k) -> int {
+            size_t i = (size_t(k) * 2654435761u) & omask;
+            while (okey[i]) {
+                if (okey[i] - 1u == k)
+                    return int(oval[i]);
+                i = (i + 1) & omask;
+            }
+            return -1;
+        };
+        for (size_t i = 0; i < nObj; ++i)
+            oplace(m_objCells[i], uint32_t(i));
+
+        // label connected components over object cells (26-neighbourhood)
+        // and track whether the component contains foliage (mat 8)
+        std::vector<uint32_t> comp(nObj, 0xFFFFFFFFu);
+        std::vector<uint32_t> queue;
+        struct Box { int lo[3], hi[3]; };
+        std::vector<Box> boxes;
+        std::vector<char> compHasLeaf;
+        auto cellXYZ = [](uint32_t k, int& x, int& y, int& z) {
+            x = int(k >> 20);
+            y = int((k >> 10) & 0x3FFu);
+            z = int(k & 0x3FFu);
+        };
+        for (size_t s = 0; s < nObj; ++s) {
+            if (comp[s] != 0xFFFFFFFFu)
+                continue;
+            uint32_t id = uint32_t(boxes.size());
+            int x, y, z;
+            cellXYZ(m_objCells[s], x, y, z);
+            Box b{};
+            b.lo[0] = b.hi[0] = x;
+            b.lo[1] = b.hi[1] = y;
+            b.lo[2] = b.hi[2] = z;
+            comp[s] = id;
+            bool hasLeaf = (m_objMats[s] == 8);
+            queue.clear();
+            queue.push_back(uint32_t(s));
+            for (size_t qi = 0; qi < queue.size(); ++qi) {
+                int cx, cy, cz;
+                cellXYZ(m_objCells[queue[qi]], cx, cy, cz);
+                if (cx < b.lo[0]) b.lo[0] = cx;
+                if (cy < b.lo[1]) b.lo[1] = cy;
+                if (cz < b.lo[2]) b.lo[2] = cz;
+                if (cx > b.hi[0]) b.hi[0] = cx;
+                if (cy > b.hi[1]) b.hi[1] = cy;
+                if (cz > b.hi[2]) b.hi[2] = cz;
+                for (int dz = -1; dz <= 1; ++dz)
+                    for (int dy = -1; dy <= 1; ++dy)
+                        for (int dx = -1; dx <= 1; ++dx) {
+                            if (!dx && !dy && !dz)
+                                continue;
+                            int nx = cx + dx, ny = cy + dy, nz = cz + dz;
+                            if (nx < 0 || ny < 0 || nz < 0 || nx >= kLatN || ny >= kLatN || nz >= kLatN)
+                                continue;
+                            int ni = ofind(cellKey(uint32_t(nx), uint32_t(ny), uint32_t(nz)));
+                            if (ni < 0 || comp[size_t(ni)] != 0xFFFFFFFFu)
+                                continue;
+                            comp[size_t(ni)] = id;
+                            if (m_objMats[size_t(ni)] == 8)
+                                hasLeaf = true;
+                            queue.push_back(uint32_t(ni));
+                        }
+            }
+            boxes.push_back(b);
+            compHasLeaf.push_back(hasLeaf ? 1 : 0);
         }
-    }
+
     // global presence grid (record cells + object interiors) for the SVO builder
     const size_t gBlocks = size_t(kGBlocks) * kGBlocks * kGBlocks;
     m_blockSolid.assign(gBlocks, 0);
@@ -475,19 +421,54 @@ bool LayeredWorld::synthesize()
     };
     for (const VoxelRecord& v : m_records)
         markBlock(v.x, v.y, v.z);
-    for (size_t w = 0; w < m_objSolid.size(); ++w) {
-        uint64_t bits = m_objSolid[w];
-        while (bits) {
-            int b = __builtin_ctzll(bits);
-            size_t idx = w * 64 + b;
-            int x = int(idx % kLatN);
-            int y = int((idx / kLatN) % kLatN);
-            int z = int(idx / (kLatN * kLatN));
-            markBlock(x, y, z);
-            bits &= bits - 1;
-        }
+
+    // Extend octree presence into enclosed interiors by sampling the analytic
+    // scene() SDF. scene() is negative inside every solid, so we mark any block
+    // whose centre or a corner lies inside (or within VOXEL of) the surface.
+    // This reaches the house interior and other object volumes without the old
+    // flood-fill that leaked through carved openings (door/windows) and left
+    // hollow holes. Seeded by the component boxes so we only touch object regions.
+    auto worldOf = [](int vx, int vy, int vz) {
+        return glm::vec3(-0.5f * WORLD + (float(vx) + 0.5f) * VOXEL,
+                         -0.5f * WORLD + (float(vy) + 0.5f) * VOXEL,
+                         -0.5f * WORLD + (float(vz) + 0.5f) * VOXEL);
+    };
+    const float kMark = VOXEL; // block intersects solid if min sample d < this
+    for (uint32_t id = 0; id < boxes.size(); ++id) {
+        const Box& b = boxes[id];
+        int x0 = std::max(0, b.lo[0] - 1), x1 = std::min(kLatN - 1, b.hi[0] + 1);
+        int y0 = std::max(0, b.lo[1] - 1), y1 = std::min(kLatN - 1, b.hi[1] + 1);
+        int z0 = std::max(0, b.lo[2] - 1), z1 = std::min(kLatN - 1, b.hi[2] + 1);
+        int bx0 = x0 / kBlockSize, bx1 = x1 / kBlockSize;
+        int by0 = y0 / kBlockSize, by1 = y1 / kBlockSize;
+        int bz0 = z0 / kBlockSize, bz1 = z1 / kBlockSize;
+        for (int bz = bz0; bz <= bz1; ++bz)
+            for (int by = by0; by <= by1; ++by)
+                for (int bx = bx0; bx <= bx1; ++bx) {
+                    int vbx = bx * kBlockSize, vby = by * kBlockSize,
+                        vbz = bz * kBlockSize;
+                    bool hit = false;
+                    for (int cz = 0; cz <= 1 && !hit; ++cz)
+                        for (int cy = 0; cy <= 1 && !hit; ++cy)
+                            for (int cx = 0; cx <= 1 && !hit; ++cx) {
+                                int vx = vbx + cx * (kBlockSize - 1);
+                                int vy = vby + cy * (kBlockSize - 1);
+                                int vz = vbz + cz * (kBlockSize - 1);
+                                if (scene(worldOf(vx, vy, vz)).d < kMark)
+                                    hit = true;
+                            }
+                    if (!hit) {
+                        // block centre catches a thin wall passing through the middle
+                        int vc = kBlockSize / 2;
+                        if (scene(worldOf(vbx + vc, vby + vc, vbz + vc)).d < kMark)
+                            hit = true;
+                    }
+                    if (hit)
+                        markBlock(vbx, vby, vbz);
+                }
     }
-    ctx.objSolid = m_objSolid.data();
+    } // close component-grouping block
+
     ctx.blockSolid = m_blockSolid.data();
 
     for (size_t i = 0; i < m_records.size(); ++i) {
@@ -655,11 +636,12 @@ bool LayeredWorld::synthesize()
                  double(m_stats.memoryBytes) / (1024.0 * 1024.0), m_stats.buildSeconds);
 
     // temporary synthesis grids no longer needed once the SVO is built
-    m_objSolid.clear();
-    m_objSolid.shrink_to_fit();
     m_blockSolid.clear();
     m_blockSolid.shrink_to_fit();
-    m_objColX.clear();
+    m_objCells.clear();
+    m_objCells.shrink_to_fit();
+    m_objMats.clear();
+    m_objMats.shrink_to_fit();
     return true;
 }
 

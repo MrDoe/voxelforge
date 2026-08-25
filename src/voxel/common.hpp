@@ -322,6 +322,7 @@ inline ObjHit houseAt(glm::vec3 p)
 
     // L1..L8: stacked log courses, orientation alternates like real blockwork
     const float lr = 0.145f, pitch = 0.27f;
+    float ry0 = 0.42f + lr + 7.f * pitch + 0.22f; // roof base (q.y)
     float wall = 1e9f;
     for (int k = 0; k < 8; ++k) {
         float y = 0.42f + lr + float(k) * pitch;
@@ -336,14 +337,25 @@ inline ObjHit houseAt(glm::vec3 p)
     float door = sdBoxF(q, glm::vec3(-0.7f, 1.30f, -hz), glm::vec3(0.52f, 0.95f, 0.6f));
     float winA = sdBoxF(q, glm::vec3(-hx, 1.62f, 0.75f), glm::vec3(0.6f, 0.42f, 0.45f));
     float winB = sdBoxF(q, glm::vec3(hx, 1.62f, 0.75f), glm::vec3(0.6f, 0.42f, 0.45f));
-    wall = glm::max(wall, glm::max(-door, glm::max(-winA, -winB)));
+    float carve = glm::max(-door, glm::max(-winA, -winB));
+    wall = glm::max(wall, carve);
+    // Enclose the interior as a true solid SDF (negative inside) so the house
+    // reads solid at every distance instead of a hollow log cage. The same
+    // door/window carve opens it.
+    float solidBox = sdBoxF(q, glm::vec3(0.f, (0.35f + ry0) * 0.5f, 0.f),
+                            glm::vec3(hx + 0.20f, (ry0 - 0.35f) * 0.5f, hz + 0.20f));
+    solidBox = glm::max(solidBox, carve);
+    if (solidBox < best.d) {
+        best.d = solidBox;
+        best.mat = 6;
+    }
     if (wall < best.d) {
         best.d = wall;
         best.mat = 6;
     }
 
     // L9..: stepped shingle layers from eaves to ridge (gable along X)
-    float ry0 = 0.42f + lr + 7.f * pitch + 0.22f;
+    ry0 = 0.42f + lr + 7.f * pitch + 0.22f;
     for (int i = 0; i < 10; ++i) {
         float t = float(i) / 9.0f;
         float rz = glm::mix(hz + 0.66f, 0.14f, t);

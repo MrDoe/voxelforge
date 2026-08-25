@@ -149,8 +149,10 @@ float map(vec3 p)
         }
         if (ty == 2u)                 // 0xFFFFFFFE solid terminal
             return -pc.b.y;
-        if (ty == 3u)                 // 0xFFFFFFFF empty terminal
-            return 6.0;
+        if (ty == 3u) {               // 0xFFFFFFFF empty terminal - conservative sdBox, not 6.0 (voxel-only fix for thin-log tunneling)
+            float d = sdBox(p, mn, mn + sz);
+            return max(-d, pc.b.y * 0.5);
+        }
         // node
         uint ni = h >> 2u;
         uint pl = uPayload[ni];
@@ -546,7 +548,15 @@ float bushesDistance(vec3 p)
 
 float objectDistance(vec3 p)
 {
-    return min(houseDistance(p), min(min(treesDistance(p), rocksDistance(p)), bushesDistance(p)));
+    // Dynamic: only contribute when the live SVO actually contains an object at
+    // this point. On removal the SVO (map) no longer has the object, so we report
+    // it absent and shading/shadow fall back to terrain. In the static default
+    // scene the SVO contains every object, so this returns the exact analytic
+    // distance as before - parity with the dense backend is preserved.
+    float dT = p.y - heightAt(p.xz);
+    if (map(p) < dT - 0.02)
+        return min(houseDistance(p), min(min(treesDistance(p), rocksDistance(p)), bushesDistance(p)));
+    return dT + 1.0; // absent -> no object contribution
 }
 
 uint getMaterialId(vec3 p)
@@ -558,7 +568,7 @@ uint getMaterialId(vec3 p)
     float dR = rocksDistance(p);
     float dB = bushesDistance(p);
     float dO = min(dH, min(min(dTr, dR), dB));
-    if (dO + 0.01 < dT) {
+    if (objectDistance(p) < p.y - heightAt(p.xz) + 0.02) {
         if (dB <= dH && dB <= dTr && dB <= dR) return 8u;
         if (dH <= dTr && dH <= dR) {
             vec3 q = vec3(p.x - kHousePosG.x, p.y - kPadYG, p.z - kHousePosG.y);

@@ -22,6 +22,7 @@ layout(push_constant) uniform PC {
 } pc;
 
 vec3 kSunDir = normalize(vec3(0.42, 0.78, 0.30)); // set from push in main()
+bool gUnderwater = false; // camera currently below the fixed water plane
 const vec3 kSunCol = vec3(1.00, 0.95, 0.84) * 1.35;
 const vec3 kZenith = vec3(0.20, 0.36, 0.62);
 const vec3 kHorizon = vec3(0.72, 0.80, 0.90);
@@ -232,7 +233,15 @@ float bushesDistance(vec3 p)
 
 float objectDistance(vec3 p)
 {
-    return min(houseDistance(p), min(min(treesDistance(p), rocksDistance(p)), bushesDistance(p)));
+    // Dynamic: only contribute when the live dense volume actually contains an
+    // object at this point. On removal the volume (sdfAt) no longer has the
+    // object, so we report it absent and shading/shadow fall back to terrain.
+    // In the static default scene the volume contains every object, so this
+    // returns the exact analytic distance as before - parity is preserved.
+    float dT = p.y - heightAt(p.xz);
+    if (sdfAt(p) < dT - 0.02)
+        return min(houseDistance(p), min(min(treesDistance(p), rocksDistance(p)), bushesDistance(p)));
+    return dT + 1.0; // absent -> no object contribution
 }
 
 uint getMaterialId(vec3 p)
@@ -244,7 +253,7 @@ uint getMaterialId(vec3 p)
     float dR = rocksDistance(p);
     float dB = bushesDistance(p);
     float dO = min(dH, min(min(dTr, dR), dB));
-    if (dO + 0.01 < dT) {
+    if (objectDistance(p) < p.y - heightAt(p.xz) + 0.02) {
         if (dB <= dH && dB <= dTr && dB <= dR) return 8u;
         if (dH <= dTr && dH <= dR) {
             vec3 q = vec3(p.x - kHousePosG.x, p.y - kPadYG, p.z - kHousePosG.y);

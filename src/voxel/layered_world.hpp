@@ -8,19 +8,17 @@
 // loaded state, so layer edits / enable toggles / MCP appends are reflected
 // everywhere at once.
 //
-// Synthesis rules (records are truth):
-//   - every record cell is solid (surface shells, band +-0.2 m around the
-//     generator surfaces),
-//   - object shells are flood-filled into solid volumes: for each (y,z) column
-//     a cell is "inside" an object when an odd number of object-record cells
-//     lie between it and the +X world edge (ray-cast parity over closed
-//     shells), so tree trunks/foliage, house walls, rocks and AI edits read as
-//     solid, not hollow, at every distance,
-//   - cells strictly below the lowest landscape-layer record of their column
-//     are underground (terrain interior) so downward normals stay correct,
-//   - remaining air cells get a small-window BFS distance to the nearest
-//     solid cell for sphere tracing, plus the seed's appearance so brick
-//     albedo lookups near hit points resolve to the right material,
+// Synthesis rules (the analytic scene() SDF is truth):
+//   - scene(p) is a single signed distance field (heightmap + every object
+//     SDF) that is NEGATIVE inside all solids (terrain interior, object shells
+//     and their enclosed interiors). Bricks bake scene(p) directly, so objects
+//     read solid at every distance with no hollow-voxel / flood-leak holes.
+//   - the per-brick SDF (quantised to VOXEL) is sphere-traced exactly like the
+//     dense raymarch path; appearance is the exact record colour where one
+//     exists, otherwise the palette of scene(p)'s material,
+//   - octree presence (blockSolid) is extended into enclosed interiors by
+//     sampling scene() at block centres/corners, seeded from the object
+//     connected-component boxes,
 //   - air below WATER_LEVEL is marked as water volume (mat id 9, non-hit).
 //
 // reloadIfChanged() stats the manifest + layer files and rebuilds when any of
@@ -70,10 +68,10 @@ private:
     std::vector<worldfile::WorldLayer> m_layersMeta;       // enabled manifest entries
     std::vector<int16_t> m_colTop;                         // per-column landscape top (lattice y)
 
-    // object-record x positions grouped by (y<<10|z) column, used to flood-fill
-    // closed shells into solid interiors via ray-cast parity.
-    std::unordered_map<uint32_t, std::vector<int16_t>> m_objColX;
-    std::vector<uint64_t> m_objSolid;                      // per-cell interior-solid bitmap
+    // packed cellKeys of object (non-landscape) records; grouped into
+    // connected components and flood-filled to solid interiors in synthesize().
+    std::vector<uint32_t> m_objCells;
+    std::vector<uint8_t> m_objMats;                        // material per object cell (parallel to m_objCells)
     std::vector<uint8_t> m_blockSolid;                     // global presence grid (records+interior)
 
     struct Signature {
