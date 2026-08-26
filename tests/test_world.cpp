@@ -2,22 +2,73 @@
 // point queries against the analytic authoring truth, and determinism.
 #include "voxel/layered_world.hpp"
 #include "voxel/common.hpp"
+#include <filesystem>
+#include <fstream>
+#include <algorithm>
 #include <doctest/doctest.h>
 #include <cmath>
+#include <string>
 
 using namespace vf::voxel;
 
+std::string allLayersManifest();
+
 namespace {
-LayeredWorld& testWorld()
+// Content-layer tests need every baked layer loaded, but the runtime default
+// world.json starts landscape-only (layers are opt-in). Generate an
+// all-enabled manifest next to the assets once per process.
+LayeredWorld& allLayersWorld()
 {
     static LayeredWorld lw;
-    static bool ok = lw.load(std::string(VOXELFORGE_ASSET_DIR) + "/world.json");
+    static std::string manifestPath;
+    static bool ok = [] {
+        namespace fs = std::filesystem;
+        std::string dir = std::string(VOXELFORGE_ASSET_DIR);
+        std::vector<std::pair<std::string, std::string>> files; // file, role
+        for (fs::directory_iterator it(dir), end; it != end; ++it) {
+            std::string f = it->path().filename().string();
+            if (it->path().extension() != ".vxw" || f == "world.vxw")
+                continue;
+            files.push_back({ f, f == "landscape.vxw" ? "landscape"
+                                : (f == "bushes.vxw" ? "scatter" : "object") });
+        }
+        std::sort(files.begin(), files.end(), [](auto& a, auto& b) {
+            if (a.second == "landscape" != (b.second == "landscape"))
+                return a.second == "landscape"; // landscape last
+            return a.first < b.first;
+        });
+        // ai_edits must claim cells first
+        std::stable_sort(files.begin(), files.end(), [](auto& a, auto& b) {
+            return a.first == "ai_edits.vxw";
+        });
+        std::string j = "{\"layers\":[";
+        bool first = true;
+        for (auto& [f, role] : files) {
+            if (!first) j += ",";
+            first = false;
+            std::string name = f.substr(0, f.size() - 4);
+            j += "{\"file\":\"" + f + "\",\"name\":\"" + name +
+                 "\",\"role\":\"" + role +
+                 "\",\"pos\":[0,0,0],\"rotDeg\":0,\"enabled\":true,\"listed\":true}";
+        }
+        j += "]}";
+        manifestPath = dir + "/world_all.json";
+        {
+            std::ofstream out(manifestPath);
+            out << j;
+        }
+        return lw.load(manifestPath);
+    }();
     REQUIRE(ok);
     return lw;
 }
+} // namespace
 
 // Analytic reference composition (terrain heightfield + authored object SDFs),
 // mirroring what the baker swept into the layers.
+// exposed for the determinism test
+std::string allLayersWorldPath() { return allLayersManifest(); }
+
 float analyticD(glm::vec3 p)
 {
     const HeightMap& hm = sharedHeightmap();
@@ -30,11 +81,9 @@ float analyticD(glm::vec3 p)
     dObj = glm::min(dObj, alpacaAt(p).d);
     return glm::min(dTerrain, dObj);
 }
-} // namespace
-
 TEST_CASE("layered world synthesizes a sparse SVO")
 {
-    LayeredWorld& lw = testWorld();
+    LayeredWorld& lw = allLayersWorld();
     auto st = lw.stats();
     MESSAGE("svo stats: nodes=", st.nodes, " bricks=", st.bricks,
             " activeChunks=", st.activeChunks);
@@ -49,7 +98,7 @@ TEST_CASE("layered world synthesizes a sparse SVO")
 
 TEST_CASE("VoxelField sign matches analytic scene truth at probes")
 {
-    LayeredWorld& lw = testWorld();
+    LayeredWorld& lw = allLayersWorld();
     const VoxelField& f = lw.field();
     REQUIRE(f.valid());
 
@@ -86,8 +135,8 @@ TEST_CASE("VoxelField sign matches analytic scene truth at probes")
 TEST_CASE("synthesis is deterministic")
 {
     LayeredWorld a, b;
-    REQUIRE(a.load(std::string(VOXELFORGE_ASSET_DIR) + "/world.json"));
-    REQUIRE(b.load(std::string(VOXELFORGE_ASSET_DIR) + "/world.json"));
+    REQUIRE(a.load(allLayersWorldPath()));
+    REQUIRE(b.load(allLayersWorldPath()));
     CHECK(a.gpu().handles == b.gpu().handles);
     CHECK(a.gpu().payload == b.gpu().payload);
     CHECK(a.gpu().childBase == b.gpu().childBase);

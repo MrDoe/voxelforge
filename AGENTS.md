@@ -25,6 +25,11 @@
 - **Runtime truth = records.** `LayeredWorld` merges enabled layers
   (first-wins-a-cell), builds `VoxelField`, and synthesizes the SVO.
   `reloadIfChanged()` polls mtimes every ~0.5 s; GUI toggles reload instantly.
+- **Default world = terrain only**: world.json ships with `landscape` +
+  `ai_edits` enabled; every other baked layer is opt-in via the "World layers"
+  panel (a plain .vxw file list). Toggling triggers an incremental rebuild and
+  refreshes SVO + terrain texture + shadow volume together (`applyWorldReload`).
+  Content tests generate their own all-enabled manifest (`world_all.json`).
 - Don't hand-edit derived `.vxw`; edit terrain in
   `tools/heightmap_gen.cpp:terrainHeightAt()`, authored shapes in
   `src/voxel/common.hpp` (baker-side analytics), then `ninja -C build world`.

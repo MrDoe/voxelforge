@@ -74,6 +74,11 @@ offline baker (`tools/heightmap_gen.cpp`), which writes:
 | `assets/world.json` | layer manifest — order = dedupe priority, first wins a cell |
 | `assets/ai_edits.vxw` | highest-priority live layer for chat/MCP edits |
 
+The app starts as a **bare valley**: only `landscape` (+ your AI edits) are
+loaded. The "World layers" panel in-app lists every `.vxw` file as a checkbox —
+tick `house.vxw`, `tree1.vxw`, … to load them into the running world; untick to
+remove them. New files dropped into `assets/` appear after a rescan.
+
 ## Controls
 
 | input | action |

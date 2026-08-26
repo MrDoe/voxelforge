@@ -110,6 +110,8 @@ private:
     void drawHud();
     bool runSelftest();
     void syncWorldLayerList();
+    bool uploadTerrainTexture();
+    bool uploadObjVolTexture();
     void persistWorldLayers();
     void rescanWorldLayers();
     void applyWorldReload();
@@ -269,54 +271,9 @@ bool App::initVulkan()
         m_pushB = glm::vec4(vf::voxel::WORLD, vf::voxel::VOXEL, float(vf::voxel::GRID_N), 0);
     }
 
-    // records-derived terrain heights -> RG32F storage image for shader heightAt()
-    {
-        const std::vector<glm::vec2>& htx = m_layers.field().heightTexture();
-        const uint32_t lat = uint32_t(m_layers.field().latN());
-        m_heightImg = vf::makeImage3D(m_ctx, lat, lat, 1,
-                                      VK_FORMAT_R32G32_SFLOAT,
-                                      VK_IMAGE_USAGE_TRANSFER_DST_BIT |
-                                          VK_IMAGE_USAGE_STORAGE_BIT);
-        if (!m_heightImg.img)
-            return false;
-        if (!vf::uploadToImage3D(m_ctx, m_heightImg, htx.data(),
-                                 htx.size() * sizeof(glm::vec2)))
-            return false;
-        m_ctx.immediateSubmit([&](VkCommandBuffer cmd) {
-            vf::transitionImage(cmd, m_heightImg.img, VK_IMAGE_ASPECT_COLOR_BIT,
-                                VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
-                                VK_IMAGE_LAYOUT_GENERAL,
-                                VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT,
-                                VK_ACCESS_2_MEMORY_READ_BIT | VK_ACCESS_2_MEMORY_WRITE_BIT,
-                                VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
-                                VK_ACCESS_2_SHADER_STORAGE_READ_BIT);
-        });
-        m_svoPass.setHeightmapView(m_heightImg.view);
-    }
-
-    // coarse object-only SDF volume -> R8_SNORM storage image for shadow marching
-    {
-        const auto& ov = m_layers.field().objectVolume();
-        const int n = vf::voxel::VoxelField::kObjVolN;
-        m_objVolImg = vf::makeImage3D(m_ctx, uint32_t(n), uint32_t(n), uint32_t(n),
-                                      VK_FORMAT_R8_SNORM,
-                                      VK_IMAGE_USAGE_TRANSFER_DST_BIT |
-                                          VK_IMAGE_USAGE_STORAGE_BIT);
-        if (!m_objVolImg.img)
-            return false;
-        if (!vf::uploadToImage3D(m_ctx, m_objVolImg, ov.data(), ov.size()))
-            return false;
-        m_ctx.immediateSubmit([&](VkCommandBuffer cmd) {
-            vf::transitionImage(cmd, m_objVolImg.img, VK_IMAGE_ASPECT_COLOR_BIT,
-                                VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
-                                VK_IMAGE_LAYOUT_GENERAL,
-                                VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT,
-                                VK_ACCESS_2_MEMORY_READ_BIT | VK_ACCESS_2_MEMORY_WRITE_BIT,
-                                VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
-                                VK_ACCESS_2_SHADER_STORAGE_READ_BIT);
-        });
-        m_svoPass.setObjVolumeView(m_objVolImg.view);
-    }
+    // field-derived GPU textures (terrain heights/materials + object shadows)
+    if (!uploadTerrainTexture() || !uploadObjVolTexture())
+        return false;
 
     if (!m_taaPass.init(m_ctx))
         return false;
@@ -367,6 +324,59 @@ void App::syncWorldLayerList()
     m_worldLayers = std::move(l);
 }
 
+bool App::uploadTerrainTexture()
+{
+    const std::vector<glm::vec2>& htx = m_layers.field().heightTexture();
+    const uint32_t lat = uint32_t(m_layers.field().latN());
+    vf::destroyImage3D(m_ctx, m_heightImg);
+    m_heightImg = vf::makeImage3D(m_ctx, lat, lat, 1,
+                                  VK_FORMAT_R32G32_SFLOAT,
+                                  VK_IMAGE_USAGE_TRANSFER_DST_BIT |
+                                      VK_IMAGE_USAGE_STORAGE_BIT);
+    if (!m_heightImg.img)
+        return false;
+    if (!vf::uploadToImage3D(m_ctx, m_heightImg, htx.data(),
+                             htx.size() * sizeof(glm::vec2)))
+        return false;
+    m_ctx.immediateSubmit([&](VkCommandBuffer cmd) {
+        vf::transitionImage(cmd, m_heightImg.img, VK_IMAGE_ASPECT_COLOR_BIT,
+                            VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+                            VK_IMAGE_LAYOUT_GENERAL,
+                            VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT,
+                            VK_ACCESS_2_MEMORY_READ_BIT | VK_ACCESS_2_MEMORY_WRITE_BIT,
+                            VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
+                            VK_ACCESS_2_SHADER_STORAGE_READ_BIT);
+    });
+    m_svoPass.setHeightmapView(m_heightImg.view);
+    return true;
+}
+
+bool App::uploadObjVolTexture()
+{
+    const auto& ov = m_layers.field().objectVolume();
+    const int n = vf::voxel::VoxelField::kObjVolN;
+    vf::destroyImage3D(m_ctx, m_objVolImg);
+    m_objVolImg = vf::makeImage3D(m_ctx, uint32_t(n), uint32_t(n), uint32_t(n),
+                                  VK_FORMAT_R8_SNORM,
+                                  VK_IMAGE_USAGE_TRANSFER_DST_BIT |
+                                      VK_IMAGE_USAGE_STORAGE_BIT);
+    if (!m_objVolImg.img)
+        return false;
+    if (!vf::uploadToImage3D(m_ctx, m_objVolImg, ov.data(), ov.size()))
+        return false;
+    m_ctx.immediateSubmit([&](VkCommandBuffer cmd) {
+        vf::transitionImage(cmd, m_objVolImg.img, VK_IMAGE_ASPECT_COLOR_BIT,
+                            VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+                            VK_IMAGE_LAYOUT_GENERAL,
+                            VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT,
+                            VK_ACCESS_2_MEMORY_READ_BIT | VK_ACCESS_2_MEMORY_WRITE_BIT,
+                            VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
+                            VK_ACCESS_2_SHADER_STORAGE_READ_BIT);
+    });
+    m_svoPass.setObjVolumeView(m_objVolImg.view);
+    return true;
+}
+
 void App::applyWorldReload()
 {
     if (!m_layers.loaded())
@@ -375,6 +385,8 @@ void App::applyWorldReload()
     vkDeviceWaitIdle(m_ctx.device());
     const auto& g = m_layers.gpu();
     m_svoPass.setWorld(g.chunkGrid, g.childBase, g.payload, g.handles, g.bricks);
+    uploadTerrainTexture(); // layer toggles can change materials too
+    uploadObjVolTexture();  // keep AI/object shadows in sync with the SVO
     syncWorldLayerList();
     rescanWorldLayers(); // layers dropped into assets/ while running show up too
 }
@@ -439,42 +451,40 @@ void App::drawHud()
         ImGui::BulletText("ESC: quit");
     }
 
-    if (ImGui::CollapsingHeader("World objects", ImGuiTreeNodeFlags_DefaultOpen)) {
+    if (ImGui::CollapsingHeader("World layers", ImGuiTreeNodeFlags_DefaultOpen)) {
         if (m_worldLayers.empty()) {
-            ImGui::TextDisabled("no world.json manifest found");
+            ImGui::TextDisabled("no .vxw files found in assets/");
         } else {
+            ImGui::TextDisabled("load .vxw content into the world:");
             for (auto& l : m_worldLayers) {
-                if (l.role == "packed")
-                    continue;
                 const std::string id = "##layer_" + l.file;
-                const std::string label =
-                    l.name.empty() ? l.file : l.name + "  (" + l.file + ")";
                 bool en = l.enabled;
                 const bool isLandscape = l.role == "landscape";
+                if (isLandscape)
+                    ImGui::BeginDisabled(true);
                 if (ImGui::Checkbox(id.c_str(), &en)) {
                     l.enabled = en;
-                    if (en)
-                        l.listed = true; // newly added layers join the manifest
+                    l.listed = true; // every listed file joins the manifest
                     persistWorldLayers();
                     m_pendingWorldReload = true;
                 }
+                if (isLandscape)
+                    ImGui::EndDisabled();
                 ImGui::SameLine();
-                ImGui::TextUnformatted(label.c_str());
+                ImGui::TextUnformatted(l.file.c_str());
                 if (isLandscape) {
                     ImGui::SameLine();
                     ImGui::TextDisabled("[terrain]");
-                }
-                if (!l.listed) {
+                } else if (l.file == vf::voxel::EditableWorld::kFileName) {
                     ImGui::SameLine();
-                    ImGui::TextDisabled("(new)");
+                    ImGui::TextDisabled("[AI edits]");
                 }
             }
         }
         if (ImGui::Button("Rescan assets folder"))
             rescanWorldLayers();
         ImGui::SameLine();
-        ImGui::TextDisabled("%s", m_layers.loaded() ? "live layered world"
-                                                    : "procedural fallback");
+        ImGui::TextDisabled("%zu records live", m_layers.stats().records);
         ImGui::TextDisabled("toggles & AI edits hot-reload live");
     }
     ImGui::End();

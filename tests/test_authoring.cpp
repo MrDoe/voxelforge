@@ -3,20 +3,57 @@
 // plus cross-checks that the baked VoxelField matches the analytic truth.
 #include "voxel/common.hpp"
 #include "voxel/layered_world.hpp"
+#include <filesystem>
+#include <fstream>
+#include <algorithm>
 #include <doctest/doctest.h>
 #include <cmath>
 
 using namespace vf::voxel;
 
-namespace {
+std::string allLayersManifest()
+{
+    namespace fs = std::filesystem;
+    static std::string path;
+    if (path.empty()) {
+        std::string dir = std::string(VOXELFORGE_ASSET_DIR);
+        std::vector<std::pair<std::string, std::string>> files;
+        for (fs::directory_iterator it(dir), end; it != end; ++it) {
+            std::string f = it->path().filename().string();
+            if (it->path().extension() != ".vxw" || f == "world.vxw")
+                continue;
+            files.push_back({ f, f == "landscape.vxw" ? "landscape"
+                                : (f == "bushes.vxw" ? "scatter" : "object") });
+        }
+        std::sort(files.begin(), files.end());
+        std::stable_sort(files.begin(), files.end(), [](auto& a, auto& b) {
+            return a.second == "landscape"; // landscape claims last
+        });
+        std::stable_sort(files.begin(), files.end(), [](auto& a, auto& b) {
+            return a.first == "ai_edits.vxw"; // ai_edits claims first
+        });
+        std::string j = "{\"layers\":[";
+        bool first = true;
+        for (auto& [f, role] : files) {
+            if (!first) j += ",";
+            first = false;
+            j += "{\"file\":\"" + f + "\",\"name\":\"" + f.substr(0, f.size() - 4) +
+                 "\",\"role\":\"" + role +
+                 "\",\"pos\":[0,0,0],\"rotDeg\":0,\"enabled\":true,\"listed\":true}";
+        }
+        j += "]}";
+        path = dir + "/world_all.json";
+        std::ofstream(path) << j;
+    }
+    return path;
+}
 const VoxelField& testField()
 {
     static LayeredWorld lw;
-    static bool ok = lw.load(std::string(VOXELFORGE_ASSET_DIR) + "/world.json");
+    static bool ok = lw.load(allLayersManifest());
     REQUIRE(ok);
     return lw.field();
 }
-} // namespace
 
 TEST_CASE("authoring primitives: capsule")
 {
