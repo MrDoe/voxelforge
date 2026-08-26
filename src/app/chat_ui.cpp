@@ -75,7 +75,8 @@ void ChatUi::spawnWorker(){
 }
 
 int ChatUi::executeToolCalls(const std::vector<ToolCall>& calls, glm::ivec3 anchor, bool hasAnchor,
-                             vf::voxel::EditableWorld& editable, std::function<void()> rebuildFn){
+                             vf::voxel::EditableWorld& editable, vf::voxel::LayeredWorld& world,
+                             std::function<void()> rebuildFn){
     int rejected = 0;
     for(auto &tc: calls){
         spdlog::info("chat tool {} {}", tc.name, tc.argumentsJson);
@@ -154,7 +155,7 @@ int ChatUi::executeToolCalls(const std::vector<ToolCall>& calls, glm::ivec3 anch
         } else if(name=="probe"){
             float x=0,y=0,z=0;
             jsonGetFloat(args,"x",x); jsonGetFloat(args,"y",y); jsonGetFloat(args,"z",z);
-            auto s = vf::voxel::scene({x,y,z});
+            auto s = world.field().sampleWorld({x,y,z});
             char buf[128];
             snprintf(buf,sizeof(buf),"probe(%.1f,%.1f,%.1f): d=%+.2f mat=%d%s",
                      x,y,z,s.d,int(s.mat), s.d<0?" solid":" empty");
@@ -170,7 +171,7 @@ int ChatUi::executeToolCalls(const std::vector<ToolCall>& calls, glm::ivec3 anch
     return rejected;
 }
 
-void ChatUi::draw(vf::voxel::EditableWorld& editable,
+void ChatUi::draw(vf::voxel::EditableWorld& editable, vf::voxel::LayeredWorld& world,
                   const vf::voxel::PickHit* hover, const vf::voxel::PickHit* selection, bool hasSelection,
                   std::function<void()> rebuildFn){
     // poll async results
@@ -193,7 +194,7 @@ void ChatUi::draw(vf::voxel::EditableWorld& editable,
             if(!r.thinking.empty() && m_showThinking) pushAssistant(r.thinking, true);
             if(!r.content.empty()) pushAssistant(r.content);
             if(!r.toolCalls.empty()){
-                int rejected = executeToolCalls(r.toolCalls, m_pendingAnchor, m_pendingHasAnchor, editable, rebuildFn);
+                int rejected = executeToolCalls(r.toolCalls, m_pendingAnchor, m_pendingHasAnchor, editable, world, rebuildFn);
                 char buf[128]; snprintf(buf,sizeof(buf),"executed %zu tool call(s)", r.toolCalls.size());
                 pushAssistant(buf);
                 m_llmHistory.push_back({"assistant", r.content + " [tools executed]"});

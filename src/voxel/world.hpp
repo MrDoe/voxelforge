@@ -46,27 +46,4 @@ struct GpuWorld {
     }
 };
 
-class World {
-public:
-    void build();
-
-    const GpuWorld& gpu() const { return m_gpu; }
-
-    // CPU point query mirroring the shader traversal (meters).
-    float sample(glm::vec3 p) const;
-
-    struct Stats {
-        size_t nodes = 0, bricks = 0, activeChunks = 0;
-        float buildSeconds = 0.0f;
-    };
-    Stats stats() const;
-
-private:
-    GpuWorld m_gpu;
-    Stats m_stats;
-
-private:
-    glm::vec3 m_worldMin { -0.5f * WORLD };
-};
-
 } // namespace vf::voxel

@@ -18,7 +18,7 @@ effort is invisible, so build chunky and readable.
 | Composition into the world | `scene(p)` at the bottom of `common.hpp` (min-combine your object like the others) |
 | Palette / surface response | `kPalette[9]`, `kMaterialReflection[9]` (same file) |
 | Placement | constexpr spot arrays (`kTreeSpots`) or hash-grid scatter (`bushesAt`, cell `kBushCell`) |
-| Terrain ground height | `sharedHeightmap().sample(x, z)` - anchor objects to it so they hug slopes |
+| Terrain ground height | `LayeredWorld::field().terrainHeightAtWorld(x, z)` or `sharedHeightmap().sample(x, z)` in baker code - anchor objects so they hug slopes |
 
 Material ids: `0` grass dark, `1` grass light, `2` soil, `3` sand, `4` rock,
 `5` light rock, `6` wood, `7` roof shingle, `8` foliage. Pick from these; a new
@@ -31,7 +31,7 @@ bake, not by hand).
   inside. Combine layers with `min` into a running `best`, tracking `mat`.
 - Carve openings by intersecting with the negated shape:
   `wall = max(wall, -door)` (see `houseAt`).
-- Every scene() evaluation is hot: bake calls it ~10M times per regen and AO
+- Every sweep evaluation is hot: the bake calls shape SDFs ~10M times per regen
   taps call it per frame. Give scatter objects a cheap reject first
   (distance-squared check against the spot, vertical cull) exactly like
   `treesAt`/`rocksAt` do.
@@ -87,7 +87,7 @@ quantization by construction.
 5. Fix or advance to the next layer. Only iterate upward: foundation ->
    body -> openings -> roof/details, mirroring how `houseAt` is structured.
 
-`world.vxw` is NOT needed for steps 2-4: probe/slice evaluate `scene()` which
+`world.json` layers ARE the runtime truth: probe/slice evaluate the VoxelField which
 only lazy-loads `assets/heightmap.png`.
 
 ### Final acceptance (once, after the last layer)
@@ -95,7 +95,7 @@ only lazy-loads `assets/heightmap.png`.
 1. Bake and rebuild: `ninja -C build world voxelforge` (regenerates the layer
    family + `world.json` + merged `world.vxw` from the new scene; never hand-edit
    `world.vxw` itself — it's derived). Data-only changes can skip the recompile:
-   edit/add an object `.vxw` layer directly; splats pick it up on next launch,
+   edit/add an object `.vxw` layer directly; the app hot-reloads it live,
    raymarch after the next `ninja -C build world`.
 2. Render 2-3 close shots framing the object from different sides:
    ```bash
@@ -123,10 +123,6 @@ only lazy-loads `assets/heightmap.png`.
   band (otherwise only terrain +/- 3 voxels are recorded there). If your
   object rises well above local ground outside existing radii, extend that
   lambda's spots/bounds. Raymarch/SVO picks up everything automatically; this
-  affects the explicit voxel records (splat source).
-- **Splat-mode sync**: `App::buildSplatData` (src/app/main.cpp) hardcodes
-  `houseAt/treesAt/rocksAt/bushesAt` for sub-splat normals. Add your object
-  function there too if splat mode should shade it correctly.
 - World bounds are +/-51.2 m; water level `-0.9`. Objects below water need
   underwater materials to look right.
 - Changing constants? `WORLD/VOXEL/GRID_N/BRICK_N` are load-bearing across the

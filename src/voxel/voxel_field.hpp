@@ -55,6 +55,14 @@ public:
     int latN() const { return m_latN; }
     const std::vector<int16_t>& colTops() const { return m_colTop; }
 
+    // Smoothed terrain height in world space (+ bilinear), -1e9 where the
+    // landscape layer has no records.
+    float terrainHeightAtWorld(float wx, float wz) const {
+        int cx = int(std::floor((wx + 0.5f * WORLD) / VOXEL));
+        int cz = int(std::floor((wz + 0.5f * WORLD) / VOXEL));
+        return anyTerrainNear(cx, cz) ? smoothTerrainY(wx, wz) : -1e9f;
+    }
+
     // Terrain-height texture for the GPU (latN x latN, RG32F):
     // R = world Y of the column's top surface, G = material / 255.
     const std::vector<glm::vec2>& heightTexture() const { return m_heightTex; }

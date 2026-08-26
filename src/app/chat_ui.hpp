@@ -2,6 +2,7 @@
 #include "ai/ollama_client.hpp"
 #include "voxel/picking.hpp"
 #include "voxel/editable_world.hpp"
+#include "voxel/layered_world.hpp"
 #include <imgui.h>
 #include <string>
 #include <vector>
@@ -27,7 +28,7 @@ public:
     void shutdown();
 
     // called each frame from App::drawHud
-    void draw(vf::voxel::EditableWorld& editable,
+    void draw(vf::voxel::EditableWorld& editable, vf::voxel::LayeredWorld& world,
               const vf::voxel::PickHit* hover, const vf::voxel::PickHit* selection, bool hasSelection,
               std::function<void()> rebuildFn);
 
@@ -36,14 +37,16 @@ public:
 
     // direct tool execution; returns number of rejected/unknown calls
     int executeToolCalls(const std::vector<ToolCall>& calls, glm::ivec3 anchor, bool hasAnchor,
-                         vf::voxel::EditableWorld& editable, std::function<void()> rebuildFn);
+                         vf::voxel::EditableWorld& editable, vf::voxel::LayeredWorld& world,
+                         std::function<void()> rebuildFn);
 
 private:
     void pushUser(const std::string& t);
     void pushAssistant(const std::string& t, bool thinking=false);
     void launchRequest(const std::string& userText, glm::ivec3 anchor, bool hasAnchor);
     void spawnWorker();
-    void pollResults(std::function<void()> rebuildFn);
+    void pollResults(vf::voxel::EditableWorld& editable, vf::voxel::LayeredWorld& world,
+                     std::function<void()> rebuildFn);
 
     std::string buildSystemPrompt(bool hasSelection) const;
 

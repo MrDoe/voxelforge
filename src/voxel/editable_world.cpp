@@ -17,7 +17,6 @@ WorldFileMeta EditableWorld::meta() const { return {WORLD, VOXEL, WATER_LEVEL, u
 
 bool EditableWorld::load() {
     WorldFileData d;
-    aiEditsClear();
     if (worldfile::read(filePath(), d)) {
         if (d.meta.worldSize != WORLD || d.meta.voxelSize != VOXEL || d.meta.gridN != uint32_t(GRID_N)) {
             spdlog::warn("editable_world: meta mismatch in {}, discarding", filePath());
@@ -25,8 +24,7 @@ bool EditableWorld::load() {
             return false;
         }
         m_records = std::move(d.voxels);
-        for (auto &v : m_records) aiEditsRegister(v.x, v.y, v.z, v.materialId);
-        spdlog::info("editable_world: loaded {} records from {}", m_records.size(), filePath());
+            spdlog::info("editable_world: loaded {} records from {}", m_records.size(), filePath());
     } else {
         m_records.clear(); // no file yet -> empty layer
     }
@@ -223,7 +221,6 @@ size_t EditableWorld::append(const std::vector<VoxelRecord>& newRecs) {
         uint32_t key=(uint32_t(v.x)<<20)|(uint32_t(v.y)<<10)|uint32_t(v.z);
         if (claimed.insert(key).second) { m_records.push_back(v); ++added; }
     }
-    for (auto &v : newRecs) aiEditsRegister(v.x, v.y, v.z, v.materialId);
     if (added) save();
     spdlog::info("editable_world: append {} new ({} total)", added, m_records.size());
     return added;
@@ -234,7 +231,6 @@ size_t EditableWorld::appendBox(glm::ivec3 anchor, glm::ivec3 sizeVox, uint8_t m
 }
 void EditableWorld::clear() {
     m_records.clear();
-    aiEditsClear();
     save();
     spdlog::info("editable_world: cleared");
 }

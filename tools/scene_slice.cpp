@@ -1,8 +1,8 @@
-// scene_slice: ASCII cross-sections of the CPU scene SDF.
+// vf_slice: ASCII cross-sections of the records-derived VoxelField.
 //
 // The fast feedback loop for layer-by-layer voxel object authoring - no GPU,
-// no window, and no world.vxw regen needed (samples scene() directly; only
-// assets/heightmap.png must exist, see heightmap_gen).
+// no window (samples the baked field; assets/world.json + layers must exist,
+// see heightmap_gen). Includes ai_edits, so AI-placed objects show up.
 //
 // Usage:
 //   vf_slice --axis x|y|z --center X Y Z --span S [--res N] [--band B]
@@ -10,7 +10,7 @@
 // axis is the plane normal through --center. Columns ascend along u, rows
 // descend along v (screen-like). Solid cells print their material glyph,
 // empty cells within --band of the surface print '+', deep air prints ' '.
-#include "voxel/common.hpp"
+#include "voxel/layered_world.hpp"
 
 #include <cmath>
 #include <cstdio>
@@ -60,11 +60,13 @@ int main(int argc, char** argv)
         std::fprintf(stderr, "bad arguments\n");
         return 2;
     }
-    if (!sharedHeightmap().loaded()) {
+    LayeredWorld lw;
+    if (!lw.load(std::string(VOXELFORGE_ASSET_DIR) + "/world.json")) {
         std::fprintf(stderr,
-                     "assets/heightmap.png missing - run: ninja -C build world\n");
+                     "assets/world.json missing/unreadable - run: ninja -C build world\n");
         return 1;
     }
+    const VoxelField& field = lw.field();
 
     const float step = span / float(res - 1);
     const float lo = -span * 0.5f;
@@ -94,7 +96,7 @@ int main(int argc, char** argv)
             else
                 p = glm::vec3(center[0] + u, center[1] + v, center[2]);
 
-            SceneSample s = scene(p);
+            VoxelField::Sample s = field.sampleWorld(p);
             char ch = ' ';
             if (s.d < 0.f)
                 ch = s.mat < 9 ? glyphs[s.mat] : '?';

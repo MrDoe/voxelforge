@@ -1,10 +1,22 @@
 // Unit tests for the voxel-object authoring helpers in common.hpp:
-// extra SDF primitives (capsule/ellipsoid/cone/smin) and voxel stamps.
+// extra SDF primitives (capsule/ellipsoid/cone/smin) and voxel stamps,
+// plus cross-checks that the baked VoxelField matches the analytic truth.
 #include "voxel/common.hpp"
+#include "voxel/layered_world.hpp"
 #include <doctest/doctest.h>
 #include <cmath>
 
 using namespace vf::voxel;
+
+namespace {
+const VoxelField& testField()
+{
+    static LayeredWorld lw;
+    static bool ok = lw.load(std::string(VOXELFORGE_ASSET_DIR) + "/world.json");
+    REQUIRE(ok);
+    return lw.field();
+}
+} // namespace
 
 TEST_CASE("authoring primitives: capsule")
 {
@@ -97,16 +109,17 @@ TEST_CASE("stamp: hit, pocket, and conservative-distance semantics")
     CHECK(none.d > 1000.0f);
 }
 
-TEST_CASE("scene composition: cabin walls solid, door carved")
+TEST_CASE("baked field: cabin walls solid, door carved")
 {
-    // mid front log course (k=0 centre): solid wood
-    SceneSample wall = scene({ kHousePos.x, kPadY + 0.42f + 0.145f, kHousePos.y - 2.0f });
-    CHECK(wall.d < -0.05f);
+    const VoxelField& f = testField();
+    // mid front log course: solid wood in the baked field too
+    auto wall = f.sampleWorld({ kHousePos.x, kPadY + 0.42f + 0.145f, kHousePos.y - 2.0f });
+    CHECK(wall.d < 0.0f);
     CHECK(wall.mat == 6);
 
     // door opening centre on the river side (-z): carved out of the wall
-    SceneSample door = scene({ kHousePos.x - 0.7f, kPadY + 1.30f, kHousePos.y - 2.0f });
-    CHECK(door.d > 0.3f);
+    auto door = f.sampleWorld({ kHousePos.x - 0.7f, kPadY + 1.30f, kHousePos.y - 2.0f });
+    CHECK(door.d > 0.1f);
 }
 
 TEST_CASE("paddock fence: rails solid, gate open")
@@ -154,17 +167,18 @@ TEST_CASE("alpaca: wool body, dark legs and muzzle")
     CHECK(alpacaAt({ o.x - 0.59f, o.y + 1.40f, o.z + 0.07f }).mat == 5);
 }
 
-TEST_CASE("scene composition: paddock and alpaca reachable through scene()")
+TEST_CASE("baked field: paddock and alpaca reachable")
 {
-    const HeightMap& hm = sharedHeightmap();
-    float g = hm.sample(kAlpacaSpot.x, kAlpacaSpot.y);
+    const VoxelField& field = testField();
 
-    SceneSample a = scene({ kAlpacaSpot.x, g + 0.64f, kAlpacaSpot.y });
+    auto a = field.sampleWorld({ kAlpacaSpot.x,
+                                 sharedHeightmap().sample(kAlpacaSpot.x, kAlpacaSpot.y) + 0.64f,
+                                 kAlpacaSpot.y });
     CHECK(a.d < 0.0f);
     CHECK(a.mat == 5);
 
     glm::vec2 mid(0.5f * (kPaddockMin.x + kPaddockMax.x), kPaddockMax.y);
-    SceneSample f = scene({ mid.x, hm.sample(mid.x, mid.y) + 0.36f, mid.y });
+    auto f = field.sampleWorld({ mid.x, sharedHeightmap().sample(mid.x, mid.y) + 0.36f, mid.y });
     CHECK(f.d < 0.0f);
     CHECK(f.mat == 6);
 }

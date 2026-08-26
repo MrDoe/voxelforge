@@ -252,9 +252,7 @@ int main(int argc, char** argv)
             !ai.voxels.empty() && ai.meta.worldSize == WORLD &&
             ai.meta.voxelSize == VOXEL) {
             aiRecords = std::move(ai.voxels);
-            for (auto& v : aiRecords)
-                vf::voxel::aiEditsRegister(v.x, v.y, v.z, v.materialId);
-            std::printf("  ai_edits: %zu records registered into scene truth\n",
+            std::printf("  ai_edits: %zu records kept as highest-priority layer\n",
                         aiRecords.size());
         }
     }

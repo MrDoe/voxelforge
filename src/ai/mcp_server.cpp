@@ -21,6 +21,7 @@
 // "ground":[x,z] to snap the anchor onto the terrain surface.
 #include "ai/tools.hpp"
 #include "voxel/common.hpp"
+#include "voxel/layered_world.hpp"
 #include "voxel/editable_world.hpp"
 #include "voxel/heightmap.hpp"
 #include "voxel/worldfile.hpp"
@@ -190,13 +191,24 @@ struct Server {
                  false };
     }
 
+    voxel::LayeredWorld& world()
+    {
+        static voxel::LayeredWorld w;
+        static bool init = false;
+        if (!init) {
+            w.load(std::string(VOXELFORGE_ASSET_DIR) + "/world.json");
+            init = true;
+        }
+        return w;
+    }
+
     ToolResult probe(const std::string& args)
     {
         float x = 0, y = 0, z = 0;
         ai::jsonGetFloat(args, "x", x);
         ai::jsonGetFloat(args, "y", y);
         ai::jsonGetFloat(args, "z", z);
-        auto s = voxel::scene({ x, y, z });
+        auto s = world().field().sampleWorld({ x, y, z });
         char buf[128];
         snprintf(buf, sizeof(buf), "d=%+.3f material=%d (%s)", s.d, int(s.mat),
                  s.d < 0 ? "solid" : "empty");
@@ -208,8 +220,8 @@ struct Server {
         float x = 0, z = 0;
         ai::jsonGetFloat(args, "x", x);
         ai::jsonGetFloat(args, "z", z);
-        const voxel::HeightMap& hm = voxel::sharedHeightmap();
-        float H = hm.sample(x, z);
+        const voxel::VoxelField& f = world().field();
+        float H = f.terrainHeightAtWorld(x, z);
         int cy = int((H + 0.5f * voxel::WORLD) / voxel::VOXEL);
         char buf[160];
         snprintf(buf, sizeof(buf),
@@ -231,8 +243,7 @@ struct Server {
                 err = "ground must be [x,z]";
                 return false;
             }
-            const voxel::HeightMap& hm = voxel::sharedHeightmap();
-            float H = hm.sample(g[0], g[1]);
+            float H = world().field().terrainHeightAtWorld(g[0], g[1]);
             out = { int((g[0] + 0.5f * voxel::WORLD) / voxel::VOXEL),
                     int((H + 0.5f * voxel::WORLD) / voxel::VOXEL),
                     int((g[1] + 0.5f * voxel::WORLD) / voxel::VOXEL) };

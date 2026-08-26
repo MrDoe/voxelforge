@@ -3,10 +3,8 @@
 #include "core/log.hpp"
 #include "platform/window.hpp"
 #include "rhi/swapchain.hpp"
-#include "render/raymarch_pass.hpp"
 #include "render/svo_pass.hpp"
 #include "render/taa_pass.hpp"
-#include "voxel/world.hpp"
 #include "voxel/worldfile.hpp"
 #include <algorithm>
 
@@ -243,23 +241,22 @@ bool App::initVulkan()
 
     // chunked-SVO world synthesis (single render path) ---------------------
     // layered world is the single source: the SVO is synthesized directly
-    // from the enabled layer files (no merged cache involved)
+    // from the enabled layer files (no merged cache, no procedural fallback)
     {
         const std::string manifestPath =
             std::string(VOXELFORGE_ASSET_DIR) + "/world.json";
-        bool fromFile = m_layers.load(manifestPath);
-        size_t nodes = 0, bricks = 0, activeChunks = 0;
-        double mb = 0.0;
-        if (fromFile) {
-            const auto& st = m_layers.stats();
-            nodes = st.nodes;
-            bricks = st.bricks;
-            activeChunks = st.activeChunks;
-            mb = double(st.memoryBytes) / (1024.0 * 1024.0);
-            spdlog::info("SVO world synthesized from layers: {} nodes, {} bricks,"
-                         " {}/{} chunks, {:.1f} MB",
-                         nodes, bricks, activeChunks,
-                         vf::voxel::GRID_N * vf::voxel::GRID_N * vf::voxel::GRID_N, mb);
+        if (!m_layers.load(manifestPath)) {
+            spdlog::critical("cannot load {} - run 'ninja -C build world' to bake assets",
+                             manifestPath);
+            return 1;
+        }
+        const auto& st = m_layers.stats();
+        spdlog::info("SVO world synthesized from layers: {} nodes, {} bricks,"
+                     " {}/{} chunks, {:.1f} MB",
+                     st.nodes, st.bricks, st.activeChunks,
+                     vf::voxel::GRID_N * vf::voxel::GRID_N * vf::voxel::GRID_N,
+                     double(st.memoryBytes) / (1024.0 * 1024.0));
+        {
             if (!m_svoPass.init(m_ctx))
                 return false;
             const auto& g = m_layers.gpu();
@@ -267,19 +264,6 @@ bool App::initVulkan()
             // every layer (incl. MCP-added ai_edits) is listed in the GUI
             syncWorldLayerList();
             rescanWorldLayers();
-        } else {
-            vf::voxel::World world;
-            world.build();
-            auto st = world.stats();
-            spdlog::info("SVO world built in {:.2f}s: {} nodes, {} bricks, {}/{} chunks"
-                         " active, {:.1f} MB",
-                         st.buildSeconds, st.nodes, st.bricks, st.activeChunks,
-                         vf::voxel::GRID_N * vf::voxel::GRID_N * vf::voxel::GRID_N,
-                         world.gpu().memoryBytes() / (1024.0 * 1024.0));
-            if (!m_svoPass.init(m_ctx))
-                return false;
-            const auto& g = world.gpu();
-            m_svoPass.setWorld(g.chunkGrid, g.childBase, g.payload, g.handles, g.bricks);
         }
 
         m_pushB = glm::vec4(vf::voxel::WORLD, vf::voxel::VOXEL, float(vf::voxel::GRID_N), 0);
@@ -498,7 +482,7 @@ void App::drawHud()
     // AI Chat (pass picking state; edits trigger an immediate world reload)
     {
         auto reloadFn = [this](){ this->requestWorldReload(); };
-        m_chatUi.draw(m_editable, m_hoverHit.hit ? &m_hoverHit : nullptr,
+        m_chatUi.draw(m_editable, m_layers, m_hoverHit.hit ? &m_hoverHit : nullptr,
                       m_hasSelection ? &m_selectedHit : nullptr, m_hasSelection, reloadFn);
         // hover highlight (world->screen)
         if (m_hoverHit.hit) {
@@ -582,12 +566,16 @@ int App::run(const Args& args)
     }
     m_animTime = args.animTime;
     if (args.probeSet) {
-        // probes must see MCP/chat edits: register ai_edits into scene truth
-        m_editable.load();
-        auto s = vf::voxel::scene(args.probe);
-        spdlog::info("probe({:.2f},{:.2f},{:.2f}): d={:+.3f} mat={} ({})", args.probe.x,
+        // probes read the live layered world (ai_edits included as a layer)
+        vf::voxel::LayeredWorld probeWorld;
+        if (!probeWorld.load(std::string(VOXELFORGE_ASSET_DIR) + "/world.json")) {
+            spdlog::critical("probe: cannot load world.json");
+            return 1;
+        }
+        auto s = probeWorld.field().sampleWorld(args.probe);
+        spdlog::info("probe({:.2f},{:.2f},{:.2f}): d={:+.3f} mat={} {}", args.probe.x,
                      args.probe.y, args.probe.z, s.d, int(s.mat),
-                     int(vf::voxel::kPalette.size()) > int(s.mat) ? "ok" : "OOR");
+                     s.d < 0 ? "solid" : "empty");
         return 0;
     }
     if (!std::filesystem::exists(std::string(VOXELFORGE_ASSET_DIR) + "/world.json")) {
@@ -749,7 +737,7 @@ int App::run(const Args& args)
                 float aspect = float(fb.x)/float(fb.y);
                 glm::vec3 rd = vf::voxel::screenRayDir(mx,my,fb.x,fb.y,tanHalf,aspect,
                                                        m_camera.forward(), m_camera.right(), m_camera.up());
-                m_hoverHit = vf::voxel::rayPick(m_camera.pos, rd);
+                m_hoverHit = vf::voxel::rayPick(m_layers.field(), m_camera.pos, rd);
             } else {
                 m_hoverHit.hit = false;
             }

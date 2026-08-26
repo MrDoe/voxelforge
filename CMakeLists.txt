@@ -81,7 +81,7 @@ add_library(vf_platform STATIC src/platform/window.cpp)
 target_include_directories(vf_platform PUBLIC src)
 target_link_libraries(vf_platform PUBLIC glfw Vulkan::Vulkan vf_glm spdlog::spdlog)
 
-add_library(vf_core STATIC src/core/camera.cpp src/voxel/world.cpp
+add_library(vf_core STATIC src/core/camera.cpp
                           src/voxel/layered_world.cpp src/voxel/voxel_field.cpp
                           src/voxel/heightmap.cpp src/voxel/worldfile.cpp
                           src/voxel/picking.cpp src/voxel/editable_world.cpp
