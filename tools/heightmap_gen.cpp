@@ -212,7 +212,7 @@ int main(int argc, char** argv)
 
     // pre-existing AI/user edits join the layer family so they are part of
     // the world like any other geometry (also registered into scene truth
-    // above for probes/splats)
+    // above for probes)
     std::vector<vf::voxel::VoxelRecord> aiRecords;
     {
         std::string adir = worldOut;
@@ -421,7 +421,7 @@ int main(int argc, char** argv)
 
     // -- ai_edits.vxw: user/AI edits are the highest-priority layer ------------
     // Already registered into scene truth above; here they join the layer
-    // family (first = highest dedupe priority) so they also reach splats.
+    // family (first = highest dedupe priority).
     if (!aiRecords.empty()) {
         LayerOut& aiL = *layers.insert(layers.begin(), LayerOut{});
         aiL.file = "ai_edits.vxw";

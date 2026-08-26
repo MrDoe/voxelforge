@@ -128,7 +128,7 @@ add_custom_target(vf_heightmap DEPENDS ${VF_HEIGHTMAP_PNG} ${VF_WORLD_LAYERS})
 add_library(vf_rhi STATIC src/rhi/context.cpp src/rhi/resources.cpp src/rhi/swapchain.cpp)
 target_link_libraries(vf_rhi PUBLIC vf_platform vf_vma spdlog::spdlog)
 
-add_library(vf_render STATIC src/render/raymarch_pass.cpp src/render/splat_pass.cpp src/render/svo_pass.cpp src/render/taa_pass.cpp)
+add_library(vf_render STATIC src/render/raymarch_pass.cpp src/render/svo_pass.cpp src/render/taa_pass.cpp)
 target_include_directories(vf_render PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/external)
 target_compile_definitions(vf_render PUBLIC
     VOXELFORGE_SHADER_DIR="${CMAKE_CURRENT_BINARY_DIR}/shaders"
@@ -142,8 +142,6 @@ file(MAKE_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}/shaders)
 
 set(VF_SHADER_SRCS ${CMAKE_CURRENT_SOURCE_DIR}/shaders/raymarch.comp
     ${CMAKE_CURRENT_SOURCE_DIR}/shaders/svo_raymarch.comp
-    ${CMAKE_CURRENT_SOURCE_DIR}/shaders/splat.vert
-    ${CMAKE_CURRENT_SOURCE_DIR}/shaders/splat.frag
     ${CMAKE_CURRENT_SOURCE_DIR}/shaders/taa_resolve.comp)
 set(VF_SHADER_SPVS "")
 foreach(src_file ${VF_SHADER_SRCS})
@@ -161,7 +159,7 @@ add_custom_target(vf_shaders ALL DEPENDS ${VF_SHADER_SPVS})
 add_executable(voxelforge src/app/main.cpp src/app/chat_ui.cpp)
 target_compile_definitions(voxelforge PRIVATE
     VOXELFORGE_SHADER_DIR="${CMAKE_CURRENT_BINARY_DIR}/shaders")
-target_link_libraries(voxelforge PRIVATE vf_render vf_core imgui_core tbb)
+target_link_libraries(voxelforge PRIVATE vf_render vf_core imgui_core)
 add_dependencies(voxelforge vf_shaders)
 add_custom_target(world DEPENDS ${VF_HEIGHTMAP_PNG} ${VF_WORLD_LAYERS})
 

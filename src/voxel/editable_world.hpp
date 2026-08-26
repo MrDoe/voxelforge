@@ -11,7 +11,7 @@ namespace vf::voxel {
 // Persistent AI edits layer: assets/ai_edits.vxw + world.json entry.
 // All AI-created objects are rasterized into VoxelRecords anchored at the
 // user-picked voxel (center-bottom convention) and appended here.
-// Splats hot-reload from this file; SVO requires explicit bake.
+// The app hot-reloads this layer via its disk poll within ~0.5 s.
 struct EditableWorld {
     static constexpr const char* kFileName = "ai_edits.vxw";
     static constexpr const char* kLayerName = "ai_edits";
@@ -37,8 +37,6 @@ struct EditableWorld {
 
     size_t size() const { return m_records.size(); }
     const std::vector<VoxelRecord>& records() const { return m_records; }
-    bool staleSVO() const { return m_staleSVO; }
-    void markSVOStale(bool s) { m_staleSVO = s; }
 
 private:
     std::string m_assetDir;
@@ -52,7 +50,6 @@ private:
                                        const std::function<float(glm::vec3)>& sdf) const;
 
     std::vector<VoxelRecord> m_records;
-    bool m_staleSVO = false;
 };
 
 } // namespace vf::voxel

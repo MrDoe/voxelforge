@@ -656,7 +656,7 @@ inline ObjHit alpacaAt(glm::vec3 p, uint64_t mask = OB_ALL)
 
 // --- ai_edits registry: data-only voxel edits as CPU truth ------------------
 // Chat/MCP edits live in assets/ai_edits.vxw. Registering their cells here
-// makes scene() (and therefore the SVO bake, probes and splat normals) see
+// makes scene() (and therefore the SVO bake and probes) see
 // them without recompiling. Single-threaded, like sharedHeightmap.
 namespace aidetail {
 struct AiCells {

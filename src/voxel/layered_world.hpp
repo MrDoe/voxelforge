@@ -4,7 +4,7 @@
 // Loads the layer family described by assets/world.json (record-only .vxw
 // files: landscape.vxw, object layers, scatter, ai_edits.vxw) and synthesizes
 // the chunked-SVO GpuWorld directly from those voxels. There is no merged
-// cache: every renderer path (SVO ray-march, splats, probes) consumes the same
+// cache: every renderer path (SVO ray-march, probes) consumes the same
 // loaded state, so layer edits / enable toggles / MCP appends are reflected
 // everywhere at once.
 //

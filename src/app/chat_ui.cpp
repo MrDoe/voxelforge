@@ -221,11 +221,6 @@ void ChatUi::draw(vf::voxel::EditableWorld& editable,
     ImGui::SetNextWindowSize(ImVec2(368, 520), ImGuiCond_FirstUseEver);
     ImGui::Begin("AI Chat", nullptr, 0);
 
-    if(editable.staleSVO()){
-        ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1,0.65f,0.2f,1));
-        ImGui::TextWrapped("SVO stale — splats live, raymarch syncs after bake (restart or ninja world)");
-        ImGui::PopStyleColor();
-    }
     ImGui::TextDisabled("%s", m_status.c_str());
     if(m_sending) { ImGui::SameLine(); ImGui::Text("⋯"); }
 

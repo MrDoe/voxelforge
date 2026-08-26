@@ -5,7 +5,7 @@
 // inspect and modify the layered voxel world. All edits land in the
 // ai_edits.vxw layer via EditableWorld, so they persist and join the manifest.
 // The running voxelforge instance watches the layer files and hot-reloads its
-// SVO + splats within a second - no external repack step involved.
+// SVO within a second - no external repack step involved.
 //
 // Tools:
 //   list_layers                       -> manifest layers + enabled state

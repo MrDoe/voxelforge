@@ -224,7 +224,7 @@ size_t EditableWorld::append(const std::vector<VoxelRecord>& newRecs) {
         if (claimed.insert(key).second) { m_records.push_back(v); ++added; }
     }
     for (auto &v : newRecs) aiEditsRegister(v.x, v.y, v.z, v.materialId);
-    if (added) { save(); m_staleSVO = true; }
+    if (added) save();
     spdlog::info("editable_world: append {} new ({} total)", added, m_records.size());
     return added;
 }
@@ -236,7 +236,6 @@ void EditableWorld::clear() {
     m_records.clear();
     aiEditsClear();
     save();
-    m_staleSVO=false;
     spdlog::info("editable_world: cleared");
 }
 

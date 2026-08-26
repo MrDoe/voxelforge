@@ -52,7 +52,7 @@ PickHit rayPick(glm::vec3 ro, glm::vec3 rd, float tMax, int maxSteps) {
             out.dist = t;
             out.mat = s.mat;
             out.voxel = worldToVoxel(p);
-            // normal: central diff, branch by terrain vs object like splat pass
+            // normal: central diff, branch by terrain vs object like the bake
             // If near object surface, use object SDF gradient; else terrain gradient
             const HeightMap& hm = sharedHeightmap();
             out.terrainHeight = hm.sample(p.x, p.z);

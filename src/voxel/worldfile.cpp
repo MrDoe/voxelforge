@@ -445,7 +445,7 @@ bool readLayered(const std::string& manifestPath, const WorldFileMeta& expected,
     std::unordered_set<uint32_t> claimed; // x<<20 | y<<10 | z of first claimant
     for (const WorldLayer& l : layers) {
         if (l.role == "packed")
-            continue; // merged cache - splats read the live layers instead
+            continue; // merged cache - renderers read the live layers instead
         if (!l.enabled)
             continue; // GUI-excluded: file stays on disk, out of merges
         WorldFileData data;

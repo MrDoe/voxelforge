@@ -5,7 +5,7 @@
 
 namespace vf {
 
-// Push-constant block shared with raymarch/splat shaders (128 bytes).
+// Push-constant block shared with the ray-march compute shaders (128 bytes).
 struct alignas(16) RaymarchPush {
     glm::vec4 camPos;
     glm::vec4 camRight;
@@ -14,7 +14,7 @@ struct alignas(16) RaymarchPush {
     glm::vec4 a; // tanHalfFov, aspect, extentX, extentY
     glm::vec4 b; // worldSize, maxEncodedDist, voxelSize, frameIdx
     glm::vec4 sunDir; // normalized direction TOWARD the sun (xyz)
-    glm::vec4 misc;   // x = splat size scale, y = animation time (seconds)
+    glm::vec4 misc;   // x = animation time (seconds); rest unused
 };
 static_assert(sizeof(RaymarchPush) == 128);
 
