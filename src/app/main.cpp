@@ -493,6 +493,26 @@ void App::drawHud()
                 } else if (l.file == vf::voxel::EditableWorld::kFileName) {
                     ImGui::SameLine();
                     ImGui::TextDisabled("[AI edits]");
+                } else {
+                    // import at the picked anchor instead of enabling the
+                    // whole baked layer at its authored coordinates
+                    ImGui::SameLine();
+                    const std::string imp = "Import##imp_" + l.file;
+                    if (!m_hasSelection)
+                        ImGui::BeginDisabled(true);
+                    if (ImGui::SmallButton(imp.c_str())) {
+                        const std::string path =
+                            std::string(VOXELFORGE_ASSET_DIR) + "/" + l.file;
+                        if (m_editable.importLayer(path, m_selectedHit.voxel) > 0)
+                            requestWorldReload();
+                    }
+                    if (!m_hasSelection) {
+                        ImGui::EndDisabled();
+                        if (ImGui::IsItemHovered())
+                            ImGui::SetTooltip("Ctrl+LMB pick an anchor first");
+                    } else if (ImGui::IsItemHovered()) {
+                        ImGui::SetTooltip("place a copy of this object at the selected voxel");
+                    }
                 }
             }
         }
@@ -500,6 +520,7 @@ void App::drawHud()
             rescanWorldLayers();
         ImGui::SameLine();
         ImGui::TextDisabled("%zu records live", m_layers.stats().records);
+        ImGui::TextDisabled("Import copies an object to the picked voxel (Ctrl+LMB)");
         ImGui::TextDisabled("toggles & AI edits hot-reload live");
     }
     ImGui::End();

@@ -30,6 +30,14 @@ struct EditableWorld {
     std::vector<VoxelRecord> makeCylinderY(glm::ivec3 anchor, float radiusM, float heightM, uint8_t mat) const;
     std::vector<VoxelRecord> makeStamp(glm::ivec3 anchor, const std::vector<StampCell>& cells) const;
 
+    // Import a foreign .vxw layer file: translates its records so the object's
+    // bottom-center lands on `anchor` and appends the copy to ai_edits.vxw.
+    // This is the only runtime placement path — layer files store absolute
+    // lattice coords, so enabling a layer shows it where it was baked, while
+    // import stamps a moved copy here. Returns records added (0 on read/meta
+    // failure or when nothing new survives dedupe/bounds).
+    size_t importLayer(const std::string& vxwPath, glm::ivec3 anchor);
+
     // append new records, deduping within layer (first wins). Returns number added.
     size_t append(const std::vector<VoxelRecord>& newRecs);
     size_t appendBox(glm::ivec3 anchor, glm::ivec3 sizeVox, uint8_t mat);

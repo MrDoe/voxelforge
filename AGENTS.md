@@ -31,6 +31,12 @@
   panel (a plain .vxw file list). Toggling triggers an incremental rebuild and
   refreshes SVO + terrain texture + shadow volume together (`applyWorldReload`).
   Content tests generate their own all-enabled manifest (`world_all.json`).
+- **Layer files hold absolute lattice coords; enabling shows the object where
+  it was baked.** To place a copy at the picked anchor, use the per-layer
+  "Import" button (or `EditableWorld::importLayer(path, anchor)`): it
+  translates the layer's records so their bottom-center lands on the selection
+  and appends only that object to `ai_edits.vxw`. The `pos`/`rotDeg` manifest
+  fields are informational (bake-time), never applied at runtime.
 - Don't hand-edit derived `.vxw`; edit terrain in
   `tools/heightmap_gen.cpp:terrainHeightAt()`, authored shapes in
   `src/voxel/common.hpp` (baker-side analytics), then `ninja -C build world`.

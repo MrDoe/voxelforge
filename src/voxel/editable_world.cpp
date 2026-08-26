@@ -236,6 +236,39 @@ size_t EditableWorld::appendBox(glm::ivec3 anchor, glm::ivec3 sizeVox, uint8_t m
     auto recs = makeBox(anchor, sizeVox, mat);
     return append(recs);
 }
+
+size_t EditableWorld::importLayer(const std::string& vxwPath, glm::ivec3 anchor) {
+    WorldFileData d;
+    if (!worldfile::read(vxwPath, d)) {
+        spdlog::warn("editable_world: importLayer cannot read {}", vxwPath);
+        return 0;
+    }
+    const WorldFileMeta want = meta();
+    if (d.voxels.empty() || d.meta.worldSize != want.worldSize ||
+        d.meta.voxelSize != want.voxelSize || d.meta.gridN != want.gridN) {
+        spdlog::warn("editable_world: importLayer {} empty or meta mismatch", vxwPath);
+        return 0;
+    }
+    // source AABB -> bottom-center origin in lattice coords (x/z centred,
+    // y at the lowest record), matching the picking bottom-center contract
+    glm::ivec3 mn(1 << 30), mx(-(1 << 30));
+    for (const auto& v : d.voxels) {
+        mn = glm::min(mn, glm::ivec3(v.x, v.y, v.z));
+        mx = glm::max(mx, glm::ivec3(v.x, v.y, v.z));
+    }
+    glm::ivec3 delta = anchor - glm::ivec3((mn.x + mx.x) / 2, mn.y, (mn.z + mx.z) / 2);
+    std::vector<VoxelRecord> moved;
+    moved.reserve(d.voxels.size());
+    for (const auto& v : d.voxels) {
+        glm::ivec3 c(int(v.x) + delta.x, int(v.y) + delta.y, int(v.z) + delta.z);
+        if (c.x < 0 || c.y < 0 || c.z < 0 || c.x >= 1024 || c.y >= 1024 || c.z >= 1024)
+            continue;
+        VoxelRecord t = v;
+        t.x = uint16_t(c.x); t.y = uint16_t(c.y); t.z = uint16_t(c.z);
+        moved.push_back(t);
+    }
+    return append(moved);
+}
 void EditableWorld::clear() {
     m_records.clear();
     save();

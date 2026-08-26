@@ -79,6 +79,12 @@ loaded. The "World layers" panel in-app lists every `.vxw` file as a checkbox �
 tick `house.vxw`, `tree1.vxw`, … to load them into the running world; untick to
 remove them. New files dropped into `assets/` appear after a rescan.
 
+Layers store absolute world coordinates, so a checkbox materializes the object
+exactly where it was baked. To place a copy somewhere else, pick an anchor with
+`Ctrl+LMB` and hit the layer's **Import** button — it stamps the object at the
+selection (bottom-center) by appending translated records to `ai_edits.vxw`,
+leaving the original layer untouched.
+
 ## Controls
 
 | input | action |

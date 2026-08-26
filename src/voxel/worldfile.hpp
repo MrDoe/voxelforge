@@ -67,8 +67,10 @@ bool read(const std::string& path, WorldFileData& out); // validates magic+versi
 // a JSON manifest (assets/world.json). Each layer holds voxels already in
 // WORLD-lattice coordinates; the optional pos/rot fields document where the
 // layer was placed by the packer (tools/heightmap_gen) and are applied there,
-// not at runtime. A layer with role "packed" (combined.vxw) carries the merged
-// SVO used for ray-marching; it is regenerated whenever any layer changes.
+// not at runtime. Runtime re-placement happens by translating records on
+// import (EditableWorld::importLayer -> ai_edits.vxw). A layer with role
+// "packed" (combined.vxw) carries the merged SVO used for ray-marching; it is
+// regenerated whenever any layer changes.
 struct WorldLayer {
     std::string file;   // relative to the manifest directory
     std::string role;   // "landscape" | "object" | "scatter" | "packed"
