@@ -170,7 +170,6 @@ add_executable(vf_tests tests/main.cpp tests/test_camera.cpp
                         src/ai/ollama_client.cpp)
 target_link_libraries(vf_tests PRIVATE vf_core vf_doctest)
 target_compile_definitions(vf_tests PRIVATE DOCTEST_CONFIG_NO_MULTITHREADING)
-add_dependencies(vf_tests vf_heightmap)
 add_test(NAME unit_tests COMMAND vf_tests)
 
 find_package(Python3 COMPONENTS Interpreter REQUIRED)

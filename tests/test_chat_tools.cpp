@@ -87,6 +87,23 @@ TEST_CASE("parse: ollama shape - object arguments")
     CHECK(calls[0].argumentsJson.find("\"material\":6") != std::string::npos);
 }
 
+TEST_CASE("parse: object arguments carrying their own name yield one call")
+{
+    // schemas require a "name" property inside arguments; a naive scan of the
+    // tool_calls array mistakes it for the next call's function name
+    std::string body = R"({"message":{"role":"assistant","content":"",
+        "tool_calls":[
+          {"function":{"name":"create_box","arguments":{"name":"crate","size":[3,3,3],"material":6}}},
+          {"function":{"name":"create_ellipsoid","arguments":{"name":"rock","radius":[0.5,0.4,0.5],"material":4}}}
+        ]}})";
+    std::vector<ToolCall> calls; std::string content, thinking;
+    REQUIRE(parseToolCallsFromResponse(body, calls, content, thinking));
+    REQUIRE(calls.size() == 2);
+    CHECK(calls[0].name == "create_box");
+    CHECK(calls[0].argumentsJson.find("\"crate\"") != std::string::npos);
+    CHECK(calls[1].name == "create_ellipsoid");
+}
+
 TEST_CASE("parse: llama.cpp / OpenAI shape - escaped string arguments")
 {
     std::string body =

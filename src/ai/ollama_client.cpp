@@ -94,7 +94,8 @@ static ParsedUrl parseBase(const std::string& base) {
     std::string hostport = slash==std::string::npos? s: s.substr(0,slash);
     u.prefix = slash==std::string::npos? "" : s.substr(slash);
     size_t colon = hostport.find(':');
-    if (colon!=std::string::npos) { u.host=hostport.substr(0,colon); u.port=std::stoi(hostport.substr(colon+1)); }
+    if (colon!=std::string::npos) { u.host=hostport.substr(0,colon);
+        try { u.port=std::stoi(hostport.substr(colon+1)); } catch(...) { u.port=80; } }
     else { u.host=hostport; u.port=80; }
     return u;
 }
@@ -199,9 +200,22 @@ bool OllamaClient::httpGet(const std::string& path, std::string& outBody, std::s
     if(getaddrinfo(u.host.c_str(),ps.c_str(),&hints,&res)!=0){ outError="dns"; return false; }
     int fd=-1; for(auto *p=res;p;p=p->ai_next){ fd=socket(p->ai_family,p->ai_socktype,p->ai_protocol); if(fd<0) continue; if(connect(fd,p->ai_addr,p->ai_addrlen)==0) break; close(fd); fd=-1; } freeaddrinfo(res); if(fd<0){outError="connect"; return false;}
     std::ostringstream req; req<<"GET "<<fullPath<<" HTTP/1.1\r\nHost: "<<u.host<<":"<<u.port<<"\r\nConnection: close\r\n\r\n";
-    std::string rs=req.str(); send(fd,rs.data(),rs.size(),0);
+    std::string rs=req.str();
+    size_t sent=0;
+    while(sent<rs.size()){ ssize_t n=send(fd,rs.data()+sent,rs.size()-sent,0); if(n<=0){ if(errno==EINTR) continue; outError="send failed"; close(fd); return false;} sent+=size_t(n); }
     std::string raw=readAllFromFd(fd, 3000); close(fd);
     size_t e=raw.find("\r\n\r\n"); if(e==std::string::npos){outError="no header"; return false;}
+    std::string header=raw.substr(0,e);
+    // require a 2xx status: a 404 from the wrong endpoint kind must not
+    // count as "server online" in ping()
+    int status=0;
+    {
+        size_t eol=header.find("\r\n");
+        std::string sl=header.substr(0, eol==std::string::npos?header.size():eol);
+        size_t sp=sl.find(' ');
+        if(sp!=std::string::npos){ try{ status=std::stoi(sl.substr(sp+1)); }catch(...){} }
+    }
+    if(status<200||status>=300){ outError="http "+std::to_string(status); return false; }
     outBody=raw.substr(e+4);
     return true;
 }
@@ -358,26 +372,64 @@ bool parseToolCallsFromResponse(const std::string& json, std::vector<ToolCall>& 
         if (tc == std::string::npos) tc = block.find("\"toolCalls\"");
         if (tc == std::string::npos) return;
         size_t arr = block.find('[', tc);
-        size_t endArr = block.rfind(']');
-        if (arr == std::string::npos || endArr == std::string::npos || endArr <= arr) return;
-        size_t pos = arr;
-        while (true) {
-            size_t fn = block.find("\"name\"", pos);
-            if (fn == std::string::npos || fn > endArr) break;
-            size_t colon = block.find(':', fn);
+        if (arr == std::string::npos) return;
+        // Walk the elements of the [...] array with a string-aware bracket
+        // scan and parse each call object in isolation: arguments may be a
+        // nested object carrying its own "name" key (our schemas require
+        // one), which must never be mistaken for the next tool's name.
+        struct Range { size_t begin, end; };
+        std::vector<Range> elems;
+        int lvl = 0;
+        bool inStr = false;
+        size_t start = std::string::npos;
+        for (size_t e = arr; e < block.size(); ++e) {
+            char c = block[e];
+            if (inStr) {
+                if (c == '\\')
+                    ++e;
+                else if (c == '"')
+                    inStr = false;
+                continue;
+            }
+            if (c == '"') {
+                inStr = true;
+            } else if (c == '[' || c == '{') {
+                ++lvl;
+                if (lvl == 2 && c == '{' && start == std::string::npos)
+                    start = e;
+            } else if (c == ']' || c == '}') {
+                if (lvl == 2 && c == '}' && start != std::string::npos) {
+                    elems.push_back({ start, e + 1 });
+                    start = std::string::npos;
+                }
+                --lvl;
+                if (lvl <= 0)
+                    break;
+            }
+        }
+        for (const Range& rng : elems) {
+            std::string elem = block.substr(rng.begin, rng.end - rng.begin);
+            size_t fn = elem.find("\"name\"");
+            if (fn == std::string::npos)
+                continue;
+            size_t colon = elem.find(':', fn);
+            if (colon == std::string::npos)
+                continue;
             size_t qs = colon + 1;
-            while (qs < block.size() && isspace((unsigned char)block[qs])) ++qs;
+            while (qs < elem.size() && isspace((unsigned char)elem[qs]))
+                ++qs;
             std::string name;
-            if (!readJsonStringAt(block, qs, name)) break;
+            if (!readJsonStringAt(elem, qs, name) || name.empty())
+                continue;
 
             std::string argsJson = "{}";
-            size_t argPos = block.find("\"arguments\"", qs);
-            if (argPos != std::string::npos && argPos < endArr) {
-                size_t acolon = block.find(':', argPos);
+            size_t argPos = elem.find("\"arguments\"", qs);
+            if (argPos != std::string::npos) {
+                size_t acolon = elem.find(':', argPos);
                 bool isStr = false;
                 std::string val;
                 if (acolon != std::string::npos &&
-                    readValueAt(block, acolon + 1, val, isStr)) {
+                    readValueAt(elem, acolon + 1, val, isStr)) {
                     // OpenAI/llama.cpp: arguments is an escaped STRING holding
                     // the JSON object; Ollama: a nested JSON object
                     argsJson = val.empty() ? "{}" : val;
@@ -387,7 +439,6 @@ bool parseToolCallsFromResponse(const std::string& json, std::vector<ToolCall>& 
             tcx.name = name;
             tcx.argumentsJson = argsJson;
             out.push_back(std::move(tcx));
-            pos = qs + name.size() + 2;
         }
     };
     extractToolCallsBlock(msg);
@@ -425,7 +476,7 @@ bool parseToolCallsFromResponse(const std::string& json, std::vector<ToolCall>& 
                     out.push_back(std::move(tcx));
                 }
             }
-            pos = after + name.size();
+            pos = after;
         }
     }
 

@@ -34,10 +34,12 @@ bool uploadToImage3D(const Context& ctx, Image3D& im, const void* data, size_t b
 bool readbackImage2D(const Context& ctx, VkImage src, uint32_t w, uint32_t h,
                      std::vector<uint8_t>& out);
 
+// Sync flags are the 64-bit Vk*Flags2 types: the VK_*_2 stage/access bits
+// live above bit 31 and silently truncate to 0 in the legacy 32-bit types.
 void transitionImage(VkCommandBuffer cmd, VkImage img, VkImageAspectFlags aspect,
                      VkImageLayout from, VkImageLayout to,
-                     VkPipelineStageFlags srcStage, VkAccessFlags srcAccess,
-                     VkPipelineStageFlags dstStage, VkAccessFlags dstAccess,
+                     VkPipelineStageFlags2 srcStage, VkAccessFlags2 srcAccess,
+                     VkPipelineStageFlags2 dstStage, VkAccessFlags2 dstAccess,
                      uint32_t layerCount = 1);
 
 } // namespace vf

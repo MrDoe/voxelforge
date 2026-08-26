@@ -21,7 +21,6 @@
 #include "voxel/editable_world.hpp"
 #include "voxel/layered_world.hpp"
 
-#include <algorithm>
 #include <chrono>
 #include <cmath>
 #include <cstring>
@@ -230,13 +229,17 @@ bool App::initVulkan()
         return false;
 
     glm::ivec2 fb = m_window.framebufferSize();
-    vf::PresentPolicy policy = (m_args.selftest || m_args.smokeFrames > 0)
-                                   ? vf::PresentPolicy::Immediate
-                                   : vf::PresentPolicy::PreferMailbox;
+    // IMMEDIATE is the default: MAILBOX deadlocks after a few thousand frames
+    // on NVIDIA 580 + X11 (xcb present wakeup loss) - see swapchain.cpp.
+    vf::PresentPolicy policy = vf::PresentPolicy::Immediate;
     if (const char* pm = getenv("VF_PRESENT")) {
         // manual override for testing WSI paths
-        policy = strcmp(pm, "immediate") == 0 ? vf::PresentPolicy::Immediate
-                                              : vf::PresentPolicy::PreferMailbox;
+        if (strcmp(pm, "immediate") == 0)
+            policy = vf::PresentPolicy::Immediate;
+        else if (strcmp(pm, "mailbox") == 0)
+            policy = vf::PresentPolicy::PreferMailbox;
+        else
+            spdlog::warn("VF_PRESENT='{}' ignored (use immediate|mailbox)", pm);
     }
     if (!m_swapchain.init(m_ctx, uint32_t(fb.x), uint32_t(fb.y), policy))
         return false;
@@ -250,7 +253,7 @@ bool App::initVulkan()
         if (!m_layers.load(manifestPath)) {
             spdlog::critical("cannot load {} - run 'ninja -C build world' to bake assets",
                              manifestPath);
-            return 1;
+            return false;
         }
         const auto& st = m_layers.stats();
         spdlog::info("SVO world synthesized from layers: {} nodes, {} bricks,"
@@ -505,21 +508,11 @@ void App::drawHud()
         auto reloadFn = [this](){ this->requestWorldReload(); };
         m_chatUi.draw(m_editable, m_layers, m_hoverHit.hit ? &m_hoverHit : nullptr,
                       m_hasSelection ? &m_selectedHit : nullptr, m_hasSelection, reloadFn);
-        // hover highlight (world->screen)
-        if (m_hoverHit.hit) {
-            // project hover voxel center to screen for a tiny reticle
-            // simple: draw crosshair at mouse cursor when Ctrl held
-            // plus small text already via ChatUi; keep for debug
-        }
-        // selected voxel world-space reticle via ImGui foreground
+        // selected voxel feedback via ImGui foreground text at screen center
         if (m_hasSelection) {
-            glm::vec3 selW = vf::voxel::voxelCenter(m_selectedHit.voxel);
-            // project using same logic as push: need view-proj
-            // Instead draw at screen center when picked via Ctrl+LMB? Provide feedback via overlay
             ImDrawList* dl = ImGui::GetForegroundDrawList();
             ImVec2 center(io.DisplaySize.x * 0.5f, io.DisplaySize.y * 0.5f);
             dl->AddText(ImVec2(center.x - 40, center.y + 20), IM_COL32(80,255,80,220), "● selected");
-            (void)selW;
         }
     }
 }
@@ -555,6 +548,7 @@ bool App::runSelftest()
     for (int gy = 0; gy < 3; ++gy) {
         for (int gx = 0; gx < 3; ++gx) {
             uint64_t r = 0, g = 0, b = 0;
+            size_t n = 0;
             uint32_t x0 = uint32_t(gx) * W / 3, x1 = uint32_t(gx + 1) * W / 3;
             uint32_t y0 = uint32_t(gy) * H / 3, y1 = uint32_t(gy + 1) * H / 3;
             for (uint32_t y = y0; y < y1; y += 4)
@@ -563,8 +557,10 @@ bool App::runSelftest()
                     r += pixels[i];
                     g += pixels[i + 1];
                     b += pixels[i + 2];
+                    ++n;
                 }
-            size_t n = size_t(((x1 - x0) / 4) + 1) * (((y1 - y0) / 4) + 1);
+            if (!n)
+                continue;
             fprintf(stderr, "[grid %d,%d] avg (%u,%u,%u)\n", gx, gy,
                     unsigned(r / n), unsigned(g / n), unsigned(b / n));
         }
@@ -696,14 +692,11 @@ int App::run(const Args& args)
         m_minMs = std::min(m_minMs, m_lastFrameMs);
         m_maxMs = std::max(m_maxMs, m_lastFrameMs);
 
-        bool chatWantsKeys = m_chatInitialized && m_chatUi.wantsCaptureKeyboard();
-        (void)chatWantsKeys;
-
         // animation clock only advances interactively - headless shots stay
         // deterministic (misc.y feeds wind/grass shading)
-        const bool headlessMode =
+        const bool headlessRun =
             args.selftest || args.smokeFrames > 0 || !args.shot.empty();
-        if (!headlessMode)
+        if (!headlessRun)
             m_animTime += dt;
 
         if (m_window.resized()) {
@@ -786,7 +779,6 @@ int App::run(const Args& args)
         FrameSync& fr = m_frames[f];
         vkWaitForFences(m_ctx.device(), 1, &fr.inFlight, VK_TRUE, UINT64_MAX);
 
-        const bool headlessRun = args.selftest || args.smokeFrames > 0 || !args.shot.empty();
         if (headlessRun) {
             // Automated mode: zero window-system interaction.
             vkResetFences(m_ctx.device(), 1, &fr.inFlight);

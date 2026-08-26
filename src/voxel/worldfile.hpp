@@ -12,9 +12,10 @@
 //                       rgba u8 x4, reflectivity u8, roughness u8,
 //                       materialId u8, reserved u8
 //
-// Generated from assets/heightmap.png by tools/heightmap_gen; the app loads
-// it directly to skip the procedural CPU build. Regenerated automatically
-// when missing.
+// Layer files are written by tools/heightmap_gen (the offline bake, run
+// explicitly via `ninja -C build world`) or by EditableWorld (ai_edits.vxw).
+// Nothing is regenerated automatically; a missing bake makes app/tests exit
+// with "run 'ninja -C build world'".
 #include <cstdint>
 #include <string>
 #include <vector>

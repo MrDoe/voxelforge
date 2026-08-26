@@ -4,7 +4,6 @@
 #include <glm/glm.hpp>
 #include <string>
 #include <vector>
-#include <functional>
 
 namespace vf::voxel {
 
@@ -44,11 +43,6 @@ private:
     std::string filePath() const;
     std::string manifestPath() const;
     WorldFileMeta meta() const;
-
-    // common raster: SDF lambda -> surface band records around anchor
-    std::vector<VoxelRecord> rasterize(glm::ivec3 anchor, glm::ivec3 halfExtent,
-                                       uint8_t mat,
-                                       const std::function<float(glm::vec3)>& sdf) const;
 
     std::vector<VoxelRecord> m_records;
 };

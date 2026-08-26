@@ -90,8 +90,8 @@ void destroyImage3D(const Context& ctx, Image3D& im)
 
 void transitionImage(VkCommandBuffer cmd, VkImage img, VkImageAspectFlags aspect,
                      VkImageLayout from, VkImageLayout to,
-                     VkPipelineStageFlags srcStage, VkAccessFlags srcAccess,
-                     VkPipelineStageFlags dstStage, VkAccessFlags dstAccess,
+                     VkPipelineStageFlags2 srcStage, VkAccessFlags2 srcAccess,
+                     VkPipelineStageFlags2 dstStage, VkAccessFlags2 dstAccess,
                      uint32_t layerCount)
 {
     VkImageMemoryBarrier2 b { VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER_2 };

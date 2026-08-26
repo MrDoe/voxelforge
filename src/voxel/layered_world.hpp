@@ -115,6 +115,7 @@ private:
     // dirty-tracking state for incremental rebuilds
     std::map<std::string, WorldAABB> m_prevBox;            // layer file -> record AABB
     std::map<std::string, bool> m_prevEnabled;             // layer file -> enabled
+    std::map<std::string, unsigned long long> m_prevSig;   // layer file -> content sig (mtime+size)
 
     struct Signature {
         std::string path;

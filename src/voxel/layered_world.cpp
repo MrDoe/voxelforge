@@ -212,8 +212,10 @@ inline std::vector<int> chunkRangeFromAABB(const WorldAABB& b)
 {
     std::vector<int> out;
     auto clampC = [](int c) { return c < 0 ? 0 : (c > GRID_N - 1 ? GRID_N - 1 : c); };
+    // b is in world meters; a chunk spans CHUNK_N cells = CHUNK_N * VOXEL m
+    const float chunkW = float(CHUNK_N) * VOXEL;
     auto toChunk = [&](float x) {
-        int c = int(std::floor((x + 0.5f * WORLD) / CHUNK_N));
+        int c = int(std::floor((x + 0.5f * WORLD) / chunkW));
         return clampC(c);
     };
     int margin = 2;
@@ -253,20 +255,23 @@ bool LayeredWorld::load(const std::string& manifestPath)
     std::unordered_set<uint32_t> claimed;
     claimed.reserve(1u << 22);
 
-    auto addSig = [&](const std::string& file) {
+    auto addSig = [&](const std::string& file) -> unsigned long long {
         std::filesystem::path p = std::filesystem::path(dir) / file;
         std::error_code ec;
         unsigned long long sz = static_cast<unsigned long long>(
             ec ? 0ull : std::filesystem::file_size(p, ec));
+        unsigned long long sig = sigOf(p) ^ (sz * 0x9E3779B97F4A7C15ull);
         m_signatures.push_back({ p.string(), sigOf(p), sz });
+        return sig;
     };
 
     addSig(manifestPath);
 
-    // per-layer record AABB + enabled-state, used to derive the dirty chunk set
-    // for incremental rebuilds.
+    // per-layer record AABB + enabled-state + content signature, used to
+    // derive the dirty chunk set for incremental rebuilds.
     std::map<std::string, WorldAABB> curBox;
     std::map<std::string, bool> curEnabled;
+    std::map<std::string, unsigned long long> curSig;
     std::string landscapeFile;
     for (const auto& l : manifest) {
         curEnabled[l.file] = l.enabled;
@@ -298,8 +303,7 @@ bool LayeredWorld::load(const std::string& manifestPath)
             spdlog::error("layered_world: layer '{}' meta mismatch", l.file);
             continue;
         }
-        addSig(l.file);
-        m_layersMeta.push_back(l);
+        curSig[l.file] = addSig(l.file);
         const bool isLandscape = (l.name == "landscape" || l.file == "landscape.vxw");
         WorldAABB& box = curBox[l.file];
         for (VoxelRecord& v : data.voxels) {
@@ -323,6 +327,8 @@ bool LayeredWorld::load(const std::string& manifestPath)
     }
 
     // --- decide full vs incremental rebuild -------------------------------
+    // Toggles stay incremental: only layers whose enabled-state, record AABB
+    // or file content changed mark their chunk range dirty.
     bool full = !m_hasFullBuild;
     WorldAABB dirty;
     bool dirtyValid = false;
@@ -332,17 +338,33 @@ bool LayeredWorld::load(const std::string& manifestPath)
         if (pit != m_prevEnabled.end() && pit->second == kv.second) {
             auto pbox = m_prevBox.find(kv.first);
             auto cbox = curBox.find(kv.first);
-            if (pbox != m_prevBox.end() && cbox != curBox.end() &&
+            auto psig = m_prevSig.find(kv.first);
+            auto csig = curSig.find(kv.first);
+            bool sigSame =
+                (psig == m_prevSig.end()) == (csig == curSig.end()) &&
+                (psig == m_prevSig.end() || psig->second == csig->second);
+            if (sigSame && pbox != m_prevBox.end() && cbox != curBox.end() &&
                 pbox->second.lo == cbox->second.lo && pbox->second.hi == cbox->second.hi)
                 changed = false;
         }
         if (changed) {
             if (kv.first == landscapeFile)
                 full = true;
+            // dirty whatever box we know: the current one (enabled / content
+            // change) or the previous one (layer just disabled - its chunks
+            // must be rebuilt or the old geometry would linger)
+            const WorldAABB* b = nullptr;
             auto cbox = curBox.find(kv.first);
-            if (cbox != curBox.end()) {
-                dirty.lo = glm::min(dirty.lo, cbox->second.lo);
-                dirty.hi = glm::max(dirty.hi, cbox->second.hi);
+            if (cbox != curBox.end())
+                b = &cbox->second;
+            else {
+                auto pbox = m_prevBox.find(kv.first);
+                if (pbox != m_prevBox.end())
+                    b = &pbox->second;
+            }
+            if (b) {
+                dirty.lo = glm::min(dirty.lo, b->lo);
+                dirty.hi = glm::max(dirty.hi, b->hi);
                 dirtyValid = true;
             }
         }
@@ -376,6 +398,7 @@ bool LayeredWorld::load(const std::string& manifestPath)
 
     m_prevBox = std::move(curBox);
     m_prevEnabled = std::move(curEnabled);
+    m_prevSig = std::move(curSig);
     m_hasFullBuild = true;
     m_loaded = true;
     return true;

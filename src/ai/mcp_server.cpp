@@ -130,6 +130,31 @@ static bool jsonHasArray(const std::string& json, const char* key)
 // --- tool implementations ----------------------------------------------------
 namespace {
 
+// end offset (exclusive) of the JSON object opening at `open`, honoring
+// string literals so braces inside values cannot derail the depth count
+size_t jsonObjectEnd(const std::string& s, size_t open)
+{
+    int depth = 0;
+    bool inStr = false;
+    for (size_t e = open; e < s.size(); ++e) {
+        char c = s[e];
+        if (inStr) {
+            if (c == '\\')
+                ++e;
+            else if (c == '"')
+                inStr = false;
+            continue;
+        }
+        if (c == '"')
+            inStr = true;
+        else if (c == '{')
+            ++depth;
+        else if (c == '}' && --depth == 0)
+            return e + 1;
+    }
+    return std::string::npos;
+}
+
 struct ToolResult {
     std::string text;
     bool isError = false;
@@ -444,7 +469,7 @@ int main()
         } else if (method == "ping") {
             resultPayload = "{}";
         } else if (method == "tools/list") {
-            resultPayload = toolSchemas().substr(0); // trailing space trimmed below
+            resultPayload = toolSchemas();
             while (!resultPayload.empty() && resultPayload.back() == ' ')
                 resultPayload.pop_back();
         } else if (method == "tools/call") {
@@ -457,17 +482,10 @@ int main()
             if (ap != std::string::npos) {
                 size_t ob = params.find('{', ap);
                 if (ob != std::string::npos) {
-                    int depth = 0;
-                    size_t e = ob;
-                    for (; e < params.size(); ++e) {
-                        if (params[e] == '{')
-                            ++depth;
-                        else if (params[e] == '}' && --depth == 0) {
-                            ++e;
-                            break;
-                        }
-                    }
-                    arguments = params.substr(ob, e - ob);
+                    size_t end = jsonObjectEnd(params, ob);
+                    arguments = params.substr(ob, end == std::string::npos
+                                                     ? std::string::npos
+                                                     : end - ob);
                 }
             }
             ToolResult tr = callTool(srv, name, arguments);

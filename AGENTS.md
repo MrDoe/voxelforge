@@ -14,9 +14,10 @@
   (target `vf_shaders`, `--target-env vulkan1.3`). Shader dir injected via
   `VOXELFORGE_SHADER_DIR`; `VOXELFORGE_ASSET_DIR` points to `assets`.
 - `ninja -C build world` bakes assets (heightmap + `.vxw` layers +
-  `world.json`) via `tools/heightmap_gen.cpp`. Not a default dependency:
-  after a clean checkout or deleting assets you must run it, or the app exits
-  with "run ninja -C build world".
+  `world.json`) via `tools/heightmap_gen.cpp`. Purely an explicit extra tool:
+  never wired into the default build, tests, or `start.sh` — after a clean
+  checkout or deleting assets you must run it, or the app/tests exit with
+  "run ninja -C build world".
 
 ## Assets — on-demand, gitignored
 - `assets/heightmap.png` and `assets/*.vxw` + `assets/world.json` are baked by
@@ -108,8 +109,9 @@
   updating heightmap encode, `worldfile` meta check, and shader constants.
 - `heightmap_gen`'s PNG writer is hand-rolled stored-deflate;
   `rowBytes = 1+w*2`.
-- Deleting assets then running `ctest` without `ninja -C build world` fails at
-  build step (`vf_tests` depends on `vf_heightmap`).
+- `vf_tests` no longer depends on `vf_heightmap`; without baked assets
+  `unit_tests` aborts with "run 'ninja -C build world' first" instead of
+  triggering a bake.
 - No validation layers installed; rely on selftest/visual_check + `VF_TRACE`.
 - ImGui uses `UseDynamicRendering`: the app must wrap `ImGui_ImplVulkan_RenderDrawData`
   in its own `vkCmdBeginRendering/vkCmdEndRendering` against the swapchain view

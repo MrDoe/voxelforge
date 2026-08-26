@@ -24,10 +24,17 @@ std::vector<uint8_t> loadSpirv(const std::string& path)
 
 bool SvoPass::uploadSsbo(Ssbo& s, const void* data, size_t bytes)
 {
+    // zero-sized sections (e.g. a fully-solid world has no nodes) still need
+    // a bindable buffer for the descriptor set - use a 4-byte dummy
+    static const uint32_t dummy = 0;
+    if (bytes == 0) {
+        data = &dummy;
+        bytes = sizeof(dummy);
+    }
     Buffer staging =
         makeBuffer(*m_ctx, bytes, VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
                    VMA_MEMORY_USAGE_AUTO_PREFER_HOST, true);
-    if (!staging.buf || !data || bytes == 0)
+    if (!staging.buf || !data)
         return false;
     memcpy(staging.mapped, data, bytes);
 

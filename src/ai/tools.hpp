@@ -100,10 +100,12 @@ inline std::string injectToolDefaults(const std::string& canonical,
 
     int mat = -1; // -1: leave to handler default
     auto has = [&](const char* sub) { return lowerRawName.find(sub) != std::string::npos; };
-    if (has("rock") || has("stone") || has("boulder") || has("pebble"))
-        mat = 4;
-    else if ((has("light") && has("rock")) || has("white") || has("gray") || has("grey"))
+    // light variants first: "light rock" must win over plain "rock"
+    if (has("white") || has("gray") || has("grey") ||
+        (has("light") && has("rock")))
         mat = 5;
+    else if (has("rock") || has("stone") || has("boulder") || has("pebble"))
+        mat = 4;
     else if (has("wood") || has("log") || has("plank") || has("crate") || has("chest"))
         mat = 6;
     else if (has("leaf") || has("foliage") || has("hedge"))

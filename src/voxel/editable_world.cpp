@@ -24,7 +24,7 @@ bool EditableWorld::load() {
             return false;
         }
         m_records = std::move(d.voxels);
-            spdlog::info("editable_world: loaded {} records from {}", m_records.size(), filePath());
+        spdlog::info("editable_world: loaded {} records from {}", m_records.size(), filePath());
     } else {
         m_records.clear(); // no file yet -> empty layer
     }
@@ -76,38 +76,6 @@ bool EditableWorld::save() const {
     // ensure manifest lists it
     const_cast<EditableWorld*>(this)->ensureManifest();
     return true;
-}
-
-std::vector<VoxelRecord> EditableWorld::rasterize(glm::ivec3 anchor, glm::ivec3 halfExtent,
-                                                  uint8_t mat,
-                                                  const std::function<float(glm::vec3)>& sdf) const {
-    std::vector<VoxelRecord> out;
-    // brute force AABB sweep around anchor, keep shell |d| <= kBand
-    // anchor is bottom-center voxel; local dy=0 => anchor.y
-    for (int dz=-halfExtent.z; dz<=halfExtent.z; ++dz)
-        for (int dy=0; dy<=halfExtent.y*2; ++dy) // height is upward from anchor (bottom)
-            for (int dx=-halfExtent.x; dx<=halfExtent.x; ++dx) {
-                // For height we handle halfExtent.y as half height? Use full height param instead.
-                // This generic raster assumes anchor is center, not bottom. So shift:
-                // We'll compute world pos of candidate cell center
-                glm::ivec3 c(anchor.x + dx, anchor.y + dy, anchor.z + dz);
-                if (c.x<0||c.y<0||c.z<0) continue;
-                if (c.x>=1024||c.y>=1024||c.z>=1024) continue;
-                glm::vec3 p = voxelCenter(c);
-                // evaluate SDF relative to object center (anchor + halfExtent.y up)
-                // Caller provides sdf that is already centered at appropriate place.
-                float d = sdf(p);
-                if (std::fabs(d) > kBand) continue;
-                VoxelRecord v;
-                v.x = uint16_t(c.x); v.y = uint16_t(c.y); v.z = uint16_t(c.z);
-                const glm::vec3& col = kPalette[std::min(int(mat),8)];
-                const glm::vec2& rr = kMaterialReflection[std::min(int(mat),8)];
-                v.r = uint8_t(col.r*255.f); v.g = uint8_t(col.g*255.f); v.b = uint8_t(col.b*255.f);
-                v.a = 255; v.reflectivity = uint8_t(rr.x); v.roughness = uint8_t(rr.y);
-                v.materialId = mat;
-                out.push_back(v);
-            }
-    return out;
 }
 
 std::vector<VoxelRecord> EditableWorld::makeBox(glm::ivec3 anchor, glm::ivec3 sizeVox, uint8_t mat) const {

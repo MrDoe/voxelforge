@@ -23,10 +23,7 @@ void ChatUi::init(const std::string& baseUrl, const std::string& model){
     pushAssistant("Hi! Ctrl+LMB a voxel, then tell me what to build. Example: 'put a 3x3 wood crate here' or 'add a small rock'");
 }
 void ChatUi::shutdown(){
-    if(m_worker.joinable()){
-        if(m_sending) m_worker.join();
-        else m_worker.join();
-    }
+    if(m_worker.joinable()) m_worker.join();
 }
 std::string ChatUi::buildSystemPrompt(bool hasSelection) const {
     std::string p = kGemmaSystemPrompt;
@@ -197,7 +194,9 @@ void ChatUi::draw(vf::voxel::EditableWorld& editable, vf::voxel::LayeredWorld& w
                 int rejected = executeToolCalls(r.toolCalls, m_pendingAnchor, m_pendingHasAnchor, editable, world, rebuildFn);
                 char buf[128]; snprintf(buf,sizeof(buf),"executed %zu tool call(s)", r.toolCalls.size());
                 pushAssistant(buf);
-                m_llmHistory.push_back({"assistant", r.content + " [tools executed]"});
+                m_llmHistory.push_back({"assistant",
+                    r.content.empty() ? std::string("[tools executed]")
+                                      : r.content + " [tools executed]"});
                 m_status = "placed";
                 // self-correction: let the model re-issue rejected calls once
                 if(rejected>0 && m_unknownRetries<2){

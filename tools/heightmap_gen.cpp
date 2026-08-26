@@ -466,14 +466,28 @@ int main(int argc, char** argv)
         dir = slash == std::string::npos ? std::string() : dir.substr(0, slash + 1);
     }
     std::vector<vf::voxel::worldfile::WorldLayer> manifestLayers;
+    manifestLayers.reserve(layers.size());
     size_t totalRecords = 0;
     for (const LayerOut& L : layers) {
+        // default manifest: terrain-only world. Content layers ship disabled
+        // and are opted into via the GUI / enable_layer; ai_edits is enabled
+        // exactly when it carries records. It is also first in the vector,
+        // i.e. highest merge priority.
+        vf::voxel::worldfile::WorldLayer wl;
+        wl.file = L.file;
+        wl.role = L.role;
+        wl.name = L.name;
+        wl.pos[0] = L.pos.x;
+        wl.pos[1] = L.pos.y;
+        wl.pos[2] = L.pos.z;
+        wl.rotDeg = 0.f;
+        wl.enabled = L.role == "landscape" || L.file == "ai_edits.vxw";
+        wl.listed = true;
         // NEVER write ai_edits.vxw back: the packer only consumes it. Writing
         // would stomp edits appended while this bake was running.
         if (L.file == "ai_edits.vxw") {
             totalRecords += L.voxels.size();
-            manifestLayers.push_back({ L.file, L.role, L.name,
-                                       { L.pos.x, L.pos.y, L.pos.z }, 0.f });
+            manifestLayers.push_back(std::move(wl));
             continue;
         }
         vf::voxel::WorldFileData ld;
@@ -484,8 +498,7 @@ int main(int argc, char** argv)
             return 1;
         }
         totalRecords += L.voxels.size();
-        manifestLayers.push_back({ L.file, L.role, L.name,
-                                   { L.pos.x, L.pos.y, L.pos.z }, 0.f });
+        manifestLayers.push_back(std::move(wl));
     }
     if (!vf::voxel::worldfile::writeManifest(dir + "world.json", manifestLayers)) {
         std::fprintf(stderr, "failed to write %sworld.json\n", dir.c_str());

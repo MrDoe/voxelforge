@@ -6,7 +6,7 @@
 int main(int argc, char** argv)
 {
     if (!vf::voxel::sharedHeightmap().loaded()) {
-        spdlog::critical("tests require assets/heightmap.png (run heightmap_gen)");
+        spdlog::critical("tests require baked assets - run 'ninja -C build world' first");
         return 1;
     }
     doctest::Context ctx(argc, argv);

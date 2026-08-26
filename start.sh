@@ -30,10 +30,10 @@ if [[ ! -x "$ROOT/$BUILD_DIR/voxelforge" ]]; then
   ninja -C "$ROOT/$BUILD_DIR" -j"$(nproc)"
 fi
 
-# 2) world assets (heightmap + world.vxw + layers) — on-demand, gitignored
-if [[ ! -f "$ROOT/assets/world.vxw" || ! -f "$ROOT/assets/heightmap.png" ]]; then
-  echo "[start] generating world assets (heightmap_gen, ~6s)..."
-  ninja -C "$ROOT/$BUILD_DIR" world -j"$(nproc)" || "$ROOT/$BUILD_DIR/heightmap_gen" "$ROOT/assets/heightmap.png" "$ROOT/assets/world.vxw"
+# 2) world assets are NOT generated here — baking is an explicit extra tool.
+if [[ ! -f "$ROOT/assets/world.json" ]]; then
+  echo "[start] assets/world.json missing - run 'ninja -C $BUILD_DIR world' first" >&2
+  exit 1
 fi
 
 # 3) llama.cpp server — reuse any existing instance to avoid double VRAM
@@ -106,8 +106,9 @@ else
   if [[ $need_server -eq 0 ]]; then
     : # discovered via ps — skip launch, reuse existing
   else
-  # serialize concurrent start.sh invocations
-  exec 9>/tmp/voxelforge-llama.lock 2>/dev/null || true
+  # serialize concurrent start.sh invocations (do NOT touch fd 2 here —
+  # exec redirections persist and would swallow all later >&2 diagnostics)
+  exec 9>/tmp/voxelforge-llama.lock || true
   if ! flock -n 9 2>/dev/null; then
     echo "[start] another start.sh holds llama launch lock — waiting for it..." >&2
     flock 9 2>/dev/null || sleep 2
@@ -149,8 +150,8 @@ else
       echo "[start] launching $LLAMA_BIN --model $GEMMA_BLOB (ctx $LLAMA_CTX) ..."
       "$LLAMA_BIN" --host "$LLAMA_HOST" --port "$LLAMA_PORT" --model "$GEMMA_BLOB" -c "$LLAMA_CTX" --jinja -ngl "$LLAMA_NGL" &
     else
-      echo "[start] launching $LLAMA_BIN --models-preset $MODELS_INI (ctx $LLAMA_CTX, ngl $LLAMA_NGL, models-max $LLAMA_MODELS_MAX, spec $LLAMA_SPEC) ..."
-      "$LLAMA_BIN" --models-preset "$MODELS_INI" "${LLAMA_ARGS[@]}" &
+      echo "[start] launching $LLAMA_BIN (no preset, no blob — server must resolve a model itself) ..." >&2
+      "$LLAMA_BIN" "${LLAMA_ARGS[@]}" &
     fi
   else
     echo "[start] launching $LLAMA_BIN --models-preset $MODELS_INI (ctx $LLAMA_CTX, ngl $LLAMA_NGL, models-max $LLAMA_MODELS_MAX, spec $LLAMA_SPEC) ..."
