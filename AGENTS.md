@@ -106,6 +106,13 @@
 - Deleting assets then running `ctest` without `ninja -C build world` fails at
   build step (`vf_tests` depends on `vf_heightmap`).
 - No validation layers installed; rely on selftest/visual_check + `VF_TRACE`.
+- ImGui uses `UseDynamicRendering`: the app must wrap `ImGui_ImplVulkan_RenderDrawData`
+  in its own `vkCmdBeginRendering/vkCmdEndRendering` against the swapchain view
+  (`main.cpp`, LOAD op keeps the blitted world). Omit it and the whole UI
+  silently renders nothing - no error anywhere.
+- `imgui.ini` persists window positions across sessions; a layout saved by a
+  wider display can push panels off-screen. The AI Chat window self-heals its
+  position every frame; delete `imgui.ini` to reset all panels.
 - `VoxelField::sample` returns quantised (int8) object distances; the shadow
   volume is coarser still (0.4 m texels) — don't use it for shading normals.
 - Docs: `README.md` (product), `AGENTS.md` (this file),

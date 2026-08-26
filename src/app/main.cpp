@@ -968,7 +968,31 @@ int App::run(const Args& args)
         ImGui::NewFrame();
         drawHud();
         ImGui::Render();
-        ImGui_ImplVulkan_RenderDrawData(ImGui::GetDrawData(), fr.cmd);
+        if (getenv("VF_IMGUI_DEBUG") && m_frameIdx == 5) {
+            ImDrawData* dd = ImGui::GetDrawData();
+            spdlog::warn("imgui dbg: valid={} display=({:.0f},{:.0f}) idxcount={} cmdlists={}",
+                         dd ? 1 : 0, dd ? dd->DisplaySize.x : -1.f,
+                         dd ? dd->DisplaySize.y : -1.f,
+                         dd ? dd->TotalIdxCount : -1, dd ? dd->CmdListsCount : -1);
+        }
+        // With UseDynamicRendering we must open the render pass ourselves and
+        // target the swapchain view; LOAD keeps the blitted world underneath.
+        {
+            VkRenderingAttachmentInfo att { VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO };
+            att.imageView = m_swapchain.imageViews()[imgIdx];
+            att.imageLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+            att.loadOp = VK_ATTACHMENT_LOAD_OP_LOAD;
+            att.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
+            VkRenderingInfo ri { VK_STRUCTURE_TYPE_RENDERING_INFO };
+            VkRect2D area { { 0, 0 }, m_swapchain.extent() };
+            ri.renderArea = area;
+            ri.layerCount = 1;
+            ri.colorAttachmentCount = 1;
+            ri.pColorAttachments = &att;
+            vkCmdBeginRendering(fr.cmd, &ri);
+            ImGui_ImplVulkan_RenderDrawData(ImGui::GetDrawData(), fr.cmd);
+            vkCmdEndRendering(fr.cmd);
+        }
 
         // VF_HUD_SHOT: blit the composed frame (HUD included) back to offscreen
         if (hudShotFrame && m_frameIdx + 1 >= hudShotFrame) {
