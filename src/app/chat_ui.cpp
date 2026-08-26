@@ -222,6 +222,18 @@ void ChatUi::draw(vf::voxel::EditableWorld& editable, vf::voxel::LayeredWorld& w
     ImGui::SetNextWindowSize(ImVec2(368, 520), ImGuiCond_FirstUseEver);
     ImGui::Begin("AI Chat", nullptr, 0);
 
+    // self-heal layouts saved by wider windows: never let the panel drift
+    // beyond reach of the current display
+    {
+        ImVec2 wp = ImGui::GetWindowPos(), ws = ImGui::GetWindowSize();
+        const float maxX = ImGui::GetIO().DisplaySize.x - 80.f;
+        const float maxY = ImGui::GetIO().DisplaySize.y - 48.f;
+        if (wp.x > maxX || wp.y > maxY || wp.x + ws.x < 80.f) {
+            ImGui::SetWindowPos(ImVec2(
+                std::max(12.f, std::min(wp.x, maxX)), std::max(12.f, std::min(wp.y, maxY))));
+        }
+    }
+
     ImGui::TextDisabled("%s", m_status.c_str());
     if(m_sending) { ImGui::SameLine(); ImGui::Text("⋯"); }
 
