@@ -90,7 +90,7 @@ def main():
         for name, cam in SHOTS:
             out = os.path.join(tmp, name + ".ppm")
             cmd = [
-                binary, "--shot", out, "--backend", "svo",
+                binary, "--shot", out,
                 "--width", str(W), "--height", str(H),
                 "--cam", *cam,
             ]

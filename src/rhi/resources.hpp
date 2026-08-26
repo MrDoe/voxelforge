@@ -17,7 +17,6 @@ struct Image3D {
     VkImageView view = VK_NULL_HANDLE;
     VkExtent3D extent {};
     VkFormat format = VK_FORMAT_UNDEFINED;
-    uint32_t mipLevels = 1;
 };
 
 Buffer makeBuffer(const Context& ctx, VkDeviceSize size, VkBufferUsageFlags usage,
@@ -27,9 +26,6 @@ void destroyBuffer(const Context& ctx, Buffer& b);
 Image3D makeImage3D(const Context& ctx, uint32_t w, uint32_t h, uint32_t d,
                     VkFormat format, VkImageUsageFlags usage);
 void destroyImage3D(const Context& ctx, Image3D& im);
-
-VkSampler makeSampler(const Context& ctx, VkFilter filter, VkSamplerAddressMode mode);
-void destroySampler(const Context& ctx, VkSampler s);
 
 // Staging-buffer upload; leaves image in VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL.
 bool uploadToImage3D(const Context& ctx, Image3D& im, const void* data, size_t bytes);

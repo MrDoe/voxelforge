@@ -8,7 +8,6 @@
 #include "render/taa_pass.hpp"
 #include "voxel/world.hpp"
 #include "voxel/worldfile.hpp"
-#include "voxel/volume.hpp"
 #include <algorithm>
 
 #include <imgui.h>
@@ -36,7 +35,6 @@ namespace {
 
 struct Args {
     bool selftest = false;
-    bool compare = false;
     int smokeFrames = 0;
     int width = 1600, height = 900;
     std::string shot;    // dump one frame to PPM and exit
@@ -67,8 +65,6 @@ Args parseArgs(int argc, char** argv)
             a.width = next(a.width);
         else if (s == "--height")
             a.height = next(a.height);
-        else if (s == "--compare")
-            a.compare = true;
         else if (s == "--shot" && i + 1 < argc)
             a.shot = argv[++i];
         else if (s == "--cam" && i + 6 < argc) {
@@ -115,7 +111,6 @@ private:
     void handleResize();
     void drawHud();
     bool runSelftest();
-    bool runCompare();
     void syncWorldLayerList();
     void persistWorldLayers();
     void rescanWorldLayers();
@@ -126,23 +121,16 @@ private:
     vf::Context m_ctx;
     vf::Swapchain m_swapchain;
 
-    vf::Image3D m_sdfVol, m_albedoVol, m_offscreen;
+    vf::Image3D m_offscreen;
     vf::Image3D m_heightImg;
-    VkSampler m_sdfSampler = VK_NULL_HANDLE, m_albedoSampler = VK_NULL_HANDLE;
-    vf::RaymarchPass m_pass;
     vf::SvoPass m_svoPass;
     vf::TaaPass m_taaPass;
     vf::Image3D m_taaHistory[2];
     vf::Image3D m_taaResolved;
-    enum class Backend { Svo, Dense };
-    Backend m_backend = Backend::Svo;
-    bool m_compareMode = false;
     bool m_taaEnabled = true;
     bool m_taaFirstFrame = true;
     int m_taaHistoryIdx = 0;
-    glm::vec4 m_pushB { 1.0f };      // active backend's .b block
-    glm::vec4 m_pushBSvo { 1.0f };   // cached per backend
-    glm::vec4 m_pushBDense { 1.0f };
+    glm::vec4 m_pushB { 1.0f };      // shader .b block: worldSize, voxelSize, gridN
 
     // layered world state (GUI)
     std::vector<vf::voxel::worldfile::WorldLayer> m_worldLayers;
@@ -151,8 +139,6 @@ private:
     vf::voxel::LayeredWorld m_layers;
     float m_layerPollT = 0.f;
     bool m_pendingWorldReload = false;
-
-    glm::vec4 pushBFor(Backend b) const { return b == Backend::Svo ? m_pushBSvo : m_pushBDense; }
 
     // Direction TOWARD the sun, derived from --sun elevation/azimuth (degrees).
     glm::vec4 m_sunDir { 0.449f, 0.8338f, 0.3207f, 0.0f };
@@ -221,8 +207,6 @@ bool App::createOffscreen(uint32_t w, uint32_t h)
             VK_IMAGE_USAGE_TRANSFER_DST_BIT);
     if (!m_offscreen.img || !m_taaHistory[0].img || !m_taaHistory[1].img || !m_taaResolved.img)
         return false;
-    m_pass.updateDescriptors(m_sdfVol, m_sdfSampler, m_albedoVol, m_albedoSampler,
-                             m_offscreen);
     m_svoPass.updateDescriptors(m_offscreen);
     m_taaFirstFrame = true;
     m_taaHistoryIdx = 0;
@@ -242,10 +226,6 @@ void App::handleResize()
 bool App::initVulkan()
 {
     if (!m_ctx.init(m_window.handle(), true))
-        return false;
-
-    // Build compute pipeline before any window-system interaction.
-    if (!m_pass.init(m_ctx))
         return false;
 
     glm::ivec2 fb = m_window.framebufferSize();
@@ -280,62 +260,13 @@ bool App::initVulkan()
                                 VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
                                 VK_ACCESS_2_SHADER_STORAGE_READ_BIT);
         });
-        m_pass.setHeightmapView(m_heightImg.view);
         m_svoPass.setHeightmapView(m_heightImg.view);
     }
 
-    // volume -----------------------------------------------------------
-    const bool useDense = m_backend == Backend::Dense;
-    const bool buildDense = useDense || m_compareMode;
-    const bool buildSvo = !useDense || m_compareMode;
-
-    if (buildDense) {
-        // Full-world reference volume so the dense backend renders the same
-        // scene as the SVO backend (same voxel count as the old 25.6 m patch,
-        // just at 0.4 m over the entire WORLD span).
-        vf::voxel::DenseVolume vol;
-        vol.worldSize = vf::voxel::WORLD;
-        vol.generate();
-
-        std::vector<uint8_t> sdfBytes(vol.sdf.size());
-        for (size_t i = 0; i < vol.sdf.size(); ++i)
-            sdfBytes[i] = vf::voxel::encodeSnorm8(vol.sdf[i]);
-
-        const size_t voxels = vol.sdf.size();
-        std::vector<uint8_t> albedoRGBA(voxels * 4);
-        for (size_t i = 0; i < voxels; ++i) {
-            albedoRGBA[i * 4 + 0] = vol.albedo[i * 3 + 0];
-            albedoRGBA[i * 4 + 1] = vol.albedo[i * 3 + 1];
-            albedoRGBA[i * 4 + 2] = vol.albedo[i * 3 + 2];
-            albedoRGBA[i * 4 + 3] = 255;
-        }
-
-        m_sdfVol = vf::makeImage3D(m_ctx, uint32_t(vol.n), uint32_t(vol.n), uint32_t(vol.n),
-                                   VK_FORMAT_R8_SNORM,
-                                   VK_IMAGE_USAGE_SAMPLED_BIT |
-                                       VK_IMAGE_USAGE_TRANSFER_DST_BIT);
-        m_albedoVol = vf::makeImage3D(m_ctx, uint32_t(vol.n), uint32_t(vol.n),
-                                      uint32_t(vol.n), VK_FORMAT_R8G8B8A8_UNORM,
-                                      VK_IMAGE_USAGE_SAMPLED_BIT |
-                                          VK_IMAGE_USAGE_TRANSFER_DST_BIT);
-        if (!m_sdfVol.img || !m_albedoVol.img) {
-            spdlog::critical("volume image creation failed");
-            return false;
-        }
-        if (!vf::uploadToImage3D(m_ctx, m_sdfVol, sdfBytes.data(), sdfBytes.size()) ||
-            !vf::uploadToImage3D(m_ctx, m_albedoVol, albedoRGBA.data(), albedoRGBA.size())) {
-            spdlog::critical("volume upload failed");
-            return false;
-        }
-        spdlog::info("Dense volume {}^3 uploaded ({:.1f} m region)", vol.n, vol.worldSize);
-
-        m_pushBDense = glm::vec4(vol.worldSize, vf::voxel::MAX_ENCODED_DIST,
-                                 vol.worldSize / float(vol.n), 0);
-    }
-
-    if (buildSvo) {
-        // layered world is the single source: the SVO is synthesized directly
-        // from the enabled layer files (no merged cache involved)
+    // chunked-SVO world synthesis (single render path) ---------------------
+    // layered world is the single source: the SVO is synthesized directly
+    // from the enabled layer files (no merged cache involved)
+    {
         const std::string manifestPath =
             std::string(VOXELFORGE_ASSET_DIR) + "/world.json";
         bool fromFile = m_layers.load(manifestPath);
@@ -373,16 +304,11 @@ bool App::initVulkan()
             m_svoPass.setWorld(g.chunkGrid, g.childBase, g.payload, g.handles, g.bricks);
         }
 
-        m_pushBSvo = glm::vec4(vf::voxel::WORLD, vf::voxel::VOXEL, float(vf::voxel::GRID_N), 0);
+        m_pushB = glm::vec4(vf::voxel::WORLD, vf::voxel::VOXEL, float(vf::voxel::GRID_N), 0);
     }
-
-    m_pushB = pushBFor(m_backend);
 
     if (!m_taaPass.init(m_ctx))
         return false;
-
-    m_sdfSampler = vf::makeSampler(m_ctx, VK_FILTER_LINEAR, VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE);
-    m_albedoSampler = vf::makeSampler(m_ctx, VK_FILTER_NEAREST, VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE);
 
     if (!createOffscreen(m_swapchain.extent().width, m_swapchain.extent().height))
         return false;
@@ -485,7 +411,7 @@ void App::drawHud()
     ImGui::Begin("Voxelforge", nullptr, ImGuiWindowFlags_AlwaysAutoResize);
 
     ImGui::Text("GPU: %s", m_ctx.gpuName());
-    ImGui::Text("Backend: %s", m_backend == Backend::Svo ? "chunked SVO" : "dense reference");
+    ImGui::Text("Render: chunked SVO");
     ImGui::Text("%u x %u @ %.1f fps (%.2f ms)", m_swapchain.extent().width,
                 m_swapchain.extent().height, 1000.0 / m_avgMs, m_avgMs);
     ImGui::Separator();
@@ -620,103 +546,6 @@ bool App::runSelftest()
     return true;
 }
 
-
-bool App::runCompare()
-{
-    // Render both backends headless with identical camera/push and compare.
-    vkDeviceWaitIdle(m_ctx.device());
-    auto renderPixels = [&](Backend be) {
-        m_backend = be;
-        createOffscreen(m_offscreen.extent.width, m_offscreen.extent.height);
-        uint32_t f = 0;
-        FrameSync& fr = m_frames[f];
-        vkWaitForFences(m_ctx.device(), 1, &fr.inFlight, VK_TRUE, UINT64_MAX);
-        vkResetFences(m_ctx.device(), 1, &fr.inFlight);
-        vkResetCommandBuffer(fr.cmd, 0);
-        VkCommandBufferBeginInfo bi { VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO };
-        vkBeginCommandBuffer(fr.cmd, &bi);
-        vf::transitionImage(fr.cmd, m_offscreen.img, VK_IMAGE_ASPECT_COLOR_BIT,
-                            VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_GENERAL,
-                            VK_PIPELINE_STAGE_2_NONE, VK_ACCESS_2_NONE,
-                            VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
-                            VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT);
-        vf::RaymarchPush push {};
-        push.camPos = glm::vec4(m_camera.pos, 0);
-        push.camRight = glm::vec4(m_camera.right(), 0);
-        push.camUp = glm::vec4(m_camera.up(), 0);
-        push.camFwd = glm::vec4(m_camera.forward(), 0);
-        push.a = glm::vec4(tanf(glm::radians(60.0f) * 0.5f),
-                           float(m_offscreen.extent.width) / float(m_offscreen.extent.height),
-                           float(m_offscreen.extent.width), float(m_offscreen.extent.height));
-        push.b = glm::vec4(pushBFor(be).x, pushBFor(be).y, pushBFor(be).z, 0);
-        push.sunDir = m_sunDir;
-        push.misc = glm::vec4(0.0f, m_animTime, 0.0f, 0.0f);
-        if (be == Backend::Svo)
-            m_svoPass.record(fr.cmd, push);
-        else
-            m_pass.record(fr.cmd, push);
-        vkEndCommandBuffer(fr.cmd);
-        VkSubmitInfo si { VK_STRUCTURE_TYPE_SUBMIT_INFO };
-        si.commandBufferCount = 1;
-        si.pCommandBuffers = &fr.cmd;
-        vkQueueSubmit(m_ctx.graphicsQueue(), 1, &si, fr.inFlight);
-        vkWaitForFences(m_ctx.device(), 1, &fr.inFlight, VK_TRUE, UINT64_MAX);
-
-        std::vector<uint8_t> px;
-        vf::readbackImage2D(m_ctx, m_offscreen.img, m_offscreen.extent.width,
-                            m_offscreen.extent.height, px);
-        return px;
-    };
-
-    std::vector<uint8_t> svoPx = renderPixels(Backend::Svo);
-    std::vector<uint8_t> densePx = renderPixels(Backend::Dense);
-
-    auto dump = [&](const char* path, const std::vector<uint8_t>& px, uint32_t w, uint32_t h) {
-        FILE* f = fopen(path, "wb");
-        if (!f)
-            return;
-        fprintf(f, "P6\n%u %u\n255\n", w, h);
-        for (size_t i = 0; i < px.size(); i += 4)
-            fwrite(&px[i], 3, 1, f);
-        fclose(f);
-    };
-    if (getenv("VF_DUMP_PPM")) {
-        dump("/tmp/opencode/cmp_svo.ppm", svoPx, m_offscreen.extent.width,
-             m_offscreen.extent.height);
-        dump("/tmp/opencode/cmp_dense.ppm", densePx, m_offscreen.extent.width,
-             m_offscreen.extent.height);
-    }
-
-    size_t total = svoPx.size() / 4;
-    double diff = 0.0;
-    for (size_t i = 0; i < total; ++i)
-        for (int c = 0; c < 3; ++c)
-            diff += std::abs(int(svoPx[i * 4 + c]) - int(densePx[i * 4 + c]));
-    double meanDiff = diff / double(total * 3);
-
-    // coverage parity (non-sky fraction per backend)
-    auto coverage = [&](const std::vector<uint8_t>& px) {
-        size_t geo = 0;
-        for (size_t i = 0; i < px.size(); i += 4) {
-            uint8_t r = px[i], g = px[i + 1], b = px[i + 2];
-            if (!(b > r + 12 && g > r + 4 && b > 120))
-                ++geo;
-        }
-        return float(geo) / float(px.size() / 4);
-    };
-    float covSvo = coverage(svoPx), covDense = coverage(densePx);
-    spdlog::info("compare: mean abs channel diff = {:.2f}/255, coverage svo={:.1f}% dense={:.1f}%",
-                 meanDiff, covSvo * 100.0f, covDense * 100.0f);
-
-    // restore primary backend descriptors on offscreen
-    createOffscreen(m_offscreen.extent.width, m_offscreen.extent.height);
-
-    // tightened after heightmap-parity work: measured ~7.4/255, delta ~6%
-    const bool ok = meanDiff < 14.0 && std::abs(covSvo - covDense) < 0.08f;
-    spdlog::info("compare {}", ok ? "PASSED" : "FAILED");
-    return ok;
-}
-
 int App::run(const Args& args)
 {
     {
@@ -742,9 +571,6 @@ int App::run(const Args& args)
         spdlog::critical("window init failed");
         return 1;
     }
-    // Dense backend removed — SVO is now the single path (dense kept only for --compare validation)
-    m_backend = Backend::Svo;
-    m_compareMode = args.compare;
     // persistent AI edits: survives restarts, hot-reload via layered world poll
     m_editable.load();
     m_editable.ensureManifest();
@@ -790,27 +616,11 @@ int App::run(const Args& args)
     }
 
     // per-backend camera spawn
-    if (args.compare) {
-        // steep downward view: both backends must see terrain-only (the dense
-        // reference volume is a bounded region without sky)
-        m_camera.pos = { -3.f, 8.f, -5.f };
-        glm::vec3 dir = glm::normalize(glm::vec3(0.f, -1.5f, 1.f) - m_camera.pos);
-        m_camera.yaw = atan2(dir.z, dir.x);
-        m_camera.pitch = asin(dir.y);
-        m_camera.speed = 6.0f;
-    } else if (m_backend == Backend::Dense) {
-        m_camera.pos = { 0.f, 10.f, -14.f };
-        glm::vec3 dir = glm::normalize(glm::vec3(0.f, 3.5f, 3.f) - m_camera.pos);
-        m_camera.yaw = atan2(dir.z, dir.x);
-        m_camera.pitch = asin(dir.y);
-        m_camera.speed = 6.0f;
-    } else {
-        // hero shot: across the river toward the cabin, sun raking from the west
-        m_camera.pos = { -16.f, 6.5f, -14.f };
-        glm::vec3 dir = glm::normalize(glm::vec3(6.5f, 0.8f, 11.0f) - m_camera.pos);
-        m_camera.yaw = atan2(dir.z, dir.x);
-        m_camera.pitch = asin(dir.y);
-    }
+    // hero shot: across the river toward the cabin, sun raking from the west
+    m_camera.pos = { -16.f, 6.5f, -14.f };
+    glm::vec3 dir = glm::normalize(glm::vec3(6.5f, 0.8f, 11.0f) - m_camera.pos);
+    m_camera.yaw = atan2(dir.z, dir.x);
+    m_camera.pitch = asin(dir.y);
 
     if (args.camSet) {
         m_camera.pos = { args.camx, args.camy, args.camz };
@@ -856,7 +666,7 @@ int App::run(const Args& args)
         // animation clock only advances interactively - headless shots stay
         // deterministic (misc.y feeds wind/grass shading)
         const bool headlessMode =
-            args.selftest || args.compare || args.smokeFrames > 0 || !args.shot.empty();
+            args.selftest || args.smokeFrames > 0 || !args.shot.empty();
         if (!headlessMode)
             m_animTime += dt;
 
@@ -940,7 +750,7 @@ int App::run(const Args& args)
         FrameSync& fr = m_frames[f];
         vkWaitForFences(m_ctx.device(), 1, &fr.inFlight, VK_TRUE, UINT64_MAX);
 
-        const bool headlessRun = args.selftest || args.compare || args.smokeFrames > 0 || !args.shot.empty();
+        const bool headlessRun = args.selftest || args.smokeFrames > 0 || !args.shot.empty();
         if (headlessRun) {
             // Automated mode: zero window-system interaction.
             vkResetFences(m_ctx.device(), 1, &fr.inFlight);
@@ -966,10 +776,7 @@ int App::run(const Args& args)
                                     VK_PIPELINE_STAGE_2_NONE, VK_ACCESS_2_NONE,
                                     VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
                                     VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT);
-                if (m_backend == Backend::Svo)
-                    m_svoPass.record(fr.cmd, push);
-                else
-                    m_pass.record(fr.cmd, push);
+                m_svoPass.record(fr.cmd, push);
             }
             vkEndCommandBuffer(fr.cmd);
             VkSubmitInfo hsi { VK_STRUCTURE_TYPE_SUBMIT_INFO };
@@ -979,8 +786,8 @@ int App::run(const Args& args)
             ++m_frameIdx;
             if (getenv("VF_TRACE"))
                 fprintf(stderr, "[f%llu] headless submitted\n", (unsigned long long)m_frameIdx);
-            if ((args.selftest || args.compare) && m_frameIdx == 30)
-                return args.compare ? (runCompare() ? 0 : 1) : (runSelftest() ? 0 : 1);
+            if ((args.selftest) && m_frameIdx == 30)
+                return runSelftest() ? 0 : 1;
             if (shotMode && m_frameIdx == 3) {
                 vkDeviceWaitIdle(m_ctx.device());
                 std::vector<uint8_t> px;
@@ -1047,10 +854,7 @@ int App::run(const Args& args)
                             VK_PIPELINE_STAGE_2_NONE, VK_ACCESS_2_NONE,
                             VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
                             VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT);
-        if (m_backend == Backend::Svo)
-            m_svoPass.record(fr.cmd, push);
-        else
-            m_pass.record(fr.cmd, push);
+        m_svoPass.record(fr.cmd, push);
 
         // TAA resolve (interactive only, not for headless tests) ----------
         VkImage taaSrc = m_offscreen.img;
@@ -1244,8 +1048,8 @@ int App::run(const Args& args)
         if (args.smokeFrames > 0 && m_frameIdx % 200 == 0)
             spdlog::info("smoke progress: {} frames, avg {:.2f} ms", m_frameIdx, m_avgMs);
 
-        if ((args.selftest || args.compare) && m_frameIdx == 30)
-            return args.compare ? (runCompare() ? 0 : 1) : (runSelftest() ? 0 : 1);
+        if (args.selftest && m_frameIdx == 30)
+            return runSelftest() ? 0 : 1;
         if (args.smokeFrames > 0 && m_frameIdx >= uint64_t(args.smokeFrames)) {
             spdlog::info("smoke: {} frames, avg {:.2f} ms, min {:.2f}, max {:.2f}",
                          m_frameIdx, m_avgMs, m_minMs, m_maxMs);
@@ -1284,12 +1088,7 @@ void App::destroy()
         vkDestroyCommandPool(m_ctx.device(), m_framePool, nullptr);
 
     m_svoPass.destroy();
-    m_pass.destroy();
     m_taaPass.destroy();
-    vf::destroySampler(m_ctx, m_sdfSampler);
-    vf::destroySampler(m_ctx, m_albedoSampler);
-    vf::destroyImage3D(m_ctx, m_sdfVol);
-    vf::destroyImage3D(m_ctx, m_albedoVol);
     vf::destroyImage3D(m_ctx, m_heightImg);
     vf::destroyImage3D(m_ctx, m_offscreen);
     vf::destroyImage3D(m_ctx, m_taaHistory[0]);

@@ -81,7 +81,7 @@ add_library(vf_platform STATIC src/platform/window.cpp)
 target_include_directories(vf_platform PUBLIC src)
 target_link_libraries(vf_platform PUBLIC glfw Vulkan::Vulkan vf_glm spdlog::spdlog)
 
-add_library(vf_core STATIC src/core/camera.cpp src/voxel/volume.cpp src/voxel/world.cpp
+add_library(vf_core STATIC src/core/camera.cpp src/voxel/world.cpp
                           src/voxel/layered_world.cpp
                           src/voxel/heightmap.cpp src/voxel/worldfile.cpp
                           src/voxel/picking.cpp src/voxel/editable_world.cpp
@@ -128,7 +128,7 @@ add_custom_target(vf_heightmap DEPENDS ${VF_HEIGHTMAP_PNG} ${VF_WORLD_LAYERS})
 add_library(vf_rhi STATIC src/rhi/context.cpp src/rhi/resources.cpp src/rhi/swapchain.cpp)
 target_link_libraries(vf_rhi PUBLIC vf_platform vf_vma spdlog::spdlog)
 
-add_library(vf_render STATIC src/render/raymarch_pass.cpp src/render/svo_pass.cpp src/render/taa_pass.cpp)
+add_library(vf_render STATIC src/render/svo_pass.cpp src/render/taa_pass.cpp)
 target_include_directories(vf_render PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/external)
 target_compile_definitions(vf_render PUBLIC
     VOXELFORGE_SHADER_DIR="${CMAKE_CURRENT_BINARY_DIR}/shaders"
@@ -140,8 +140,7 @@ add_dependencies(vf_render vf_shaders)
 find_program(GLSLANG_VALIDATOR NAMES glslangValidator glslang REQUIRED)
 file(MAKE_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}/shaders)
 
-set(VF_SHADER_SRCS ${CMAKE_CURRENT_SOURCE_DIR}/shaders/raymarch.comp
-    ${CMAKE_CURRENT_SOURCE_DIR}/shaders/svo_raymarch.comp
+set(VF_SHADER_SRCS ${CMAKE_CURRENT_SOURCE_DIR}/shaders/svo_raymarch.comp
     ${CMAKE_CURRENT_SOURCE_DIR}/shaders/taa_resolve.comp)
 set(VF_SHADER_SPVS "")
 foreach(src_file ${VF_SHADER_SRCS})
@@ -165,7 +164,7 @@ add_custom_target(world DEPENDS ${VF_HEIGHTMAP_PNG} ${VF_WORLD_LAYERS})
 
 # ---- tests -------------------------------------------------------------------------
 enable_testing()
-add_executable(vf_tests tests/main.cpp tests/test_volume.cpp tests/test_camera.cpp
+add_executable(vf_tests tests/main.cpp tests/test_camera.cpp
                         tests/test_world.cpp tests/test_worldfile.cpp
                         tests/test_authoring.cpp tests/test_chat_tools.cpp
                         src/ai/ollama_client.cpp)
