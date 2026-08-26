@@ -1,5 +1,6 @@
 #include "render/svo_pass.hpp"
 #include <core/log.hpp>
+#include <cstring>
 #include <fstream>
 
 namespace vf {
@@ -69,16 +70,17 @@ bool SvoPass::init(const Context& ctx)
     m_ctx = &ctx;
     VkDevice dev = ctx.device();
 
-    VkDescriptorSetLayoutBinding b[8] = {};
+    VkDescriptorSetLayoutBinding b[9] = {};
     b[0] = { 0, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 1, VK_SHADER_STAGE_COMPUTE_BIT, nullptr };
     for (int i = 1; i < 6; ++i)
         b[i] = { uint32_t(i), VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1,
                  VK_SHADER_STAGE_COMPUTE_BIT, nullptr };
     b[6] = { 6, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 1, VK_SHADER_STAGE_COMPUTE_BIT, nullptr };
     b[7] = { 7, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 1, VK_SHADER_STAGE_COMPUTE_BIT, nullptr };
+    b[8] = { 8, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, 1, VK_SHADER_STAGE_COMPUTE_BIT, nullptr };
 
     VkDescriptorSetLayoutCreateInfo li { VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO };
-    li.bindingCount = 8;
+    li.bindingCount = 9;
     li.pBindings = b;
     if (vkCreateDescriptorSetLayout(dev, &li, nullptr, &m_setLayout) != VK_SUCCESS)
         return false;
@@ -113,11 +115,12 @@ bool SvoPass::init(const Context& ctx)
         return false;
     }
 
-    VkDescriptorPoolSize sizes[2] = { { VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 3 },
-                                      { VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 5 } };
+    VkDescriptorPoolSize sizes[3] = { { VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 3 },
+                                      { VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 5 },
+                                      { VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, 1 } };
     VkDescriptorPoolCreateInfo pi { VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO };
     pi.maxSets = 1;
-    pi.poolSizeCount = 2;
+    pi.poolSizeCount = 3;
     pi.pPoolSizes = sizes;
     if (vkCreateDescriptorPool(dev, &pi, nullptr, &m_pool) != VK_SUCCESS)
         return false;
@@ -126,7 +129,22 @@ bool SvoPass::init(const Context& ctx)
     ai.descriptorPool = m_pool;
     ai.descriptorSetCount = 1;
     ai.pSetLayouts = &m_setLayout;
-    return vkAllocateDescriptorSets(dev, &ai, &m_set) == VK_SUCCESS;
+    if (vkAllocateDescriptorSets(dev, &ai, &m_set) != VK_SUCCESS)
+        return false;
+
+    // highlight feeds: tiny host-visible uniform buffer, bound once
+    m_selection = makeBuffer(ctx, 2 * sizeof(glm::vec4),
+                             VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT,
+                             VMA_MEMORY_USAGE_AUTO_PREFER_HOST, true);
+    if (!m_selection.buf || !m_selection.mapped)
+        return false;
+    glm::vec4 init[2] = { m_selFeed, m_hovFeed };
+    memcpy(m_selection.mapped, init, sizeof(init));
+    VkDescriptorBufferInfo selInfo { m_selection.buf, 0, VK_WHOLE_SIZE };
+    VkWriteDescriptorSet w { VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, nullptr, m_set, 8, 0, 1,
+                             VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, nullptr, &selInfo, nullptr };
+    vkUpdateDescriptorSets(dev, 1, &w, 0, nullptr);
+    return true;
 }
 
 void SvoPass::setWorld(const std::vector<int32_t>& grid,
@@ -179,8 +197,13 @@ void SvoPass::updateDescriptors(const Image3D& outImage)
     vkUpdateDescriptorSets(m_ctx->device(), 3, w, 0, nullptr);
 }
 
-void SvoPass::record(VkCommandBuffer cmd, const RaymarchPush& push) const
+void SvoPass::record(VkCommandBuffer cmd, const RaymarchPush& push)
 {
+    // flush the staged highlight feeds into the persistently mapped UBO
+    if (m_selection.mapped) {
+        glm::vec4 feeds[2] = { m_selFeed, m_hovFeed };
+        memcpy(m_selection.mapped, feeds, sizeof(feeds));
+    }
     vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, m_pipeline);
     vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, m_layout, 0, 1, &m_set, 0,
                             nullptr);
@@ -198,6 +221,8 @@ void SvoPass::destroy()
     destroySsbo(m_payload);
     destroySsbo(m_handles);
     destroySsbo(m_bricks);
+    if (m_selection.buf)
+        destroyBuffer(*m_ctx, m_selection);
     if (m_pool)
         vkDestroyDescriptorPool(dev, m_pool, nullptr);
     if (m_setLayout)

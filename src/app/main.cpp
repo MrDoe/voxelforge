@@ -162,7 +162,8 @@ private:
     vf::voxel::PickHit m_hoverHit;
     vf::voxel::PickHit m_selectedHit;
     bool m_hasSelection = false;
-    bool m_ctrlLmbWasDown = false;
+    bool m_lmbWasDown = false;
+    bool m_ctrlWasDown = false;
     bool m_chatInitialized = false;
 public:
     void requestWorldReload() { m_pendingWorldReload = true; }
@@ -721,6 +722,21 @@ int App::run(const Args& args)
             m_pendingWorldReload = true;
         }
 
+        // test hook: deterministic selection for headless highlight shots
+        static const char* testSel = getenv("VF_TEST_SELECT");
+        if (testSel && *testSel && !m_hasSelection && m_layers.loaded()) {
+            glm::ivec3 v;
+            if (sscanf(testSel, "%d,%d,%d", &v.x, &v.y, &v.z) == 3) {
+                m_selectedHit = {};
+                m_selectedHit.hit = true;
+                m_selectedHit.voxel = v;
+                m_selectedHit.mat =
+                    m_layers.field().sampleWorld(vf::voxel::voxelCenter(v)).mat;
+                m_hasSelection = true;
+                spdlog::info("VF_TEST_SELECT {} {} {}", v.x, v.y, v.z);
+            }
+        }
+
         // live world reload: MCP/chat edits and layer toggles land in the
         // layer files; poll for changes and swap the SVO in-place
         m_layerPollT += dt;
@@ -755,15 +771,43 @@ int App::run(const Args& args)
             } else {
                 m_hoverHit.hit = false;
             }
-            bool justPressed = lmb && !m_ctrlLmbWasDown && ctrl && !wantMouse;
-            m_ctrlLmbWasDown = lmb;
+            // forgiving trigger: fire on whichever edge arrives second, so a
+            // few ms between LMB-down and Ctrl-down still picks
+            bool lmbEdge = lmb && !m_lmbWasDown;
+            bool ctrlEdge = ctrl && !m_ctrlWasDown;
+            m_lmbWasDown = lmb;
+            m_ctrlWasDown = ctrl;
+            bool justPressed =
+                ((lmbEdge && ctrl) || (ctrlEdge && lmb)) && !wantMouse;
             if (justPressed && m_hoverHit.hit) {
                 m_selectedHit = m_hoverHit;
                 m_hasSelection = true;
                 glm::vec3 w = vf::voxel::voxelCenter(m_selectedHit.voxel);
-                spdlog::info("pick selected {} {} {} world {:.2f} {:.2f} {:.2f} mat {}", 
+                spdlog::info("pick selected {} {} {} world {:.2f} {:.2f} {:.2f} mat {}",
                     m_selectedHit.voxel.x, m_selectedHit.voxel.y, m_selectedHit.voxel.z, w.x,w.y,w.z, int(m_selectedHit.mat));
             }
+        }
+
+        static const char* testHov = getenv("VF_TEST_HOVER");
+        if (testHov && *testHov && !m_hoverHit.hit && m_layers.loaded()) {
+            glm::ivec3 v;
+            if (sscanf(testHov, "%d,%d,%d", &v.x, &v.y, &v.z) == 3) {
+                m_hoverHit = {};
+                m_hoverHit.hit = true;
+                m_hoverHit.voxel = v;
+                spdlog::info("VF_TEST_HOVER {} {} {}", v.x, v.y, v.z);
+            }
+        }
+
+        // highlight feeds: selected (strong) + hover (faint) -> shader UBO
+        {
+            glm::vec4 selFeed(0.f), hovFeed(0.f);
+            if (m_hasSelection)
+                selFeed = glm::vec4(vf::voxel::voxelCenter(m_selectedHit.voxel), 1.f);
+            if (m_hoverHit.hit)
+                hovFeed = glm::vec4(vf::voxel::voxelCenter(m_hoverHit.voxel), 1.f);
+            m_svoPass.setSelection(selFeed);
+            m_svoPass.setHover(hovFeed);
         }
 
         // camera: skip WASD when chat input focused

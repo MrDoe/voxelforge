@@ -35,7 +35,12 @@ public:
     void updateDescriptors(const Image3D& outImage);
     void setHeightmapView(VkImageView view);
     void setObjVolumeView(VkImageView view);
-    void record(VkCommandBuffer cmd, const RaymarchPush& push) const;
+    // Highlight feeds written to a persistently mapped UBO (binding 8):
+    // slot 0 = selected voxel (strong warm), slot 1 = hover preview (faint).
+    // xyz = voxel center (world), w = active flag.
+    void setSelection(const glm::vec4& sel) { m_selFeed = sel; }
+    void setHover(const glm::vec4& hov) { m_hovFeed = hov; }
+    void record(VkCommandBuffer cmd, const RaymarchPush& push);
 
 private:
     struct Ssbo {
@@ -55,6 +60,10 @@ private:
     Ssbo m_grid, m_childBase, m_payload, m_handles, m_bricks;
     VkImageView m_heightView = VK_NULL_HANDLE;
     VkImageView m_objVolView = VK_NULL_HANDLE;
-};
 
+    // persistently mapped 32 B uniform buffer: selection + hover feeds
+    Buffer m_selection {};
+    glm::vec4 m_selFeed { 0.f }; // staged on CPU, flushed in record()
+    glm::vec4 m_hovFeed { 0.f };
+};
 } // namespace vf

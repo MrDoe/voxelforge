@@ -167,6 +167,7 @@ enable_testing()
 add_executable(vf_tests tests/main.cpp tests/test_camera.cpp
                         tests/test_world.cpp tests/test_worldfile.cpp
                         tests/test_authoring.cpp tests/test_chat_tools.cpp
+                        tests/test_picking.cpp
                         src/ai/ollama_client.cpp)
 target_link_libraries(vf_tests PRIVATE vf_core vf_doctest)
 target_compile_definitions(vf_tests PRIVATE DOCTEST_CONFIG_NO_MULTITHREADING)
