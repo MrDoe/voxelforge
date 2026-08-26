@@ -47,7 +47,9 @@ bool EditableWorld::ensureManifest() {
     nl.name = kLayerName;
     nl.pos[0]=0.f; nl.pos[1]=0.f; nl.pos[2]=0.f;
     nl.rotDeg = 0.f;
-    nl.enabled = true;
+    // presence only: starts DISABLED so a pristine valley stays pristine;
+    // enableInManifest() flips it when AI content actually lands
+    nl.enabled = false;
     nl.listed = true;
     // insert as first object layer (highest priority) but before landscape/packed
     // Find insertion point: before landscape
@@ -211,6 +213,40 @@ std::vector<VoxelRecord> EditableWorld::makeStamp(glm::ivec3 anchor, const std::
     return res;
 }
 
+// flip the ai_edits manifest entry to enabled so appended content becomes
+// visible immediately (the default world starts with landscape only)
+void EditableWorld::enableInManifest() const {
+    std::vector<worldfile::WorldLayer> layers;
+    if (!worldfile::loadManifest(manifestPath(), layers))
+        return;
+    bool changed = false;
+    bool found = false;
+    for (auto& l : layers) {
+        if (l.file != kFileName)
+            continue;
+        found = true;
+        if (!l.enabled) {
+            l.enabled = true;
+            changed = true;
+        }
+        break;
+    }
+    if (!found) {
+        worldfile::WorldLayer nl;
+        nl.file = kFileName;
+        nl.name = kLayerName;
+        nl.role = "object";
+        nl.pos[0] = nl.pos[1] = nl.pos[2] = 0.f;
+        nl.rotDeg = 0.f;
+        nl.enabled = true;
+        nl.listed = true;
+        layers.insert(layers.begin(), nl); // highest priority
+        changed = true;
+    }
+    if (changed)
+        worldfile::writeManifest(manifestPath(), layers);
+}
+
 size_t EditableWorld::append(const std::vector<VoxelRecord>& newRecs) {
     if (newRecs.empty()) return 0;
     std::unordered_set<uint32_t> claimed;
@@ -221,7 +257,10 @@ size_t EditableWorld::append(const std::vector<VoxelRecord>& newRecs) {
         uint32_t key=(uint32_t(v.x)<<20)|(uint32_t(v.y)<<10)|uint32_t(v.z);
         if (claimed.insert(key).second) { m_records.push_back(v); ++added; }
     }
-    if (added) save();
+    if (added) {
+        save();
+        enableInManifest();
+    }
     spdlog::info("editable_world: append {} new ({} total)", added, m_records.size());
     return added;
 }

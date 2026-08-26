@@ -21,6 +21,7 @@ struct EditableWorld {
 
     bool load(); // reads existing ai_edits.vxw if present (empty if missing)
     bool save() const; // writes current records to ai_edits.vxw + ensures manifest
+    void enableInManifest() const; // mark the ai_edits layer enabled in world.json
     bool ensureManifest(); // adds layer entry to world.json if absent
 
     // record generation helpers (anchor is lattice coord of selected voxel = bottom-center)

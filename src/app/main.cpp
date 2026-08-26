@@ -321,6 +321,13 @@ void App::syncWorldLayerList()
                                           return e.file == u.file;
                                       }))
             l.push_back(u);
+    // enforce unique ids: one row per file
+    auto dupEnd = std::unique(l.begin(), l.end(),
+                              [](const vf::voxel::worldfile::WorldLayer& a,
+                                 const vf::voxel::worldfile::WorldLayer& b) {
+                                  return a.file == b.file;
+                              });
+    l.erase(dupEnd, l.end());
     m_worldLayers = std::move(l);
 }
 
@@ -396,7 +403,11 @@ void App::persistWorldLayers()
     std::vector<vf::voxel::worldfile::WorldLayer> out;
     out.reserve(m_worldLayers.size());
     for (const auto& l : m_worldLayers)
-        if (l.listed)
+        if (l.listed &&
+            std::none_of(out.begin(), out.end(),
+                         [&](const vf::voxel::worldfile::WorldLayer& e) {
+                             return e.file == l.file;
+                         }))
             out.push_back(l);
     vf::voxel::worldfile::writeManifest(std::string(VOXELFORGE_ASSET_DIR) + "/world.json",
                                         out);

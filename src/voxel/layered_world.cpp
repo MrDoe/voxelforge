@@ -276,10 +276,15 @@ bool LayeredWorld::load(const std::string& manifestPath)
 
     for (const worldfile::WorldLayer& l : manifest) {
         // remember every non-packed layer (enabled or not) so GUI persistence
-        // can never silently delete a temporarily disabled layer
+        // can never silently delete a temporarily disabled layer; dedupe by
+        // file (first entry wins) so corrupt manifests cannot multiply rows
         if (l.role == "packed")
             continue;
-        m_layersMeta.push_back(l);
+        bool known = false;
+        for (const auto& k : m_layersMeta)
+            known |= (k.file == l.file);
+        if (!known)
+            m_layersMeta.push_back(l);
         if (!l.enabled)
             continue;
         WorldFileData data;
