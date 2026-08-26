@@ -240,29 +240,6 @@ bool App::initVulkan()
     if (!m_swapchain.init(m_ctx, uint32_t(fb.x), uint32_t(fb.y), policy))
         return false;
 
-    // terrain heightmap -> R32F storage image, kept in GENERAL for shader reads
-    {
-        const vf::voxel::HeightMap& hm = vf::voxel::sharedHeightmap();
-        m_heightImg = vf::makeImage3D(m_ctx, hm.width(), hm.height(), 1,
-                                      VK_FORMAT_R32_SFLOAT,
-                                      VK_IMAGE_USAGE_TRANSFER_DST_BIT |
-                                          VK_IMAGE_USAGE_STORAGE_BIT);
-        if (!m_heightImg.img)
-            return false;
-        if (!vf::uploadToImage3D(m_ctx, m_heightImg, hm.data(), hm.bytes()))
-            return false;
-        m_ctx.immediateSubmit([&](VkCommandBuffer cmd) {
-            vf::transitionImage(cmd, m_heightImg.img, VK_IMAGE_ASPECT_COLOR_BIT,
-                                VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
-                                VK_IMAGE_LAYOUT_GENERAL,
-                                VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT,
-                                VK_ACCESS_2_MEMORY_READ_BIT | VK_ACCESS_2_MEMORY_WRITE_BIT,
-                                VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
-                                VK_ACCESS_2_SHADER_STORAGE_READ_BIT);
-        });
-        m_svoPass.setHeightmapView(m_heightImg.view);
-    }
-
     // chunked-SVO world synthesis (single render path) ---------------------
     // layered world is the single source: the SVO is synthesized directly
     // from the enabled layer files (no merged cache involved)
@@ -305,6 +282,31 @@ bool App::initVulkan()
         }
 
         m_pushB = glm::vec4(vf::voxel::WORLD, vf::voxel::VOXEL, float(vf::voxel::GRID_N), 0);
+    }
+
+    // records-derived terrain heights -> R32F storage image for shader heightAt()
+    {
+        const std::vector<float>& htx = m_layers.field().heightTexture();
+        const uint32_t lat = uint32_t(m_layers.field().latN());
+        m_heightImg = vf::makeImage3D(m_ctx, lat, lat, 1,
+                                      VK_FORMAT_R32_SFLOAT,
+                                      VK_IMAGE_USAGE_TRANSFER_DST_BIT |
+                                          VK_IMAGE_USAGE_STORAGE_BIT);
+        if (!m_heightImg.img)
+            return false;
+        if (!vf::uploadToImage3D(m_ctx, m_heightImg, htx.data(),
+                                 htx.size() * sizeof(float)))
+            return false;
+        m_ctx.immediateSubmit([&](VkCommandBuffer cmd) {
+            vf::transitionImage(cmd, m_heightImg.img, VK_IMAGE_ASPECT_COLOR_BIT,
+                                VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+                                VK_IMAGE_LAYOUT_GENERAL,
+                                VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT,
+                                VK_ACCESS_2_MEMORY_READ_BIT | VK_ACCESS_2_MEMORY_WRITE_BIT,
+                                VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
+                                VK_ACCESS_2_SHADER_STORAGE_READ_BIT);
+        });
+        m_svoPass.setHeightmapView(m_heightImg.view);
     }
 
     if (!m_taaPass.init(m_ctx))
@@ -563,8 +565,8 @@ int App::run(const Args& args)
                      int(vf::voxel::kPalette.size()) > int(s.mat) ? "ok" : "OOR");
         return 0;
     }
-    if (!vf::voxel::sharedHeightmap().loaded()) {
-        spdlog::critical("assets/heightmap.png missing - build & run heightmap_gen first");
+    if (!std::filesystem::exists(std::string(VOXELFORGE_ASSET_DIR) + "/world.json")) {
+        spdlog::critical("assets/world.json missing - run 'ninja -C build world' to bake assets first");
         return 1;
     }
     if (!initWindow(args)) {

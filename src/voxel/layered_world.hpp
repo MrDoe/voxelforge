@@ -3,22 +3,19 @@
 //
 // Loads the layer family described by assets/world.json (record-only .vxw
 // files: landscape.vxw, object layers, scatter, ai_edits.vxw) and synthesizes
-// the chunked-SVO GpuWorld directly from those voxels. There is no merged
-// cache: every renderer path (SVO ray-march, probes) consumes the same
-// loaded state, so layer edits / enable toggles / MCP appends are reflected
-// everywhere at once.
+// the chunked-SVO GpuWorld directly from those voxels via VoxelField. There is
+// no merged cache and no analytic scene(): every renderer path (SVO ray-march,
+// probes) consumes the same records-derived state, so layer edits / enable
+// toggles / MCP appends are reflected everywhere at once.
 //
-// Synthesis rules (the analytic scene() SDF is truth):
-//   - scene(p) is a single signed distance field (heightmap + every object
-//     SDF) that is NEGATIVE inside all solids (terrain interior, object shells
-//     and their enclosed interiors). Bricks bake scene(p) directly, so objects
-//     read solid at every distance with no hollow-voxel / flood-leak holes.
-//   - the per-brick SDF (quantised to VOXEL) is sphere-traced exactly like the
-//     dense raymarch path; appearance is the exact record colour where one
-//     exists, otherwise the palette of scene(p)'s material,
-//   - octree presence (blockSolid) is extended into enclosed interiors by
-//     sampling scene() at block centres/corners, seeded from the object
-//     connected-component boxes,
+// Synthesis rules (VoxelField is truth):
+//   - terrain: per-column top record from the landscape layer (world Y of its
+//     top face + material); everything below reads solid,
+//   - objects: connected components of object records flood-filled to solid
+//     volumes with a signed distance transform, so shells AND enclosed
+//     interiors read solid at every distance - no hollow-voxel holes,
+//   - brick appearance is the exact record colour where one exists, otherwise
+//     the palette of the field's material at that cell,
 //   - air below WATER_LEVEL is marked as water volume (mat id 9, non-hit).
 //
 // reloadIfChanged() stats the manifest + layer files and rebuilds when any of
@@ -26,6 +23,7 @@
 // running instance without an external repack step.
 #include "voxel/world.hpp"
 #include "voxel/worldfile.hpp"
+#include "voxel/voxel_field.hpp"
 #include <filesystem>
 #include <map>
 #include <string>
@@ -84,6 +82,7 @@ public:
     const std::vector<VoxelRecord>& records() const { return m_records; }
     const std::vector<worldfile::WorldLayer>& layers() const { return m_layersMeta; }
     const Stats& stats() const { return m_stats; }
+    const VoxelField& field() const { return m_field; }
 
     ~LayeredWorld();
 
@@ -100,12 +99,15 @@ private:
     std::vector<VoxelRecord> m_records;                    // priority-merged union
     std::vector<worldfile::WorldLayer> m_layersMeta;       // enabled manifest entries
     std::vector<int16_t> m_colTop;                         // per-column landscape top (lattice y)
+    std::vector<uint8_t> m_colMat;                         // material of each column's top record
 
     // packed cellKeys of object (non-landscape) records; grouped into
-    // connected components and flood-filled to solid interiors in synthesize().
+    // connected components and flood-filled to solid interiors by the
+    // VoxelField build.
     std::vector<uint32_t> m_objCells;
     std::vector<uint8_t> m_objMats;                        // material per object cell (parallel to m_objCells)
     std::vector<uint8_t> m_blockSolid;                     // global presence grid (records+interior)
+    VoxelField m_field;                                    // records-derived geometry oracle
 
     // cached per-chunk SVO pools (kept across reloads for incremental updates)
     std::vector<std::unique_ptr<ChunkPool>> m_pools;
@@ -113,7 +115,6 @@ private:
     // dirty-tracking state for incremental rebuilds
     std::map<std::string, WorldAABB> m_prevBox;            // layer file -> record AABB
     std::map<std::string, bool> m_prevEnabled;             // layer file -> enabled
-    uint64_t m_enabledObjMask = ~0ull;                     // current object enable mask
 
     struct Signature {
         std::string path;

@@ -307,26 +307,10 @@ inline StampHit stampAt(glm::vec3 p, glm::vec3 origin, const StampCell* cells, s
     return best;
 }
 
-// Object-instance enable mask for layer-aware SVO baking. Default (OB_ALL)
-// keeps every object on; LayeredWorld passes a per-world mask so disabling a
-// layer's records also removes its baked analytic geometry from the SVO.
-inline constexpr uint64_t OB_HOUSE  = 1ull << 0;
-inline constexpr uint64_t OB_TREE0  = 1ull << 1;
-inline constexpr uint64_t OB_ROCK0  = 1ull << 7;
-inline constexpr uint64_t OB_BUSHES = 1ull << 10;
-inline constexpr uint64_t OB_FENCE  = 1ull << 11;
-inline constexpr uint64_t OB_ALPACA = 1ull << 12;
-inline constexpr uint64_t OB_AI     = 1ull << 13;
-inline constexpr uint64_t OB_ALL    = ~0ull;
-inline constexpr uint64_t treeBit(int i) { return 1ull << (1 + i); }
-inline constexpr uint64_t rockBit(int i) { return 1ull << (7 + i); }
-
 // log cabin: stone foundation -> alternating log courses -> carved openings ->
 // stepped shingle layers -> chimney. ~5.2 x 4.5 m footprint, ridge ~3.9 m.
-inline ObjHit houseAt(glm::vec3 p, uint64_t mask = OB_ALL)
+inline ObjHit houseAt(glm::vec3 p)
 {
-    if (!(mask & OB_HOUSE))
-        return { 1e9f, 4u };
     glm::vec3 q(p.x - kHousePos.x, p.y - kPadY, p.z - kHousePos.y);
     const float hx = 2.6f, hz = 2.0f;
     ObjHit best { 1e9f, 4u };
@@ -434,13 +418,11 @@ inline const std::array<glm::vec2, 3> kRockSpots {
 };
 inline const std::array<float, 3> kRockRadii { 0.85f, 0.65f, 1.00f };
 
-inline ObjHit treesAt(glm::vec3 p, uint64_t mask = OB_ALL)
+inline ObjHit treesAt(glm::vec3 p)
 {
     const HeightMap& hm = sharedHeightmap();
     ObjHit best { 1e9f, 8u };
     for (size_t i = 0; i < kTreeSpots.size(); ++i) {
-        if (!(mask & treeBit(int(i))))
-            continue;
         const glm::vec2& s = kTreeSpots[i];
         float dx = p.x - s.x, dz = p.z - s.y;
         if (dx * dx + dz * dz > 16.0f || p.y > hm.sample(s.x, s.y) + 8.4f)
@@ -452,13 +434,11 @@ inline ObjHit treesAt(glm::vec3 p, uint64_t mask = OB_ALL)
     return best;
 }
 
-inline ObjHit rocksAt(glm::vec3 p, uint64_t mask = OB_ALL)
+inline ObjHit rocksAt(glm::vec3 p)
 {
     const HeightMap& hm = sharedHeightmap();
     ObjHit best { 1e9f, 4u };
     for (size_t i = 0; i < kRockSpots.size(); ++i) {
-        if (!(mask & rockBit(int(i))))
-            continue;
         glm::vec2 s = kRockSpots[i];
         float r = kRockRadii[i];
         float dx = p.x - s.x, dz = p.z - s.y;
@@ -477,10 +457,8 @@ inline ObjHit rocksAt(glm::vec3 p, uint64_t mask = OB_ALL)
 
 inline constexpr float kBushCell = 6.0f;
 
-inline ObjHit bushesAt(glm::vec3 p, uint64_t mask = OB_ALL)
+inline ObjHit bushesAt(glm::vec3 p)
 {
-    if (!(mask & OB_BUSHES))
-        return { 1e9f, 8u };
     const HeightMap& hm = sharedHeightmap();
     ObjHit best { 1e9f, 8u };
     float cell = kBushCell;
@@ -515,10 +493,8 @@ inline constexpr glm::vec2 kPaddockMax { 13.8f, 19.8f };
 inline constexpr float kGateCenter = 17.0f; // gate gap centre z on the west side
 inline constexpr float kGateHalf = 0.75f;
 
-inline ObjHit fenceAt(glm::vec3 p, uint64_t mask = OB_ALL)
+inline ObjHit fenceAt(glm::vec3 p)
 {
-    if (!(mask & OB_FENCE))
-        return { 1e9f, 6u };
     const HeightMap& hm = sharedHeightmap();
     ObjHit best { 1e9f, 6u };
 
@@ -577,11 +553,9 @@ inline ObjHit fenceAt(glm::vec3 p, uint64_t mask = OB_ALL)
 // --- the paddock's resident alpaca (faces the cabin, -x) --------------------
 inline constexpr glm::vec2 kAlpacaSpot { 11.1f, 16.9f };
 
-inline ObjHit alpacaAt(glm::vec3 p, uint64_t mask = OB_ALL)
+inline ObjHit alpacaAt(glm::vec3 p)
 {
     const HeightMap& hm = sharedHeightmap();
-    if (!(mask & OB_ALPACA))
-        return { 1e9f, 5u };
     float g = hm.sample(kAlpacaSpot.x, kAlpacaSpot.y);
     // cheap reject: bounding disc + vertical band around the animal
     float dx = p.x - kAlpacaSpot.x, dz = p.z - kAlpacaSpot.y;
@@ -705,10 +679,10 @@ inline size_t aiEditsCount()
 // point-to-box distance minus half a cell diagonal (conservative underestimate
 // -> the surface band stays local, no global SVO explosion). Inside the AABB:
 // exact cube distance near cells, bounded +VOXEL clearance in pockets.
-inline ObjHit aiEditsAt(glm::vec3 p, uint64_t mask = OB_ALL)
+inline ObjHit aiEditsAt(glm::vec3 p)
 {
     auto& m = aidetail::aiCells();
-    if (!(mask & OB_AI) || m.mat.empty())
+    if (m.mat.empty())
         return { 1e9f, 4u };
 
     glm::vec3 bmin(-0.5f * WORLD + float(m.lo[0]) * VOXEL - VOXEL * 0.5f,
@@ -749,40 +723,40 @@ inline ObjHit aiEditsAt(glm::vec3 p, uint64_t mask = OB_ALL)
     return best;
 }
 
-inline SceneSample scene(glm::vec3 p, uint64_t mask = OB_ALL)
+inline SceneSample scene(glm::vec3 p)
 {
     const HeightMap& hm = sharedHeightmap();
     float H = hm.sample(p.x, p.z);
     float d = p.y - H;
     uint8_t mat = materialAt(p.x, p.z, H);
 
-    ObjHit obj = houseAt(p, mask);
-    ObjHit t = treesAt(p, mask);
+    ObjHit obj = houseAt(p);
+    ObjHit t = treesAt(p);
     if (t.d < obj.d) {
         obj.d = t.d;
         obj.mat = t.mat;
     }
-    ObjHit r = rocksAt(p, mask);
+    ObjHit r = rocksAt(p);
     if (r.d < obj.d) {
         obj.d = r.d;
         obj.mat = r.mat;
     }
-    ObjHit b = bushesAt(p, mask);
+    ObjHit b = bushesAt(p);
     if (b.d < obj.d) {
         obj.d = b.d;
         obj.mat = b.mat;
     }
-    ObjHit f = fenceAt(p, mask);
+    ObjHit f = fenceAt(p);
     if (f.d < obj.d) {
         obj.d = f.d;
         obj.mat = f.mat;
     }
-    ObjHit al = alpacaAt(p, mask);
+    ObjHit al = alpacaAt(p);
     if (al.d < obj.d) {
         obj.d = al.d;
         obj.mat = al.mat;
     }
-    ObjHit ai = aiEditsAt(p, mask);
+    ObjHit ai = aiEditsAt(p);
     if (ai.d < obj.d) {
         obj.d = ai.d;
         obj.mat = ai.mat;
