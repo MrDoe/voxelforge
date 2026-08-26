@@ -1,6 +1,8 @@
 #version 460
-// Voxelforge M2 - chunked-SVO sphere tracer.
+// Voxelforge - chunked-SVO sphere tracer.
 // Top-level chunk grid -> per-chunk octree -> 8^3 bricks (packed sdf+color).
+// All geometry is data: terrain from the records-derived height texture,
+// objects from the baked bricks. No analytic scene constants remain.
 
 layout(local_size_x = 8, local_size_y = 8, local_size_z = 1) in;
 
@@ -11,7 +13,8 @@ layout(std430, set = 0, binding = 2) readonly buffer ChildBase { uint uChildBase
 layout(std430, set = 0, binding = 3) readonly buffer Payload { uint uPayload[]; };
 layout(std430, set = 0, binding = 4) readonly buffer Handles { uint uHandles[]; };
 layout(std430, set = 0, binding = 5) readonly buffer Bricks { uint uBricks[]; };
-layout(set = 0, binding = 6, r32f) uniform readonly highp image2D uHeight;
+layout(set = 0, binding = 6, rg32f) uniform readonly highp image2D uHeight;
+layout(set = 0, binding = 7, r8_snorm) uniform readonly highp image3D uObjVol;
 
 layout(push_constant) uniform PC {
     vec4 camPos;
@@ -21,7 +24,7 @@ layout(push_constant) uniform PC {
     vec4 a; // tanHalfFov, aspect, extentX, extentY
     vec4 b; // worldSize, voxelSize, gridN, frameIdx
     vec4 sunDir; // normalized direction TOWARD the sun
-    vec4 misc;   // x = splat scale, y = animation time (s)
+    vec4 misc;   // x = animation time (s)
 } pc;
 
 const uint kEmpty = 0xFFFFFFFFu;
@@ -45,7 +48,7 @@ const vec2 kMatRefl[9] = vec2[9](
     vec2(70,160)/255.0, vec2(60,170)/255.0, vec2(30,235)/255.0
 );
 
-// bilinear height sample from the shared terrain heightmap
+// bilinear height sample from the records-derived terrain texture (.r = top Y)
 float heightAt(vec2 xz)
 {
     ivec2 sz = imageSize(uHeight);
@@ -60,8 +63,37 @@ float heightAt(vec2 xz)
     return mix(mix(h00, h10, f.x), mix(h01, h11, f.x), f.y);
 }
 
+// nearest-texel terrain material straight from the baked records (.g)
+uint heightMatNearest(vec2 xz)
+{
+    ivec2 sz = imageSize(uHeight);
+    vec2 tc = clamp(xz / pc.b.x + 0.5, vec2(0.0), vec2(1.0)) * vec2(sz - 1);
+    ivec2 c = clamp(ivec2(round(tc)), ivec2(0), sz - 1);
+    return uint(clamp(imageLoad(uHeight, c).g, 0.0, 1.0) * 255.0 + 0.5);
+}
+
 bool underWater(vec2 xz) { return heightAt(xz) < kWaterLevel; }
 bool gUnderwater = false; // camera currently below the fixed water plane
+
+// trilinear object-only signed distance (metres) from the coarse bake; the
+// CPU clamps at +-1.26 m so empty space reads far away
+float objVolAt(ivec3 c)
+{
+    return float(imageLoad(uObjVol, c).r);
+}
+float objDist(vec3 p)
+{
+    ivec3 sz = imageSize(uObjVol);
+    vec3 tc = clamp(p / pc.b.x + 0.5, vec3(0.0), vec3(1.0)) * vec3(sz - 1);
+    ivec3 i0 = ivec3(floor(tc));
+    vec3 f = tc - vec3(i0);
+    ivec3 i1 = min(i0 + 1, sz - 1);
+    float c00 = mix(objVolAt(ivec3(i0.x, i0.y, i0.z)), objVolAt(ivec3(i1.x, i0.y, i0.z)), f.x);
+    float c10 = mix(objVolAt(ivec3(i0.x, i1.y, i0.z)), objVolAt(ivec3(i1.x, i1.y, i0.z)), f.x);
+    float c01 = mix(objVolAt(ivec3(i0.x, i0.y, i1.z)), objVolAt(ivec3(i1.x, i0.y, i1.z)), f.x);
+    float c11 = mix(objVolAt(ivec3(i0.x, i1.y, i1.z)), objVolAt(ivec3(i1.x, i1.y, i1.z)), f.x);
+    return mix(mix(c00, c10, f.y), mix(c01, c11, f.y), f.z);
+}
 
 // deterministic value noise (bank foam pattern)
 float hashN(vec2 q) { return fract(sin(dot(q, vec2(127.1, 311.7))) * 43758.5453); }
@@ -410,212 +442,68 @@ float waterHit(vec3 ro, vec3 rd, float tMax)
     return underWater(pw.xz) ? tw : -1.0;
 }
 
-// --- riverside objects (mirror common.hpp; layered bottom-up) ---------------
-const vec2 kHousePosG = vec2(6.5, 12.5);
-const vec2 kTreePosG  = vec2(10.5, 11.5);
-const float kPadYG = -0.40;
-
-float sdBoxF(vec3 p, vec3 c, vec3 b)
+// full material byte of the brick cell at p (bit 7 = object surface).
+// Returns 0xFF when p does not resolve to a brick (air/solid terminal).
+uint brickMatByte(vec3 p)
 {
-    vec3 q = abs(p - c) - b;
-    return length(max(q, vec3(0.0))) + min(max(q.x, max(q.y, q.z)), 0.0);
-}
-float sdLogX(vec3 p, float cx, float halfLen, float y, float zOff, float r)
-{
-    float dx = abs(p.x - cx) - halfLen;
-    return length(vec2(max(dx, 0.0), length(vec2(p.y - y, p.z - zOff)))) - r;
-}
-float sdLogZ(vec3 p, float cz, float halfLen, float y, float xOff, float r)
-{
-    float dz = abs(p.z - cz) - halfLen;
-    return length(vec2(max(dz, 0.0), length(vec2(p.y - y, p.x - xOff)))) - r;
-}
-float sdCylY(vec3 p, vec2 c, float y0, float y1, float r)
-{
-    float qr = length(p.xz - c) - r;
-    float qy = max(y0 - p.y, p.y - y1);
-    return length(max(vec2(qr, qy), vec2(0.0))) + min(max(qr, qy), 0.0);
-}
-float houseDistance(vec3 p)
-{
-    vec3 q = vec3(p.x - kHousePosG.x, p.y - kPadYG, p.z - kHousePosG.y);
-    const float hx = 2.6, hz = 2.0;
-    float best = sdBoxF(q, vec3(0.0, 0.05, 0.0), vec3(hx + 0.28, 0.30, hz + 0.28));
-    const float lr = 0.145, pitch = 0.27;
-    float wall = 1e9;
-    for (int k = 0; k < 8; ++k) {
-        float y = 0.42 + lr + float(k) * pitch;
-        if (k % 2 == 0)
-            wall = min(wall, min(sdLogX(q, 0.0, hx, y, hz, lr),
-                                 sdLogX(q, 0.0, hx, y, -hz, lr)));
-        else
-            wall = min(wall, min(sdLogZ(q, 0.0, hz, y, hx, lr),
-                                 sdLogZ(q, 0.0, hz, y, -hx, lr)));
+    vec3 wmin = vec3(-pc.b.x * 0.5);
+    vec3 rel = p - wmin;
+    float chunkM = pc.b.x / pc.b.z;
+    ivec3 cc = ivec3(floor(rel / chunkM));
+    cc = clamp(cc, ivec3(0), ivec3(int(pc.b.z) - 1));
+    int root = uGrid[(cc.z * int(pc.b.z) + cc.y) * int(pc.b.z) + cc.x];
+    if (root == -1)
+        return 0xFFu;
+    uint h = uint(root);
+    vec3 mn = wmin + vec3(cc) * chunkM;
+    vec3 sz = vec3(chunkM);
+    for (int guard = 0; guard < 12; ++guard) {
+        if ((h & 3u) == 1u) {
+            uint bi = h >> 2;
+            float cellSz = sz.x / float(BRICK_N);
+            vec3 g = clamp((p - mn) / cellSz - 0.5, vec3(0.0), vec3(BRICK_N - 1.001));
+            ivec3 i0 = ivec3(g);
+            uint vi = bi * BRICK_WORDS + (uint(i0.z) * BRICK_N * BRICK_N +
+                                          uint(i0.y) * BRICK_N + uint(i0.x)) *
+                                             2 + 1;
+            return (uBricks[vi] >> 24) & 255u;
+        }
+        if ((h & 3u) != 0u)
+            break; // solid/empty terminal
+        uint ni = h >> 2;
+        vec3 halfS = sz * 0.5;
+        vec3 r2 = p - mn;
+        int oct = (r2.x >= halfS.x ? 1 : 0) | (r2.y >= halfS.y ? 2 : 0) |
+                  (r2.z >= halfS.z ? 4 : 0);
+        h = uHandles[uChildBase[ni] + oct];
+        mn += vec3(oct & 1, (oct >> 1) & 1, (oct >> 2) & 1) * halfS;
+        sz = halfS;
     }
-    float door = sdBoxF(q, vec3(-0.7, 1.30, -hz), vec3(0.52, 0.95, 0.6));
-    float winA = sdBoxF(q, vec3(-hx, 1.62, 0.75), vec3(0.6, 0.42, 0.45));
-    float winB = sdBoxF(q, vec3(hx, 1.62, 0.75), vec3(0.6, 0.42, 0.45));
-    wall = max(wall, max(-door, max(-winA, -winB)));
-    best = min(best, wall);
-    float ry0 = 0.42 + lr + 7.0 * pitch + 0.22;
-    for (int i = 0; i < 10; ++i) {
-        float rz = mix(hz + 0.66, 0.14, float(i) / 9.0);
-        best = min(best, sdBoxF(q, vec3(0.0, ry0 + float(i) * 0.145, 0.0),
-                                vec3(hx + 0.58, 0.09, rz)));
-    }
-    best = min(best, sdBoxF(q, vec3(1.55, ry0 + 0.85, 0.75), vec3(0.30, 1.45, 0.30)));
-    return best;
-}
-const vec2 kTreeSpots[6] = vec2[6](vec2(10.5, 11.5), vec2(2.0, 17.0),
-                                   vec2(-6.0, 20.0), vec2(14.0, 4.0),
-                                   vec2(18.0, 16.0), vec2(15.0, 22.0));
-const vec2 kRockSpots[3] = vec2[3](vec2(3.0, 9.0), vec2(11.5, 9.0), vec2(-1.0, 4.5));
-const float kRockRadii[3] = float[3](0.85, 0.65, 1.00);
-
-float treeDistance(vec3 p, vec2 spot, float groundY)
-{
-    vec3 q = vec3(p.x - spot.x, p.y - groundY, p.z - spot.y);
-    float d = sdCylY(q, vec2(0.0), -0.05, 0.20, 0.37);
-    d = min(d, sdCylY(q, vec2(0.0), 0.20, 0.45, 0.28));
-    d = min(d, sdCylY(q, vec2(0.0), 0.45, 1.70, 0.235));
-    d = min(d, sdCylY(q, vec2(0.0), 1.70, 2.70, 0.195));
-    d = min(d, sdCylY(q, vec2(0.0), 2.70, 3.25, 0.165));
-    d = min(d, length(q - vec3(-0.45, 3.75, 0.30)) - 1.50);
-    d = min(d, length(q - vec3(0.50, 4.35, -0.25)) - 1.70);
-    d = min(d, length(q - vec3(0.00, 5.25, 0.10)) - 1.50);
-    d = min(d, length(q - vec3(0.10, 6.05, -0.05)) - 1.05);
-    return d;
-}
-float treesDistance(vec3 p)
-{
-    float best = 1e9;
-    for (int i = 0; i < 6; ++i) {
-        float gy = heightAt(kTreeSpots[i]);
-        if (dot(p.xz - kTreeSpots[i], p.xz - kTreeSpots[i]) > 16.0 || p.y > gy + 8.4)
-            continue;
-        best = min(best, treeDistance(p, kTreeSpots[i], gy));
-    }
-    return best;
-}
-float rocksDistance(vec3 p)
-{
-    float best = 1e9;
-    for (int i = 0; i < 3; ++i) {
-        float r = kRockRadii[i];
-        float dx = p.x - kRockSpots[i].x, dz = p.z - kRockSpots[i].y;
-        if (dx * dx + dz * dz > (r + 0.4) * (r + 0.4))
-            continue;
-        vec3 c = vec3(kRockSpots[i], heightAt(kRockSpots[i]) + r * 0.30);
-        best = min(best, length(p - c) - r);
-    }
-    return best;
+    return 0xFFu;
 }
 
-const float kBushCell = 6.0;
-
-float bushesDistance(vec3 p)
+bool isObjectSurface(vec3 p)
 {
-    float best = 1e9;
-    float cell = kBushCell;
-    int ix = int(floor(p.x / cell));
-    int iz = int(floor(p.z / cell));
-    for (int dz = -1; dz <= 1; ++dz) for (int dx = -1; dx <= 1; ++dx) {
-        int cx = ix + dx, cz = iz + dz;
-        float hCell = hashN(vec2(float(cx) * 19.1, float(cz) * 37.7));
-        if (hCell < 0.62) continue;
-        float jx = hashN(vec2(float(cx) * 7.3, float(cz) * 11.1));
-        float jz = hashN(vec2(float(cx) * 13.7, float(cz) * 17.3));
-        float hr = hashN(vec2(float(cx) * 23.1, float(cz) * 29.7));
-        vec2 center = vec2((float(cx) + jx) * cell, (float(cz) + jz) * cell);
-        float H = heightAt(center);
-        // material/slope cull (approximate heightmap material check)
-        float wd = kWaterLevel - H;
-        if (wd > -0.02) continue;
-        float e = 0.5;
-        float sx = heightAt(center + vec2(e,0.0)) - heightAt(center - vec2(e,0.0));
-        float sz = heightAt(center + vec2(0.0,e)) - heightAt(center - vec2(0.0,e));
-        float slope = length(vec2(sx, sz)) * (0.5 / e);
-        if (slope > 0.9) continue;
-        // quick vertical cull
-        if (p.y < H - 0.5 || p.y > H + 2.5) continue;
-        float r = 0.35 + hr * 0.45;
-        vec3 c = vec3(center.x, H + r * 0.55, center.y);
-        float d = length(p - c) - r;
-        best = min(best, d);
-    }
-    return best;
-}
-
-float objectDistance(vec3 p)
-{
-    // Dynamic: only contribute when the live SVO actually contains an object at
-    // this point. On removal the SVO (map) no longer has the object, so we report
-    // it absent and shading/shadow fall back to terrain. In the static default
-    // scene the SVO contains every object, so this returns the exact analytic
-    // distance as before - parity with the dense backend is preserved.
-    float dT = p.y - heightAt(p.xz);
-    if (map(p) < dT - 0.02)
-        return min(houseDistance(p), min(min(treesDistance(p), rocksDistance(p)), bushesDistance(p)));
-    return dT + 1.0; // absent -> no object contribution
+    return ((brickMatByte(p) & 0x80u) != 0u) && map(p) < p.y - heightAt(p.xz) + 0.02;
 }
 
 uint getMaterialId(vec3 p)
 {
-    float H = heightAt(p.xz);
-    float dT = p.y - H;
-    float dH = houseDistance(p);
-    float dTr = treesDistance(p);
-    float dR = rocksDistance(p);
-    float dB = bushesDistance(p);
-    float dO = min(dH, min(min(dTr, dR), dB));
-    if (objectDistance(p) < p.y - heightAt(p.xz) + 0.02) {
-        if (dB <= dH && dB <= dTr && dB <= dR) return 8u;
-        if (dH <= dTr && dH <= dR) {
-            vec3 q = vec3(p.x - kHousePosG.x, p.y - kPadYG, p.z - kHousePosG.y);
-            float ry0 = 0.42 + 0.145 + 7.0 * 0.27 + 0.22;
-            if (q.y > ry0 - 0.05) return 7u;
-            if (q.y < 0.33) return 4u;
-            return 6u;
-        } else if (dTr <= dR) {
-            // foliage is high, trunk low
-            // find closest tree ground to decide foliage vs trunk
-            float bestGy = 1e9;
-            for (int i = 0; i < 6; ++i) {
-                float gy = heightAt(kTreeSpots[i]);
-                float d2 = dot(p.xz - kTreeSpots[i], p.xz - kTreeSpots[i]);
-                if (d2 < 4.0) bestGy = min(bestGy, gy);
-            }
-            if (p.y > bestGy + 3.0) return 8u;
-            return 6u;
-        } else {
-            return 4u;
-        }
-    }
-    float wd = kWaterLevel - H;
-    float e = 0.5;
-    float sx = heightAt(p.xz + vec2(e,0.0)) - heightAt(p.xz - vec2(e,0.0));
-    float sz = heightAt(p.xz + vec2(0.0,e)) - heightAt(p.xz - vec2(0.0,e));
-    float slope = length(vec2(sx, sz)) * (0.5 / e);
-    float n = vnoise(p.xz * 0.35);
-    if (wd > 0.55) return n > 0.5 ? 5u : 4u;
-    if (wd > -0.02) return 3u;
-    if (wd > -0.45) return n > 0.575 ? 3u : 2u;
-    if (slope > 0.85) return n > 0.5 ? 4u : 5u;
-    if (wd > -1.2) return 2u;
-    return n > 0.625 ? 1u : 0u;
+    // objects: material baked into each brick cell by the CPU bake
+    if (isObjectSurface(p))
+        return brickMatByte(p) & 0x7Fu;
+    // terrain: material straight from the records-derived height texture
+    return heightMatNearest(p.xz);
 }
 
 vec3 calcNormal(vec3 p)
 {
-    // objects get exact primitive normals; terrain keeps the heightmap normal
-    if (objectDistance(p) < p.y - heightAt(p.xz) + 0.02) {
+    // objects get SVO gradient normals; terrain keeps the smooth heightfield normal
+    if (isObjectSurface(p)) {
         float eo = 0.03;
-        return normalize(vec3(objectDistance(p + vec3(eo, 0, 0)) -
-                                  objectDistance(p - vec3(eo, 0, 0)),
-                              objectDistance(p + vec3(0, eo, 0)) -
-                                  objectDistance(p - vec3(0, eo, 0)),
-                              objectDistance(p + vec3(0, 0, eo)) -
-                                  objectDistance(p - vec3(0, 0, eo))));
+        return normalize(vec3(map(p + vec3(eo, 0, 0)) - map(p - vec3(eo, 0, 0)),
+                              map(p + vec3(0, eo, 0)) - map(p - vec3(0, eo, 0)),
+                              map(p + vec3(0, 0, eo)) - map(p - vec3(0, 0, eo))));
     }
     // analytic heightfield normal - identical in both backends so shading
     // stays independent of each field's sampling resolution.
@@ -633,14 +521,19 @@ vec3 calcNormal(vec3 p)
 
 float softShadow(vec3 ro, vec3 rd)
 {
-    // terrain + objects march - identical in both backends for parity
+    // march the baked SVO field (terrain columns + objects all live in bricks).
+    // The quantised field can dip slightly negative when a ray grazes a smooth
+    // slope; clamping the step distance keeps those grazes from self-shadowing
+    // while real occluders (deep brick interiors / solid terminals) still bite.
     float res = 1.0;
     float t = 0.05;
     for (int i = 0; i < 28; ++i) {
         vec3 sp = ro + rd * t;
-        float s = min(sp.y - heightAt(sp.xz), objectDistance(sp));
-        res = min(res, 9.0 * s / t);
-        t += clamp(s * 0.85, 0.05, 1.2);
+        // proven hybrid: smooth records-heightfield for terrain, coarse baked
+        // object volume for object occluders - both purely data-derived
+        float s = min(sp.y - heightAt(sp.xz), objDist(sp));
+        res = min(res, 9.0 * max(s, pc.b.y * 0.45) / t);
+        t += clamp(max(s, pc.b.y * 0.35) * 0.85, 0.05, 1.2);
         if (res < 0.004 || t > 40.0)
             break;
     }

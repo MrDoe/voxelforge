@@ -21,6 +21,7 @@ public:
 
     void updateDescriptors(const Image3D& outImage);
     void setHeightmapView(VkImageView view);
+    void setObjVolumeView(VkImageView view);
     void record(VkCommandBuffer cmd, const RaymarchPush& push) const;
 
 private:
@@ -40,6 +41,7 @@ private:
 
     Ssbo m_grid, m_childBase, m_payload, m_handles, m_bricks;
     VkImageView m_heightView = VK_NULL_HANDLE;
+    VkImageView m_objVolView = VK_NULL_HANDLE;
 };
 
 } // namespace vf

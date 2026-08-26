@@ -35,6 +35,7 @@ public:
     struct Sample {
         float d = 1e9f;
         uint8_t mat = 0;
+        bool obj = false; // true when the object field is the closest surface
     };
 
     // Signed distance (meters, negative inside solids) + material at a lattice
@@ -54,8 +55,9 @@ public:
     int latN() const { return m_latN; }
     const std::vector<int16_t>& colTops() const { return m_colTop; }
 
-    // R32F terrain-height texture (latN x latN, meters) for the GPU heightAt().
-    const std::vector<float>& heightTexture() const { return m_heightTex; }
+    // Terrain-height texture for the GPU (latN x latN, RG32F):
+    // R = world Y of the column's top surface, G = material / 255.
+    const std::vector<glm::vec2>& heightTexture() const { return m_heightTex; }
 
     // Byte grid (kGBlocks^3): 1 where the block holds any object-field cell.
     // OR-ed into LayeredWorld's presence grid for octree subdivision.
@@ -63,6 +65,13 @@ public:
     static constexpr int blockSize() { return 4; } // must match LayeredWorld kBlockSize
     static constexpr int blocksPerChunkAxis() { return 64 / 4; }
     static constexpr int globalBlocks() { return 16 * blocksPerChunkAxis(); }
+
+    // Coarse object-only signed distance volume for GPU shadows:
+    // kObjVolN^3 texels over the whole world, int8 snorm metres
+    // (see kObjVolScale). Empty space stores +127 (= far away).
+    static constexpr int kObjVolN = 256;
+    static constexpr float kObjVolMax = 1.26f; // metres encoded at +-127
+    const std::vector<int8_t>& objectVolume() const { return m_objVol; }
 
     size_t objectCellsStored() const { return m_stored; }
 
@@ -72,7 +81,7 @@ private:
 
     std::vector<int16_t> m_colTop;
     std::vector<uint8_t> m_colMat;
-    std::vector<float> m_heightTex;
+    std::vector<glm::vec2> m_heightTex;
 
     // sparse object field: key = packed lattice cell (+1), value =
     // uint32(uint8(sdfRaw)) | uint32(mat) << 8 ; sdf meters = int8(raw)*VOXEL
@@ -82,6 +91,7 @@ private:
     size_t m_stored = 0;
 
     std::vector<uint8_t> m_objBlock;
+    std::vector<int8_t> m_objVol;
 
     inline size_t oslot(uint32_t k) const { return (size_t(k) * 2654435761u) & m_omask; }
     inline bool ofind(uint32_t k, uint32_t& v) const {
@@ -98,6 +108,12 @@ private:
         return false;
     }
     void oinsert(uint32_t k, uint32_t v);
+
+    // Bilinearly interpolated terrain height at a lattice cell centre - mirrors
+    // the GPU heightAt() over m_heightTex, so baked bricks and the shader see
+    // the SAME smooth terrain (no stair-step divergence).
+    float smoothTerrainY(float wx, float wz) const;
+    bool anyTerrainNear(int cx, int cz) const;
 };
 
 } // namespace vf::voxel

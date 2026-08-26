@@ -6,6 +6,7 @@
 #include "voxel/heightmap.hpp"
 #include "voxel/world.hpp"
 #include "voxel/worldfile.hpp"
+#include <algorithm>
 #include <cmath>
 #include <cstdio>
 #include <cstring>
@@ -210,6 +211,34 @@ int main(int argc, char** argv)
         return 1;
     vf::voxel::setSharedHeightmap(&hm);
 
+    // lattice-height grid: the runtime renders terrain from these columns, so
+    // materials must be classified against THIS geometry (smoothed, 10 cm
+    // steps) rather than the raw 5 cm PNG - otherwise slopes that look grassy
+    // in-engine get baked as rock.
+    const int LAT = int(vf::voxel::WORLD / vf::voxel::VOXEL);
+    std::vector<float> latH(size_t(LAT) * LAT);
+    for (int iz = 0; iz < LAT; ++iz)
+        for (int ix = 0; ix < LAT; ++ix)
+            latH[size_t(iz) * LAT + size_t(ix)] =
+                hm.sample(-0.5f * vf::voxel::WORLD + (ix + 0.5f) * vf::voxel::VOXEL,
+                          -0.5f * vf::voxel::WORLD + (iz + 0.5f) * vf::voxel::VOXEL);
+    auto latSlope = [&](float wx, float wz) {
+        int ix = std::clamp(int((wx + 0.5f * vf::voxel::WORLD) / vf::voxel::VOXEL), 5, LAT - 6);
+        int iz = std::clamp(int((wz + 0.5f * vf::voxel::WORLD) / vf::voxel::VOXEL), 5, LAT - 6);
+        float gx = (latH[size_t(iz) * LAT + size_t(ix + 5)] -
+                    latH[size_t(iz) * LAT + size_t(ix - 5)]) /
+                   (10.0f * vf::voxel::VOXEL);
+        float gz = (latH[size_t(iz + 5) * LAT + size_t(ix)] -
+                    latH[size_t(iz - 5) * LAT + size_t(ix)]) /
+                   (10.0f * vf::voxel::VOXEL);
+        return std::sqrt(gx * gx + gz * gz);
+    };
+    auto latMat = [&](float wx, float wz, float H) {
+        float wd = vf::voxel::WATER_LEVEL - H;
+        float n = vf::voxel::fbm2(wx * 0.35f, wz * 0.35f);
+        return vf::voxel::materialFromBands(wd, latSlope(wx, wz), n);
+    };
+
     // pre-existing AI/user edits join the layer family so they are part of
     // the world like any other geometry (also registered into scene truth
     // above for probes)
@@ -381,7 +410,7 @@ int main(int argc, char** argv)
                 glm::vec2 bc((cx + jx) * cell, (cz + jz) * cell);
                 if (fabs(bc.x) > 0.5f * WORLD || fabs(bc.y) > 0.5f * WORLD) continue;
                 float H = hm.sample(bc.x, bc.y);
-                uint8_t mat = materialAt(bc.x, bc.y, H);
+                uint8_t mat = latMat(bc.x, bc.y, H);
                 if (mat != 0 && mat != 1) continue;
                 if (glm::length(hm.gradient(bc.x, bc.y)) > 0.9f) continue;
                 float r = 0.35f + hr * 0.45f;
@@ -406,7 +435,7 @@ int main(int argc, char** argv)
             float wx = -0.5f * WORLD + (ix + 0.5f) * VOXEL;
             float wz = -0.5f * WORLD + (iz + 0.5f) * VOXEL;
             float H = sharedHeightmap().sample(wx, wz);
-            uint8_t tm = materialAt(wx, wz, H);
+            uint8_t tm = latMat(wx, wz, H);
             int yc = int((H + 0.5f * WORLD) / VOXEL);
             for (int iy = glm::max(yc - 3, 0); iy <= glm::min(yc + 3, N - 1); ++iy) {
                 float wy = -0.5f * WORLD + (iy + 0.5f) * VOXEL;

@@ -67,8 +67,8 @@ void VoxelField::build(const std::vector<VoxelRecord>& records,
     m_heightTex.resize(size_t(N) * N);
     for (size_t i = 0; i < m_heightTex.size(); ++i) {
         int16_t t = m_colTop[i];
-        m_heightTex[i] =
-            t >= 0 ? (-0.5f * WORLD + (float(t) + 1.0f) * VOXEL) : -1e30f;
+        float topY = t >= 0 ? (-0.5f * WORLD + (float(t) + 1.0f) * VOXEL) : -1e30f;
+        m_heightTex[i] = glm::vec2(topY, float(m_colMat[i]) / 255.0f);
     }
 
     // ---- group object cells into connected components (26-neighbourhood) ---
@@ -335,9 +335,64 @@ void VoxelField::build(const std::vector<VoxelRecord>& records,
     if (skipped)
         spdlog::warn("voxel_field: {} oversized component(s) skipped", skipped);
 
+    // ---- coarse object-only volume for GPU shadow marching -----------------
+    // Splat every stored field cell into its nearest texel, keeping the most
+    // occluding (smallest) distance. Texels never touched stay +127 = clear.
+    m_objVol.assign(size_t(kObjVolN) * kObjVolN * kObjVolN, int8_t(127));
+    for (size_t i = 0; i < m_okey.size(); ++i) {
+        if (!m_okey[i])
+            continue;
+        uint32_t k = m_okey[i] - 1u;
+        uint32_t v = m_oval[i];
+        float d = float(int8_t(v & 0xFF)) * VOXEL;
+        if (d > kObjVolMax)
+            continue;
+        int x = int(k >> 20), y = int((k >> 10) & 0x3FFu), z = int(k & 0x3FFu);
+        auto toTexel = [&](int c) {
+            float w = -0.5f * WORLD + (float(c) + 0.5f) * VOXEL;
+            return std::clamp(int((w / WORLD + 0.5f) * kObjVolN), 0, kObjVolN - 1);
+        };
+        int8_t enc = int8_t(std::clamp(int(std::lround(d / kObjVolMax * 127.0f)), -127, 127));
+        size_t ti = (size_t(toTexel(z)) * kObjVolN + size_t(toTexel(y))) * kObjVolN +
+                    size_t(toTexel(x));
+        if (enc < m_objVol[ti])
+            m_objVol[ti] = enc;
+    }
+
     m_built = true;
     spdlog::info("voxel_field: {} components, {} object cells stored", comps.size(),
                  m_stored);
+}
+
+float VoxelField::smoothTerrainY(float wx, float wz) const
+{
+    // continuous lattice coordinate of the sample point; texel i is centred on
+    // cell i, matching the shader's heightAt() uv mapping
+    float fx = (wx + 0.5f * WORLD) / VOXEL - 0.5f;
+    float fz = (wz + 0.5f * WORLD) / VOXEL - 0.5f;
+    int x0 = int(std::floor(fx)), z0 = int(std::floor(fz));
+    float tx = fx - float(x0), tz = fz - float(z0);
+    auto const clampi = [](int v, int lo, int hi) { return v < lo ? lo : (v > hi ? hi : v); };
+    int x1 = clampi(x0 + 1, 0, m_latN - 1), z1 = clampi(z0 + 1, 0, m_latN - 1);
+    x0 = clampi(x0, 0, m_latN - 1);
+    z0 = clampi(z0, 0, m_latN - 1);
+    float h00 = m_heightTex[size_t(z0) * m_latN + size_t(x0)].x;
+    float h10 = m_heightTex[size_t(z0) * m_latN + size_t(x1)].x;
+    float h01 = m_heightTex[size_t(z1) * m_latN + size_t(x0)].x;
+    float h11 = m_heightTex[size_t(z1) * m_latN + size_t(x1)].x;
+    return glm::mix(glm::mix(h00, h10, tx), glm::mix(h01, h11, tx), tz);
+}
+
+bool VoxelField::anyTerrainNear(int cx, int cz) const
+{
+    for (int dz = -1; dz <= 1; ++dz)
+        for (int dx = -1; dx <= 1; ++dx) {
+            int x = cx + dx, z = cz + dz;
+            if (x >= 0 && z >= 0 && x < m_latN && z < m_latN &&
+                m_colTop[size_t(z) * m_latN + size_t(x)] >= 0)
+                return true;
+        }
+    return false;
 }
 
 VoxelField::Sample VoxelField::sample(int cx, int cy, int cz) const
@@ -345,14 +400,18 @@ VoxelField::Sample VoxelField::sample(int cx, int cy, int cz) const
     Sample out;
     out.d = 1e9f;
     out.mat = 0;
+    out.obj = false;
     if (cx < 0 || cy < 0 || cz < 0 || cx >= m_latN || cy >= m_latN || cz >= m_latN)
         return out;
 
-    // terrain: vertical distance to the column top plane
-    if (terrainColumn(cx, cz)) {
+    // terrain: vertical distance to the bilinear-smoothed column surface
+    if (anyTerrainNear(cx, cz)) {
+        float wx = -0.5f * WORLD + (float(cx) + 0.5f) * VOXEL;
+        float wz = -0.5f * WORLD + (float(cz) + 0.5f) * VOXEL;
         float py = -0.5f * WORLD + (float(cy) + 0.5f) * VOXEL;
-        out.d = py - terrainTopY(cx, cz);
-        out.mat = terrainMat(cx, cz);
+        out.d = py - smoothTerrainY(wx, wz);
+        int ix = std::clamp(cx, 0, m_latN - 1), iz = std::clamp(cz, 0, m_latN - 1);
+        out.mat = terrainMat(ix, iz);
     }
 
     // objects: sparse signed field (overrides terrain when closer)
@@ -362,6 +421,7 @@ VoxelField::Sample VoxelField::sample(int cx, int cy, int cz) const
         if (d < out.d || out.d >= 1e9f) {
             out.d = d;
             out.mat = uint8_t(v >> 8);
+            out.obj = true;
         }
     }
     return out;

@@ -81,13 +81,10 @@ struct SceneSample {
 };
 
 // material selection shared by scene(), worldgen and the worldfile generator
-inline uint8_t materialAt(float x, float z, float H)
+// terrain material bands shared by worldgen, probes and the worldfile generator.
+// wd = WATER_LEVEL - H (>0 submerged); n = per-point variation noise.
+inline uint8_t materialFromBands(float wd, float slope, float n)
 {
-    const HeightMap& hm = sharedHeightmap();
-    float wd = WATER_LEVEL - H; // >0: column submerged
-    float slope = glm::length(hm.gradient(x, z));
-    float n = fbm2(x * 0.35f, z * 0.35f);
-
     if (wd > 0.55f)
         return n > 0.0f ? uint8_t(5) : uint8_t(4); // deeper bed: rock
     if (wd > -0.02f)
@@ -99,6 +96,15 @@ inline uint8_t materialAt(float x, float z, float H)
     if (wd > -1.2f)
         return 2;                                  // floodplain soil band
     return n > 0.25f ? uint8_t(1) : uint8_t(0);    // grass
+}
+
+inline uint8_t materialAt(float x, float z, float H)
+{
+    const HeightMap& hm = sharedHeightmap();
+    float wd = WATER_LEVEL - H;
+    float slope = glm::length(hm.gradient(x, z));
+    float n = fbm2(x * 0.35f, z * 0.35f);
+    return materialFromBands(wd, slope, n);
 }
 
 // --- riverside objects (built layer for layer, bottom to top) ---------------

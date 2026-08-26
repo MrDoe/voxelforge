@@ -89,17 +89,19 @@ inline uint32_t paletteWordLo(uint8_t mat)
     return uint32_t(c.r * 255.f) | (uint32_t(c.g * 255.f) << 8) |
            (uint32_t(c.b * 255.f) << 16);
 }
-inline uint32_t paletteWordHi(uint8_t mat)
+inline uint32_t paletteWordHi(uint8_t mat, bool isObj = false)
 {
     const glm::vec2& rr = kMaterialReflection[std::min(int(mat), 8)];
-    return 255u | (uint32_t(rr.x) << 8) | (uint32_t(rr.y) << 16) | (uint32_t(mat) << 24);
+    return 255u | (uint32_t(rr.x) << 8) | (uint32_t(rr.y) << 16) |
+           (uint32_t(mat) | (isObj ? 0x80u : 0u)) << 24;
 }
 
-inline void wordsFromPacked(uint64_t p, int sdfRaw, uint32_t w[2])
+inline void wordsFromPacked(uint64_t p, int sdfRaw, bool isObj, uint32_t w[2])
 {
     w[0] = uint32_t(p & 0xFFFFFFu) | (uint32_t(sdfRaw & 0xFF) << 24);
     w[1] = 255u | (uint32_t((p >> 24) & 0xFFu) << 8) |
-           (uint32_t((p >> 32) & 0xFFu) << 16) | (uint32_t((p >> 40) & 0xFFu) << 24);
+           (uint32_t((p >> 32) & 0xFFu) << 16) |
+           ((uint32_t((p >> 40) & 0xFFu) | (isObj ? 0x80u : 0u)) << 24);
 }
 
 unsigned long long sigOf(const std::filesystem::path& p)
@@ -181,11 +183,11 @@ void fillBrick(const BuildCtx& c, uint32_t* data, int bx0, int by0, int bz0)
                     uint32_t ridx;
                     if (c.map->find(cellKey(uint32_t(cx), uint32_t(cy), uint32_t(cz)), p,
                                     ridx))
-                        wordsFromPacked(p, int(h.d / VOXEL), w);
+                        wordsFromPacked(p, int(h.d / VOXEL), h.obj, w);
                     else {
                         w[0] = paletteWordLo(h.mat) |
                                (uint32_t(int32_t(int(h.d / VOXEL)) & 0xFF) << 24);
-                        w[1] = paletteWordHi(h.mat);
+                        w[1] = paletteWordHi(h.mat, h.obj);
                     }
                 } else if (worldYc < WATER_LEVEL) {
                     // water volume (shader-only surface at y = WATER_LEVEL)
