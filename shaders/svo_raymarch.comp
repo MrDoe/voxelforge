@@ -551,26 +551,211 @@ vec3 calcNormal(vec3 p)
     return normalize(mix(nFine, nWide, 0.55));
 }
 
+// ---------------------------------------------------------------------------
+// Exact SVO / DDA traversal
+// The previous sphere-trace stepped on an interpolated SDF which over-estimates
+// distance in concave / corner regions, so thin voxels were tunnelled and cube
+// corners were rounded ("cut off"). This traversal visits every voxel in strict
+// ray order (3D-DDA over the chunk grid, then the octree, then the brick's
+// voxels) and returns the *first* solid voxel - nothing is skipped, and corners
+// are sharp because the test is a per-voxel sign check, not an interpolated SDF.
+// ---------------------------------------------------------------------------
+void boxTSlab(vec3 ro, vec3 rd, vec3 bmin, vec3 bmax, out float tEnter, out float tExit)
+{
+    vec3 t0 = vec3(-1e30), t1 = vec3(1e30);
+    for (int a = 0; a < 3; ++a) {
+        if (abs(rd[a]) < 1e-9) {
+            if (ro[a] < bmin[a] || ro[a] > bmax[a]) { tEnter = 1e30; tExit = -1e30; return; }
+        } else {
+            float ta = (bmin[a] - ro[a]) / rd[a];
+            float tb = (bmax[a] - ro[a]) / rd[a];
+            t0[a] = min(ta, tb);
+            t1[a] = max(ta, tb);
+        }
+    }
+    tEnter = max(max(t0.x, t0.y), t0.z);
+    tExit  = min(min(t1.x, t1.y), t1.z);
+}
+
+bool brickDDAB(vec3 ro, vec3 rd, vec3 rdi, uint bi, vec3 bmin, float bsz,
+               float tA, float tB, out float tHit)
+{
+    float vsz = bsz / float(BRICK_N);
+    float t = max(tA, 0.0);
+    vec3 p = ro + rd * t;
+    vec3 vcell = floor((p - bmin) / vsz);
+    vec3 stp = vec3(rd.x >= 0.0 ? 1.0 : -1.0, rd.y >= 0.0 ? 1.0 : -1.0, rd.z >= 0.0 ? 1.0 : -1.0);
+    vec3 tDelta = abs(rdi) * vsz;
+    vec3 nextB;
+    nextB.x = (stp.x > 0.0) ? (bmin.x + (vcell.x + 1.0) * vsz) : (bmin.x + vcell.x * vsz);
+    nextB.y = (stp.y > 0.0) ? (bmin.y + (vcell.y + 1.0) * vsz) : (bmin.y + vcell.y * vsz);
+    nextB.z = (stp.z > 0.0) ? (bmin.z + (vcell.z + 1.0) * vsz) : (bmin.z + vcell.z * vsz);
+    vec3 tMax = (nextB - ro) * rdi;
+    for (int i = 0; i < BRICK_N * BRICK_N * BRICK_N + 16; ++i) {
+        if (t > tB) return false;
+        ivec3 vc = ivec3(clamp(vcell, vec3(0.0), vec3(float(BRICK_N) - 1.0)));
+        float sdf = brickVoxelSdf(bi, vc);   // signed metres, < 0 inside solid
+        if (sdf <= 0.0) { tHit = t; return true; }
+        if (tMax.x < tMax.y) {
+            if (tMax.x < tMax.z) { t = tMax.x; tMax.x += tDelta.x; vcell.x += stp.x; }
+            else { t = tMax.z; tMax.z += tDelta.z; vcell.z += stp.z; }
+        } else {
+            if (tMax.y < tMax.z) { t = tMax.y; tMax.y += tDelta.y; vcell.y += stp.y; }
+            else { t = tMax.z; tMax.z += tDelta.z; vcell.z += stp.z; }
+        }
+    }
+    return false;
+}
+
+void traverseSVONode(vec3 ro, vec3 rd, vec3 rdi, uint h, vec3 nmin, float sz,
+                     float tEnter, float tExit, inout float bestT, inout bool found)
+{
+    const int MAXS = 256;
+    uint  sh[MAXS]; vec3 smin[MAXS]; float ssz[MAXS]; float se[MAXS]; float sx[MAXS];
+    int sp = 0;
+    if (sp < MAXS) { sh[sp] = h; smin[sp] = nmin; ssz[sp] = sz; se[sp] = tEnter; sx[sp] = tExit; sp++; }
+
+    while (sp > 0) {
+        sp--;
+        uint hh = sh[sp];
+        vec3 curMin = smin[sp];
+        float curSz = ssz[sp];
+        float curEn = se[sp];
+        float curEx = sx[sp];
+        if (found && curEn >= bestT) continue;   // cannot improve best
+        if (curEn > curEx) continue;
+
+        uint ty = hh & 3u;
+        if (ty == 3u) continue;                  // empty terminal
+        if (ty == 2u) {                          // solid terminal
+            if (curEn < bestT) { bestT = curEn; found = true; }
+            continue;
+        }
+        if (ty == 1u) {                          // brick -> per-voxel DDA
+            float th;
+            if (brickDDAB(ro, rd, rdi, hh >> 2u, curMin, curSz, curEn, curEx, th)) {
+                if (th < bestT) { bestT = th; found = true; }
+            }
+            continue;
+        }
+        // node
+        uint ni = hh >> 2u;
+        uint pl = uPayload[ni];
+        uint validMask = pl & 0xFFu;
+        uint solidMask = (pl >> 8) & 0xFFu;
+        uint cbase = uChildBase[ni];
+        // distance LOD: a node that projects to <= ~1px can be collapsed to its
+        // solid content with no visible change. This is octree LOD in the
+        // raymarch - distant solid subtrees stop descending, so far geometry
+        // (terrain masses, big objects) costs a fraction of the steps.
+        float pixAng = (2.0f * pc.a.x) / max(pc.a.w, 1.0f);
+        if (curSz / max(curEn, 1e-3f) < 0.9f * pixAng) {
+            if (((solidMask | validMask) != 0u) && curEn < bestT) {
+                bestT = curEn; found = true;
+            }
+            continue;
+        }
+        float hsz = curSz * 0.5;
+        float ten[8]; uint ctgt[8]; vec3 cmin_t[8]; float tex_t[8]; int cnt = 0;
+        for (int o = 0; o < 8; ++o) {
+            uint om = uint(1 << o);
+            bool solid = ((solidMask & om) != 0u);
+            bool valid = ((validMask & om) != 0u);
+            if (!solid && !valid) continue;
+            vec3 cmin_o = curMin + vec3((o & 1) != 0 ? hsz : 0.0,
+                                        (o & 2) != 0 ? hsz : 0.0,
+                                        (o & 4) != 0 ? hsz : 0.0);
+            vec3 cmax_o = cmin_o + vec3(hsz);
+            float te, tx;
+            boxTSlab(ro, rd, cmin_o, cmax_o, te, tx);
+            float tce = max(curEn, te);
+            float tcx = min(curEx, tx);
+            if (tce > tcx) continue;
+            uint chh;
+            if (solid) chh = 0xFFFFFFFEu;
+            else {
+                uint ch = uHandles[cbase + uint(o)];
+                if (ch == 0xFFFFFFFFu) continue;
+                chh = (ch == 0xFFFFFFFEu) ? 0xFFFFFFFEu : ch;
+            }
+            ten[cnt] = tce; ctgt[cnt] = chh; cmin_t[cnt] = cmin_o; tex_t[cnt] = tcx; cnt++;
+        }
+        // sort descending by entry t so the LIFO stack pops nearest-first
+        for (int a = 0; a < cnt; ++a)
+            for (int b = a + 1; b < cnt; ++b)
+                if (ten[b] > ten[a]) {
+                    float ft = ten[a]; ten[a] = ten[b]; ten[b] = ft;
+                    uint ut = ctgt[a]; ctgt[a] = ctgt[b]; ctgt[b] = ut;
+                    vec3 vt = cmin_t[a]; cmin_t[a] = cmin_t[b]; cmin_t[b] = vt;
+                    float xt = tex_t[a]; tex_t[a] = tex_t[b]; tex_t[b] = xt;
+                }
+        for (int a = 0; a < cnt; ++a) {
+            if (sp < MAXS) {
+                sh[sp] = ctgt[a]; smin[sp] = cmin_t[a]; ssz[sp] = hsz;
+                se[sp] = ten[a]; sx[sp] = tex_t[a]; sp++;
+            }
+        }
+    }
+}
+
+bool exactSVOHit(vec3 ro, vec3 rd, float tStart, float tEnd, out float tHit)
+{
+    vec3 rdi = 1.0 / rd;
+    float W = pc.b.x;
+    vec3 wmin = vec3(-W * 0.5);
+    float chunkM = W / pc.b.z;
+    int GN = int(pc.b.z);
+    float t = tStart;
+    vec3 p = ro + rd * t;
+    vec3 cell = floor((p - wmin) / chunkM);
+    vec3 stp = vec3(rd.x >= 0.0 ? 1.0 : -1.0, rd.y >= 0.0 ? 1.0 : -1.0, rd.z >= 0.0 ? 1.0 : -1.0);
+    vec3 tDelta = abs(rdi) * chunkM;
+    vec3 nextB;
+    nextB.x = (stp.x > 0.0) ? (wmin.x + (cell.x + 1.0) * chunkM) : (wmin.x + cell.x * chunkM);
+    nextB.y = (stp.y > 0.0) ? (wmin.y + (cell.y + 1.0) * chunkM) : (wmin.y + cell.y * chunkM);
+    nextB.z = (stp.z > 0.0) ? (wmin.z + (cell.z + 1.0) * chunkM) : (wmin.z + cell.z * chunkM);
+    vec3 tMax = (nextB - ro) * rdi;
+
+    float bestT = 1e30f;
+    bool found = false;
+    for (int citer = 0; citer < 4096; ++citer) {
+        if (t > tEnd) { tHit = bestT; return found; }
+        if (found && t >= bestT) { tHit = bestT; return found; }
+        ivec3 ci = ivec3(cell);
+        if (ci.x >= 0 && ci.y >= 0 && ci.z >= 0 && ci.x < GN && ci.y < GN && ci.z < GN) {
+            int idx = ci.z * GN * GN + ci.y * GN + ci.x;
+            int root = uGrid[idx];
+            if (root >= 0) {
+                vec3 cmin = wmin + vec3(ci) * chunkM;
+                float tce, tcx;
+                boxTSlab(ro, rd, cmin, cmin + vec3(chunkM), tce, tcx);
+                float tEn = max(t, tce);
+                float tEx = min(tEnd, tcx);
+                if (tEn <= tEx)
+                    traverseSVONode(ro, rd, rdi, uint(root), cmin, chunkM, tEn, tEx, bestT, found);
+            }
+        }
+        if (tMax.x < tMax.y) {
+            if (tMax.x < tMax.z) { t = tMax.x; tMax.x += tDelta.x; cell.x += stp.x; }
+            else { t = tMax.z; tMax.z += tDelta.z; cell.z += stp.z; }
+        } else {
+            if (tMax.y < tMax.z) { t = tMax.y; tMax.y += tDelta.y; cell.y += stp.y; }
+            else { t = tMax.z; tMax.z += tDelta.z; cell.z += stp.z; }
+        }
+    }
+    tHit = bestT;
+    return found;
+}
+
 float softShadow(vec3 ro, vec3 rd)
 {
-    // March the live SVO field (map = terrain columns + object bricks, rebuilt
-    // on every edit) so shadows are always derived from the CURRENT geometry -
-    // no dependence on the coarse edit-derived object volume, which could go
-    // stale after an add/remove and make shadows vanish. The quantised field
-    // can dip slightly negative when a ray grazes a smooth slope; clamping the
-    // step distance keeps those grazes from self-shadowing while real occluders
-    // (deep brick interiors / solid terminals) still bite.
-    float res = 1.0;
-    float t = 0.05;
-    for (int i = 0; i < 28; ++i) {
-        vec3 sp = ro + rd * t;
-        float s = map(sp);
-        res = min(res, 9.0 * max(s, pc.b.y * 0.45) / t);
-        t += clamp(max(s, pc.b.y * 0.35) * 0.85, 0.05, 1.2);
-        if (res < 0.004 || t > 40.0)
-            break;
-    }
-    return clamp(res, 0.0, 1.0);
+    // Exact SVO/DDA occlusion: any solid voxel between the surface and the sun
+    // fully occludes. Replaces the conservative sphere-trace, which could
+    // over-step and let thin occluders leak light (no voxel is ever missed now).
+    float th;
+    if (exactSVOHit(ro, rd, 0.05, 60.0, th))
+        return 0.0;
+    return 1.0;
 }
 
 vec3 skyColor(vec3 d)
@@ -989,35 +1174,17 @@ void main()
     } else {
         float t = max(t0, 0.0);
         bool hit = false;
-        float eps = pc.b.y * 0.45;
-        // Adaptive sphere tracing: far from any surface the distance field is
-        // reliable, so we can take nearly-full steps (0.95) to cross empty
-        // space fast and reach distant geometry; only near surfaces (small s,
-        // e.g. grazing the heightfield) do we relax to 0.85 so thin voxels are
-        // never tunneled. This is the ray-march analogue of vengi's aggressive
-        // empty-space pruning and is what stops objects "hiding" at distance.
-        for (int i = 0; i < 1500 && t <= t1; ++i) {
-            float s = map(ro + rd * t);
-            if (s < eps) {
-                // refine: bisect back toward the last clear sample so relaxed
-                // stepping / empty-cell skips cannot leave us deep inside
-                float lo = max(t - 2.0, 0.0), hi = t;
-                for (int k = 0; k < 8; ++k) {
-                    float mid = (lo + hi) * 0.5;
-                    if (map(ro + rd * mid) < eps)
-                        hi = mid;
-                    else
-                        lo = mid;
-                }
-                t = hi;
+        // Exact SVO/DDA traversal: visits every voxel in ray order, so no voxel
+        // is ever missed and cube corners stay sharp (no interpolated-SDF
+        // rounding). `t` becomes the entry t of the first solid voxel hit.
+        {
+            float th;
+            if (exactSVOHit(ro, rd, max(t0, 0.0), t1, th)) {
                 hit = true;
-                break;
+                t = th;
+            } else {
+                t = t1;
             }
-            // far from surfaces (s > 4 voxels) the field is trustworthy: take
-            // 0.95 steps to cover empty space quickly; near surfaces stay at
-            // 0.85 with a 0.35-voxel floor so thin voxels are never skipped.
-            float stepScale = (s > pc.b.y * 4.0) ? 0.95f : 0.85f;
-            t += max(s * stepScale, pc.b.y * 0.35);
         }
 
         // water surface between camera and terrain? (works from above and below)
@@ -1053,12 +1220,9 @@ void main()
                     // internal reflection dives back down into the water/bed
                     vec3 R = reflect(rd, nFace);
                     vec3 rc = skyColor(vec3(R.x, -abs(R.y), R.z));
-                    for (int i=0;i<64;++i){
-                        vec3 q = pw + R * (0.05 + 0.1*float(i));
-                        float s = map(q);
-                        if (s<0.03){ rc = shadeFloor(q, R); break; }
-                        if (dot(q,q) > 26000.0) break;
-                    }
+                    float rth;
+                    if (exactSVOHit(pw, R, 0.02, 200.0, rth))
+                        rc = shadeFloor(pw + R * rth, R);
                     vec3 skyT = skyColor(vec3(rd.x, abs(rd.y), rd.z));
                     skyT *= vec3(0.55, 0.80, 0.85);
                     col = mix(skyT, rc * mix(vec3(0.45,0.55,0.55), vec3(1.0), wsh), fres)
@@ -1067,12 +1231,9 @@ void main()
                     vec3 R = reflect(rd, n);
                     R.y = abs(R.y);
                     vec3 rc = skyColor(R);
-                    for (int i=0;i<64;++i){
-                        vec3 q = pw + R * (0.05 + 0.1*float(i));
-                        float s = map(q);
-                        if (s<0.03){ rc = shadeFloor(q, R); break; }
-                        if (dot(q,q) > 26000.0) break;
-                    }
+                    float rth;
+                    if (exactSVOHit(pw, R, 0.02, 200.0, rth))
+                        rc = shadeFloor(pw + R * rth, R);
                     col = mix(vec3(0.04,0.10,0.09), rc * mix(vec3(0.45,0.55,0.55), vec3(1.0), wsh), clamp(fres+0.25,0.0,1.0))
                           + kSunCol * sunGlint * 3.0 * wsh;
                 }

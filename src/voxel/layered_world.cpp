@@ -233,13 +233,38 @@ inline std::vector<int> chunkRangeFromAABB(const WorldAABB& b)
 
 bool LayeredWorld::load(const std::string& manifestPath)
 {
-    auto tLoad = std::chrono::steady_clock::now();
     m_manifestPath = manifestPath;
+    bool full = true;
+    std::vector<int> dirty;
+    double readMs = 0, fieldMs = 0;
+    if (!parseAndComputeDirty(full, dirty, readMs, fieldMs)) {
+        m_loaded = false;
+        return false;
+    }
+    auto tSvo = std::chrono::steady_clock::now();
+    if (!rebuildNow(full, dirty, glm::vec3(0))) {
+        m_loaded = false;
+        return false;
+    }
+    double svoMs = std::chrono::duration<double, std::milli>(
+                       std::chrono::steady_clock::now() - tSvo)
+                       .count();
+    spdlog::info("layered_world: load {:.0f} ms (read {:.0f}, field {:.0f}, svo {:.0f})",
+                 readMs + fieldMs + svoMs, readMs, fieldMs, svoMs);
+    m_hasFullBuild = true;
+    m_loaded = true;
+    return true;
+}
+
+bool LayeredWorld::parseAndComputeDirty(bool& outFull, std::vector<int>& outDirty,
+                                        double& outReadMs, double& outFieldMs)
+{
+    auto tLoad = std::chrono::steady_clock::now();
     std::vector<worldfile::WorldLayer> manifest;
-    if (!worldfile::loadManifest(manifestPath, manifest))
+    if (!worldfile::loadManifest(m_manifestPath, manifest))
         return false;
 
-    std::string dir = manifestPath;
+    std::string dir = m_manifestPath;
     size_t slash = dir.find_last_of("/\\");
     dir = slash == std::string::npos ? std::string() : dir.substr(0, slash + 1);
 
@@ -266,7 +291,7 @@ bool LayeredWorld::load(const std::string& manifestPath)
         return sig;
     };
 
-    addSig(manifestPath);
+    addSig(m_manifestPath);
 
     // per-layer record AABB + enabled-state + content signature, used to
     // derive the dirty chunk set for incremental rebuilds.
@@ -418,45 +443,118 @@ bool LayeredWorld::load(const std::string& manifestPath)
     const double fieldMs = std::chrono::duration<double, std::milli>(
                                std::chrono::steady_clock::now() - tField)
                                .count();
-    auto tSvo = std::chrono::steady_clock::now();
-    if (!synthesize(full, dirtyChunks)) {
-        m_loaded = false;
-        return false;
-    }
-    spdlog::info("layered_world: load {:.0f} ms (read {:.0f}, field {:.0f}, svo {:.0f})",
-                 std::chrono::duration<double, std::milli>(
-                     std::chrono::steady_clock::now() - tLoad)
-                     .count(),
-                 readMs, fieldMs,
-                 std::chrono::duration<double, std::milli>(
-                     std::chrono::steady_clock::now() - tSvo)
-                     .count());
+
+    outFull = full;
+    outDirty = std::move(dirtyChunks);
+    outReadMs = readMs;
+    outFieldMs = fieldMs;
 
     m_prevBox = std::move(curBox);
     m_prevEnabled = std::move(curEnabled);
     m_prevSig = std::move(curSig);
-    m_hasFullBuild = true;
-    m_loaded = true;
     return true;
 }
 
-bool LayeredWorld::reloadIfChanged()
+LayeredWorld::ReloadResult LayeredWorld::reloadIfChanged(glm::vec3 cam)
 {
     if (!m_loaded)
-        return false;
+        return kNone;
     for (const Signature& s : m_signatures) {
         std::error_code ec;
         unsigned long long sz = static_cast<unsigned long long>(
             ec ? 0ull : std::filesystem::file_size(s.path, ec));
         if (ec || sigOf(s.path) != s.mtime || sz != s.size) {
             spdlog::info("layered_world: '{}' changed on disk, rebuilding", s.path);
-            return load(m_manifestPath);
+            bool full = true;
+            std::vector<int> dirty;
+            double r = 0, f = 0;
+            if (!parseAndComputeDirty(full, dirty, r, f))
+                return kNone;
+            return kick(full, std::move(dirty), cam);
         }
     }
-    return false;
+    return kNone;
 }
 
-bool LayeredWorld::synthesize(bool full, const std::vector<int>& dirty)
+bool LayeredWorld::rebuildNow(bool full, const std::vector<int>& dirty, glm::vec3 cam)
+{
+    std::vector<std::unique_ptr<ChunkPool>> newPools;
+    Stats s;
+    if (!buildInto(full, dirty, &m_pools, cam, m_gpu, newPools, m_field, s))
+        return false;
+    m_pools = std::move(newPools);
+    m_stats = s;
+    return true;
+}
+
+LayeredWorld::ReloadResult LayeredWorld::kick(bool full, std::vector<int> dirty, glm::vec3 cam)
+{
+    if (m_rebuildRunning)
+        return kNone;
+    if (m_rebuildThread.joinable())
+        m_rebuildThread.join();
+    if (getenv("VF_SYNC_RELOAD")) {
+        if (!rebuildNow(full, dirty, cam))
+            return kNone;
+        return kSyncDone;
+    }
+    m_rebuildRunning = true;
+    m_rebuildDone = false;
+    m_rebuildThread = std::thread([this, full, dirty, cam]() {
+        std::vector<std::unique_ptr<ChunkPool>> newPools;
+        GpuWorld g;
+        VoxelField f;
+        Stats s;
+        buildInto(full, dirty, &m_pools, cam, g, newPools, f, s);
+        {
+            std::lock_guard<std::mutex> lk(m_pendingMtx);
+            m_pending = std::make_unique<PendingBuild>();
+            m_pending->gpu = std::move(g);
+            m_pending->pools = std::move(newPools);
+            m_pending->field = std::move(f);
+            m_pending->stats = s;
+        }
+        m_rebuildDone = true;
+        m_rebuildRunning = false;
+    });
+    return kStartedAsync;
+}
+
+void LayeredWorld::requestReload(glm::vec3 cam, bool full)
+{
+    if (m_rebuildRunning)
+        return;
+    std::vector<int> dirty; // empty => full
+    bool f = full;
+    double r = 0, ff = 0;
+    if (parseAndComputeDirty(f, dirty, r, ff))
+        kick(full, std::move(dirty), cam);
+}
+
+bool LayeredWorld::consumeRebuild()
+{
+    if (!m_rebuildDone.load(std::memory_order_acquire))
+        return false;
+    std::unique_lock<std::mutex> lk(m_pendingMtx);
+    if (!m_pending) {
+        m_rebuildDone = false;
+        return false;
+    }
+    m_gpu = std::move(m_pending->gpu);
+    m_pools = std::move(m_pending->pools);
+    m_field = std::move(m_pending->field);
+    m_stats = m_pending->stats;
+    m_pending.reset();
+    lk.unlock();
+    m_rebuildDone = false;
+    return true;
+}
+
+bool LayeredWorld::buildInto(bool full, const std::vector<int>& dirty,
+                              std::vector<std::unique_ptr<ChunkPool>>* prevPools,
+                              glm::vec3 camPos, GpuWorld& outGpu,
+                              std::vector<std::unique_ptr<ChunkPool>>& outPools,
+                              VoxelField& outField, Stats& outStats)
 {
     auto t0 = std::chrono::steady_clock::now();
     if (m_records.empty()) {
@@ -470,7 +568,7 @@ bool LayeredWorld::synthesize(bool full, const std::vector<int>& dirty)
     BuildCtx ctx;
     ctx.records = &m_records;
     ctx.map = &map;
-    ctx.field = &m_field;
+    ctx.field = &outField;
     ctx.chunkRecords.resize(size_t(GRID_N) * GRID_N * GRID_N);
     ctx.ugLo = paletteWordLo(2);
     ctx.ugHi = paletteWordHi(2);
@@ -484,24 +582,24 @@ bool LayeredWorld::synthesize(bool full, const std::vector<int>& dirty)
     // records-derived geometry oracle: terrain columns + flood-filled object
     // components with a signed distance transform. Replaces the old analytic
     // scene() sampling entirely.
-    m_field.build(m_records, m_colTop, m_colMat, m_objCells, m_objMats);
+    outField.build(m_records, m_colTop, m_colMat, m_objCells, m_objMats);
 
     // global presence grid (record cells + object interiors) for the SVO builder
     const size_t gBlocks = size_t(kGBlocks) * kGBlocks * kGBlocks;
-    m_blockSolid.assign(gBlocks, 0);
+    std::vector<uint8_t> blockSolid(gBlocks, 0);
     auto markBlock = [&](int x, int y, int z) {
         size_t bi = (size_t(z / kBlockSize) * kGBlocks + size_t(y / kBlockSize)) *
                         kGBlocks +
                     size_t(x / kBlockSize);
-        m_blockSolid[bi] = 1;
+        blockSolid[bi] = 1;
     };
     for (const VoxelRecord& v : m_records)
         markBlock(v.x, v.y, v.z);
-    const std::vector<uint8_t>& objMask = m_field.objectBlockMask();
+    const std::vector<uint8_t>& objMask = outField.objectBlockMask();
     for (size_t i = 0; i < gBlocks; ++i)
-        m_blockSolid[i] |= objMask[i];
+        blockSolid[i] |= objMask[i];
 
-    ctx.blockSolid = m_blockSolid.data();
+    ctx.blockSolid = blockSolid.data();
 
     for (size_t i = 0; i < m_records.size(); ++i) {
         const VoxelRecord& v = m_records[i];
@@ -511,15 +609,33 @@ bool LayeredWorld::synthesize(bool full, const std::vector<int>& dirty)
     }
 
     const size_t numChunks = ctx.chunkRecords.size();
-    if (m_pools.size() != numChunks) {
-        m_pools.clear();
-        m_pools.resize(numChunks); // default-constructed (null) unique_ptrs
-    }
-    if (full)
-        for (auto& p : m_pools)
-            p.reset();
+    outPools.clear();
+    outPools.resize(numChunks);
 
     std::unordered_set<int> dirtySet(dirty.begin(), dirty.end());
+
+    // camera-distance-priority visit order: nearest chunks are built first so a
+    // rebuild (especially an incremental one) makes the visible volume correct
+    // before the far field.
+    std::vector<size_t> order(numChunks);
+    for (size_t ci = 0; ci < numChunks; ++ci)
+        order[ci] = ci;
+    {
+        const float chunkM = CHUNK_N * VOXEL;
+        const float half = WORLD * 0.5f;
+        std::vector<float> dist(numChunks);
+        for (size_t ci = 0; ci < numChunks; ++ci) {
+            int cz = int(ci / (GRID_N * GRID_N));
+            int cy = int((ci / GRID_N) % GRID_N);
+            int cx = int(ci % GRID_N);
+            glm::vec3 c = (glm::vec3(float(cx), float(cy), float(cz)) + 0.5f) * chunkM -
+                          glm::vec3(half);
+            glm::vec3 d = c - camPos;
+            dist[ci] = glm::dot(d, d);
+        }
+        std::sort(order.begin(), order.end(),
+                  [&](size_t a, size_t b) { return dist[a] < dist[b]; });
+    }
 
     std::atomic<size_t> next{ 0 };
     unsigned hc = std::max(1u, std::thread::hardware_concurrency());
@@ -527,16 +643,20 @@ bool LayeredWorld::synthesize(bool full, const std::vector<int>& dirty)
     for (unsigned t = 0; t < hc; ++t)
         threads.emplace_back([&] {
             for (;;) {
-                size_t ci = next.fetch_add(1);
-                if (ci >= numChunks)
+                size_t oi = next.fetch_add(1);
+                if (oi >= numChunks)
                     return;
+                size_t ci = order[oi];
                 // reuse the cached pool unless this chunk must be rebuilt
-                if (!full && dirtySet.find(int(ci)) == dirtySet.end())
+                if (!full && dirtySet.find(int(ci)) == dirtySet.end()) {
+                    if (prevPools && (*prevPools)[ci])
+                        outPools[ci] = std::move((*prevPools)[ci]);
                     continue;
+                }
                 if (ctx.chunkRecords[ci].empty()) {
                     // no records: drop any previous geometry (the post-process
                     // step may promote fully-below-ground chunks to solid)
-                    m_pools[ci].reset();
+                    outPools[ci].reset();
                     continue;
                 }
                 int cz = int(ci / (GRID_N * GRID_N));
@@ -581,28 +701,28 @@ bool LayeredWorld::synthesize(bool full, const std::vector<int>& dirty)
                     return int32_t(nodeH);
                 };
                 pool->root = build(x0, y0, z0, CHUNK_N);
-                m_pools[ci] = std::move(pool);
+                outPools[ci] = std::move(pool);
             }
         });
     for (auto& th : threads)
         th.join();
 
     // --- deterministic merge across per-chunk pools (non-mutating) ---
-    m_gpu = GpuWorld{};
-    m_gpu.chunkGrid.assign(numChunks, -1);
+    outGpu = GpuWorld{};
+    outGpu.chunkGrid.assign(numChunks, -1);
     size_t nodeOff = 0, hOff = 0, bOff = 0;
     for (size_t ci = 0; ci < numChunks; ++ci) {
-        ChunkPool* pp = m_pools[ci].get();
+        ChunkPool* pp = outPools[ci].get();
         if (!pp || pp->root < 0) {
-            m_gpu.chunkGrid[ci] = -1;
+            outGpu.chunkGrid[ci] = -1;
             continue;
         }
-        // copy + offset-adjust handles into m_gpu; the pool stays pristine so it
+        // copy + offset-adjust handles into outGpu; the pool stays pristine so it
         // can be reused in a later incremental rebuild.
-        size_t hStart = m_gpu.handles.size();
-        m_gpu.handles.insert(m_gpu.handles.end(), pp->handles.begin(), pp->handles.end());
-        for (size_t k = hStart; k < m_gpu.handles.size(); ++k) {
-            uint32_t& h = m_gpu.handles[k];
+        size_t hStart = outGpu.handles.size();
+        outGpu.handles.insert(outGpu.handles.end(), pp->handles.begin(), pp->handles.end());
+        for (size_t k = hStart; k < outGpu.handles.size(); ++k) {
+            uint32_t& h = outGpu.handles[k];
             if (handleIsNode(h))
                 h += uint32_t(nodeOff << 2);
             else if (handleIsBrick(h))
@@ -613,14 +733,14 @@ bool LayeredWorld::synthesize(bool full, const std::vector<int>& dirty)
             r += uint32_t(nodeOff << 2);
         else if (handleIsBrick(r))
             r += uint32_t(bOff << 2);
-        m_gpu.chunkGrid[ci] = r == kEmptyHandle ? -1 : int32_t(r);
-        size_t cStart = m_gpu.childBase.size();
-        m_gpu.childBase.insert(m_gpu.childBase.end(), pp->childBase.begin(),
-                               pp->childBase.end());
-        for (size_t k = cStart; k < m_gpu.childBase.size(); ++k)
-            m_gpu.childBase[k] += uint32_t(hOff);
-        m_gpu.payload.insert(m_gpu.payload.end(), pp->payload.begin(), pp->payload.end());
-        m_gpu.bricks.insert(m_gpu.bricks.end(), pp->bricks.begin(), pp->bricks.end());
+        outGpu.chunkGrid[ci] = r == kEmptyHandle ? -1 : int32_t(r);
+        size_t cStart = outGpu.childBase.size();
+        outGpu.childBase.insert(outGpu.childBase.end(), pp->childBase.begin(),
+                                pp->childBase.end());
+        for (size_t k = cStart; k < outGpu.childBase.size(); ++k)
+            outGpu.childBase[k] += uint32_t(hOff);
+        outGpu.payload.insert(outGpu.payload.end(), pp->payload.begin(), pp->payload.end());
+        outGpu.bricks.insert(outGpu.bricks.end(), pp->bricks.begin(), pp->bricks.end());
         nodeOff += pp->payload.size();
         hOff += pp->handles.size();
         bOff += pp->bricks.size() / BRICK_WORDS;
@@ -629,24 +749,24 @@ bool LayeredWorld::synthesize(bool full, const std::vector<int>& dirty)
     // chunks without any record: fully-below-ground becomes a solid terminal,
     // everything else stays an empty root
     for (size_t ci = 0; ci < numChunks; ++ci) {
-        if (m_gpu.chunkGrid[ci] != -1 || !ctx.chunkRecords[ci].empty())
+        if (outGpu.chunkGrid[ci] != -1 || !ctx.chunkRecords[ci].empty())
             continue;
         int cz = int(ci / (GRID_N * GRID_N));
         int cy = int((ci / GRID_N) % GRID_N);
         int cx = int(ci % GRID_N);
         int cls = classifyBox(ctx, nullptr, false, cx * CHUNK_N, cy * CHUNK_N,
                               cz * CHUNK_N, CHUNK_N);
-        m_gpu.chunkGrid[ci] = cls == 1 ? int32_t(kSolidHandle) : -1;
+        outGpu.chunkGrid[ci] = cls == 1 ? int32_t(kSolidHandle) : -1;
     }
 
-    m_stats.records = m_records.size();
-    m_stats.nodes = m_gpu.payload.size();
-    m_stats.bricks = m_gpu.bricks.size() / BRICK_WORDS;
-    m_stats.activeChunks =
-        size_t(std::count_if(m_gpu.chunkGrid.begin(), m_gpu.chunkGrid.end(),
+    outStats.records = m_records.size();
+    outStats.nodes = outGpu.payload.size();
+    outStats.bricks = outGpu.bricks.size() / BRICK_WORDS;
+    outStats.activeChunks =
+        size_t(std::count_if(outGpu.chunkGrid.begin(), outGpu.chunkGrid.end(),
                              [](int32_t v) { return v >= 0; }));
-    m_stats.memoryBytes = m_gpu.memoryBytes();
-    m_stats.buildSeconds =
+    outStats.memoryBytes = outGpu.memoryBytes();
+    outStats.buildSeconds =
         std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
 
     if (getenv("VF_TRACE")) {
@@ -656,30 +776,25 @@ bool LayeredWorld::synthesize(bool full, const std::vector<int>& dirty)
                 h = (h ^ x) * 1099511628211ull;
             return h;
         };
-        std::vector<uint32_t> gridWords(m_gpu.chunkGrid.begin(), m_gpu.chunkGrid.end());
+        std::vector<uint32_t> gridWords(outGpu.chunkGrid.begin(), outGpu.chunkGrid.end());
         spdlog::info("layered_world hash: grid={:x} nodes={:x} handles={:x} bricks={:x}",
-                     vecHash(gridWords), vecHash(m_gpu.payload), vecHash(m_gpu.handles),
-                     vecHash(m_gpu.bricks));
+                     vecHash(gridWords), vecHash(outGpu.payload),
+                     vecHash(outGpu.handles), vecHash(outGpu.bricks));
     }
 
     spdlog::info("layered_world: {} records -> {} nodes, {} bricks, {}/{} chunks"
                  " active, {:.1f} MB in {:.2f}s{}",
-                 m_stats.records, m_stats.nodes, m_stats.bricks, m_stats.activeChunks,
+                 outStats.records, outStats.nodes, outStats.bricks, outStats.activeChunks,
                  GRID_N * GRID_N * GRID_N,
-                 double(m_stats.memoryBytes) / (1024.0 * 1024.0), m_stats.buildSeconds,
+                 double(outStats.memoryBytes) / (1024.0 * 1024.0), outStats.buildSeconds,
                  full ? "" : " (incremental)");
-
-    // temporary synthesis grids no longer needed once the SVO is built
-    // (m_pools is kept resident for incremental rebuilds)
-    m_blockSolid.clear();
-    m_blockSolid.shrink_to_fit();
-    m_objCells.clear();
-    m_objCells.shrink_to_fit();
-    m_objMats.clear();
-    m_objMats.shrink_to_fit();
     return true;
 }
 
-LayeredWorld::~LayeredWorld() = default;
+LayeredWorld::~LayeredWorld()
+{
+    if (m_rebuildThread.joinable())
+        m_rebuildThread.join();
+}
 
 } // namespace vf::voxel

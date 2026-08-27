@@ -24,10 +24,15 @@
 #include "voxel/world.hpp"
 #include "voxel/worldfile.hpp"
 #include "voxel/voxel_field.hpp"
+#include <atomic>
 #include <filesystem>
 #include <map>
+#include <memory>
+#include <mutex>
 #include <string>
+#include <thread>
 #include <vector>
+#include <glm/glm.hpp>
 
 namespace vf::voxel {
 
@@ -72,9 +77,18 @@ public:
     // procedural World::build path).
     bool load(const std::string& manifestPath);
 
-    // Rebuild if any input file changed since the last load. Returns true
-    // when a rebuild happened.
-    bool reloadIfChanged();
+    // Rebuild if any input file changed since the last load. Returns kSyncDone
+    // when the fresh world is already applied (synchronous mode) or kStartedAsync
+    // when a background rebuild was kicked (poll consumeRebuild() each frame).
+    enum ReloadResult { kNone, kSyncDone, kStartedAsync };
+    ReloadResult reloadIfChanged(glm::vec3 cam);
+
+    // Force a (camera-priority) rebuild, e.g. after a GUI layer toggle.
+    void requestReload(glm::vec3 cam, bool full = true);
+
+    // Returns true once a background rebuild has finished and the fresh world has
+    // been swapped in; the caller should then re-upload GPU buffers.
+    bool consumeRebuild();
 
     bool loaded() const { return m_loaded; }
 
@@ -87,9 +101,29 @@ public:
     ~LayeredWorld();
 
 private:
-    // Build the SVO. When `full` is false only the chunks in `dirty` are
-    // rebuilt; the rest are reused from the cached per-chunk pools.
-    bool synthesize(bool full = true, const std::vector<int>& dirty = {});
+    // Build the SVO into the supplied targets. When `full` is false only the
+    // chunks in `dirty` are rebuilt; the rest are reused from `prevPools` (left
+    // null in `outPools` entries are skipped). Chunks are visited nearest-first
+    // relative to `camPos` so a camera-priority rebuild does the visible volume
+    // first. Used by both the synchronous initial load and the background reload.
+    bool buildInto(bool full, const std::vector<int>& dirty,
+                   std::vector<std::unique_ptr<ChunkPool>>* prevPools,
+                   glm::vec3 camPos, GpuWorld& outGpu,
+                   std::vector<std::unique_ptr<ChunkPool>>& outPools,
+                   VoxelField& outField, Stats& outStats);
+
+    // Synchronous rebuild into the live members (initial load / VF_SYNC_RELOAD).
+    bool rebuildNow(bool full, const std::vector<int>& dirty, glm::vec3 cam);
+
+    // Parse the manifest + enabled layers into the record buffers and compute the
+    // full/incremental dirty set. Shared by load() and reloadIfChanged().
+    bool parseAndComputeDirty(bool& outFull, std::vector<int>& outDirty,
+                             double& outReadMs, double& outFieldMs);
+
+    // Kick a rebuild: synchronous when VF_SYNC_RELOAD is set, otherwise a
+    // background thread builds into a pending world that consumeRebuild() swaps
+    // in. Returns the resulting ReloadResult.
+    ReloadResult kick(bool full, std::vector<int> dirty, glm::vec3 cam);
 
     std::string m_manifestPath;
     bool m_loaded = false;
@@ -135,6 +169,19 @@ private:
     std::map<std::string, LayerCacheEntry> m_layerCache;
 
     Stats m_stats;
+
+    // --- background rebuild state (camera-priority, non-blocking) ----------
+    struct PendingBuild {
+        GpuWorld gpu;
+        std::vector<std::unique_ptr<ChunkPool>> pools;
+        VoxelField field;
+        Stats stats;
+    };
+    std::unique_ptr<PendingBuild> m_pending;
+    std::mutex m_pendingMtx;
+    std::atomic<bool> m_rebuildRunning{ false };
+    std::atomic<bool> m_rebuildDone{ false };
+    std::thread m_rebuildThread;
 };
 
 } // namespace vf::voxel

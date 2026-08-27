@@ -857,17 +857,21 @@ int App::run(const Args& args)
         }
 
         // live world reload: MCP/chat edits and layer toggles land in the
-        // layer files; poll for changes and swap the SVO in-place
+        // layer files; poll for changes and swap the SVO in-place. Reloads are
+        // camera-distance-priority and run off the render thread (see
+        // LayeredWorld), so an in-progress rebuild never blocks a frame; the
+        // finished world is swapped in here on the next consumeRebuild().
         m_layerPollT += dt;
         if (m_layers.loaded() && m_layerPollT >= 0.5f) {
             m_layerPollT = 0.f;
-            if (m_layers.reloadIfChanged())
+            if (m_layers.reloadIfChanged(m_camera.pos) == vf::voxel::LayeredWorld::kSyncDone)
                 applyWorldReload();
         }
+        if (m_layers.consumeRebuild())
+            applyWorldReload();
         if (m_pendingWorldReload) {
             m_pendingWorldReload = false;
-            m_layers.load(std::string(VOXELFORGE_ASSET_DIR) + "/world.json");
-            applyWorldReload();
+            m_layers.requestReload(m_camera.pos, true);
         }
 
         // Voxel picking: Ctrl+LMB
