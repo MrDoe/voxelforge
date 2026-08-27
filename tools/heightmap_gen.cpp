@@ -396,6 +396,17 @@ int main(int argc, char** argv)
           cellOf(-1.5f), cellOf(3.5f),
           cellOf(kPaddockMin.y - 0.5f), cellOf(kPaddockMax.y + 0.5f));
 
+    // footbridge arching across the river at x = 0
+    auto& bridgeL = layers.emplace_back();
+    bridgeL.file = "bridge.vxw";
+    bridgeL.role = "object";
+    bridgeL.name = "bridge";
+    bridgeL.pos = { kBridgePos.x, 0.f, kBridgePos.y };
+    sweep(bridgeL, [](glm::vec3 p) { return vf::voxel::bridgeAt(p); },
+          cellOf(kBridgePos.x - 1.5f), cellOf(kBridgePos.x + 1.5f),
+          cellOf(-3.4f), cellOf(2.0f),
+          cellOf(kBridgePos.y - 6.5f), cellOf(kBridgePos.y + 6.5f));
+
     auto& bushL = layers.emplace_back();
     bushL.file = "bushes.vxw";
     bushL.role = "scatter";
@@ -489,7 +500,8 @@ int main(int argc, char** argv)
         wl.pos[1] = L.pos.y;
         wl.pos[2] = L.pos.z;
         wl.rotDeg = 0.f;
-        wl.enabled = L.role == "landscape" || L.file == "ai_edits.vxw";
+        wl.enabled = L.role == "landscape" || L.file == "ai_edits.vxw" ||
+                     L.file == "bridge.vxw";
         wl.listed = true;
         // NEVER write ai_edits.vxw back: the packer only consumes it. Writing
         // would stomp edits appended while this bake was running.

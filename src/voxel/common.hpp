@@ -168,8 +168,11 @@ inline uint8_t materialAt(float x, float z, float H)
 
 // --- riverside objects (built layer for layer, bottom to top) ---------------
 inline constexpr glm::vec2 kHousePos { 6.5f, 12.5f }; // west bank of the river
+
 inline constexpr float kPadY = -0.40f; // flattened ground level around the house
 
+// wooden footbridge crossing the river at x = 0 (river centre z = riverZ(0) ~ 7.15)
+inline constexpr glm::vec2 kBridgePos { 0.0f, 7.15f };
 struct ObjHit {
     float d;
     uint8_t mat;
@@ -691,6 +694,56 @@ inline ObjHit alpacaAt(glm::vec3 p)
         }
     }
     return best;
+}
+
+// --- a wooden footbridge arching over the river ----------------------------
+// Long axis runs along Z (perpendicular to the river's X-flow); the deck bows
+// upward toward mid-span and is carried on a pair of timber trestles that drop
+// into the banks/riverbed, with side rails and cross beams.
+inline ObjHit bridgeAt(glm::vec3 p)
+{
+    const float bx = kBridgePos.x, bz = kBridgePos.y;
+    const float halfW = 0.95f;  // half deck width (x)
+    const float halfL = 6.0f;   // half span (z)
+    const float deckBase = 0.95f;
+    const float arch = 0.45f;   // mid-span rise
+
+    float lx = p.x - bx, lz = p.z - bz;
+    if (std::fabs(lx) > halfW + 0.5f || std::fabs(lz) > halfL + 0.5f)
+        return { 1e9f, 6u };
+
+    float tz = glm::clamp(lz / halfL, -1.0f, 1.0f);
+    float yDeck = deckBase + arch * (1.0f - tz * tz); // highest at centre
+
+    // deck slab
+    float plank = 0.14f;
+    float d = sdBoxF(p, glm::vec3(bx, yDeck - plank * 0.5f, bz),
+                     glm::vec3(halfW, plank * 0.5f, halfL));
+
+    // side rails (logs along Z) with uprights at intervals
+    float railY = yDeck + 0.42f, railR = 0.06f;
+    float railL = sdLogZ(p, bz, halfL - 0.2f, railY, bx - (halfW - 0.06f), railR);
+    float railRr = sdLogZ(p, bz, halfL - 0.2f, railY, bx + (halfW - 0.06f), railR);
+    d = glm::min(d, glm::min(railL, railRr));
+    for (float zp = -halfL + 0.4f; zp <= halfL - 0.4f + 1e-3f; zp += 1.5f) {
+        for (int s = -1; s <= 1; s += 2) {
+            float xp = bx + s * (halfW - 0.06f);
+            d = glm::min(d, sdCylY(p, glm::vec2(xp, bz + zp), yDeck, railY, 0.05f));
+        }
+    }
+
+    // trestle legs dropping to the riverbed, with cross beams under the deck
+    float yBot = -3.2f;
+    for (float zp = -halfL + 1.0f; zp <= halfL - 1.0f + 1e-3f; zp += 2.0f) {
+        for (int s = -1; s <= 1; s += 2) {
+            float xp = bx + s * (halfW - 0.25f);
+            d = glm::min(d, sdCylY(p, glm::vec2(xp, bz + zp), yBot,
+                                   yDeck - plank, 0.10f));
+        }
+        d = glm::min(d, sdLogX(p, bx, halfW - 0.2f, yDeck - plank - 0.12f,
+                               bz + zp, 0.07f));
+    }
+    return { d, 6u }; // wood
 }
 
 

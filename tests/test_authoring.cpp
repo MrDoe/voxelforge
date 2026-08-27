@@ -266,3 +266,43 @@ TEST_CASE("carve: subtractive cylinder cuts a hole through terrain and objects")
     CHECK(t.d <= 0.0f);
 }
 
+TEST_CASE("raise: dome lifts terrain most at the centre, tapering to the rim")
+{
+    EditableWorld raiser(std::string(VOXELFORGE_ASSET_DIR),
+                         std::string(EditableWorld::kRaiseFileName),
+                         std::string(EditableWorld::kRaiseLayerName),
+                         std::string("raise"));
+    const glm::ivec3 anchor = worldToVoxel(glm::vec3(0.f, 0.f, 0.f));
+    std::vector<VoxelRecord> drecs =
+        raiser.makeDome(anchor, glm::vec3(0.f, 1.f, 0.f), 1.0f, 1.5f, 6);
+    REQUIRE(!drecs.empty());
+    std::vector<uint32_t> raiseCells;
+    std::vector<uint8_t> raiseMats;
+    for (auto& r : drecs) {
+        raiseCells.push_back(((uint32_t)r.x << 20) | ((uint32_t)r.y << 10) | (uint32_t)r.z);
+        raiseMats.push_back(r.materialId);
+    }
+
+    const int latN = 1024;
+    std::vector<int16_t> colTop(latN * latN, -1);
+    std::vector<uint8_t> colMat(latN * latN, 0);
+    for (int dz = -60; dz <= 60; ++dz)
+        for (int dx = -60; dx <= 60; ++dx) {
+            int x = anchor.x + dx, z = anchor.z + dz;
+            if (x < 0 || z < 0 || x >= latN || z >= latN)
+                continue;
+            colTop[size_t(z) * latN + x] = (int16_t)anchor.y;
+            colMat[size_t(z) * latN + x] = 1;
+        }
+
+    VoxelField f;
+    std::vector<VoxelRecord> recs0;
+    f.build(recs0, colTop, colMat, {}, {}, {}, {}, raiseCells, raiseMats);
+
+    const auto& ht = f.heightTexture();
+    float hCenter = ht[size_t(anchor.z) * latN + anchor.x].x;
+    int rim = anchor.x + int(1.0f / VOXEL); // one radius out from the centre
+    float hRim = ht[size_t(anchor.z) * latN + rim].x;
+    CHECK(hCenter > hRim + 1.0f); // centre lifted well above the tapering rim
+}
+
