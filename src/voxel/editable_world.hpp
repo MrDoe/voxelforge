@@ -7,20 +7,28 @@
 
 namespace vf::voxel {
 
-// Persistent AI edits layer: assets/ai_edits.vxw + world.json entry.
-// All AI-created objects are rasterized into VoxelRecords anchored at the
+// Persistent editable layer: assets/<file> + world.json entry.
+// All created objects are rasterized into VoxelRecords anchored at the
 // user-picked voxel (center-bottom convention) and appended here.
 // The app hot-reloads this layer via its disk poll within ~0.5 s.
+//
+// The default instance is the AI "add" layer (ai_edits.vxw, role "object").
+// A second instance with role "carve" holds subtractive carve voxels.
 struct EditableWorld {
     static constexpr const char* kFileName = "ai_edits.vxw";
     static constexpr const char* kLayerName = "ai_edits";
+    static constexpr const char* kCarveFileName = "carve_edits.vxw";
+    static constexpr const char* kCarveLayerName = "carve_edits";
     static constexpr float kBand = 0.20f; // surface band like heightmap_gen sweep
 
-    EditableWorld(std::string assetDir = std::string(VOXELFORGE_ASSET_DIR));
+    EditableWorld(std::string assetDir = std::string(VOXELFORGE_ASSET_DIR),
+                  std::string fileName = std::string(kFileName),
+                  std::string layerName = std::string(kLayerName),
+                  std::string role = std::string("object"));
 
-    bool load(); // reads existing ai_edits.vxw if present (empty if missing)
-    bool save() const; // writes current records to ai_edits.vxw + ensures manifest
-    void enableInManifest() const; // mark the ai_edits layer enabled in world.json
+    bool load(); // reads existing file if present (empty if missing)
+    bool save() const; // writes current records to the layer file + ensures manifest
+    void enableInManifest() const; // mark this layer enabled in world.json
     bool ensureManifest(); // adds layer entry to world.json if absent
 
     // record generation helpers (anchor is lattice coord of selected voxel = bottom-center)
@@ -29,6 +37,14 @@ struct EditableWorld {
     std::vector<VoxelRecord> makeEllipsoid(glm::ivec3 anchor, glm::vec3 radiusM, uint8_t mat) const;
     std::vector<VoxelRecord> makeCylinderY(glm::ivec3 anchor, float radiusM, float heightM, uint8_t mat) const;
     std::vector<VoxelRecord> makeStamp(glm::ivec3 anchor, const std::vector<StampCell>& cells) const;
+
+    // Oriented cylinder stamped along `axisDir` (unit world vector) for `lengthM`,
+    // starting at the anchor (base centre). When `carve` is true the FULL solid
+    // volume is emitted (the removed material); otherwise a thin shell band is
+    // emitted (flood-filled to solid by VoxelField::build, like other objects).
+    std::vector<VoxelRecord> makeOrientedCylinder(glm::ivec3 anchor, glm::vec3 axisDir,
+                                                  float radiusM, float lengthM,
+                                                  uint8_t mat, bool carve) const;
 
     // Import a foreign .vxw layer file: translates its records so the object's
     // bottom-center lands on `anchor` and appends the copy to ai_edits.vxw.
@@ -64,6 +80,9 @@ struct EditableWorld {
 
 private:
     std::string m_assetDir;
+    std::string m_fileName;   // e.g. "ai_edits.vxw" or "carve_edits.vxw"
+    std::string m_layerName;  // manifest layer name
+    std::string m_role;       // "object" or "carve"
     std::string filePath() const;
     std::string manifestPath() const;
     WorldFileMeta meta() const;

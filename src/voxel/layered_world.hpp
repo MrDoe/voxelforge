@@ -140,6 +140,11 @@ private:
     // VoxelField build.
     std::vector<uint32_t> m_objCells;
     std::vector<uint8_t> m_objMats;                        // material per object cell (parallel to m_objCells)
+    // subtractive "carve" layer cells (role "carve"): cut holes through terrain
+    // and objects. Not part of the merged record set; fed to VoxelField::build
+    // as a separate field.
+    std::vector<uint32_t> m_carveCells;
+    std::vector<uint8_t> m_carveMats;
     std::vector<uint8_t> m_blockSolid;                     // global presence grid (records+interior)
     VoxelField m_field;                                    // records-derived geometry oracle
 

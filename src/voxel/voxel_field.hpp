@@ -25,10 +25,15 @@ class VoxelField {
 public:
     // colTop/colMat: per-column landscape tops (lattice y, -1 = none) and the
     // top record's material. objCells/objMats: packed keys + material of every
-    // non-landscape record cell (priority-merged union).
+    // non-landscape record cell (priority-merged union). carveCells/carveMats:
+    // packed keys + material of subtractive "carve" cells (role "carve"); the
+    // field lowers the terrain heightfield where carved and subtracts the carve
+    // volume from BOTH terrain and objects so the hole reads as air.
     void build(const std::vector<VoxelRecord>& records,
                const std::vector<int16_t>& colTop, const std::vector<uint8_t>& colMat,
-               const std::vector<uint32_t>& objCells, const std::vector<uint8_t>& objMats);
+               const std::vector<uint32_t>& objCells, const std::vector<uint8_t>& objMats,
+               const std::vector<uint32_t>& carveCells = {},
+               const std::vector<uint8_t>& carveMats = {});
 
     bool valid() const { return m_built; }
 
@@ -36,6 +41,13 @@ public:
         float d = 1e9f;
         uint8_t mat = 0;
         bool obj = false; // true when the object field is the closest surface
+    };
+
+    // Cached component distance-transform output (content-keyed reuse across
+    // builds). Public so the free helper in voxel_field.cpp can fill it.
+    struct CompOut {
+        std::vector<uint32_t> keys; // packed lattice cells
+        std::vector<uint32_t> vals; // uint8(sdfRaw) | mat << 8
     };
 
     // Signed distance (meters, negative inside solids) + material at a lattice
@@ -101,6 +113,15 @@ private:
     std::vector<uint8_t> m_objBlock;
     std::vector<int8_t> m_objVol;
 
+    // subtractive carve field: same sparse layout as the object field, but its
+    // signed distance is negated in sample() so the carved volume reads as air
+    // (cutting holes through terrain and objects alike).
+    std::vector<uint32_t> m_carveKey, m_carveVal;
+    size_t m_carveMask = 0;
+    size_t m_carveStored = 0;
+    void carveInsert(uint32_t k, uint32_t v);
+    inline bool carveFind(uint32_t k, uint32_t& v) const;
+
     inline size_t oslot(uint32_t k) const { return (size_t(k) * 2654435761u) & m_omask; }
     inline bool ofind(uint32_t k, uint32_t& v) const {
         if (m_omask == 0)
@@ -126,10 +147,6 @@ private:
     // component result cache (content-keyed): distance transforms of unchanged
     // components are reused verbatim across builds, so small edits only pay
     // for the components whose cells actually changed
-    struct CompOut {
-        std::vector<uint32_t> keys; // packed lattice cells
-        std::vector<uint32_t> vals; // uint8(sdfRaw) | mat << 8
-    };
     std::vector<CompOut> m_prevOuts;
     std::vector<uint64_t> m_prevHashes;
     bool m_hasPrev = false;

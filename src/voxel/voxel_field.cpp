@@ -12,6 +12,9 @@ namespace vf::voxel {
 namespace {
 
 constexpr int kBlock = 4; // presence-block granularity (cells)
+constexpr int kMargin = 2;       // cells of context around the shell
+constexpr float kStore = 6.f;    // store air band up to 6 voxels from solids
+constexpr int kPad = int(kStore) + kMargin;
 
 inline uint32_t cellKey(uint32_t x, uint32_t y, uint32_t z)
 {
@@ -37,6 +40,243 @@ inline const std::vector<Nb>& neighbours()
         return v;
     }();
     return nb;
+}
+
+// One connected component of solid record cells (26-neighbourhood).
+struct Comp {
+    int lo[3], hi[3];
+    std::vector<uint32_t> cellIdx; // indices into the source cells array
+};
+
+// scratch buffers for the two-pass Dijkstra signed distance transform
+struct Scratch {
+    std::vector<float> distOcc, distAir;
+    std::vector<uint8_t> occupied, exterior, argmat;
+    std::vector<uint32_t> bfs;
+    using QE = std::pair<float, uint32_t>; // dist, cell index
+    std::priority_queue<QE, std::vector<QE>, std::greater<QE>> pq;
+};
+
+// Group packed cell keys into connected components.
+static void groupComponents(const std::vector<uint32_t>& cells, int N, std::vector<Comp>& comps)
+{
+    size_t cap = 1024;
+    while (cap < cells.size() * 2)
+        cap <<= 1;
+    std::vector<uint32_t> okey(cap, 0), oval(cap, 0);
+    const size_t omask = cap - 1;
+    auto oplace = [&](uint32_t k, uint32_t v) {
+        size_t i = (size_t(k) * 2654435761u) & omask;
+        while (okey[i]) {
+            if (okey[i] - 1u == k)
+                return;
+            i = (i + 1) & omask;
+        }
+        okey[i] = k + 1;
+        oval[i] = v;
+    };
+    auto ofind = [&](uint32_t k) -> int {
+        size_t i = (size_t(k) * 2654435761u) & omask;
+        while (okey[i]) {
+            if (okey[i] - 1u == k)
+                return int(oval[i]);
+            i = (i + 1) & omask;
+        }
+        return -1;
+    };
+    for (size_t i = 0; i < cells.size(); ++i)
+        oplace(cells[i], uint32_t(i));
+
+    auto xyz = [](uint32_t k, int& x, int& y, int& z) {
+        x = int(k >> 20);
+        y = int((k >> 10) & 0x3FFu);
+        z = int(k & 0x3FFu);
+    };
+    std::vector<uint32_t> comp(cells.size(), 0xFFFFFFFFu);
+    std::vector<uint32_t> queue;
+    for (size_t s = 0; s < cells.size(); ++s) {
+        if (comp[s] != 0xFFFFFFFFu)
+            continue;
+        uint32_t id = uint32_t(comps.size());
+        comps.emplace_back();
+        Comp& c = comps.back();
+        int x, y, z;
+        xyz(cells[s], x, y, z);
+        c.lo[0] = c.hi[0] = x;
+        c.lo[1] = c.hi[1] = y;
+        c.lo[2] = c.hi[2] = z;
+        comp[s] = id;
+        queue.clear();
+        queue.push_back(uint32_t(s));
+        for (size_t qi = 0; qi < queue.size(); ++qi) {
+            int cx, cy, cz;
+            xyz(cells[queue[qi]], cx, cy, cz);
+            if (cx < c.lo[0]) c.lo[0] = cx;
+            if (cy < c.lo[1]) c.lo[1] = cy;
+            if (cz < c.lo[2]) c.lo[2] = cz;
+            if (cx > c.hi[0]) c.hi[0] = cx;
+            if (cy > c.hi[1]) c.hi[1] = cy;
+            if (cz > c.hi[2]) c.hi[2] = cz;
+            c.cellIdx.push_back(queue[qi]);
+            for (int dz = -1; dz <= 1; ++dz)
+                for (int dy = -1; dy <= 1; ++dy)
+                    for (int dx = -1; dx <= 1; ++dx) {
+                        if (!dx && !dy && !dz)
+                            continue;
+                        int nx = cx + dx, ny = cy + dy, nz = cz + dz;
+                        if (nx < 0 || ny < 0 || nz < 0 || nx >= N || ny >= N || nz >= N)
+                            continue;
+                        int ni = ofind(cellKey(uint32_t(nx), uint32_t(ny), uint32_t(nz)));
+                        if (ni < 0 || comp[size_t(ni)] != 0xFFFFFFFFu)
+                            continue;
+                        comp[size_t(ni)] = id;
+                        queue.push_back(uint32_t(ni));
+                    }
+        }
+    }
+}
+
+// Two-pass Dijkstra signed distance transform for a single component.
+// `cells`/`mats` are the source arrays; result (packed keys + int8 sdf|mat) is
+// written into `out`. Returns false if the component's grid is too large.
+static bool processComponent(const std::vector<uint32_t>& cells, const std::vector<uint8_t>& mats,
+                             const Comp& c, int N, Scratch& s, VoxelField::CompOut& out)
+{
+    const int nx = c.hi[0] - c.lo[0] + 1 + 2 * kPad;
+    const int ny = c.hi[1] - c.lo[1] + 1 + 2 * kPad;
+    const int nz = c.hi[2] - c.lo[2] + 1 + 2 * kPad;
+    const long long vol = (long long)nx * ny * nz;
+    if (vol > 32'000'000)
+        return false;
+    const int gx0 = c.lo[0] - kPad, gy0 = c.lo[1] - kPad, gz0 = c.lo[2] - kPad;
+    const size_t ncells = size_t(vol);
+
+    s.occupied.assign(ncells, 0);
+    s.argmat.assign(ncells, 0);
+    for (uint32_t ci : c.cellIdx) {
+        uint32_t k = cells[ci];
+        int x = int(k >> 20), y = int((k >> 10) & 0x3FFu), z = int(k & 0x3FFu);
+        size_t i = (size_t(z - gz0) * ny + size_t(y - gy0)) * nx + size_t(x - gx0);
+        s.occupied[i] = 1;
+        s.argmat[i] = mats[ci];
+    }
+
+    auto idx = [&](int lx, int ly, int lz) {
+        return (size_t(lz) * ny + size_t(ly)) * nx + size_t(lx);
+    };
+
+    // pass 1: distance to nearest occupied cell (+ its material)
+    s.distOcc.assign(ncells, 1e30f);
+    s.pq = {};
+    for (size_t i = 0; i < ncells; ++i)
+        if (s.occupied[i]) {
+            s.distOcc[i] = 0.f;
+            s.pq.push({0.f, uint32_t(i)});
+        }
+    while (!s.pq.empty()) {
+        auto [dcur, i] = s.pq.top();
+        s.pq.pop();
+        if (dcur > s.distOcc[i])
+            continue;
+        int lz = int(i / (size_t(nx) * ny)), ly = int((i / nx) % ny), lx = int(i % nx);
+        for (const Nb& n : neighbours()) {
+            int ax = lx + n.dx, ay = ly + n.dy, az = lz + n.dz;
+            if (ax < 0 || ay < 0 || az < 0 || ax >= nx || ay >= ny || az >= nz)
+                continue;
+            float nd = dcur + n.len;
+            size_t j = idx(ax, ay, az);
+            if (nd < s.distOcc[j]) {
+                s.distOcc[j] = nd;
+                s.argmat[j] = s.argmat[i];
+                s.pq.push({nd, uint32_t(j)});
+            }
+        }
+    }
+
+    // exterior air flood from the grid boundary through unoccupied cells
+    s.exterior.assign(ncells, 0);
+    {
+        s.bfs.clear();
+        auto visit = [&](size_t i) {
+            if (!s.occupied[i] && !s.exterior[i]) {
+                s.exterior[i] = 1;
+                s.bfs.push_back(uint32_t(i));
+            }
+        };
+        for (int ly = 0; ly < ny; ++ly)
+            for (int lx = 0; lx < nx; ++lx) {
+                visit(idx(lx, ly, 0));
+                visit(idx(lx, ly, nz - 1));
+            }
+        for (int lz = 1; lz < nz - 1; ++lz)
+            for (int lx = 0; lx < nx; ++lx) {
+                visit(idx(lx, 0, lz));
+                visit(idx(lx, ny - 1, lz));
+            }
+        for (int lz = 1; lz < nz - 1; ++lz)
+            for (int ly = 1; ly < ny - 1; ++ly) {
+                visit(idx(0, ly, lz));
+                visit(idx(nx - 1, ly, lz));
+            }
+        for (size_t qi = 0; qi < s.bfs.size(); ++qi) {
+            int lz = int(s.bfs[qi] / (size_t(nx) * ny)),
+                ly = int((s.bfs[qi] / nx) % ny), lx = int(s.bfs[qi] % nx);
+            for (const Nb& n : neighbours()) {
+                int ax = lx + n.dx, ay = ly + n.dy, az = lz + n.dz;
+                if (ax < 0 || ay < 0 || az < 0 || ax >= nx || ay >= ny || az >= nz)
+                    continue;
+                visit(idx(ax, ay, az));
+            }
+        }
+    }
+
+    // pass 2: distance from solid cells to the nearest exterior-air cell
+    s.distAir.assign(ncells, 255.f);
+    s.pq = {};
+    for (size_t i = 0; i < ncells; ++i)
+        if (s.exterior[i]) {
+            s.distAir[i] = 0.f;
+            s.pq.push({0.f, uint32_t(i)});
+        }
+    while (!s.pq.empty()) {
+        auto [dcur, i] = s.pq.top();
+        s.pq.pop();
+        if (dcur > s.distAir[i])
+            continue;
+        int lz = int(i / (size_t(nx) * ny)), ly = int((i / nx) % ny), lx = int(i % nx);
+        for (const Nb& n : neighbours()) {
+            int ax = lx + n.dx, ay = ly + n.dy, az = lz + n.dz;
+            if (ax < 0 || ay < 0 || az < 0 || ax >= nx || ay >= ny || az >= nz)
+                continue;
+            float nd = dcur + n.len;
+            size_t j = idx(ax, ay, az);
+            if (nd < s.distAir[j]) {
+                s.distAir[j] = nd;
+                s.pq.push({nd, uint32_t(j)});
+            }
+        }
+    }
+
+    // collect signed field cells
+    out.keys.clear();
+    out.vals.clear();
+    for (int lz = 0; lz < nz; ++lz)
+        for (int ly = 0; ly < ny; ++ly)
+            for (int lx = 0; lx < nx; ++lx) {
+                size_t i = idx(lx, ly, lz);
+                bool solid = s.occupied[i] || !s.exterior[i];
+                float dCell = solid ? -(s.distAir[i] * VOXEL) : +(s.distOcc[i] * VOXEL);
+                if (!solid && dCell > kStore * VOXEL)
+                    continue;
+                int raw = int(std::lround(dCell / VOXEL));
+                raw = std::clamp(raw, -127, 127);
+                uint32_t wx = gx0 + lx, wy = gy0 + ly, wz = gz0 + lz;
+                if (wx >= uint32_t(N) || wy >= uint32_t(N) || wz >= uint32_t(N))
+                    continue;
+                out.keys.push_back(cellKey(wx, wy, wz));
+                out.vals.push_back(uint32_t(uint8_t(raw & 0xFF)) | (uint32_t(s.argmat[i]) << 8));
+            }
+    return true;
 }
 
 } // namespace
@@ -79,7 +319,9 @@ void VoxelField::oinsert(uint32_t k, uint32_t v)
 void VoxelField::build(const std::vector<VoxelRecord>& records,
                        const std::vector<int16_t>& colTop, const std::vector<uint8_t>& colMat,
                        const std::vector<uint32_t>& objCells,
-                       const std::vector<uint8_t>& objMats)
+                       const std::vector<uint8_t>& objMats,
+                       const std::vector<uint32_t>& carveCells,
+                       const std::vector<uint8_t>& carveMats)
 {
     auto tStart = std::chrono::steady_clock::now();
     m_latN = int(WORLD / VOXEL);
@@ -95,99 +337,34 @@ void VoxelField::build(const std::vector<VoxelRecord>& records,
         m_heightTex[i] = glm::vec2(topY, float(m_colMat[i]) / 255.0f);
     }
 
-    // ---- group object cells into connected components (26-neighbourhood) ---
-    struct Comp {
-        int lo[3], hi[3];
-        std::vector<uint32_t> cellIdx; // indices into objCells
-    };
-    std::vector<Comp> comps;
-    {
-        size_t cap = 1024;
-        while (cap < objCells.size() * 2)
-            cap <<= 1;
-        std::vector<uint32_t> okey(cap, 0), oval(cap, 0);
-        const size_t omask = cap - 1;
-        auto oplace = [&](uint32_t k, uint32_t v) {
-            size_t i = (size_t(k) * 2654435761u) & omask;
-            while (okey[i]) {
-                if (okey[i] - 1u == k)
-                    return;
-                i = (i + 1) & omask;
-            }
-            okey[i] = k + 1;
-            oval[i] = v;
-        };
-        auto ofind = [&](uint32_t k) -> int {
-            size_t i = (size_t(k) * 2654435761u) & omask;
-            while (okey[i]) {
-                if (okey[i] - 1u == k)
-                    return int(oval[i]);
-                i = (i + 1) & omask;
-            }
-            return -1;
-        };
-        for (size_t i = 0; i < objCells.size(); ++i)
-            oplace(objCells[i], uint32_t(i));
-
-        auto xyz = [](uint32_t k, int& x, int& y, int& z) {
-            x = int(k >> 20);
-            y = int((k >> 10) & 0x3FFu);
-            z = int(k & 0x3FFu);
-        };
-        std::vector<uint32_t> comp(objCells.size(), 0xFFFFFFFFu);
-        std::vector<uint32_t> queue;
-        for (size_t s = 0; s < objCells.size(); ++s) {
-            if (comp[s] != 0xFFFFFFFFu)
-                continue;
-            uint32_t id = uint32_t(comps.size());
-            comps.emplace_back();
-            Comp& c = comps.back();
-            int x, y, z;
-            xyz(objCells[s], x, y, z);
-            c.lo[0] = c.hi[0] = x;
-            c.lo[1] = c.hi[1] = y;
-            c.lo[2] = c.hi[2] = z;
-            comp[s] = id;
-            queue.clear();
-            queue.push_back(uint32_t(s));
-            for (size_t qi = 0; qi < queue.size(); ++qi) {
-                int cx, cy, cz;
-                xyz(objCells[queue[qi]], cx, cy, cz);
-                if (cx < c.lo[0]) c.lo[0] = cx;
-                if (cy < c.lo[1]) c.lo[1] = cy;
-                if (cz < c.lo[2]) c.lo[2] = cz;
-                if (cx > c.hi[0]) c.hi[0] = cx;
-                if (cy > c.hi[1]) c.hi[1] = cy;
-                if (cz > c.hi[2]) c.hi[2] = cz;
-                c.cellIdx.push_back(queue[qi]);
-                for (int dz = -1; dz <= 1; ++dz)
-                    for (int dy = -1; dy <= 1; ++dy)
-                        for (int dx = -1; dx <= 1; ++dx) {
-                            if (!dx && !dy && !dz)
-                                continue;
-                            int nx = cx + dx, ny = cy + dy, nz = cz + dz;
-                            if (nx < 0 || ny < 0 || nz < 0 || nx >= N || ny >= N || nz >= N)
-                                continue;
-                            int ni = ofind(cellKey(uint32_t(nx), uint32_t(ny), uint32_t(nz)));
-                            if (ni < 0 || comp[size_t(ni)] != 0xFFFFFFFFu)
-                                continue;
-                            comp[size_t(ni)] = id;
-                            queue.push_back(uint32_t(ni));
-                        }
+    // ---- carve depression: lower the terrain heightfield where carved --------
+    // The carve volume is a set of solid cells (the removed material). For each
+    // (x,z) column we take the lowest carve cell as the new terrain top, so the
+    // rendered landscape slumps into a depression of the carved diameter.
+    if (!carveCells.empty()) {
+        std::vector<float> colBottom(size_t(N) * N, 1e30f);
+        for (uint32_t k : carveCells) {
+            int x = int(k >> 20), y = int((k >> 10) & 0x3FFu), z = int(k & 0x3FFu);
+            float by = -0.5f * WORLD + (float(y) + 0.5f) * VOXEL;
+            size_t ci = size_t(z) * N + x;
+            if (by < colBottom[ci])
+                colBottom[ci] = by;
+        }
+        for (size_t i = 0; i < m_heightTex.size(); ++i) {
+            if (colBottom[i] < m_heightTex[i].x) {
+                m_heightTex[i].x = colBottom[i];
+                int16_t ny = int16_t(std::floor((colBottom[i] + 0.5f * WORLD) / VOXEL - 1.0f));
+                if (ny < m_colTop[i])
+                    m_colTop[i] = ny;
             }
         }
     }
 
-    // ---- signed distance transform per component ---------------------------
-    constexpr int kMargin = 2;   // cells of context around the shell
-    constexpr float kStore = 6.f; // store air band up to 6 voxels from solids
-    // The Dijkstra grid must extend at least kStore beyond the solid bbox, else
-    // air cells in the outer part of the air band fall outside the grid and are
-    // never stored -> sample() falls back to the (huge) terrain distance just
-    // above thin features, so the ray-marcher steps over them at a distance.
-    const int kPad = int(kStore) + kMargin;
-    const auto nb = neighbours();
+    // ---- group object cells into connected components -----------------------
+    std::vector<Comp> comps;
+    groupComponents(objCells, N, comps);
 
+    // ---- signed distance transform per component ---------------------------
     const size_t gBlocks = size_t(globalBlocks());
     m_objBlock.assign(gBlocks * gBlocks * gBlocks, 0);
 
@@ -233,12 +410,6 @@ void VoxelField::build(const std::vector<VoxelRecord>& records,
             m_objVol[ti] = enc;
     };
 
-    std::vector<float> distOcc, distAir;
-    std::vector<uint8_t> occupied, exterior;
-    std::vector<uint8_t> argmat;
-    using QE = std::pair<float, uint32_t>; // dist, cell index
-    std::priority_queue<QE, std::vector<QE>, std::greater<QE>> pq;
-
     // ---- signed distance transform, parallel over components ---------------
     // Components are independent: workers keep private scratch buffers and
     // fill per-comp outputs; the shared hash / presence blocks / shadow volume
@@ -246,13 +417,6 @@ void VoxelField::build(const std::vector<VoxelRecord>& records,
     // Results are cached content-keyed: components whose cells (coords +
     // materials) are unchanged since the previous build are reused verbatim,
     // so small edits only pay Dijkstra for the affected neighbourhoods.
-    struct Scratch {
-        std::vector<float> distOcc, distAir;
-        std::vector<uint8_t> occupied, exterior, argmat;
-        std::vector<uint32_t> bfs;
-        using QE = std::pair<float, uint32_t>; // dist, cell index
-        std::priority_queue<QE, std::vector<QE>, std::greater<QE>> pq;
-    };
     auto compHash = [&](const Comp& c) {
         uint64_t h = c.cellIdx.size();
         for (uint32_t ci : c.cellIdx) {
@@ -322,7 +486,7 @@ void VoxelField::build(const std::vector<VoxelRecord>& records,
             if (dcur > s.distOcc[i])
                 continue;
             int lz = int(i / (size_t(nx) * ny)), ly = int((i / nx) % ny), lx = int(i % nx);
-            for (const Nb& n : nb) {
+            for (const Nb& n : neighbours()) {
                 int ax = lx + n.dx, ay = ly + n.dy, az = lz + n.dz;
                 if (ax < 0 || ay < 0 || az < 0 || ax >= nx || ay >= ny || az >= nz)
                     continue;
@@ -364,7 +528,7 @@ void VoxelField::build(const std::vector<VoxelRecord>& records,
             for (size_t qi = 0; qi < s.bfs.size(); ++qi) {
                 int lz = int(s.bfs[qi] / (size_t(nx) * ny)),
                     ly = int((s.bfs[qi] / nx) % ny), lx = int(s.bfs[qi] % nx);
-                for (const Nb& n : nb) {
+                for (const Nb& n : neighbours()) {
                     int ax = lx + n.dx, ay = ly + n.dy, az = lz + n.dz;
                     if (ax < 0 || ay < 0 || az < 0 || ax >= nx || ay >= ny || az >= nz)
                         continue;
@@ -387,7 +551,7 @@ void VoxelField::build(const std::vector<VoxelRecord>& records,
             if (dcur > s.distAir[i])
                 continue;
             int lz = int(i / (size_t(nx) * ny)), ly = int((i / nx) % ny), lx = int(i % nx);
-            for (const Nb& n : nb) {
+            for (const Nb& n : neighbours()) {
                 int ax = lx + n.dx, ay = ly + n.dy, az = lz + n.dz;
                 if (ax < 0 || ay < 0 || az < 0 || ax >= nx || ay >= ny || az >= nz)
                     continue;
@@ -459,6 +623,39 @@ void VoxelField::build(const std::vector<VoxelRecord>& records,
     }
     if (skipped)
         spdlog::warn("voxel_field: {} oversized component(s) skipped", skipped);
+
+    // ---- carve field: subtractive volume cut through terrain + objects ---------
+    // Built from the same component/Dijkstra machinery as the object field, then
+    // its signed distance is negated in sample() so the carved region reads as
+    // air (a hole). Not cached (carves are small and infrequent).
+    m_carveKey.clear();
+    m_carveVal.clear();
+    m_carveMask = 0;
+    m_carveStored = 0;
+    if (!carveCells.empty()) {
+        std::vector<Comp> ccomps;
+        groupComponents(carveCells, N, ccomps);
+        size_t est = 1024;
+        for (const Comp& c : ccomps)
+            est += c.cellIdx.size() * 8 + 1024;
+        size_t cap = 2048;
+        while (cap < est && cap < (4u << 20))
+            cap <<= 1;
+        m_carveKey.assign(cap, 0);
+        m_carveVal.assign(cap, 0);
+        m_carveMask = cap - 1;
+        m_carveStored = 0;
+        Scratch s;
+        CompOut out;
+        for (const Comp& c : ccomps) {
+            if (!processComponent(carveCells, carveMats, c, N, s, out)) {
+                spdlog::warn("voxel_field: carve component skipped (too large)");
+                continue;
+            }
+            for (size_t i = 0; i < out.keys.size(); ++i)
+                carveInsert(out.keys[i], out.vals[i]);
+        }
+    }
 
     m_prevOuts = std::move(outs);
     m_prevHashes = std::move(hashes);
@@ -532,6 +729,15 @@ VoxelField::Sample VoxelField::sample(int cx, int cy, int cz) const
             out.obj = true;
         }
     }
+
+    // carve: subtractive field - the carved volume reads as air, so a hole is cut
+    // through whichever surface (terrain or object) was otherwise closest.
+    if (m_carveMask && carveFind(cellKey(uint32_t(cx), uint32_t(cy), uint32_t(cz)), v)) {
+        float cd = float(int8_t(v & 0xFF)) * VOXEL; // negative inside the carve
+        float cAir = -cd;                            // positive inside -> air
+        if (cAir > out.d)
+            out.d = cAir; // material/obj flag kept from the carved surface
+    }
     return out;
 }
 
@@ -541,6 +747,54 @@ VoxelField::Sample VoxelField::sampleWorld(glm::vec3 p) const
     int cy = int(std::floor((p.y + 0.5f * WORLD) / VOXEL));
     int cz = int(std::floor((p.z + 0.5f * WORLD) / VOXEL));
     return sample(cx, cy, cz);
+}
+
+void VoxelField::carveInsert(uint32_t k, uint32_t v)
+{
+    if (m_carveMask == 0 || (m_carveStored + 1) * 2 >= m_carveMask) {
+        size_t ncap = m_carveMask ? (m_carveMask + 1) * 2 : 2048;
+        std::vector<uint32_t> nkey(ncap, 0), nval(ncap, 0);
+        size_t nmask = ncap - 1;
+        for (size_t i = 0; i <= m_carveMask; ++i) {
+            if (!m_carveKey[i])
+                continue;
+            uint32_t ok = m_carveKey[i] - 1u;
+            size_t j = (size_t(ok) * 2654435761u) & nmask;
+            while (nkey[j])
+                j = (j + 1) & nmask;
+            nkey[j] = ok + 1;
+            nval[j] = m_carveVal[i];
+        }
+        m_carveKey.swap(nkey);
+        m_carveVal.swap(nval);
+        m_carveMask = nmask;
+    }
+    size_t i = (size_t(k) * 2654435761u) & m_carveMask;
+    while (m_carveKey[i]) {
+        if (m_carveKey[i] - 1u == k) {
+            m_carveVal[i] = v;
+            return;
+        }
+        i = (i + 1) & m_carveMask;
+    }
+    m_carveKey[i] = k + 1;
+    m_carveVal[i] = v;
+    ++m_carveStored;
+}
+
+inline bool VoxelField::carveFind(uint32_t k, uint32_t& v) const
+{
+    if (m_carveMask == 0)
+        return false;
+    size_t i = (size_t(k) * 2654435761u) & m_carveMask;
+    while (m_carveKey[i]) {
+        if (m_carveKey[i] - 1u == k) {
+            v = m_carveVal[i];
+            return true;
+        }
+        i = (i + 1) & m_carveMask;
+    }
+    return false;
 }
 
 } // namespace vf::voxel

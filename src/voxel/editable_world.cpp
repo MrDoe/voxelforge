@@ -1,7 +1,9 @@
+#define GLM_ENABLE_EXPERIMENTAL
 #include "voxel/editable_world.hpp"
 #include "voxel/common.hpp"
 #include "voxel/worldfile.hpp"
 #include "voxel/picking.hpp"
+#include <glm/gtx/quaternion.hpp>
 #include <spdlog/spdlog.h>
 #include <unordered_set>
 #include <cmath>
@@ -9,9 +11,12 @@
 
 namespace vf::voxel {
 
-EditableWorld::EditableWorld(std::string assetDir) : m_assetDir(std::move(assetDir)) {}
+EditableWorld::EditableWorld(std::string assetDir, std::string fileName,
+                               std::string layerName, std::string role)
+    : m_assetDir(std::move(assetDir)), m_fileName(std::move(fileName)),
+      m_layerName(std::move(layerName)), m_role(std::move(role)) {}
 
-std::string EditableWorld::filePath() const { return m_assetDir + "/" + kFileName; }
+std::string EditableWorld::filePath() const { return m_assetDir + "/" + m_fileName; }
 std::string EditableWorld::manifestPath() const { return m_assetDir + "/world.json"; }
 WorldFileMeta EditableWorld::meta() const { return {WORLD, VOXEL, WATER_LEVEL, uint32_t(GRID_N), 8}; }
 
@@ -83,15 +88,15 @@ bool EditableWorld::ensureManifest() {
         // but normally manifest exists; just add ai_edits
         layers.clear();
     }
-    for (auto &l : layers) if (l.file == kFileName) return true;
+    for (auto &l : layers) if (l.file == m_fileName) return true;
     worldfile::WorldLayer nl;
-    nl.file = kFileName;
-    nl.role = "object";
-    nl.name = kLayerName;
+    nl.file = m_fileName;
+    nl.role = m_role;
+    nl.name = m_layerName;
     nl.pos[0]=0.f; nl.pos[1]=0.f; nl.pos[2]=0.f;
     nl.rotDeg = 0.f;
     // presence only: starts DISABLED so a pristine valley stays pristine;
-    // enableInManifest() flips it when AI content actually lands
+    // enableInManifest() flips it when content actually lands
     nl.enabled = false;
     nl.listed = true;
     // insert as first object layer (highest priority) but before landscape/packed
@@ -233,7 +238,7 @@ void EditableWorld::enableInManifest() const {
     bool changed = false;
     bool found = false;
     for (auto& l : layers) {
-        if (l.file != kFileName)
+        if (l.file != m_fileName)
             continue;
         found = true;
         if (!l.enabled) {
@@ -244,9 +249,9 @@ void EditableWorld::enableInManifest() const {
     }
     if (!found) {
         worldfile::WorldLayer nl;
-        nl.file = kFileName;
-        nl.name = kLayerName;
-        nl.role = "object";
+        nl.file = m_fileName;
+        nl.name = m_layerName;
+        nl.role = m_role;
         nl.pos[0] = nl.pos[1] = nl.pos[2] = 0.f;
         nl.rotDeg = 0.f;
         nl.enabled = true;
@@ -368,6 +373,59 @@ bool EditableWorld::deleteObjectLayer(const std::string& name)
     std::remove((m_assetDir + "/" + file).c_str());
     spdlog::info("editable_world: deleted object layer {}", file);
     return true;
+}
+
+std::vector<VoxelRecord> EditableWorld::makeOrientedCylinder(
+    glm::ivec3 anchor, glm::vec3 axisDir, float radiusM, float lengthM, uint8_t mat, bool carve) const
+{
+    axisDir = glm::normalize(axisDir);
+    radiusM = std::max(radiusM, VOXEL * 0.5f);
+    lengthM = std::max(lengthM, VOXEL);
+
+    // rotation mapping local +Y -> world axisDir; Rt brings a world offset into
+    // the cylinder's local frame (axis = +Y) for the SDF test.
+    const glm::mat3 R = glm::mat3(glm::rotation(glm::vec3(0.f, 1.f, 0.f), axisDir));
+    const glm::mat3 Rt = glm::transpose(R);
+
+    const glm::vec3 base = voxelCenter(anchor);
+    const glm::vec3 center = base + axisDir * (lengthM * 0.5f);
+    const float r = radiusM;
+    // world-space AABB of the oriented cylinder
+    const glm::vec3 half(r + (lengthM * 0.5f) * std::abs(axisDir.x),
+                         r + (lengthM * 0.5f) * std::abs(axisDir.y),
+                         r + (lengthM * 0.5f) * std::abs(axisDir.z));
+    const glm::vec3 lo = center - half, hi = center + half;
+
+    const int N = int(WORLD / VOXEL);
+    auto toCell = [&](float w) { return int(std::floor((w + 0.5f * WORLD) / VOXEL)); };
+    const int x0 = std::max(0, toCell(lo.x)), x1 = std::min(N - 1, toCell(hi.x));
+    const int y0 = std::max(0, toCell(lo.y)), y1 = std::min(N - 1, toCell(hi.y));
+    const int z0 = std::max(0, toCell(lo.z)), z1 = std::min(N - 1, toCell(hi.z));
+
+    std::vector<VoxelRecord> res;
+    res.reserve(size_t((x1 - x0 + 1) * (y1 - y0 + 1) * (z1 - z0 + 1)) / 4);
+    const glm::vec2 c(0.f, 0.f);
+    for (int z = z0; z <= z1; ++z)
+        for (int y = y0; y <= y1; ++y)
+            for (int x = x0; x <= x1; ++x) {
+                const glm::vec3 p = voxelCenter(glm::ivec3(x, y, z));
+                const glm::vec3 local = Rt * (p - base);
+                const float d = sdCylY(local, c, 0.f, lengthM, radiusM);
+                // carve: emit the solid removed volume; add: emit a thin shell band
+                if (carve ? (d > 0.f) : (std::fabs(d) > kBand))
+                    continue;
+                VoxelRecord v;
+                v.x = uint16_t(x); v.y = uint16_t(y); v.z = uint16_t(z);
+                const glm::vec3& col = kPalette[std::min(int(mat), 16)];
+                const glm::vec2& rr = kMaterialReflection[std::min(int(mat), 16)];
+                v.r = uint8_t(col.r * 255.f); v.g = uint8_t(col.g * 255.f); v.b = uint8_t(col.b * 255.f);
+                v.a = 255;
+                v.reflectivity = uint8_t(rr.x);
+                v.roughness = uint8_t(rr.y);
+                v.materialId = mat;
+                res.push_back(v);
+            }
+    return res;
 }
 
 }

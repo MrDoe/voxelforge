@@ -276,6 +276,8 @@ bool LayeredWorld::parseAndComputeDirty(bool& outFull, std::vector<int>& outDirt
     m_colMat.assign(size_t(kLatN) * kLatN, 0);
     m_objCells.clear();
     m_objMats.clear();
+    m_carveCells.clear();
+    m_carveMats.clear();
     m_blockSolid.clear();
 
     std::unordered_set<uint32_t> claimed;
@@ -350,14 +352,22 @@ bool LayeredWorld::parseAndComputeDirty(bool& outFull, std::vector<int>& outDirt
         }
         curSig[l.file] = addSig(l.file);
         const bool isLandscape = (l.name == "landscape" || l.file == "landscape.vxw");
+        const bool isCarve = (l.role == "carve");
         WorldAABB& box = curBox[l.file];
         for (const VoxelRecord& v : *vox) {
             uint32_t key = cellKey(v.x, v.y, v.z);
-            if (claimed.insert(key).second)
-                m_records.push_back(v);
             glm::vec3 wp = v.position(expected);
             box.lo = glm::min(box.lo, wp);
             box.hi = glm::max(box.hi, wp);
+            if (isCarve) {
+                // subtractive field: carve cells are fed to VoxelField::build as a
+                // separate (carved) volume and never enter the merged record set.
+                m_carveCells.push_back(key);
+                m_carveMats.push_back(v.materialId);
+                continue;
+            }
+            if (claimed.insert(key).second)
+                m_records.push_back(v);
             if (isLandscape) {
                 int16_t& top = m_colTop[size_t(v.z) * kLatN + size_t(v.x)];
                 if (v.y > top) {
@@ -365,7 +375,7 @@ bool LayeredWorld::parseAndComputeDirty(bool& outFull, std::vector<int>& outDirt
                     m_colMat[size_t(v.z) * kLatN + size_t(v.x)] = v.materialId;
                 }
             } else {
-                m_objCells.push_back(cellKey(v.x, v.y, v.z));
+                m_objCells.push_back(key);
                 m_objMats.push_back(v.materialId);
             }
         }
@@ -582,7 +592,7 @@ bool LayeredWorld::buildInto(bool full, const std::vector<int>& dirty,
     // records-derived geometry oracle: terrain columns + flood-filled object
     // components with a signed distance transform. Replaces the old analytic
     // scene() sampling entirely.
-    outField.build(m_records, m_colTop, m_colMat, m_objCells, m_objMats);
+    outField.build(m_records, m_colTop, m_colMat, m_objCells, m_objMats, m_carveCells, m_carveMats);
 
     // global presence grid (record cells + object interiors) for the SVO builder
     const size_t gBlocks = size_t(kGBlocks) * kGBlocks * kGBlocks;

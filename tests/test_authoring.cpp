@@ -3,6 +3,8 @@
 // plus cross-checks that the baked VoxelField matches the analytic truth.
 #include "voxel/common.hpp"
 #include "voxel/layered_world.hpp"
+#include "voxel/editable_world.hpp"
+#include "voxel/picking.hpp"
 #include <filesystem>
 #include <fstream>
 #include <algorithm>
@@ -219,3 +221,48 @@ TEST_CASE("baked field: paddock and alpaca reachable")
     CHECK(f.d < 0.0f);
     CHECK(f.mat == 6);
 }
+
+TEST_CASE("carve: subtractive cylinder cuts a hole through terrain and objects")
+{
+    // generate carve cells with the same rasterizer the app uses
+    EditableWorld carver(std::string(VOXELFORGE_ASSET_DIR),
+                         std::string(EditableWorld::kCarveFileName),
+                         std::string(EditableWorld::kCarveLayerName),
+                         std::string("carve"));
+    const glm::ivec3 anchor = worldToVoxel(glm::vec3(0.f, 0.f, 0.f));
+    std::vector<VoxelRecord> crecs =
+        carver.makeOrientedCylinder(anchor, glm::vec3(0.f, -1.f, 0.f), 1.0f, 1.5f, 6, /*carve=*/true);
+    REQUIRE(!crecs.empty());
+    std::vector<uint32_t> carveCells;
+    std::vector<uint8_t> carveMats;
+    for (auto& r : crecs) {
+        carveCells.push_back(((uint32_t)r.x << 20) | ((uint32_t)r.y << 10) | (uint32_t)r.z);
+        carveMats.push_back(r.materialId);
+    }
+
+    // build a flat terrain patch with its surface at the anchor column
+    const int latN = 1024;
+    std::vector<int16_t> colTop(latN * latN, -1);
+    std::vector<uint8_t> colMat(latN * latN, 0);
+    for (int dz = -60; dz <= 60; ++dz)
+        for (int dx = -60; dx <= 60; ++dx) {
+            int x = anchor.x + dx, z = anchor.z + dz;
+            if (x < 0 || z < 0 || x >= latN || z >= latN)
+                continue;
+            colTop[size_t(z) * latN + x] = (int16_t)anchor.y;
+            colMat[size_t(z) * latN + x] = 1;
+        }
+
+    VoxelField f;
+    std::vector<VoxelRecord> recs0;
+    f.build(recs0, colTop, colMat, {}, {}, carveCells, carveMats);
+
+    // the centred carve cell sits inside the subtracted volume -> reads as air
+    auto s = f.sampleWorld(glm::vec3(0.f, 0.f, 0.f));
+    CHECK(s.d > 0.0f);
+
+    // outside the carve radius the terrain is intact
+    auto t = f.sampleWorld(glm::vec3(3.f, -0.1f, 0.f));
+    CHECK(t.d <= 0.0f);
+}
+

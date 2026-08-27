@@ -171,6 +171,10 @@ private:
 
     // AI chat + picking + editable world
     vf::voxel::EditableWorld m_editable { std::string(VOXELFORGE_ASSET_DIR) };
+    vf::voxel::EditableWorld m_carve { std::string(VOXELFORGE_ASSET_DIR),
+                                       std::string(vf::voxel::EditableWorld::kCarveFileName),
+                                       std::string(vf::voxel::EditableWorld::kCarveLayerName),
+                                       std::string("carve") };
     vf::ai::ChatUi m_chatUi;
     vf::voxel::PickHit m_hoverHit;
     vf::voxel::PickHit m_selectedHit;
@@ -178,6 +182,17 @@ private:
     bool m_lmbWasDown = false;
     bool m_ctrlWasDown = false;
     bool m_chatInitialized = false;
+
+    // carve / add edit tool: stamps an oriented cylinder (carve = subtractive,
+    // add = solid) of m_editDiameter at the hovered surface point, along its
+    // normal. Diameter/depth adjustable via +/-; mode toggled with [C].
+    bool m_editActive = false;
+    bool m_editCarve = true;
+    float m_editDiameter = 2.0f; // meters
+    float m_editDepth = 1.5f;    // meters (carve depth / add length)
+    uint8_t m_editMat = 6;       // wood/rock-ish palette id for the add mode
+
+    void applyEdit();
 public:
     void requestWorldReload() { m_pendingWorldReload = true; }
     };
@@ -440,6 +455,41 @@ void App::applyWorldReload()
     rescanWorldLayers(); // layers dropped into assets/ while running show up too
 }
 
+void App::applyEdit()
+{
+    if (!m_hoverHit.hit)
+        return;
+    glm::vec3 n = m_hoverHit.normal;
+    if (glm::length(n) < 1e-3f)
+        n = glm::vec3(0.f, 1.f, 0.f);
+    n = glm::normalize(n);
+    const float radius = m_editDiameter * 0.5f;
+    const float length = m_editDepth;
+
+    if (m_editCarve) {
+        // carve volume goes INTO the surface (along -normal) to cut a depression
+        std::vector<vf::voxel::VoxelRecord> recs =
+            m_carve.makeOrientedCylinder(m_hoverHit.voxel, -n, radius, length, m_editMat, /*carve=*/true);
+        if (!recs.empty()) {
+            m_carve.append(recs);
+            spdlog::info("carve: {} voxels at {},{},{} d={:.1f} depth={:.1f}",
+                         recs.size(), m_hoverHit.voxel.x, m_hoverHit.voxel.y, m_hoverHit.voxel.z,
+                         m_editDiameter, m_editDepth);
+        }
+    } else {
+        // add: protrude OUT of the surface along +normal
+        std::vector<vf::voxel::VoxelRecord> recs =
+            m_editable.makeOrientedCylinder(m_hoverHit.voxel, n, radius, length, m_editMat, /*carve=*/false);
+        if (!recs.empty()) {
+            m_editable.append(recs);
+            spdlog::info("add: {} voxels at {},{},{} d={:.1f} depth={:.1f}",
+                         recs.size(), m_hoverHit.voxel.x, m_hoverHit.voxel.y, m_hoverHit.voxel.z,
+                         m_editDiameter, m_editDepth);
+        }
+    }
+    requestWorldReload();
+}
+
 void App::persistWorldLayers()
 {
     std::vector<vf::voxel::worldfile::WorldLayer> out;
@@ -537,6 +587,7 @@ void App::drawHud()
         ImGui::BulletText("RMB hold: look");
         ImGui::BulletText("Wheel: speed, Shift/Ctrl boost/slow");
         ImGui::BulletText("ESC: quit");
+        ImGui::BulletText("C: carve/add tool (LMB to stamp, +/- size)");
     }
 
     if (ImGui::CollapsingHeader("World layers", ImGuiTreeNodeFlags_DefaultOpen)) {
@@ -596,6 +647,44 @@ void App::drawHud()
         ImGui::TextDisabled("Import copies an object to the picked voxel (Ctrl+LMB)");
         ImGui::TextDisabled("toggles & AI edits hot-reload live");
     }
+
+    // carve / add edit tool panel (only while the tool is active)
+    if (m_editActive) {
+        ImGuiIO& io = ImGui::GetIO();
+        ImGui::SetNextWindowPos(ImVec2(io.DisplaySize.x - 234.f, 12.f), ImGuiCond_FirstUseEver);
+        ImGui::SetNextWindowSize(ImVec2(220, 0), ImGuiCond_FirstUseEver);
+        if (ImGui::Begin("Carve / Add", nullptr, ImGuiWindowFlags_AlwaysAutoResize)) {
+            ImGui::Text("Carve / Add tool  ([C] to toggle)");
+            if (ImGui::RadioButton("Carve", m_editCarve))
+                m_editCarve = true;
+            ImGui::SameLine();
+            if (ImGui::RadioButton("Add", !m_editCarve))
+                m_editCarve = false;
+            ImGui::Separator();
+            ImGui::SliderFloat("Diameter (m)", &m_editDiameter, 0.2f, 12.0f, "%.1f");
+            if (ImGui::Button("-##diam")) m_editDiameter = std::max(0.2f, m_editDiameter - 0.2f);
+            ImGui::SameLine();
+            if (ImGui::Button("+##diam")) m_editDiameter = std::min(12.0f, m_editDiameter + 0.2f);
+            ImGui::SliderFloat("Depth (m)", &m_editDepth, 0.2f, 12.0f, "%.1f");
+            if (ImGui::Button("-##depth")) m_editDepth = std::max(0.2f, m_editDepth - 0.2f);
+            ImGui::SameLine();
+            if (ImGui::Button("+##depth")) m_editDepth = std::min(12.0f, m_editDepth + 0.2f);
+            ImGui::Separator();
+            ImGui::Text("LMB on terrain to %s", m_editCarve ? "carve a hole" : "add voxels");
+            ImGui::TextDisabled("Shift + / - adjust depth");
+            ImGui::TextDisabled("Ctrl+LMB: set import anchor");
+            if (ImGui::Button("Clear carve edits")) {
+                m_carve.clear();
+                requestWorldReload();
+            }
+            if (ImGui::Button("Clear add edits")) {
+                m_editable.clear();
+                requestWorldReload();
+            }
+        }
+        ImGui::End();
+    }
+
     if (m_scenePreview) {
         if (!m_sceneTexId)
             m_sceneTexId = (ImTextureID)ImGui_ImplVulkan_AddTexture(m_uiSampler, m_offscreen.view,
@@ -893,8 +982,10 @@ int App::run(const Args& args)
             glfwGetCursorPos(m_window.handle(), &mx, &my);
             glm::ivec2 fb = m_window.framebufferSize();
             bool lmb = glfwGetMouseButton(m_window.handle(), GLFW_MOUSE_BUTTON_LEFT)==GLFW_PRESS;
-            // hover when Ctrl held (update 15Hz throttled implicitly every frame okay)
-            if (ctrl && !wantMouse && fb.x>0 && fb.y>0) {
+            // hover while Ctrl held (anchor pick) OR while the edit tool is active
+            // (so an LMB click can stamp a carve/add at the pointed surface)
+            bool computeHover = (ctrl || m_editActive) && !wantMouse && fb.x>0 && fb.y>0;
+            if (computeHover) {
                 float tanHalf = tanHalfFov;
                 float aspect = float(fb.x)/float(fb.y);
                 glm::vec3 rd = vf::voxel::screenRayDir(mx,my,fb.x,fb.y,tanHalf,aspect,
@@ -918,6 +1009,10 @@ int App::run(const Args& args)
                 spdlog::info("pick selected {} {} {} world {:.2f} {:.2f} {:.2f} mat {}",
                     m_selectedHit.voxel.x, m_selectedHit.voxel.y, m_selectedHit.voxel.z, w.x,w.y,w.z, int(m_selectedHit.mat));
             }
+            // edit tool: plain LMB click (no Ctrl) stamps a carve/add at the hover point
+            bool justPressedApply = lmbEdge && !ctrl && !wantMouse && m_editActive;
+            if (justPressedApply)
+                applyEdit();
         }
 
         static const char* testHov = getenv("VF_TEST_HOVER");
@@ -961,17 +1056,36 @@ int App::run(const Args& args)
                 return e;
             };
             GLFWwindow* hw = m_window.handle();
+            bool shift = glfwGetKey(hw, GLFW_KEY_LEFT_SHIFT) == GLFW_PRESS ||
+                         glfwGetKey(hw, GLFW_KEY_RIGHT_SHIFT) == GLFW_PRESS;
             if (edge(GLFW_KEY_T, hw)) {
                 m_tonemapLook = (m_tonemapLook + 1) % 3;
                 spdlog::info("tonemap look -> {}", m_tonemapLook);
             }
-            if (edge(GLFW_KEY_EQUAL, hw) || edge(GLFW_KEY_KP_ADD, hw)) {
-                m_exposure = m_exposure * 1.1f < 4.0f ? m_exposure * 1.1f : 4.0f;
-                spdlog::info("exposure -> {:.2f}", m_exposure);
+            // toggle the carve / add edit tool
+            if (edge(GLFW_KEY_C, hw)) {
+                m_editActive = !m_editActive;
+                spdlog::info("edit tool -> {}", m_editActive ? "active" : "off");
             }
-            if (edge(GLFW_KEY_MINUS, hw) || edge(GLFW_KEY_KP_SUBTRACT, hw)) {
-                m_exposure = m_exposure / 1.1f > 0.1f ? m_exposure / 1.1f : 0.1f;
-                spdlog::info("exposure -> {:.2f}", m_exposure);
+            if (m_editActive) {
+                // + / - change diameter; Shift + / - change depth
+                if (edge(GLFW_KEY_EQUAL, hw) || edge(GLFW_KEY_KP_ADD, hw)) {
+                    if (shift) m_editDepth = std::min(m_editDepth + 0.2f, 12.0f);
+                    else       m_editDiameter = std::min(m_editDiameter + 0.2f, 12.0f);
+                }
+                if (edge(GLFW_KEY_MINUS, hw) || edge(GLFW_KEY_KP_SUBTRACT, hw)) {
+                    if (shift) m_editDepth = std::max(m_editDepth - 0.2f, 0.2f);
+                    else       m_editDiameter = std::max(m_editDiameter - 0.2f, 0.2f);
+                }
+            } else {
+                if (edge(GLFW_KEY_EQUAL, hw) || edge(GLFW_KEY_KP_ADD, hw)) {
+                    m_exposure = m_exposure * 1.1f < 4.0f ? m_exposure * 1.1f : 4.0f;
+                    spdlog::info("exposure -> {:.2f}", m_exposure);
+                }
+                if (edge(GLFW_KEY_MINUS, hw) || edge(GLFW_KEY_KP_SUBTRACT, hw)) {
+                    m_exposure = m_exposure / 1.1f > 0.1f ? m_exposure / 1.1f : 0.1f;
+                    spdlog::info("exposure -> {:.2f}", m_exposure);
+                }
             }
             for (int i = 0; i < 5; ++i) {
                 if (edge(GLFW_KEY_1 + i, hw)) {
