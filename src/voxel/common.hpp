@@ -697,23 +697,28 @@ inline ObjHit alpacaAt(glm::vec3 p)
 }
 
 // --- a wooden footbridge arching over the river ----------------------------
-// Long axis runs along Z (perpendicular to the river's X-flow); the deck bows
-// upward toward mid-span and is carried on a pair of timber trestles that drop
-// into the banks/riverbed, with side rails and cross beams.
+// Long axis runs along Z (perpendicular to the river's X-flow). The deck ends
+// are anchored to the sampled bank terrain and it bows gently over the water,
+// carried on timber trestles whose legs reach down into the banks/riverbed.
 inline ObjHit bridgeAt(glm::vec3 p)
 {
     const float bx = kBridgePos.x, bz = kBridgePos.y;
     const float halfW = 0.95f;  // half deck width (x)
     const float halfL = 6.0f;   // half span (z)
-    const float deckBase = 0.95f;
-    const float arch = 0.45f;   // mid-span rise
+    const float arch = 0.18f;   // gentle mid-span rise above the chord
 
     float lx = p.x - bx, lz = p.z - bz;
     if (std::fabs(lx) > halfW + 0.5f || std::fabs(lz) > halfL + 0.5f)
         return { 1e9f, 6u };
 
-    float tz = glm::clamp(lz / halfL, -1.0f, 1.0f);
-    float yDeck = deckBase + arch * (1.0f - tz * tz); // highest at centre
+    // anchor the deck ends to the bank ground so the bridge meets the terrain
+    const HeightMap& hm = sharedHeightmap();
+    float gL = hm.sample(bx, bz - halfL);
+    float gR = hm.sample(bx, bz + halfL);
+    float u = (lz + halfL) / (2.0f * halfL);          // 0..1 along span
+    float u01 = glm::clamp(u, 0.0f, 1.0f);
+    float chord = glm::mix(gL, gR, u01);
+    float yDeck = chord + arch * std::sin(3.14159265f * u01); // clear the water
 
     // deck slab
     float plank = 0.14f;
@@ -732,11 +737,13 @@ inline ObjHit bridgeAt(glm::vec3 p)
         }
     }
 
-    // trestle legs dropping to the riverbed, with cross beams under the deck
-    float yBot = -3.2f;
+    // trestle legs dropping to the local ground (banks or riverbed), with
+    // cross beams under the deck
     for (float zp = -halfL + 1.0f; zp <= halfL - 1.0f + 1e-3f; zp += 2.0f) {
         for (int s = -1; s <= 1; s += 2) {
             float xp = bx + s * (halfW - 0.25f);
+            float gLeg = hm.sample(xp, bz + zp);
+            float yBot = glm::min(gLeg, WATER_LEVEL - 2.0f) - 0.4f; // embed
             d = glm::min(d, sdCylY(p, glm::vec2(xp, bz + zp), yBot,
                                    yDeck - plank, 0.10f));
         }
