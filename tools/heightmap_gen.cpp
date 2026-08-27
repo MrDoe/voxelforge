@@ -41,25 +41,33 @@ float fbm2(float x, float y)
 }
 
 // ---- river ------------------------------------------------------------------
-float riverZ(float x) { return 14.f * std::sin(x * 0.042f) + 5.f * std::sin(x * 0.113f + 1.7f); }
-float riverW(float x) { return 2.6f + 0.8f * std::sin(x * 0.087f + 0.6f); }
+// A fresh, more strongly meandering channel with a wider, deeper bed.
+float riverZ(float x)
+{
+    return 11.f * std::sin(x * 0.045f) + 6.f * std::sin(x * 0.121f + 1.7f) +
+           2.5f * std::sin(x * 0.307f + 0.5f);
+}
+float riverW(float x) { return 3.2f + 1.0f * std::sin(x * 0.093f + 0.6f); }
 
 float terrainHeightAt(float x, float z)
 {
     float t = std::fabs(z - riverZ(x)) / riverW(x);
 
-    // rolling ridged hills rising away from the river
-    float bankRamp = smoothstepf(0.55f, 2.8f, t);
-    float farRamp = smoothstepf(4.0f, 14.0f, t);
-    float amp = 7.5f * bankRamp + 4.5f * farRamp;
+    // broad rolling landform: a large-scale swell so the hills read as a
+    // continuous range rather than uniform noise, plus ridged detail.
+    float landSwell = fbm2(x * 0.0085f + 11.3f, z * 0.0085f - 4.1f) * 6.0f;
+    float bankRamp = smoothstepf(0.55f, 3.0f, t);
+    float farRamp = smoothstepf(4.0f, 15.0f, t);
+    float amp = (9.5f * bankRamp + 5.5f * farRamp) + landSwell * bankRamp;
     float ridge = 1.f - std::fabs(fbm2(x * 0.021f, z * 0.021f));
-    float hills = ridge * ridge * ridge * 0.62f + fbm2(x * 0.06f, z * 0.06f) * 0.25f +
-                  fbm2(x * 0.19f, z * 0.19f) * 0.13f;
-    float floorH = glm::max(WATER_LEVEL + 0.55f + hills * amp, WATER_LEVEL + 0.35f);
+    float hills = ridge * ridge * ridge * 0.72f + fbm2(x * 0.06f, z * 0.06f) * 0.27f +
+                  fbm2(x * 0.19f, z * 0.19f) * 0.15f;
+    float floorH = glm::max(WATER_LEVEL + 0.65f + hills * amp, WATER_LEVEL + 0.40f);
 
-    // channel bowl down to a level bed so the water plane stays consistent
-    float bowl = 1.f - smoothstepf(0.30f, 0.95f, t);
-    float bed = WATER_LEVEL - 2.1f + fbm2(x * 0.23f, z * 0.23f) * 0.12f;
+    // channel bowl down to a wider, deeper level bed so the water plane stays
+    // consistent and the river carves a clear valley.
+    float bowl = 1.f - smoothstepf(0.34f, 1.05f, t);
+    float bed = WATER_LEVEL - 2.7f + fbm2(x * 0.23f, z * 0.23f) * 0.14f;
     float h = glm::mix(floorH, bed, bowl);
 
     // building pad: flatten ground under the riverside house

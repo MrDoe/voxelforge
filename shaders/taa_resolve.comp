@@ -1,16 +1,23 @@
 #version 460
 // TAA resolve: temporal blend current with history, AABB-clamped to avoid ghosting.
-// No reprojection yet (same-pixel blend) — reduces flicker/shimmer, will ghost slightly when moving.
+// History is reprojected using the world-position G-buffer (uGPos) and the
+// previous frame's camera, so camera motion no longer blends mismatched pixels.
 // History is in GENERAL layout, current is same offscreen image after raymarch (GENERAL).
 
 layout(local_size_x = 8, local_size_y = 8, local_size_z = 1) in;
 
-layout(set = 0, binding = 0, rgba8) uniform readonly image2D uCurrent;
-layout(set = 0, binding = 1, rgba8) uniform readonly image2D uHistory;
-layout(set = 0, binding = 2, rgba8) uniform writeonly image2D uOut;
+layout(set = 0, binding = 0, rgba8)  uniform readonly image2D uCurrent;
+layout(set = 0, binding = 1, rgba8)  uniform readonly image2D uHistory;
+layout(set = 0, binding = 2, rgba8)  uniform writeonly image2D uOut;
+layout(set = 0, binding = 3, rgba16f) uniform readonly image2D uGPos; // world pos .xyz, hitType .w
 
 layout(push_constant) uniform PC {
-    vec4 extentInv; // x=1/W, y=1/H, z=blendFactor, w=firstFrame(1/0)
+    vec4 extentInv;    // x=1/W, y=1/H, z=blendFactor, w=firstFrame(1/0)
+    vec4 prevCamPos;
+    vec4 prevCamRight;
+    vec4 prevCamUp;
+    vec4 prevCamFwd;
+    vec4 prevParams;   // x=tanHalfFov, y=aspect
 } pc;
 
 vec3 clipAABB(vec3 aabbMin, vec3 aabbMax, vec3 p, vec3 q) {
@@ -24,6 +31,25 @@ vec3 clipAABB(vec3 aabbMin, vec3 aabbMax, vec3 p, vec3 q) {
     float t1 = min(min(d1.x, d1.y), d1.z);
     t0 = clamp(t0, 0.0, 1.0);
     return mix(p, q, t0);
+}
+
+// Bilinear sample of the history storage image (storage images can't use a sampler here).
+vec3 sampleHist(vec2 uv) {
+    ivec2 sz = imageSize(uHistory);
+    vec2 f = uv * vec2(sz) - 0.5;
+    vec2 base = floor(f);
+    vec2 t = f - base;
+    ivec2 p00 = ivec2(base);
+    ivec2 p11 = p00 + ivec2(1, 1);
+    ivec2 c00 = clamp(p00,            ivec2(0), sz - ivec2(1));
+    ivec2 c10 = clamp(ivec2(p00.x+1, p00.y), ivec2(0), sz - ivec2(1));
+    ivec2 c01 = clamp(ivec2(p00.x, p00.y+1), ivec2(0), sz - ivec2(1));
+    ivec2 c11 = clamp(p11,            ivec2(0), sz - ivec2(1));
+    vec3 s00 = imageLoad(uHistory, c00).rgb;
+    vec3 s10 = imageLoad(uHistory, c10).rgb;
+    vec3 s01 = imageLoad(uHistory, c01).rgb;
+    vec3 s11 = imageLoad(uHistory, c11).rgb;
+    return mix(mix(s00, s10, t.x), mix(s01, s11, t.x), t.y);
 }
 
 void main() {
@@ -51,13 +77,27 @@ void main() {
     vec3 pad = (nmax - nmin) * 0.08;
     nmin -= pad; nmax += pad;
 
-    vec3 hist = imageLoad(uHistory, pix).rgb;
-    // variance-style clamp (Karlsruhe)
-    vec3 clamped = clamp(hist, nmin, nmax);
-    // also clip along ray to AABB for better corners
+    // Reproject the previous frame's history onto this pixel using the world
+    // position written by the raymarch pass and the previous camera basis.
+    vec3 histCol = cur.rgb;
+    vec4 gp = imageLoad(uGPos, pix);
+    if (gp.w > 0.5) { // not sky: has a stable world position
+        vec3 v = gp.xyz - pc.prevCamPos.xyz;
+        float z = dot(v, pc.prevCamFwd.xyz);
+        if (z > 0.0) {
+            float ndx = dot(v, pc.prevCamRight.xyz) / (z * pc.prevParams.x * pc.prevParams.y);
+            float ndy = -dot(v, pc.prevCamUp.xyz)    / (z * pc.prevParams.x);
+            vec2 puv = vec2(ndx * 0.5 + 0.5, ndy * 0.5 + 0.5);
+            if (all(greaterThanEqual(puv, vec2(0.0))) && all(lessThan(puv, vec2(1.0))))
+                histCol = sampleHist(puv);
+        }
+    }
+
+    // variance-style clamp (Karlsruhe) + AABB clip to kill ghosting
+    vec3 clamped = clamp(histCol, nmin, nmax);
     clamped = clipAABB(nmin, nmax, m0, clamped);
 
-    float alpha = pc.extentInv.z; // blend factor for history (0.9)
+    float alpha = pc.extentInv.z; // blend factor for history (0.92)
     vec3 outCol = mix(cur.rgb, clamped, alpha);
     imageStore(uOut, pix, vec4(outCol, cur.a));
 }

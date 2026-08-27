@@ -137,6 +137,7 @@ private:
     bool m_taaEnabled = true;
     bool m_taaFirstFrame = true;
     int m_taaHistoryIdx = 0;
+    vf::TaaPrevCam m_prevCam{};  // previous-frame camera for TAA reprojection
     glm::vec4 m_pushB { 1.0f };      // shader .b block: worldSize, voxelSize, gridN
 
     // layered world state (GUI)
@@ -175,6 +176,10 @@ private:
                                        std::string(vf::voxel::EditableWorld::kCarveFileName),
                                        std::string(vf::voxel::EditableWorld::kCarveLayerName),
                                        std::string("carve") };
+    vf::voxel::EditableWorld m_add { std::string(VOXELFORGE_ASSET_DIR),
+                                     std::string(vf::voxel::EditableWorld::kRaiseFileName),
+                                     std::string(vf::voxel::EditableWorld::kRaiseLayerName),
+                                     std::string("raise") };
     vf::ai::ChatUi m_chatUi;
     vf::voxel::PickHit m_hoverHit;
     vf::voxel::PickHit m_selectedHit;
@@ -477,12 +482,14 @@ void App::applyEdit()
                          m_editDiameter, m_editDepth);
         }
     } else {
-        // add: protrude OUT of the surface along +normal
+        // add: raise a half-sphere bump ON the surface (along +normal). The dome
+        // volume's top surface follows height(r)=depth*sqrt(1-(r/radius)^2), so the
+        // terrain is lifted most at the centre and tapers to the rim.
         std::vector<vf::voxel::VoxelRecord> recs =
-            m_editable.makeOrientedCylinder(m_hoverHit.voxel, n, radius, length, m_editMat, /*carve=*/false);
+            m_add.makeDome(m_hoverHit.voxel, n, radius, length, m_editMat);
         if (!recs.empty()) {
-            m_editable.append(recs);
-            spdlog::info("add: {} voxels at {},{},{} d={:.1f} depth={:.1f}",
+            m_add.append(recs);
+            spdlog::info("raise: {} voxels at {},{},{} d={:.1f} height={:.1f}",
                          recs.size(), m_hoverHit.voxel.x, m_hoverHit.voxel.y, m_hoverHit.voxel.z,
                          m_editDiameter, m_editDepth);
         }
@@ -670,15 +677,15 @@ void App::drawHud()
             ImGui::SameLine();
             if (ImGui::Button("+##depth")) m_editDepth = std::min(12.0f, m_editDepth + 0.2f);
             ImGui::Separator();
-            ImGui::Text("LMB on terrain to %s", m_editCarve ? "carve a hole" : "add voxels");
+            ImGui::Text("LMB on terrain to %s", m_editCarve ? "carve a hole" : "raise a dome");
             ImGui::TextDisabled("Shift + / - adjust depth");
             ImGui::TextDisabled("Ctrl+LMB: set import anchor");
             if (ImGui::Button("Clear carve edits")) {
                 m_carve.clear();
                 requestWorldReload();
             }
-            if (ImGui::Button("Clear add edits")) {
-                m_editable.clear();
+            if (ImGui::Button("Clear raise edits")) {
+                m_add.clear();
                 requestWorldReload();
             }
         }
@@ -1266,10 +1273,15 @@ int App::run(const Args& args)
                                 taaSrcLayout, VK_IMAGE_LAYOUT_GENERAL,
                                 taaSrcStage, taaSrcAccess,
                                 VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT, VK_ACCESS_2_SHADER_STORAGE_READ_BIT);
-            VkImageView histView = m_taaHistory[m_taaHistoryIdx].view;
+            // Ping-pong: read history from idx, write resolved into the OTHER
+            // buffer, then make that the read buffer next frame (exact 1-frame
+            // history, no stale/garbage read).
+            const uint32_t hidx = uint32_t(m_taaHistoryIdx);
+            const uint32_t widx = hidx ^ 1u;
+            VkImageView histView = m_taaHistory[hidx].view;
             // history already in GENERAL from previous frame's copy, make it readable
             // (first frame history is undefined but TAA handles firstFrame)
-            m_taaPass.updateDescriptors(m_offscreen.view, histView, m_taaResolved.view);
+            m_taaPass.updateDescriptors(m_offscreen.view, histView, m_taaResolved.view, m_gpos.view);
             // history -> SHADER_READ (if not first frame, already GENERAL)
             // resolved -> GENERAL for write
             vf::transitionImage(fr.cmd, m_taaResolved.img, VK_IMAGE_ASPECT_COLOR_BIT,
@@ -1277,7 +1289,7 @@ int App::run(const Args& args)
                                 VK_PIPELINE_STAGE_2_NONE, VK_ACCESS_2_NONE,
                                 VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT, VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT);
             m_taaPass.record(fr.cmd, m_offscreen.extent.width, m_offscreen.extent.height,
-                             m_taaFirstFrame ? 0.0f : 0.92f, m_taaFirstFrame);
+                             m_taaFirstFrame ? 0.0f : 0.92f, m_taaFirstFrame, m_prevCam);
             // TAA output -> TRANSFER_SRC for blit, and copy to history for next frame
             vf::transitionImage(fr.cmd, m_taaResolved.img, VK_IMAGE_ASPECT_COLOR_BIT,
                                 VK_IMAGE_LAYOUT_GENERAL, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
@@ -1289,13 +1301,13 @@ int App::run(const Args& args)
             copy.dstSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
             copy.extent = {m_offscreen.extent.width, m_offscreen.extent.height, 1};
             // history need to be DST
-            vf::transitionImage(fr.cmd, m_taaHistory[m_taaHistoryIdx].img, VK_IMAGE_ASPECT_COLOR_BIT,
+            vf::transitionImage(fr.cmd, m_taaHistory[widx].img, VK_IMAGE_ASPECT_COLOR_BIT,
                                 VK_IMAGE_LAYOUT_GENERAL, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
                                 VK_PIPELINE_STAGE_2_NONE, VK_ACCESS_2_NONE,
                                 VK_PIPELINE_STAGE_2_TRANSFER_BIT, VK_ACCESS_2_TRANSFER_WRITE_BIT);
             vkCmdCopyImage(fr.cmd, m_taaResolved.img, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
-                           m_taaHistory[m_taaHistoryIdx].img, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &copy);
-            vf::transitionImage(fr.cmd, m_taaHistory[m_taaHistoryIdx].img, VK_IMAGE_ASPECT_COLOR_BIT,
+                           m_taaHistory[widx].img, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &copy);
+            vf::transitionImage(fr.cmd, m_taaHistory[widx].img, VK_IMAGE_ASPECT_COLOR_BIT,
                                 VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_LAYOUT_GENERAL,
                                 VK_PIPELINE_STAGE_2_TRANSFER_BIT, VK_ACCESS_2_TRANSFER_WRITE_BIT,
                                 VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT, VK_ACCESS_2_SHADER_STORAGE_READ_BIT);
@@ -1304,8 +1316,15 @@ int App::run(const Args& args)
             taaSrcLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
             taaSrcStage = VK_PIPELINE_STAGE_2_TRANSFER_BIT;
             taaSrcAccess = VK_ACCESS_2_TRANSFER_READ_BIT;
-            m_taaHistoryIdx ^= 1;
+            m_taaHistoryIdx = int(widx);
             m_taaFirstFrame = false;
+            // remember this frame's camera so next frame can reproject history
+            m_prevCam.pos = m_camera.pos;
+            m_prevCam.right = m_camera.right();
+            m_prevCam.up = m_camera.up();
+            m_prevCam.fwd = m_camera.forward();
+            m_prevCam.tanHalfFov = tanHalfFov;
+            m_prevCam.aspect = float(m_swapchain.extent().width) / float(m_swapchain.extent().height);
         } else {
             // no TAA: offscreen -> TRANSFER_SRC directly
             vf::transitionImage(fr.cmd, m_offscreen.img, VK_IMAGE_ASPECT_COLOR_BIT,

@@ -428,4 +428,55 @@ std::vector<VoxelRecord> EditableWorld::makeOrientedCylinder(
     return res;
 }
 
+std::vector<VoxelRecord> EditableWorld::makeDome(glm::ivec3 anchor, glm::vec3 axisDir,
+                                                 float radiusM, float heightM, uint8_t mat) const
+{
+    std::vector<VoxelRecord> res;
+    if (radiusM <= 1e-3f || heightM <= 1e-3f)
+        return res;
+    axisDir = glm::normalize(axisDir);
+    radiusM = std::max(radiusM, VOXEL * 0.5f);
+    heightM = std::max(heightM, VOXEL * 0.5f);
+
+    // rotation mapping local +Y -> world axisDir; Rt brings a world offset into
+    // the dome's local frame (axis = +Y) for the half-ellipsoid test.
+    const glm::mat3 R = glm::mat3(glm::rotation(glm::vec3(0.f, 1.f, 0.f), axisDir));
+    const glm::mat3 Rt = glm::transpose(R);
+
+    const glm::vec3 base = voxelCenter(anchor);
+    const float reach = std::max(radiusM, heightM);
+    const int N = int(WORLD / VOXEL);
+    auto toCell = [&](float w) { return int(std::floor((w + 0.5f * WORLD) / VOXEL)); };
+    const int x0 = std::max(0, toCell(base.x - reach)), x1 = std::min(N - 1, toCell(base.x + reach));
+    const int y0 = std::max(0, toCell(base.y)),          y1 = std::min(N - 1, toCell(base.y + heightM));
+    const int z0 = std::max(0, toCell(base.z - reach)), z1 = std::min(N - 1, toCell(base.z + reach));
+
+    const float invR2 = 1.f / (radiusM * radiusM);
+    const float invH2 = 1.f / (heightM * heightM);
+    const float eps = VOXEL;
+    for (int z = z0; z <= z1; ++z)
+        for (int y = y0; y <= y1; ++y)
+            for (int x = x0; x <= x1; ++x) {
+                const glm::vec3 p = voxelCenter(glm::ivec3(x, y, z));
+                const glm::vec3 local = Rt * (p - base);
+                if (local.y < -eps)
+                    continue; // only the half above the surface
+                const float r2 = local.x * local.x + local.z * local.z;
+                const float v = r2 * invR2 + (local.y * local.y) * invH2;
+                if (v > 1.f + 1e-4f)
+                    continue; // outside the half-ellipsoid
+                VoxelRecord rec;
+                rec.x = uint16_t(x); rec.y = uint16_t(y); rec.z = uint16_t(z);
+                const glm::vec3& col = kPalette[std::min(int(mat), 16)];
+                const glm::vec2& rr = kMaterialReflection[std::min(int(mat), 16)];
+                rec.r = uint8_t(col.r * 255.f); rec.g = uint8_t(col.g * 255.f); rec.b = uint8_t(col.b * 255.f);
+                rec.a = 255;
+                rec.reflectivity = uint8_t(rr.x);
+                rec.roughness = uint8_t(rr.y);
+                rec.materialId = mat;
+                res.push_back(rec);
+            }
+    return res;
+}
+
 }

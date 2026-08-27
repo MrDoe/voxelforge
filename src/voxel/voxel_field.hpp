@@ -33,7 +33,9 @@ public:
                const std::vector<int16_t>& colTop, const std::vector<uint8_t>& colMat,
                const std::vector<uint32_t>& objCells, const std::vector<uint8_t>& objMats,
                const std::vector<uint32_t>& carveCells = {},
-               const std::vector<uint8_t>& carveMats = {});
+               const std::vector<uint8_t>& carveMats = {},
+               const std::vector<uint32_t>& raiseCells = {},
+               const std::vector<uint8_t>& raiseMats = {});
 
     bool valid() const { return m_built; }
 

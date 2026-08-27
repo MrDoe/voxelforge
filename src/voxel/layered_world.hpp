@@ -145,6 +145,11 @@ private:
     // as a separate field.
     std::vector<uint32_t> m_carveCells;
     std::vector<uint8_t> m_carveMats;
+    // additive "raise" layer cells (role "raise"): lift the terrain into a
+    // half-sphere bump. Like carve, kept out of the merged record set and fed to
+    // VoxelField::build as its own field that only deforms the heightfield.
+    std::vector<uint32_t> m_raiseCells;
+    std::vector<uint8_t> m_raiseMats;
     std::vector<uint8_t> m_blockSolid;                     // global presence grid (records+interior)
     VoxelField m_field;                                    // records-derived geometry oracle
 

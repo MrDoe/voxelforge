@@ -321,11 +321,14 @@ void VoxelField::build(const std::vector<VoxelRecord>& records,
                        const std::vector<uint32_t>& objCells,
                        const std::vector<uint8_t>& objMats,
                        const std::vector<uint32_t>& carveCells,
-                       const std::vector<uint8_t>& carveMats)
+                       const std::vector<uint8_t>& carveMats,
+                       const std::vector<uint32_t>& raiseCells,
+                       const std::vector<uint8_t>& raiseMats)
 {
     auto tStart = std::chrono::steady_clock::now();
     m_latN = int(WORLD / VOXEL);
     const int N = m_latN;
+    (void)raiseMats; // raise volume only deforms the heightfield; material is unused
 
     // ---- terrain columns ---------------------------------------------------
     m_colTop = colTop;
@@ -355,6 +358,30 @@ void VoxelField::build(const std::vector<VoxelRecord>& records,
                 m_heightTex[i].x = colBottom[i];
                 int16_t ny = int16_t(std::floor((colBottom[i] + 0.5f * WORLD) / VOXEL - 1.0f));
                 if (ny < m_colTop[i])
+                    m_colTop[i] = ny;
+            }
+        }
+    }
+
+    // ---- raise (dome): lift the terrain heightfield where added -----------------
+    // The raise volume is a solid half-ellipsoid (the added material). For each
+    // (x,z) column we take the highest raise cell as the new terrain top, so the
+    // landscape bulges into a half-sphere bump of the carved diameter (max at the
+    // centre, tapering to the rim).
+    if (!raiseCells.empty()) {
+        std::vector<float> colTopR(size_t(N) * N, -1e30f);
+        for (uint32_t k : raiseCells) {
+            int x = int(k >> 20), y = int((k >> 10) & 0x3FFu), z = int(k & 0x3FFu);
+            float ty = -0.5f * WORLD + (float(y) + 0.5f) * VOXEL;
+            size_t ci = size_t(z) * N + x;
+            if (ty > colTopR[ci])
+                colTopR[ci] = ty;
+        }
+        for (size_t i = 0; i < m_heightTex.size(); ++i) {
+            if (colTopR[i] > m_heightTex[i].x) {
+                m_heightTex[i].x = colTopR[i];
+                int16_t ny = int16_t(std::floor((colTopR[i] + 0.5f * WORLD) / VOXEL));
+                if (ny > m_colTop[i])
                     m_colTop[i] = ny;
             }
         }

@@ -13,12 +13,16 @@ namespace vf::voxel {
 // The app hot-reloads this layer via its disk poll within ~0.5 s.
 //
 // The default instance is the AI "add" layer (ai_edits.vxw, role "object").
-// A second instance with role "carve" holds subtractive carve voxels.
+// A second instance with role "carve" holds subtractive carve voxels that
+// depress the terrain; a third with role "raise" holds additive dome voxels
+// that lift the terrain into a half-sphere bump.
 struct EditableWorld {
     static constexpr const char* kFileName = "ai_edits.vxw";
     static constexpr const char* kLayerName = "ai_edits";
     static constexpr const char* kCarveFileName = "carve_edits.vxw";
     static constexpr const char* kCarveLayerName = "carve_edits";
+    static constexpr const char* kRaiseFileName = "raise_edits.vxw";
+    static constexpr const char* kRaiseLayerName = "raise_edits";
     static constexpr float kBand = 0.20f; // surface band like heightmap_gen sweep
 
     EditableWorld(std::string assetDir = std::string(VOXELFORGE_ASSET_DIR),
@@ -45,6 +49,14 @@ struct EditableWorld {
     std::vector<VoxelRecord> makeOrientedCylinder(glm::ivec3 anchor, glm::vec3 axisDir,
                                                   float radiusM, float lengthM,
                                                   uint8_t mat, bool carve) const;
+
+    // Half-ellipsoid "dome" sitting on the surface, bulging along +axisDir.
+    // emit a solid volume whose top surface follows height(r) = heightM *
+    // sqrt(1 - (r/radiusM)^2): max at the centre, tapering to zero at the rim,
+    // so the terrain raised to its top forms a half-sphere bump. Used by the
+    // "Add" edit tool (role "raise").
+    std::vector<VoxelRecord> makeDome(glm::ivec3 anchor, glm::vec3 axisDir,
+                                      float radiusM, float heightM, uint8_t mat) const;
 
     // Import a foreign .vxw layer file: translates its records so the object's
     // bottom-center lands on `anchor` and appends the copy to ai_edits.vxw.
