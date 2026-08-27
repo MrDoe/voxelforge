@@ -124,6 +124,16 @@ private:
     };
     std::vector<Signature> m_signatures;
 
+    // parsed-layer cache: file -> (content sig, records). Reloads re-parse only
+    // layers whose signature changed (usually just ai_edits.vxw / world.json).
+    struct LayerCacheEntry {
+        unsigned long long mtime = 0;
+        unsigned long long size = 0;
+        bool valid = false;                                // false = parse failed before
+        std::vector<VoxelRecord> voxels;
+    };
+    std::map<std::string, LayerCacheEntry> m_layerCache;
+
     Stats m_stats;
 };
 

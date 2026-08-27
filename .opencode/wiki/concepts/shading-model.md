@@ -1,13 +1,14 @@
 ---
 title: Voxelforge PBR shading model
 tags: [shading, pbr, ggx, ao, gi, fog, grade]
-sourceRefs: [shaders/svo_raymarch.comp, shaders/raymarch.comp, ImplementationPlan.md]
-lastReviewed: 2026-08-24
+sourceRefs: [shaders/svo_raymarch.comp, docs/rendering.md]
+lastReviewed: 2026-08-26
 ---
 
 # PBR Shading Model
 
-The lighting stack implemented 2026-08-24 (identical in both backends, see [[entities/svo-render]]):
+The lighting stack implemented 2026-08-24 in the single chunked-SVO shader
+(`shaders/svo_raymarch.comp`; see [[entities/svo-render]] and `docs/rendering.md`):
 
 ## Direct light
 - **GGX BRDF**: Fresnel-Schlick `F = f0 + (1-f0)(1-V·H)^5` with
@@ -21,7 +22,7 @@ The lighting stack implemented 2026-08-24 (identical in both backends, see [[ent
 - **Multi-scale SDF AO** (`sdfAO`): 3 rings (0.14 / 0.45 / 1.25 m) × 4 azimuths on a
   ~0.85*n cone, smoothstep falloff, weight `1/(1+fall²*4)`, accumulated into a **bent normal**
   that drives the ambient (occluded directions drop out of `bent`). Replaced the old 4-dir
-  constant-radius `voxelAO` (SVO-only) and gave the dense backend real AO. Cost ≈ +0.5 ms/frame.
+  constant-radius `voxelAO`. Cost ≈ +0.5 ms/frame.
 - **Sky-driven ambient** (`skyIrradiance`): 3 taps of the analytic `skyColor` model
   (n-tilted-to-up, n-tilted-to-sun, near-zenith), so ambient follows sun azimuth and sky
   gradient instead of constant `mix(kHorizon, kZenith)`.
@@ -71,5 +72,5 @@ ACES → vibrance (`mix(lum, col, 1 + 0.85*(1 − sat))`) → cool shadow lift +
 gamma 2.2. Tuning knobs are plain GLSL constants (push constant is exactly 128 B, no free slots).
 
 ## Priorities for the next realism step
-Per `ImplementationPlan.md` P1: real 1-bounce GI (half-res temporal), TAA reprojection,
+Per `docs/history/ImplementationPlan.md`: real 1-bounce GI (half-res temporal), TAA reprojection,
 leaf-cluster foliage warp. The SDF AO + bent normal is already the cheapest leg of that.

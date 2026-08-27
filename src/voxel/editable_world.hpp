@@ -43,8 +43,24 @@ struct EditableWorld {
     size_t appendBox(glm::ivec3 anchor, glm::ivec3 sizeVox, uint8_t mat);
     void clear(); // removes all AI edits and persists
 
+    // --- arbitrary-object authoring -----------------------------------------
+    // Write a standalone named object layer (<name>.vxw, record-only) into the
+    // asset dir and register it (enabled, role "object") in world.json so the
+    // running app hot-reloads it. Overwrites an existing layer of the same name
+    // (the modification path: read_object -> edit -> write_object). Returns
+    // false for an empty/illegal name.
+    bool writeObjectLayer(const std::string& name,
+                          const std::vector<VoxelRecord>& recs);
+
+    // Remove a named object layer file + its manifest entry (never landscape or
+    // the packed cache). Returns false if absent, protected, or an illegal name.
+    bool deleteObjectLayer(const std::string& name);
+
     size_t size() const { return m_records.size(); }
     const std::vector<VoxelRecord>& records() const { return m_records; }
+
+    // Keep a layer name filesystem- and manifest-safe: [A-Za-z0-9_-], <=40 chars.
+    static std::string sanitizeLayerName(const std::string& name);
 
 private:
     std::string m_assetDir;

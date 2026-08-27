@@ -3,8 +3,13 @@
 > **Scope:** The whole project is a **single-path chunked-SVO voxel renderer**
 > with AI-driven world editing. Splats, the dense reference raymarcher and all
 > analytic runtime geometry are **gone** — geometry is derived solely from
-> `.vxw` records via `VoxelField` (`rework.md`). Keep this invariant in every
-> change.
+> `.vxw` records via `VoxelField` (`docs/history/rework.md`). Keep this
+> invariant in every change.
+>
+> **Full developer documentation lives in `docs/`** (start at
+> `docs/index.md`): architecture, world format, GPU contract, AI/MCP tooling,
+> testing gates, contributing guide. This file stays the authoritative quick
+> convention sheet for coding sessions.
 
 ## Build
 - Requires Vulkan 1.3, `glslangValidator`, CMake ≥3.24, Ninja, Python3.
@@ -54,7 +59,8 @@
   `VF_LLM_URL=http://host:8080/v1 VF_LLM_MODEL=… ./build/voxelforge`.
   MCP: `./build/vf_mcp` (stdio), registered in `.opencode/opencode.json`.
 - Present quirk: default IMMEDIATE on NVIDIA+X11 (`VF_PRESENT=immediate|mailbox`),
-  per-swapchain-image acquire semaphores (`src/rhi/swapchain.cpp:53`).
+  per-swapchain-image acquire semaphores (`src/app/main.cpp`: `m_acquireSems`
+  at :148, created in `ensureAcquireSemaphores()` at :177, used at :923).
 
 ## Tests & verification — run in order
 - `ninja -C build && ctest --test-dir build` runs `unit_tests` (doctest) +
@@ -83,10 +89,19 @@
   tests as authoring truth — NOT linked into the renderer path).
 - `src/render/svo_pass.{hpp,cpp}` — compute pipeline; `RaymarchPush` (128 B)
   lives here. `taa_pass.*` resolve. `src/rhi/*` Vulkan 1.3 + VMA.
+- `src/voxel/heightmap.{hpp,cpp}` — terrain source of truth: 16-bit grayscale
+  PNG (`kHmSize=2048`, meters `[-8,24]`); bilinear `sample()` + `gradient()`.
+- `src/voxel/worldfile.{hpp,cpp}` — VXW v1 binary reader/writer (header + SVO
+  buffers + 16 B voxel records); used by `heightmap_gen` bake and `EditableWorld`.
+- `src/voxel/picking.{hpp,cpp}` — `rayPick()` against the records-derived
+  `VoxelField` for `Ctrl+LMB` anchor selection.
 - `src/app/main.cpp` — window/swapchain/frame loop/HUD/picking wiring.
 - `src/app/chat_ui.cpp`, `src/ai/*` — chat UI, LLM client/tool parsing, MCP
-  server (`vf_mcp`: add_box/cylinder/ellipsoid/stamp, list_layers,
-  enable_layer, probe, ground, clear_edits).
+  server (`vf_mcp`: add_box/cylinder/ellipsoid/stamp, add_voxels, write_object,
+  read_object, delete_object, list_layers, enable_layer, probe, ground,
+  clear_edits). See the voxel-object skill for how to author arbitrary objects
+  via these tools (the `.vxw` file is produced by `write_object`/`add_voxels`,
+  never hand-written binary).
 - `tools/heightmap_gen.cpp` — offline baker; classifies terrain materials
   against lattice geometry (`latSlope`) so baked materials match what the GPU
   renders. `tools/scene_slice.cpp` — ASCII cross-sections of the field.
@@ -107,8 +122,10 @@
   `word1=a|refl<<8|rough<<16|(mat|objFlag)<<24`. Empty-cell fallback in
   `map()` is `max(-sdBox(p,cmin,cmax), VOXEL*0.5)` + 6-step bisection.
 - Push block `RaymarchPush` (128 B, `svo_pass.hpp`): camPos/Right/Up/Fwd,
-  `a=(tanHalfFov,aspect,extentX,extentY)`, `b=(worldSize,voxelSize,gridN,_)`,
-  `sunDir` toward sun, `misc.x=animTime_s`. Don't reuse `a.w`.
+  `a=(tanHalfFov,aspect,extentX,extentY)`, `b=(worldSize,voxelSize,gridN,_),
+  sunDir` toward sun, **`misc.y=animTime_s`** (the struct comment claims
+  `misc.x` — the shader and main.cpp actually use `misc.y`). Don't reuse
+  `a.w`. See `docs/rendering.md`.
 
 ## Gotchas
 - `WORLD/VOXEL/GRID_N/BRICK_N` are load-bearing; changing one requires
@@ -128,6 +145,7 @@
   position every frame; delete `imgui.ini` to reset all panels.
 - `VoxelField::sample` returns quantised (int8) object distances; the shadow
   volume is coarser still (0.4 m texels) — don't use it for shading normals.
-- Docs: `README.md` (product), `AGENTS.md` (this file),
-  `rework.md` (architecture plan), `ImplementationPlan.md` (history/roadmap),
-  `THREAD_SUMMARY.md` (design history).
+- Docs: `README.md` (product), `AGENTS.md` (this file), `docs/` (full dev
+  documentation, start at `docs/index.md`),
+  `docs/history/` (`rework.md` architecture plan, `ImplementationPlan.md`
+  roadmap, `THREAD_SUMMARY.md` design log — historical).

@@ -85,13 +85,13 @@ struct CellMap {
 
 inline uint32_t paletteWordLo(uint8_t mat)
 {
-    const glm::vec3& c = kPalette[std::min(int(mat), 8)];
+    const glm::vec3& c = kPalette[std::min(int(mat), 16)];
     return uint32_t(c.r * 255.f) | (uint32_t(c.g * 255.f) << 8) |
            (uint32_t(c.b * 255.f) << 16);
 }
 inline uint32_t paletteWordHi(uint8_t mat, bool isObj = false)
 {
-    const glm::vec2& rr = kMaterialReflection[std::min(int(mat), 8)];
+    const glm::vec2& rr = kMaterialReflection[std::min(int(mat), 16)];
     return 255u | (uint32_t(rr.x) << 8) | (uint32_t(rr.y) << 16) |
            (uint32_t(mat) | (isObj ? 0x80u : 0u)) << 24;
 }
@@ -233,6 +233,7 @@ inline std::vector<int> chunkRangeFromAABB(const WorldAABB& b)
 
 bool LayeredWorld::load(const std::string& manifestPath)
 {
+    auto tLoad = std::chrono::steady_clock::now();
     m_manifestPath = manifestPath;
     std::vector<worldfile::WorldLayer> manifest;
     if (!worldfile::loadManifest(manifestPath, manifest))
@@ -292,21 +293,40 @@ bool LayeredWorld::load(const std::string& manifestPath)
             m_layersMeta.push_back(l);
         if (!l.enabled)
             continue;
-        WorldFileData data;
-        if (!worldfile::read(dir + l.file, data)) {
-            spdlog::error("layered_world: cannot read layer '{}'", l.file);
-            continue;
-        }
-        if (data.meta.worldSize != expected.worldSize ||
-            data.meta.voxelSize != expected.voxelSize ||
-            data.meta.gridN != expected.gridN) {
-            spdlog::error("layered_world: layer '{}' meta mismatch", l.file);
-            continue;
+        // parse-cache: only re-read layers whose mtime+size changed
+        const std::string path = dir + l.file;
+        std::error_code ec;
+        unsigned long long sz =
+            static_cast<unsigned long long>(std::filesystem::file_size(path, ec));
+        unsigned long long mt = sigOf(path);
+        LayerCacheEntry& ce = m_layerCache[l.file];
+        const std::vector<VoxelRecord>* vox = nullptr;
+        if (ce.valid && ce.mtime == mt && ce.size == sz) {
+            vox = &ce.voxels;
+        } else {
+            WorldFileData data;
+            if (!worldfile::read(path, data)) {
+                spdlog::error("layered_world: cannot read layer '{}'", l.file);
+                ce.valid = false;
+                continue;
+            }
+            if (data.meta.worldSize != expected.worldSize ||
+                data.meta.voxelSize != expected.voxelSize ||
+                data.meta.gridN != expected.gridN) {
+                spdlog::error("layered_world: layer '{}' meta mismatch", l.file);
+                ce.valid = false;
+                continue;
+            }
+            ce.mtime = mt;
+            ce.size = sz;
+            ce.voxels = std::move(data.voxels);
+            ce.valid = true;
+            vox = &ce.voxels;
         }
         curSig[l.file] = addSig(l.file);
         const bool isLandscape = (l.name == "landscape" || l.file == "landscape.vxw");
         WorldAABB& box = curBox[l.file];
-        for (VoxelRecord& v : data.voxels) {
+        for (const VoxelRecord& v : *vox) {
             uint32_t key = cellKey(v.x, v.y, v.z);
             if (claimed.insert(key).second)
                 m_records.push_back(v);
@@ -329,6 +349,10 @@ bool LayeredWorld::load(const std::string& manifestPath)
     // --- decide full vs incremental rebuild -------------------------------
     // Toggles stay incremental: only layers whose enabled-state, record AABB
     // or file content changed mark their chunk range dirty.
+    const double readMs = std::chrono::duration<double, std::milli>(
+                              std::chrono::steady_clock::now() - tLoad)
+                              .count();
+    auto tField = std::chrono::steady_clock::now();
     bool full = !m_hasFullBuild;
     WorldAABB dirty;
     bool dirtyValid = false;
@@ -391,10 +415,22 @@ bool LayeredWorld::load(const std::string& manifestPath)
     if (full)
         dirtyChunks.clear();
 
+    const double fieldMs = std::chrono::duration<double, std::milli>(
+                               std::chrono::steady_clock::now() - tField)
+                               .count();
+    auto tSvo = std::chrono::steady_clock::now();
     if (!synthesize(full, dirtyChunks)) {
         m_loaded = false;
         return false;
     }
+    spdlog::info("layered_world: load {:.0f} ms (read {:.0f}, field {:.0f}, svo {:.0f})",
+                 std::chrono::duration<double, std::milli>(
+                     std::chrono::steady_clock::now() - tLoad)
+                     .count(),
+                 readMs, fieldMs,
+                 std::chrono::duration<double, std::milli>(
+                     std::chrono::steady_clock::now() - tSvo)
+                     .count());
 
     m_prevBox = std::move(curBox);
     m_prevEnabled = std::move(curEnabled);

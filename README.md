@@ -181,10 +181,21 @@ shadow rays march the smooth heightfield plus a coarse object-SDF volume.
 There are no analytic scene constants in GLSL by design — new geometry only
 ever arrives as data.
 
-## Documentation index
+## Documentation
 
-- `README.md` — this file
-- `AGENTS.md` — engineering conventions, gotchas and test gates for coding sessions
-- `rework.md` — the records-only architecture plan (implemented on `VoxelsOnly`)
-- `ImplementationPlan.md` — milestone history and roadmap
-- `THREAD_SUMMARY.md` — historical design log
+Full developer documentation lives in **[`docs/`](docs/index.md)**:
+
+| doc | contents |
+|---|---|
+| [`docs/getting-started.md`](docs/getting-started.md) | build, asset bake, controls, headless modes, troubleshooting |
+| [`docs/architecture.md`](docs/architecture.md) | data flow, module tour, synthesis & hot-reload model |
+| [`docs/world-format.md`](docs/world-format.md) | VXW v1 binary spec, manifest schema, layer merge rules |
+| [`docs/rendering.md`](docs/rendering.md) | GPU contract: handles, brick packing, push block, textures |
+| [`docs/ai-editing.md`](docs/ai-editing.md) | chat backend, tool normalization, MCP protocol reference |
+| [`docs/tooling.md`](docs/tooling.md) | full CLI/env reference, `vf_slice`, baker, `start.sh` |
+| [`docs/testing.md`](docs/testing.md) | test gates, suite breakdown, debug workflows |
+| [`docs/contributing.md`](docs/contributing.md) | invariants, conventions, gotchas, how-to recipes |
+
+Historical design docs (records-only rework plan, roadmap, session log) live
+in [`docs/history/`](docs/history/). Engineering conventions for coding
+agents: [`AGENTS.md`](AGENTS.md).

@@ -88,6 +88,44 @@ void destroyImage3D(const Context& ctx, Image3D& im)
     im = {};
 }
 
+Image3D makeImage2D(const Context& ctx, uint32_t w, uint32_t h,
+                     VkFormat format, VkImageUsageFlags usage)
+{
+    Image3D im;
+    im.extent = { w, h, 1 };
+    im.format = format;
+
+    VkImageCreateInfo ii { VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO };
+    ii.imageType = VK_IMAGE_TYPE_2D;
+    ii.format = format;
+    ii.extent = im.extent;
+    ii.mipLevels = 1;
+    ii.arrayLayers = 1;
+    ii.samples = VK_SAMPLE_COUNT_1_BIT;
+    ii.tiling = VK_IMAGE_TILING_OPTIMAL;
+    ii.usage = usage;
+    ii.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+
+    VmaAllocationCreateInfo ai {};
+    ai.usage = VMA_MEMORY_USAGE_AUTO_PREFER_DEVICE;
+
+    if (vmaCreateImage(ctx.allocator(), &ii, &ai, &im.img, &im.alloc, nullptr) != VK_SUCCESS) {
+        spdlog::critical("vmaCreateImage 2D {}x{} failed", w, h);
+        return im;
+    }
+
+    VkImageViewCreateInfo vi { VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO };
+    vi.image = im.img;
+    vi.viewType = VK_IMAGE_VIEW_TYPE_2D;
+    vi.format = format;
+    vi.subresourceRange = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1 };
+    if (vkCreateImageView(ctx.device(), &vi, nullptr, &im.view) != VK_SUCCESS) {
+        spdlog::critical("vkCreateImageView(2D) failed");
+        return im;
+    }
+    return im;
+}
+
 void transitionImage(VkCommandBuffer cmd, VkImage img, VkImageAspectFlags aspect,
                      VkImageLayout from, VkImageLayout to,
                      VkPipelineStageFlags2 srcStage, VkAccessFlags2 srcAccess,

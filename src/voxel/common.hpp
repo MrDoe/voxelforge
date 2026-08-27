@@ -3,6 +3,7 @@
 // v3: heightmap-driven river valley - hills + carved stream channel.
 // All geometry derives from assets/heightmap.png via sharedHeightmap().
 #include "voxel/heightmap.hpp"
+#include "voxel/worldfile.hpp"
 #include <glm/glm.hpp>
 #include <array>
 #include <cstdint>
@@ -18,7 +19,7 @@ constexpr int CHUNK_N = 64;
 constexpr float CHUNK_M = float(CHUNK_N) * VOXEL;
 constexpr int GRID_N = int(WORLD / CHUNK_M);
 
-inline const std::array<glm::vec3, 9> kPalette {
+inline const std::array<glm::vec3, 17> kPalette {
     glm::vec3 { 0.07f, 0.52f, 0.06f }, // 0 grass dark - vivid
     glm::vec3 { 0.16f, 0.68f, 0.10f }, // 1 grass light - vivid
     glm::vec3 { 0.62f, 0.36f, 0.14f }, // 2 soil - warm brown
@@ -28,10 +29,18 @@ inline const std::array<glm::vec3, 9> kPalette {
     glm::vec3 { 0.62f, 0.33f, 0.10f }, // 6 wood (logs/trunk) - reddish
     glm::vec3 { 0.42f, 0.22f, 0.10f }, // 7 roof shingles - deep brown
     glm::vec3 { 0.04f, 0.52f, 0.03f }, // 8 foliage - vivid green
+    glm::vec3 { 1.00f, 0.35f, 0.06f }, // 9 lava  - emissive
+    glm::vec3 { 0.95f, 0.20f, 0.05f }, // 10 ember - emissive
+    glm::vec3 { 0.10f, 0.55f, 0.95f }, // 11 glow cyan - emissive
+    glm::vec3 { 0.15f, 0.85f, 0.25f }, // 12 glow green - emissive
+    glm::vec3 { 0.55f, 0.10f, 0.85f }, // 13 glow purple - emissive
+    glm::vec3 { 0.10f, 0.35f, 0.95f }, // 14 glow blue - emissive
+    glm::vec3 { 0.95f, 0.90f, 0.85f }, // 15 white-hot - emissive
+    glm::vec3 { 0.92f, 0.95f, 0.99f }, // 16 snow - cold white
 };
 
 // per-material surface attributes, 0-255: x = reflectivity, y = roughness
-inline const std::array<glm::vec2, 9> kMaterialReflection {
+inline const std::array<glm::vec2, 17> kMaterialReflection {
     glm::vec2 { 35.f, 235.f },  // 0 grass dark
     glm::vec2 { 40.f, 230.f },  // 1 grass light
     glm::vec2 { 55.f, 225.f },  // 2 soil
@@ -41,9 +50,57 @@ inline const std::array<glm::vec2, 9> kMaterialReflection {
     glm::vec2 { 70.f, 160.f },  // 6 wood
     glm::vec2 { 60.f, 170.f },  // 7 roof
     glm::vec2 { 30.f, 235.f },  // 8 foliage
+    glm::vec2 { 45.f, 205.f },  // 9 lava
+    glm::vec2 { 45.f, 205.f },  // 10 ember
+    glm::vec2 { 40.f, 200.f },  // 11 glow cyan
+    glm::vec2 { 40.f, 200.f },  // 12 glow green
+    glm::vec2 { 40.f, 200.f },  // 13 glow purple
+    glm::vec2 { 40.f, 200.f },  // 14 glow blue
+    glm::vec2 { 40.f, 200.f },  // 15 white-hot
+    glm::vec2 { 50.f, 200.f },  // 16 snow
 };
 
 inline constexpr float WATER_LEVEL = -0.9f;
+
+// Build a single surface VoxelRecord. When r/g/b are absent (negative) the
+// colour is taken from kPalette[mat]; when refl/rough are absent (negative) the
+// surface response is taken from kMaterialReflection[mat]. Coordinates are
+// clamped into the valid 1024^3 lattice. This is the shared record constructor
+// used by the MCP object-authoring tools (add_voxels / write_object).
+inline VoxelRecord makeVoxelRecord(int x, int y, int z, uint8_t mat, int r = -1,
+                                   int g = -1, int b = -1, int refl = -1,
+                                   int rough = -1)
+{
+    auto clamp255 = [](int v) { return v < 0 ? 0 : (v > 255 ? 255 : v); };
+    auto clampCoord = [](int v) { return v < 0 ? 0 : (v > 1023 ? 1023 : v); };
+    VoxelRecord v;
+    v.x = uint16_t(clampCoord(x));
+    v.y = uint16_t(clampCoord(y));
+    v.z = uint16_t(clampCoord(z));
+    int mi = mat > 16 ? 16 : int(mat);
+    if (r >= 0 && g >= 0 && b >= 0) {
+        v.r = uint8_t(clamp255(r));
+        v.g = uint8_t(clamp255(g));
+        v.b = uint8_t(clamp255(b));
+    } else {
+        const glm::vec3& col = kPalette[mi];
+        v.r = uint8_t(col.r * 255.f);
+        v.g = uint8_t(col.g * 255.f);
+        v.b = uint8_t(col.b * 255.f);
+    }
+    v.a = 255;
+    if (refl >= 0)
+        v.reflectivity = uint8_t(clamp255(refl));
+    else
+        v.reflectivity = uint8_t(kMaterialReflection[mi].x);
+    if (rough >= 0)
+        v.roughness = uint8_t(clamp255(rough));
+    else
+        v.roughness = uint8_t(kMaterialReflection[mi].y);
+    v.materialId = uint8_t(mi);
+    v.reserved = 0;
+    return v;
+}
 
 // --- deterministic value noise -------------------------------------------
 inline float hash2(float x, float y)
@@ -95,6 +152,8 @@ inline uint8_t materialFromBands(float wd, float slope, float n)
         return n > 0.0f ? uint8_t(4) : uint8_t(5); // steep slopes: rock
     if (wd > -1.2f)
         return 2;                                  // floodplain soil band
+    if (wd < -4.0f && slope < 0.85f)
+        return 16;                                 // snow caps on high, gentle peaks
     return n > 0.25f ? uint8_t(1) : uint8_t(0);    // grass
 }
 

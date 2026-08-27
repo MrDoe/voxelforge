@@ -122,6 +122,17 @@ private:
     // the SAME smooth terrain (no stair-step divergence).
     float smoothTerrainY(float wx, float wz) const;
     bool anyTerrainNear(int cx, int cz) const;
+
+    // component result cache (content-keyed): distance transforms of unchanged
+    // components are reused verbatim across builds, so small edits only pay
+    // for the components whose cells actually changed
+    struct CompOut {
+        std::vector<uint32_t> keys; // packed lattice cells
+        std::vector<uint32_t> vals; // uint8(sdfRaw) | mat << 8
+    };
+    std::vector<CompOut> m_prevOuts;
+    std::vector<uint64_t> m_prevHashes;
+    bool m_hasPrev = false;
 };
 
 } // namespace vf::voxel

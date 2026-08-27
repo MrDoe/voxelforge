@@ -279,8 +279,8 @@ int main(int argc, char** argv)
                          -0.5f * WORLD + (iz + 0.5f) * VOXEL);
     };
     auto record = [&](vf::voxel::VoxelRecord v, glm::vec3 p, uint8_t mat) {
-        const glm::vec3& c = kPalette[mat];
-        const glm::vec2& rr = kMaterialReflection[mat];
+        const glm::vec3& c = kPalette[std::min(int(mat),16)];
+        const glm::vec2& rr = kMaterialReflection[std::min(int(mat),16)];
         v.r = uint8_t(c.r * 255.0f);
         v.g = uint8_t(c.g * 255.0f);
         v.b = uint8_t(c.b * 255.0f);

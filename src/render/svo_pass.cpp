@@ -70,17 +70,22 @@ bool SvoPass::init(const Context& ctx)
     m_ctx = &ctx;
     VkDevice dev = ctx.device();
 
-    VkDescriptorSetLayoutBinding b[9] = {};
-    b[0] = { 0, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 1, VK_SHADER_STAGE_COMPUTE_BIT, nullptr };
-    for (int i = 1; i < 6; ++i)
-        b[i] = { uint32_t(i), VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1,
-                 VK_SHADER_STAGE_COMPUTE_BIT, nullptr };
-    b[6] = { 6, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 1, VK_SHADER_STAGE_COMPUTE_BIT, nullptr };
-    b[7] = { 7, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 1, VK_SHADER_STAGE_COMPUTE_BIT, nullptr };
-    b[8] = { 8, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, 1, VK_SHADER_STAGE_COMPUTE_BIT, nullptr };
+    // Note: binding 0 is intentionally absent (an unwritten binding in the
+    // layout invalidates the whole descriptor set on this driver). uHdr lives
+    // at 9, uGPos at 10; the shader no longer references binding 0.
+    VkDescriptorSetLayoutBinding b[10] = {};
+    int n = 0;
+    for (uint32_t i = 1; i < 6; ++i)
+        b[n++] = { i, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1,
+                   VK_SHADER_STAGE_COMPUTE_BIT, nullptr };
+    b[n++] = { 6, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 1, VK_SHADER_STAGE_COMPUTE_BIT, nullptr };
+    b[n++] = { 7, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 1, VK_SHADER_STAGE_COMPUTE_BIT, nullptr };
+    b[n++] = { 8, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, 1, VK_SHADER_STAGE_COMPUTE_BIT, nullptr };
+    b[n++] = { 9, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 1, VK_SHADER_STAGE_COMPUTE_BIT, nullptr };
+    b[n++] = { 10, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 1, VK_SHADER_STAGE_COMPUTE_BIT, nullptr };
 
     VkDescriptorSetLayoutCreateInfo li { VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO };
-    li.bindingCount = 9;
+    li.bindingCount = n;
     li.pBindings = b;
     if (vkCreateDescriptorSetLayout(dev, &li, nullptr, &m_setLayout) != VK_SUCCESS)
         return false;
@@ -115,9 +120,9 @@ bool SvoPass::init(const Context& ctx)
         return false;
     }
 
-    VkDescriptorPoolSize sizes[3] = { { VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 3 },
-                                      { VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 5 },
-                                      { VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, 1 } };
+    VkDescriptorPoolSize sizes[3] = { { VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 5 },
+                                       { VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 5 },
+                                       { VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, 1 } };
     VkDescriptorPoolCreateInfo pi { VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO };
     pi.maxSets = 1;
     pi.poolSizeCount = 3;
@@ -180,21 +185,24 @@ void SvoPass::setWorld(const std::vector<int32_t>& grid,
 void SvoPass::setHeightmapView(VkImageView view) { m_heightView = view; }
 void SvoPass::setObjVolumeView(VkImageView view) { m_objVolView = view; }
 
-void SvoPass::updateDescriptors(const Image3D& outImage)
+void SvoPass::updateDescriptors(const Image3D& hdrImage, const Image3D& gposImage)
 {
     if (!m_set || !m_ctx)
         return;
-    VkDescriptorImageInfo ii { VK_NULL_HANDLE, outImage.view, VK_IMAGE_LAYOUT_GENERAL };
+    VkDescriptorImageInfo ii { VK_NULL_HANDLE, hdrImage.view, VK_IMAGE_LAYOUT_GENERAL };
+    VkDescriptorImageInfo gi { VK_NULL_HANDLE, gposImage.view, VK_IMAGE_LAYOUT_GENERAL };
     VkDescriptorImageInfo hi { VK_NULL_HANDLE, m_heightView, VK_IMAGE_LAYOUT_GENERAL };
     VkDescriptorImageInfo oi { VK_NULL_HANDLE, m_objVolView, VK_IMAGE_LAYOUT_GENERAL };
-    VkWriteDescriptorSet w[3] = {};
-    w[0] = { VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, nullptr, m_set, 0, 0, 1,
-             VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, &ii, nullptr, nullptr };
-    w[1] = { VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, nullptr, m_set, 6, 0, 1,
+    VkWriteDescriptorSet w[4] = {};
+    w[0] = { VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, nullptr, m_set, 6, 0, 1,
              VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, &hi, nullptr, nullptr };
-    w[2] = { VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, nullptr, m_set, 7, 0, 1,
+    w[1] = { VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, nullptr, m_set, 7, 0, 1,
              VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, &oi, nullptr, nullptr };
-    vkUpdateDescriptorSets(m_ctx->device(), 3, w, 0, nullptr);
+    w[2] = { VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, nullptr, m_set, 9, 0, 1,
+             VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, &ii, nullptr, nullptr };
+    w[3] = { VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, nullptr, m_set, 10, 0, 1,
+             VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, &gi, nullptr, nullptr };
+    vkUpdateDescriptorSets(m_ctx->device(), 4, w, 0, nullptr);
 }
 
 void SvoPass::record(VkCommandBuffer cmd, const RaymarchPush& push)

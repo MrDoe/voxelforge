@@ -29,7 +29,8 @@ struct NormalizedCall {
 };
 
 inline const char* kValidTools =
-    "create_box, create_cylinder, create_ellipsoid, create_stamp, list_world, probe";
+    "create_box, create_cylinder, create_ellipsoid, create_stamp, create_voxels, "
+    "write_object, read_object, delete_object, list_world, probe";
 
 // lowercase alnum key with verb prefixes and trailing instance counters stripped:
 // "Add_Rock_2" -> "rock", "create-box" -> "box", "LIST_WORLD" -> "listworld"
@@ -71,10 +72,24 @@ inline std::string canonicalToolName(const std::string& key)
         return "create_ellipsoid";
     if (has("stamp") || has("mosaic") || has("pixel"))
         return "create_stamp";
+    // listing/probing must win before the "layer"/"object" rules below, since
+    // "list_layers" / "worldlist" contain those substrings
     if (has("listworld") || key == "list" || has("layers") || has("worldlist"))
         return "list_world";
     if (key == "probe")
         return "probe";
+    // object-layer file ops (read/modify/write/delete standalone .vxw layers)
+    if (has("read") || has("inspect") || has("getobject") || has("dump"))
+        return "read_object";
+    if (has("delete") || has("remove") || has("erase"))
+        return "delete_object";
+    if (has("layer") || has("saveobject") || has("writelayer") ||
+        has("export") || has("model") || has("mesh"))
+        return "write_object";
+    // fully arbitrary voxel authoring (freeform, vs the fixed primitives)
+    if (has("voxel") || has("sculpt") || has("freeform") || has("custom") ||
+        has("object"))
+        return "create_voxels";
     // box family last: "crate"/"chest"/"block" also contain no earlier keywords
     if (has("box") || has("crate") || has("cube") || has("block") || has("chest") ||
         has("brick"))

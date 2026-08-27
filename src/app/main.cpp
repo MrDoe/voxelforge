@@ -4,6 +4,7 @@
 #include "platform/window.hpp"
 #include "rhi/swapchain.hpp"
 #include "render/svo_pass.hpp"
+#include "render/post_pass.hpp"
 #include "render/taa_pass.hpp"
 #include "voxel/worldfile.hpp"
 #include <algorithm>
@@ -40,6 +41,7 @@ struct Args {
     float sunElev=34.0f, sunAzim=238.0f; // golden-hour: long visible shadows
     bool sunSet=false;
     float animTime=0.0f;
+    int tonemap = 2;    // AgX look: 0=Default 1=Golden 2=Punchy
     bool probeSet=false;
     glm::vec3 probe { 0.f };
     std::string llmUrl = "http://127.0.0.1:11434";
@@ -71,8 +73,10 @@ Args parseArgs(int argc, char** argv)
         } else if (s == "--sun" && i + 2 < argc) {
             a.sunElev = atof(argv[++i]); a.sunAzim = atof(argv[++i]);
             a.sunSet = true;
-        } else if (s == "--animtime" && i + 1 < argc) {
+        }         else if (s == "--animtime" && i + 1 < argc) {
             a.animTime = atof(argv[++i]);
+        } else if (s == "--tonemap" && i + 1 < argc) {
+            a.tonemap = atoi(argv[++i]);
         } else if (s == "--probe" && i + 3 < argc) {
             a.probe = { float(atof(argv[i + 1])), float(atof(argv[i + 2])),
                         float(atof(argv[i + 3])) };
@@ -121,10 +125,13 @@ private:
     vf::Swapchain m_swapchain;
 
     vf::Image3D m_offscreen;
+    vf::Image3D m_hdr;     // ray-march linear HDR output
+    vf::Image3D m_gpos;    // ray-march G-buffer: world pos + hit type
     vf::Image3D m_heightImg;
     vf::Image3D m_objVolImg;
     vf::SvoPass m_svoPass;
     vf::TaaPass m_taaPass;
+    vf::PostPass m_postPass;
     vf::Image3D m_taaHistory[2];
     vf::Image3D m_taaResolved;
     bool m_taaEnabled = true;
@@ -153,7 +160,13 @@ private:
     float m_minMs = 1e9f, m_maxMs = 0.0f;
     uint64_t m_frameIdx = 0;
     bool m_showControls = true;
+    VkSampler m_uiSampler = VK_NULL_HANDLE;
+    ImTextureID m_sceneTexId = 0;
+    bool m_scenePreview = false;
     float m_animTime = 0.0f;
+    int m_tonemapLook = 2;
+    int m_renderFlags = 31;   // bit0 AO,bit1 shadows,bit2 flora,bit3 water,bit4 outline
+    float m_exposure = 1.15f;
     uint32_t m_nextAcquire = 0;
 
     // AI chat + picking + editable world
@@ -190,10 +203,14 @@ bool App::createOffscreen(uint32_t w, uint32_t h)
     vf::destroyImage3D(m_ctx, m_taaHistory[0]);
     vf::destroyImage3D(m_ctx, m_taaHistory[1]);
     vf::destroyImage3D(m_ctx, m_taaResolved);
+    if (m_scenePreview && m_sceneTexId) {
+        ImGui_ImplVulkan_RemoveTexture((VkDescriptorSet)m_sceneTexId);
+        m_sceneTexId = 0;
+    }
     m_offscreen = vf::makeImage3D(
         m_ctx, w, h, 1, VK_FORMAT_R8G8B8A8_UNORM,
         VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT |
-            VK_IMAGE_USAGE_TRANSFER_DST_BIT);
+            VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_SAMPLED_BIT);
     m_taaHistory[0] = vf::makeImage3D(
         m_ctx, w, h, 1, VK_FORMAT_R8G8B8A8_UNORM,
         VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT |
@@ -206,9 +223,19 @@ bool App::createOffscreen(uint32_t w, uint32_t h)
         m_ctx, w, h, 1, VK_FORMAT_R8G8B8A8_UNORM,
         VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT |
             VK_IMAGE_USAGE_TRANSFER_DST_BIT);
-    if (!m_offscreen.img || !m_taaHistory[0].img || !m_taaHistory[1].img || !m_taaResolved.img)
+    vf::destroyImage3D(m_ctx, m_hdr);
+    vf::destroyImage3D(m_ctx, m_gpos);
+    m_hdr = vf::makeImage2D(
+        m_ctx, w, h, VK_FORMAT_R16G16B16A16_SFLOAT,
+        VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT);
+    m_gpos = vf::makeImage2D(
+        m_ctx, w, h, VK_FORMAT_R16G16B16A16_SFLOAT,
+        VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT);
+    if (!m_offscreen.img || !m_taaHistory[0].img || !m_taaHistory[1].img ||
+        !m_taaResolved.img || !m_hdr.img || !m_gpos.img)
         return false;
-    m_svoPass.updateDescriptors(m_offscreen);
+    m_svoPass.updateDescriptors(m_hdr, m_gpos);
+    m_postPass.updateDescriptors(m_hdr.view, m_gpos.view, m_offscreen.view);
     m_taaFirstFrame = true;
     m_taaHistoryIdx = 0;
     return true;
@@ -280,6 +307,8 @@ bool App::initVulkan()
         return false;
 
     if (!m_taaPass.init(m_ctx))
+        return false;
+    if (!m_postPass.init(m_ctx))
         return false;
 
     if (!createOffscreen(m_swapchain.extent().width, m_swapchain.extent().height))
@@ -454,9 +483,44 @@ void App::drawHud()
                 m_swapchain.extent().height, 1000.0 / m_avgMs, m_avgMs);
     ImGui::Separator();
 
-    ImGui::Text("Cam  %.1f %.1f %.1f", m_camera.pos.x, m_camera.pos.y, m_camera.pos.z);
-    ImGui::Text("Yaw/pitch %.0f/%.0f  speed %.1f", glm::degrees(m_camera.yaw),
-                glm::degrees(m_camera.pitch), m_camera.speed);
+    {
+        const glm::vec3 fwd = m_camera.forward();
+        ImGui::Text("Viewer");
+        ImGui::Indent();
+        ImGui::Text("pos  x %6.1f  y %6.1f  z %6.1f", m_camera.pos.x,
+                     m_camera.pos.y, m_camera.pos.z);
+        // Heading in the world azimuth convention (sun/probe): +Z = 0 deg (N),
+        // +X = 90 deg (E). So heading = atan2(forward.x, forward.z).
+        const float heading = glm::degrees(std::atan2(fwd.x, fwd.z));
+        const float hNorm = (heading < 0.0f) ? heading + 360.0f : heading;
+        const char* card = (hNorm < 22.5f || hNorm >= 337.5f) ? "N" :
+                           (hNorm < 67.5f) ? "NE" :
+                           (hNorm < 112.5f) ? "E" :
+                           (hNorm < 157.5f) ? "SE" :
+                           (hNorm < 202.5f) ? "S" :
+                           (hNorm < 247.5f) ? "SW" :
+                           (hNorm < 292.5f) ? "W" : "NW";
+        ImGui::Text("facing %5.1f deg %s", hNorm, card);
+        ImGui::Text("look   x %6.2f  y %6.2f  z %6.2f", fwd.x, fwd.y, fwd.z);
+
+        // Compact compass: North (+Z) up, East (+X) right, needle = heading.
+        const ImVec2 c0 = ImGui::GetCursorScreenPos();
+        const float R = 26.0f;
+        const ImVec2 ctr = ImVec2(c0.x + R + 4.0f, c0.y + R + 4.0f);
+        ImDrawList* dl = ImGui::GetWindowDrawList();
+        dl->AddCircle(ctr, R, IM_COL32(180, 200, 220, 180), 0, 1.5f);
+        dl->AddText(ImVec2(ctr.x - 4.0f, ctr.y - R - 11.0f), IM_COL32(170, 200, 255, 255), "N");
+        dl->AddText(ImVec2(ctr.x + R - 1.0f, ctr.y - 4.0f), IM_COL32(160, 200, 200, 255), "E");
+        dl->AddText(ImVec2(ctr.x - 4.0f, ctr.y + R + 1.0f), IM_COL32(160, 200, 200, 255), "S");
+        dl->AddText(ImVec2(ctr.x - R - 9.0f, ctr.y - 4.0f), IM_COL32(160, 200, 200, 255), "W");
+        const float a = glm::radians(hNorm);
+        const ImVec2 tip = ImVec2(ctr.x + std::sin(a) * (R - 4.0f),
+                                  ctr.y - std::cos(a) * (R - 4.0f));
+        dl->AddLine(ctr, tip, IM_COL32(255, 220, 120, 255), 2.0f);
+        dl->AddCircleFilled(ctr, 2.0f, IM_COL32(255, 220, 120, 255));
+        ImGui::Dummy(ImVec2((R + 4.0f) * 2.0f, (R + 4.0f) * 2.0f));
+        ImGui::Unindent();
+    }
     ImGui::Checkbox("Show controls", &m_showControls);
     if (m_showControls) {
         ImGui::Separator();
@@ -522,6 +586,14 @@ void App::drawHud()
         ImGui::TextDisabled("%zu records live", m_layers.stats().records);
         ImGui::TextDisabled("Import copies an object to the picked voxel (Ctrl+LMB)");
         ImGui::TextDisabled("toggles & AI edits hot-reload live");
+    }
+    if (m_scenePreview) {
+        if (!m_sceneTexId)
+            m_sceneTexId = (ImTextureID)ImGui_ImplVulkan_AddTexture(m_uiSampler, m_offscreen.view,
+                                                       VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+        ImGui::Separator();
+        ImGui::Text("Scene preview");
+        ImGui::Image(m_sceneTexId, ImVec2(240.0f, 135.0f));
     }
     ImGui::End();
 
@@ -604,12 +676,27 @@ int App::run(const Args& args)
             glm::normalize(glm::vec3(cosf(e) * sinf(a), sinf(e), cosf(e) * cosf(a))), 0.0f);
     }
     m_animTime = args.animTime;
+    m_tonemapLook = args.tonemap;
     if (args.probeSet) {
         // probes read the live layered world (ai_edits included as a layer)
         vf::voxel::LayeredWorld probeWorld;
-        if (!probeWorld.load(std::string(VOXELFORGE_ASSET_DIR) + "/world.json")) {
+        const std::string manifest = std::string(VOXELFORGE_ASSET_DIR) + "/world.json";
+        if (!probeWorld.load(manifest)) {
             spdlog::critical("probe: cannot load world.json");
             return 1;
+        }
+        // VF_PROBE_RELOAD=N: re-run load() N times on the warm instance to
+        // measure the interactive toggle / edit reload cost
+        if (const char* r = getenv("VF_PROBE_RELOAD")) {
+            int n = atoi(r);
+            for (int i = 0; i < n; ++i) {
+                auto t0 = std::chrono::steady_clock::now();
+                probeWorld.load(manifest);
+                spdlog::info("probe: warm reload {:d}: {:.0f} ms", i,
+                             std::chrono::duration<double, std::milli>(
+                                 std::chrono::steady_clock::now() - t0)
+                                 .count());
+            }
         }
         auto s = probeWorld.field().sampleWorld(args.probe);
         spdlog::info("probe({:.2f},{:.2f},{:.2f}): d={:+.3f} mat={} {}", args.probe.x,
@@ -652,7 +739,7 @@ int App::run(const Args& args)
     vi.Queue = m_ctx.graphicsQueue();
     vi.MinImageCount = 3;
     vi.ImageCount = uint32_t(m_swapchain.imageCount());
-    vi.DescriptorPoolSize = 64;
+    vi.DescriptorPoolSize = 128;
     vi.UseDynamicRendering = true;
     vi.PipelineRenderingCreateInfo = { VK_STRUCTURE_TYPE_PIPELINE_RENDERING_CREATE_INFO };
     vi.PipelineRenderingCreateInfo.colorAttachmentCount = 1;
@@ -663,6 +750,17 @@ int App::run(const Args& args)
     };
     ImGui_ImplVulkan_Init(&vi);
     ImGui_ImplVulkan_CreateFontsTexture();
+
+    // linear sampler for UI textures (e.g. the live scene-preview thumbnail)
+    VkSamplerCreateInfo sci { VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO };
+    sci.magFilter = VK_FILTER_LINEAR;
+    sci.minFilter = VK_FILTER_LINEAR;
+    sci.addressModeU = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
+    sci.addressModeV = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
+    sci.addressModeW = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
+    vkCreateSampler(m_ctx.device(), &sci, nullptr, &m_uiSampler);
+    m_scenePreview = getenv("VF_SCENE_PREVIEW") != nullptr;
+
     // AI chat
     if (!m_chatInitialized) {
         m_chatUi.init(args.llmUrl, args.llmModel);
@@ -827,8 +925,8 @@ int App::run(const Args& args)
                 selFeed = glm::vec4(vf::voxel::voxelCenter(m_selectedHit.voxel), 1.f);
             if (m_hoverHit.hit)
                 hovFeed = glm::vec4(vf::voxel::voxelCenter(m_hoverHit.voxel), 1.f);
-            m_svoPass.setSelection(selFeed);
-            m_svoPass.setHover(hovFeed);
+            m_postPass.setSelection(selFeed);
+            m_postPass.setHover(hovFeed);
         }
 
         // camera: skip WASD when chat input focused
@@ -838,6 +936,40 @@ int App::run(const Args& args)
             double _dx,_dy; m_window.getMouseDelta(_dx,_dy);
         } else {
             m_camera.update(m_window, dt);
+        }
+
+        // ---- render-option hotkeys (edge-triggered) ----
+        if (!chatCaptures) {
+            auto edge = [](int k, GLFWwindow* w) {
+                static std::vector<uint8_t> prev(1024, 0);
+                bool now = glfwGetKey(w, k) == GLFW_PRESS;
+                bool e = now && !prev[k];
+                prev[k] = now ? 1 : 0;
+                return e;
+            };
+            GLFWwindow* hw = m_window.handle();
+            if (edge(GLFW_KEY_T, hw)) {
+                m_tonemapLook = (m_tonemapLook + 1) % 3;
+                spdlog::info("tonemap look -> {}", m_tonemapLook);
+            }
+            if (edge(GLFW_KEY_EQUAL, hw) || edge(GLFW_KEY_KP_ADD, hw)) {
+                m_exposure = m_exposure * 1.1f < 4.0f ? m_exposure * 1.1f : 4.0f;
+                spdlog::info("exposure -> {:.2f}", m_exposure);
+            }
+            if (edge(GLFW_KEY_MINUS, hw) || edge(GLFW_KEY_KP_SUBTRACT, hw)) {
+                m_exposure = m_exposure / 1.1f > 0.1f ? m_exposure / 1.1f : 0.1f;
+                spdlog::info("exposure -> {:.2f}", m_exposure);
+            }
+            for (int i = 0; i < 5; ++i) {
+                if (edge(GLFW_KEY_1 + i, hw)) {
+                    m_renderFlags ^= (1 << i);
+                    spdlog::info("render flag {} -> {}", i, (m_renderFlags >> i) & 1);
+                }
+            }
+            if (edge(GLFW_KEY_0, hw)) {
+                m_renderFlags = 31;
+                spdlog::info("render flags reset -> 31");
+            }
         }
 
         uint32_t f = m_frameIdx % kMaxFramesInFlight;
@@ -862,14 +994,37 @@ int App::run(const Args& args)
                                float(m_offscreen.extent.height));
             push.b = glm::vec4(m_pushB.x, m_pushB.y, m_pushB.z, float(m_frameIdx % 1024));
             push.sunDir = m_sunDir;
-            push.misc = glm::vec4(0.0f, m_animTime, 0.0f, 0.0f);
+            push.misc = glm::vec4(float(m_renderFlags), m_animTime, float(m_tonemapLook), m_exposure);
             {
-                vf::transitionImage(fr.cmd, m_offscreen.img, VK_IMAGE_ASPECT_COLOR_BIT,
+                // ray-march writes linear HDR + G-buffer
+                vf::transitionImage(fr.cmd, m_hdr.img, VK_IMAGE_ASPECT_COLOR_BIT,
+                                    VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_GENERAL,
+                                    VK_PIPELINE_STAGE_2_NONE, VK_ACCESS_2_NONE,
+                                    VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
+                                    VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT);
+                vf::transitionImage(fr.cmd, m_gpos.img, VK_IMAGE_ASPECT_COLOR_BIT,
                                     VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_GENERAL,
                                     VK_PIPELINE_STAGE_2_NONE, VK_ACCESS_2_NONE,
                                     VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
                                     VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT);
                 m_svoPass.record(fr.cmd, push);
+                // barrier: HDR/G-buffer written -> read by post pass
+                VkMemoryBarrier2 mb { VK_STRUCTURE_TYPE_MEMORY_BARRIER_2 };
+                mb.srcStageMask = VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT;
+                mb.srcAccessMask = VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT;
+                mb.dstStageMask = VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT;
+                mb.dstAccessMask = VK_ACCESS_2_SHADER_STORAGE_READ_BIT;
+                VkDependencyInfo di { VK_STRUCTURE_TYPE_DEPENDENCY_INFO };
+                di.memoryBarrierCount = 1;
+                di.pMemoryBarriers = &mb;
+                vkCmdPipelineBarrier2(fr.cmd, &di);
+                // post pass reads HDR/G-buffer, writes LDR offscreen
+                vf::transitionImage(fr.cmd, m_offscreen.img, VK_IMAGE_ASPECT_COLOR_BIT,
+                                    VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_GENERAL,
+                                    VK_PIPELINE_STAGE_2_NONE, VK_ACCESS_2_NONE,
+                                    VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
+                                    VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT);
+                m_postPass.record(fr.cmd, push);
             }
             vkEndCommandBuffer(fr.cmd);
             VkSubmitInfo hsi { VK_STRUCTURE_TYPE_SUBMIT_INFO };
@@ -939,15 +1094,37 @@ int App::run(const Args& args)
                            float(m_offscreen.extent.width), float(m_offscreen.extent.height));
         push.b = glm::vec4(m_pushB.x, m_pushB.y, m_pushB.z, float(m_frameIdx % 1024));
         push.sunDir = m_sunDir;
-        push.misc = glm::vec4(0.0f, m_animTime, 0.0f, 0.0f);
+        push.misc = glm::vec4(float(m_renderFlags), m_animTime, float(m_tonemapLook), m_exposure);
 
-        // offscreen -> compute-writable -----------------------------------
-        vf::transitionImage(fr.cmd, m_offscreen.img, VK_IMAGE_ASPECT_COLOR_BIT,
+        // ray-march -> HDR + G-buffer -------------------------------------
+        vf::transitionImage(fr.cmd, m_hdr.img, VK_IMAGE_ASPECT_COLOR_BIT,
+                            VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_GENERAL,
+                            VK_PIPELINE_STAGE_2_NONE, VK_ACCESS_2_NONE,
+                            VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
+                            VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT);
+        vf::transitionImage(fr.cmd, m_gpos.img, VK_IMAGE_ASPECT_COLOR_BIT,
                             VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_GENERAL,
                             VK_PIPELINE_STAGE_2_NONE, VK_ACCESS_2_NONE,
                             VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
                             VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT);
         m_svoPass.record(fr.cmd, push);
+        // barrier: HDR/G-buffer written -> read by post pass
+        VkMemoryBarrier2 mb { VK_STRUCTURE_TYPE_MEMORY_BARRIER_2 };
+        mb.srcStageMask = VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT;
+        mb.srcAccessMask = VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT;
+        mb.dstStageMask = VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT;
+        mb.dstAccessMask = VK_ACCESS_2_SHADER_STORAGE_READ_BIT;
+        VkDependencyInfo di { VK_STRUCTURE_TYPE_DEPENDENCY_INFO };
+        di.memoryBarrierCount = 1;
+        di.pMemoryBarriers = &mb;
+        vkCmdPipelineBarrier2(fr.cmd, &di);
+        // post pass reads HDR/G-buffer, writes LDR offscreen ---------------
+        vf::transitionImage(fr.cmd, m_offscreen.img, VK_IMAGE_ASPECT_COLOR_BIT,
+                            VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_GENERAL,
+                            VK_PIPELINE_STAGE_2_NONE, VK_ACCESS_2_NONE,
+                            VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
+                            VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT);
+        m_postPass.record(fr.cmd, push);
 
         // TAA resolve (interactive only, not for headless tests) ----------
         VkImage taaSrc = m_offscreen.img;
@@ -1033,14 +1210,6 @@ int App::run(const Args& args)
                        m_swapchain.image(imgIdx), VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1,
                        &blit, VK_FILTER_LINEAR);
 
-        // swapchain -> color attachment for ImGui --------------------------
-        vf::transitionImage(fr.cmd, m_swapchain.image(imgIdx), VK_IMAGE_ASPECT_COLOR_BIT,
-                            VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
-                            VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
-                            VK_PIPELINE_STAGE_2_BLIT_BIT, VK_ACCESS_2_TRANSFER_WRITE_BIT,
-                            VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT,
-                            VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT);
-
         ImGui_ImplVulkan_NewFrame();
         ImGui_ImplGlfw_NewFrame();
         ImGui::NewFrame();
@@ -1053,9 +1222,25 @@ int App::run(const Args& args)
                          dd ? dd->DisplaySize.y : -1.f,
                          dd ? dd->TotalIdxCount : -1, dd ? dd->CmdListsCount : -1);
         }
-        // With UseDynamicRendering we must open the render pass ourselves and
-        // target the swapchain view; LOAD keeps the blitted world underneath.
-        {
+        ImDrawData* dd = ImGui::GetDrawData();
+        if (dd && dd->TotalIdxCount > 0) {
+            // swapchain -> color attachment for ImGui (LOAD keeps the blitted world)
+            vf::transitionImage(fr.cmd, m_swapchain.image(imgIdx), VK_IMAGE_ASPECT_COLOR_BIT,
+                                VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+                                VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+                                VK_PIPELINE_STAGE_2_BLIT_BIT, VK_ACCESS_2_TRANSFER_WRITE_BIT,
+                                VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT,
+                                VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT);
+            if (m_scenePreview) {
+                // offscreen is TRANSFER_SRC after the blit; make it shader-readable for ImGui
+                vf::transitionImage(fr.cmd, m_offscreen.img, VK_IMAGE_ASPECT_COLOR_BIT,
+                                    VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+                                    VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+                                    VK_PIPELINE_STAGE_2_BLIT_BIT, VK_ACCESS_2_TRANSFER_WRITE_BIT,
+                                    VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT, VK_ACCESS_2_SHADER_READ_BIT);
+            }
+            // With UseDynamicRendering we must open the render pass ourselves and
+            // target the swapchain view; LOAD keeps the blitted world underneath.
             VkRenderingAttachmentInfo att { VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO };
             att.imageView = m_swapchain.imageViews()[imgIdx];
             att.imageLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
@@ -1068,7 +1253,7 @@ int App::run(const Args& args)
             ri.colorAttachmentCount = 1;
             ri.pColorAttachments = &att;
             vkCmdBeginRendering(fr.cmd, &ri);
-            ImGui_ImplVulkan_RenderDrawData(ImGui::GetDrawData(), fr.cmd);
+            ImGui_ImplVulkan_RenderDrawData(dd, fr.cmd);
             vkCmdEndRendering(fr.cmd);
         }
 
@@ -1087,7 +1272,8 @@ int App::run(const Args& args)
                                 VK_PIPELINE_STAGE_2_TRANSFER_BIT,
                                 VK_ACCESS_2_TRANSFER_READ_BIT);
             vf::transitionImage(fr.cmd, m_offscreen.img, VK_IMAGE_ASPECT_COLOR_BIT,
-                                VK_IMAGE_LAYOUT_GENERAL,
+                                m_scenePreview ? VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL
+                                               : VK_IMAGE_LAYOUT_GENERAL,
                                 VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
                                 VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT,
                                 VK_ACCESS_2_MEMORY_READ_BIT | VK_ACCESS_2_MEMORY_WRITE_BIT,
@@ -1175,6 +1361,10 @@ int App::run(const Args& args)
     }
 
     vkDeviceWaitIdle(m_ctx.device());
+    if (m_uiSampler) {
+        vkDestroySampler(m_ctx.device(), m_uiSampler, nullptr);
+        m_uiSampler = VK_NULL_HANDLE;
+    }
     ImGui_ImplVulkan_Shutdown();
     ImGui_ImplGlfw_Shutdown();
     ImGui::DestroyContext();
@@ -1206,9 +1396,12 @@ void App::destroy()
 
     m_svoPass.destroy();
     m_taaPass.destroy();
+    m_postPass.destroy();
     vf::destroyImage3D(m_ctx, m_objVolImg);
     vf::destroyImage3D(m_ctx, m_heightImg);
     vf::destroyImage3D(m_ctx, m_offscreen);
+    vf::destroyImage3D(m_ctx, m_hdr);
+    vf::destroyImage3D(m_ctx, m_gpos);
     vf::destroyImage3D(m_ctx, m_taaHistory[0]);
     vf::destroyImage3D(m_ctx, m_taaHistory[1]);
     vf::destroyImage3D(m_ctx, m_taaResolved);

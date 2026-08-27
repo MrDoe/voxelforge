@@ -15,6 +15,49 @@ std::string EditableWorld::filePath() const { return m_assetDir + "/" + kFileNam
 std::string EditableWorld::manifestPath() const { return m_assetDir + "/world.json"; }
 WorldFileMeta EditableWorld::meta() const { return {WORLD, VOXEL, WATER_LEVEL, uint32_t(GRID_N), 8}; }
 
+std::string EditableWorld::sanitizeLayerName(const std::string& name)
+{
+    std::string s;
+    for (char c : name) {
+        if (std::isalnum((unsigned char)c) || c == '_' || c == '-')
+            s += c;
+    }
+    if (s.empty() || s.size() > 40)
+        return "";
+    return s;
+}
+
+// Insert an object layer entry (or enable it if already present) before the
+// landscape layer so AI-authored content wins cell collisions over terrain.
+static void upsertObjectLayer(std::vector<worldfile::WorldLayer>& layers,
+                              const std::string& file, const std::string& name)
+{
+    for (auto& l : layers) {
+        if (l.file == file) {
+            l.enabled = true;
+            l.role = "object";
+            l.name = name;
+            l.listed = true;
+            return;
+        }
+    }
+    worldfile::WorldLayer nl;
+    nl.file = file;
+    nl.name = name;
+    nl.role = "object";
+    nl.enabled = true;
+    nl.listed = true;
+    nl.pos[0] = nl.pos[1] = nl.pos[2] = 0.f;
+    nl.rotDeg = 0.f;
+    size_t insertAt = 0;
+    for (size_t i = 0; i < layers.size(); ++i)
+        if (layers[i].role == "landscape") {
+            insertAt = i;
+            break;
+        }
+    layers.insert(layers.begin() + insertAt, nl);
+}
+
 bool EditableWorld::load() {
     WorldFileData d;
     if (worldfile::read(filePath(), d)) {
@@ -97,8 +140,8 @@ std::vector<VoxelRecord> EditableWorld::makeBox(glm::ivec3 anchor, glm::ivec3 si
                 float d = sdf(p);
                 if (std::fabs(d) > kBand) continue;
                 VoxelRecord v; v.x=uint16_t(c.x); v.y=uint16_t(c.y); v.z=uint16_t(c.z);
-                const glm::vec3& col = kPalette[std::min(int(mat),8)];
-                const glm::vec2& rr = kMaterialReflection[std::min(int(mat),8)];
+                const glm::vec3& col = kPalette[std::min(int(mat),16)];
+                const glm::vec2& rr = kMaterialReflection[std::min(int(mat),16)];
                 v.r=uint8_t(col.r*255.f); v.g=uint8_t(col.g*255.f); v.b=uint8_t(col.b*255.f);
                 v.a=255; v.reflectivity=uint8_t(rr.x); v.roughness=uint8_t(rr.y); v.materialId=mat;
                 res.push_back(v);
@@ -127,8 +170,8 @@ std::vector<VoxelRecord> EditableWorld::makeEllipsoid(glm::ivec3 anchor, glm::ve
                 float d = sdf(p);
                 if (std::fabs(d) > kBand) continue;
                 VoxelRecord v; v.x=uint16_t(c.x); v.y=uint16_t(c.y); v.z=uint16_t(c.z);
-                const glm::vec3& col = kPalette[std::min(int(mat),8)];
-                const glm::vec2& rr = kMaterialReflection[std::min(int(mat),8)];
+                const glm::vec3& col = kPalette[std::min(int(mat),16)];
+                const glm::vec2& rr = kMaterialReflection[std::min(int(mat),16)];
                 v.r=uint8_t(col.r*255.f); v.g=uint8_t(col.g*255.f); v.b=uint8_t(col.b*255.f);
                 v.a=255; v.reflectivity=uint8_t(rr.x); v.roughness=uint8_t(rr.y); v.materialId=mat;
                 res.push_back(v);
@@ -155,8 +198,8 @@ std::vector<VoxelRecord> EditableWorld::makeCylinderY(glm::ivec3 anchor, float r
                 float d = sdCylY(p, cylCenter, y0, y1, radiusM);
                 if (std::fabs(d) > kBand) continue;
                 VoxelRecord v; v.x=uint16_t(c.x); v.y=uint16_t(c.y); v.z=uint16_t(c.z);
-                const glm::vec3& col = kPalette[std::min(int(mat),8)];
-                const glm::vec2& rr = kMaterialReflection[std::min(int(mat),8)];
+                const glm::vec3& col = kPalette[std::min(int(mat),16)];
+                const glm::vec2& rr = kMaterialReflection[std::min(int(mat),16)];
                 v.r=uint8_t(col.r*255.f); v.g=uint8_t(col.g*255.f); v.b=uint8_t(col.b*255.f);
                 v.a=255; v.reflectivity=uint8_t(rr.x); v.roughness=uint8_t(rr.y); v.materialId=mat;
                 res.push_back(v);
@@ -170,8 +213,8 @@ std::vector<VoxelRecord> EditableWorld::makeStamp(glm::ivec3 anchor, const std::
     for (auto &c : cells) {
         glm::ivec3 p(anchor.x + c.dx, anchor.y + c.dy, anchor.z + c.dz);
         if (p.x<0||p.y<0||p.z<0||p.x>=1024||p.y>=1024||p.z>=1024) continue;
-        const glm::vec3& col = kPalette[std::min(int(c.mat),8)];
-        const glm::vec2& rr = kMaterialReflection[std::min(int(c.mat),8)];
+        const glm::vec3& col = kPalette[std::min(int(c.mat),16)];
+        const glm::vec2& rr = kMaterialReflection[std::min(int(c.mat),16)];
         VoxelRecord v; v.x=uint16_t(p.x); v.y=uint16_t(p.y); v.z=uint16_t(p.z);
         v.r=uint8_t(col.r*255.f); v.g=uint8_t(col.g*255.f); v.b=uint8_t(col.b*255.f);
         v.a=255; v.reflectivity=uint8_t(rr.x); v.roughness=uint8_t(rr.y); v.materialId=c.mat;
@@ -273,6 +316,58 @@ void EditableWorld::clear() {
     m_records.clear();
     save();
     spdlog::info("editable_world: cleared");
+}
+
+bool EditableWorld::writeObjectLayer(const std::string& name,
+                                     const std::vector<VoxelRecord>& recs)
+{
+    std::string safe = sanitizeLayerName(name);
+    if (safe.empty())
+        return false;
+    const std::string file = safe + ".vxw";
+    WorldFileData d;
+    d.meta = meta();
+    d.voxels = recs;
+    if (!worldfile::write(m_assetDir + "/" + file, d)) {
+        spdlog::error("editable_world: failed to write object layer {}", file);
+        return false;
+    }
+    std::vector<worldfile::WorldLayer> layers;
+    worldfile::loadManifest(manifestPath(), layers);
+    upsertObjectLayer(layers, file, safe);
+    if (!worldfile::writeManifest(manifestPath(), layers)) {
+        spdlog::error("editable_world: failed to update manifest for {}", file);
+        return false;
+    }
+    spdlog::info("editable_world: wrote object layer {} ({} voxels)", file, recs.size());
+    return true;
+}
+
+bool EditableWorld::deleteObjectLayer(const std::string& name)
+{
+    std::string safe = sanitizeLayerName(name);
+    if (safe.empty())
+        return false;
+    const std::string file = safe + ".vxw";
+    std::vector<worldfile::WorldLayer> layers;
+    if (!worldfile::loadManifest(manifestPath(), layers))
+        return false;
+    bool found = false;
+    for (auto it = layers.begin(); it != layers.end(); ++it) {
+        if (it->file != file)
+            continue;
+        if (it->role == "landscape" || it->role == "packed")
+            return false; // protected: never delete core layers
+        layers.erase(it);
+        found = true;
+        break;
+    }
+    if (!found)
+        return false;
+    worldfile::writeManifest(manifestPath(), layers);
+    std::remove((m_assetDir + "/" + file).c_str());
+    spdlog::info("editable_world: deleted object layer {}", file);
+    return true;
 }
 
 }

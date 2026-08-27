@@ -454,7 +454,7 @@ bool readLayered(const std::string& manifestPath, const WorldFileMeta& expected,
         if (data.meta.worldSize != expected.worldSize ||
             data.meta.voxelSize != expected.voxelSize ||
             data.meta.gridN != expected.gridN) {
-            spdlog::error("worldfile: layer '{}' meta mismatch", l.file);
+            spdlog::warn("worldfile: layer '{}' meta mismatch (rejected)", l.file);
             return false;
         }
         for (VoxelRecord& v : data.voxels) {

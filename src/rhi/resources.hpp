@@ -24,8 +24,12 @@ Buffer makeBuffer(const Context& ctx, VkDeviceSize size, VkBufferUsageFlags usag
 void destroyBuffer(const Context& ctx, Buffer& b);
 
 Image3D makeImage3D(const Context& ctx, uint32_t w, uint32_t h, uint32_t d,
-                    VkFormat format, VkImageUsageFlags usage);
+                     VkFormat format, VkImageUsageFlags usage);
 void destroyImage3D(const Context& ctx, Image3D& im);
+// 2D variant (single-layer, depth=1) for compute storage images that the
+// shaders declare as `image2D` (avoids binding a 3D view to a 2D descriptor).
+Image3D makeImage2D(const Context& ctx, uint32_t w, uint32_t h,
+                     VkFormat format, VkImageUsageFlags usage);
 
 // Staging-buffer upload; leaves image in VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL.
 bool uploadToImage3D(const Context& ctx, Image3D& im, const void* data, size_t bytes);

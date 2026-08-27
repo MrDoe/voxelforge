@@ -32,7 +32,7 @@ public:
                   const std::vector<uint32_t>& handles,
                   const std::vector<uint32_t>& bricks);
 
-    void updateDescriptors(const Image3D& outImage);
+    void updateDescriptors(const Image3D& hdrImage, const Image3D& gposImage);
     void setHeightmapView(VkImageView view);
     void setObjVolumeView(VkImageView view);
     // Highlight feeds written to a persistently mapped UBO (binding 8):

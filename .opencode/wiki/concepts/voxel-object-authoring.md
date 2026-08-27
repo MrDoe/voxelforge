@@ -16,14 +16,19 @@ tool landscape.
 ## Why SDF-in-code (no mesh import)
 
 - Materials are first-class: every primitive returns `ObjHit{d, mat}`, which
-  flows into brick packing, `kMaterialReflection`, and splat shading. STL/OBJ
+  flows into brick packing, `kMaterialReflection`, and shading. STL/OBJ
   has no materials - an importer would need a sidecar convention.
 - Rendered detail caps at `VOXEL = 0.1 m`; imported high-poly would just buy
   aliasing.
 - Parametric repetition, hash variation, ground-hugging placement, and
   deterministic diffs are natural in code; binary assets are none of those.
-- Everything downstream (`World::build`, bake, splats, probe, tests) already
-  consumes `scene()`.
+- The bake sweeps these shapes into `.vxw` record layers, and everything
+  downstream (`VoxelField`, SVO synthesis, probe, tests) consumes records.
+
+A converter was considered and rejected for now; if organic hero assets ever
+demand Blender sculpting, the right shape is an *offline* mesh->stamp-table
+generator emitting C++ `StampCell` arrays back into `common.hpp`, keeping the
+bake sweeps the single source of truth.
 
 A converter was considered and rejected for now; if organic hero assets ever
 demand Blender sculpting, the right shape is an *offline* mesh->stamp-table
@@ -34,16 +39,16 @@ generator emitting C++ `StampCell` arrays back into `common.hpp`, keeping
 
 | Stage | Tool | Cost |
 |---|---|---|
-| Per layer | `vf_slice` ASCII cross-sections of `scene()` (`tools/scene_slice.cpp`) + `--probe` point queries | seconds; no GPU/window/world.vxw |
+| Per layer | `vf_slice` ASCII cross-sections of the baked field (`tools/scene_slice.cpp`) + `--probe` point queries | seconds; no GPU/window |
 | Object done | 2-3 `--shot` renders judged via `ascii_view.py` glyph maps/stats (bundled in skill `scripts/`; never vision models) | needs bake + display |
 | Done | `ctest --test-dir build` | ~30 s |
 
-Key insight: `--probe` exits before Vulkan init (src/app/main.cpp:1130) and
-`vf_slice` links scene truth directly, so the whole layer iteration loop runs
-without regenerating `assets/world.vxw`. Renders stay reserved for what only
-they can catch: shader-side integration bugs (the LOD t0 incident hid entire
-grass layers while CPU truth was fine), palette/shading under sun+fog+ACES,
-and visual_check regression thresholds.
+Key insight: `--probe` exits before Vulkan init (see `src/app/main.cpp`,
+`App::run`) and `vf_slice` reads the baked field directly, so the whole layer
+iteration loop runs without any render pass. Renders stay reserved for what
+only they can catch: shader-side integration bugs (the LOD t0 incident hid
+entire grass layers while CPU truth was fine), palette/shading under sun+fog+
+ACES, and visual_check regression thresholds.
 
 ## Building blocks added 2026-08-24
 
@@ -56,7 +61,8 @@ the AABB, `+VOXEL` in interior pockets). Unit coverage:
 
 Bake-band constraint: tall objects placed outside existing radii must be
 added to `nearObject()` in `tools/heightmap_gen.cpp`, or their above-ground
-parts never reach the explicit voxel records (splat source). See skill.
+parts never reach the baked voxel records (and thus never reach the SVO).
+See skill.
 
 ## Cross-references
 

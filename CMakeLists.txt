@@ -59,7 +59,8 @@ endif()
 
 # ---- Dear ImGui -------------------------------------------------------------
 FetchContent_Declare(imgui GIT_REPOSITORY https://github.com/ocornut/imgui.git
-                     GIT_TAG v1.91.8 GIT_SHALLOW TRUE)
+                     GIT_TAG v1.91.8 GIT_SHALLOW TRUE
+                     PATCH_COMMAND sed -i -e "s/(uint32_t)(clip_max.x - clip_min.x)/(uint32_t)(clip_max.x - clip_min.x + 0.999f)/" -e "s/(uint32_t)(clip_max.y - clip_min.y)/(uint32_t)(clip_max.y - clip_min.y + 0.999f)/" "<SOURCE_DIR>/backends/imgui_impl_vulkan.cpp")
 FetchContent_GetProperties(imgui)
 if(NOT imgui_POPULATED)
     FetchContent_Populate(imgui)
@@ -128,7 +129,7 @@ add_custom_target(vf_heightmap DEPENDS ${VF_HEIGHTMAP_PNG} ${VF_WORLD_LAYERS})
 add_library(vf_rhi STATIC src/rhi/context.cpp src/rhi/resources.cpp src/rhi/swapchain.cpp)
 target_link_libraries(vf_rhi PUBLIC vf_platform vf_vma spdlog::spdlog)
 
-add_library(vf_render STATIC src/render/svo_pass.cpp src/render/taa_pass.cpp)
+add_library(vf_render STATIC src/render/svo_pass.cpp src/render/taa_pass.cpp src/render/post_pass.cpp)
 target_include_directories(vf_render PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/external)
 target_compile_definitions(vf_render PUBLIC
     VOXELFORGE_SHADER_DIR="${CMAKE_CURRENT_BINARY_DIR}/shaders"
@@ -141,6 +142,7 @@ find_program(GLSLANG_VALIDATOR NAMES glslangValidator glslang REQUIRED)
 file(MAKE_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}/shaders)
 
 set(VF_SHADER_SRCS ${CMAKE_CURRENT_SOURCE_DIR}/shaders/svo_raymarch.comp
+    ${CMAKE_CURRENT_SOURCE_DIR}/shaders/post.comp
     ${CMAKE_CURRENT_SOURCE_DIR}/shaders/taa_resolve.comp)
 set(VF_SHADER_SPVS "")
 foreach(src_file ${VF_SHADER_SRCS})
