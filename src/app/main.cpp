@@ -368,13 +368,18 @@ bool App::uploadTerrainTexture()
 {
     const std::vector<glm::vec2>& htx = m_layers.field().heightTexture();
     const uint32_t lat = uint32_t(m_layers.field().latN());
-    vf::destroyImage3D(m_ctx, m_heightImg);
-    m_heightImg = vf::makeImage3D(m_ctx, lat, lat, 1,
-                                  VK_FORMAT_R32G32_SFLOAT,
-                                  VK_IMAGE_USAGE_TRANSFER_DST_BIT |
-                                      VK_IMAGE_USAGE_STORAGE_BIT);
-    if (!m_heightImg.img)
-        return false;
+    // The height texture is constant-size (latN x latN); create it once and
+    // only re-upload contents on reload. Recreating would invalidate the
+    // VkImageView bound by the (once-written) descriptor set, causing the
+    // whole scene to read freed memory and crash on repeated toggles.
+    if (m_heightImg.img == VK_NULL_HANDLE) {
+        m_heightImg = vf::makeImage3D(m_ctx, lat, lat, 1,
+                                      VK_FORMAT_R32G32_SFLOAT,
+                                      VK_IMAGE_USAGE_TRANSFER_DST_BIT |
+                                          VK_IMAGE_USAGE_STORAGE_BIT);
+        if (!m_heightImg.img)
+            return false;
+    }
     if (!vf::uploadToImage3D(m_ctx, m_heightImg, htx.data(),
                              htx.size() * sizeof(glm::vec2)))
         return false;
@@ -395,13 +400,17 @@ bool App::uploadObjVolTexture()
 {
     const auto& ov = m_layers.field().objectVolume();
     const int n = vf::voxel::VoxelField::kObjVolN;
-    vf::destroyImage3D(m_ctx, m_objVolImg);
-    m_objVolImg = vf::makeImage3D(m_ctx, uint32_t(n), uint32_t(n), uint32_t(n),
-                                  VK_FORMAT_R8_SNORM,
-                                  VK_IMAGE_USAGE_TRANSFER_DST_BIT |
-                                      VK_IMAGE_USAGE_STORAGE_BIT);
-    if (!m_objVolImg.img)
-        return false;
+    // Constant-size (kObjVolN^3) volume; create once and re-upload only.
+    // Recreating would free the VkImageView still referenced by the (once-
+    // written) descriptor set, producing stale reads and memory exceptions.
+    if (m_objVolImg.img == VK_NULL_HANDLE) {
+        m_objVolImg = vf::makeImage3D(m_ctx, uint32_t(n), uint32_t(n), uint32_t(n),
+                                      VK_FORMAT_R8_SNORM,
+                                      VK_IMAGE_USAGE_TRANSFER_DST_BIT |
+                                          VK_IMAGE_USAGE_STORAGE_BIT);
+        if (!m_objVolImg.img)
+            return false;
+    }
     if (!vf::uploadToImage3D(m_ctx, m_objVolImg, ov.data(), ov.size()))
         return false;
     m_ctx.immediateSubmit([&](VkCommandBuffer cmd) {
