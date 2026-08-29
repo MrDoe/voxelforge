@@ -9,17 +9,7 @@ rocks, fences, anything the AI builds — lives in plain `.vxw` voxel-record
 files. The renderer bakes those records into an SVO on the fly and hot-reloads
 them while running.
 
-```
-┌──────────────┐   writes    ┌────────────────┐   loads    ┌──────────────────┐
-│  Local LLM   │────────────▶│ ai_edits.vxw   │◀───────────│ LayeredWorld     │
-│  (chat / MCP)│             │ + world.json   │            │ VoxelField       │
-└──────────────┘             └────────────────┘            └───────┬──────────┘
-                                                     synthesizes   │  every ~0.5 s
-                                                           ┌───────▼──────────┐
-                                                           │ chunked-SVO      │
-                                                           │ svo_raymarch.comp│
-                                                           └──────────────────┘
-```
+![image](docs/1788035427945.png)
 
 ## Features
 
