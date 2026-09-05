@@ -4,8 +4,10 @@
 #include "platform/window.hpp"
 #include "rhi/swapchain.hpp"
 #include "render/svo_pass.hpp"
+#include "render/splat_pass.hpp"
 #include "render/post_pass.hpp"
 #include "render/taa_pass.hpp"
+#include "voxel/surfelize.hpp"
 #include "voxel/worldfile.hpp"
 #include <algorithm>
 
@@ -42,6 +44,7 @@ struct Args {
     bool sunSet=false;
     float animTime=0.0f;
     int tonemap = 2;    // AgX look: 0=Default 1=Golden 2=Punchy
+    std::string mode = "splat"; // primary renderer: "splat" | "svo" (reference)
     bool probeSet=false;
     glm::vec3 probe { 0.f };
     std::string llmUrl = "http://127.0.0.1:11434";
@@ -77,6 +80,8 @@ Args parseArgs(int argc, char** argv)
             a.animTime = atof(argv[++i]);
         } else if (s == "--tonemap" && i + 1 < argc) {
             a.tonemap = atoi(argv[++i]);
+        } else if (s == "--mode" && i + 1 < argc) {
+            a.mode = argv[++i];
         } else if (s == "--probe" && i + 3 < argc) {
             a.probe = { float(atof(argv[i + 1])), float(atof(argv[i + 2])),
                         float(atof(argv[i + 3])) };
@@ -118,6 +123,7 @@ private:
     void persistWorldLayers();
     void rescanWorldLayers();
     void applyWorldReload();
+    void rebuildSurfels(); // (re)build the surfel set from the live field
 
     Args m_args;
     vf::Window m_window;
@@ -130,8 +136,12 @@ private:
     vf::Image3D m_heightImg;
     vf::Image3D m_objVolImg;
     vf::SvoPass m_svoPass;
+    vf::SplatPass m_splatPass;
     vf::TaaPass m_taaPass;
     vf::PostPass m_postPass;
+    // primary visibility renderer; SVO kept as the pixel reference
+    enum class RenderMode { Splats, Svo };
+    RenderMode m_renderMode = RenderMode::Splats;
     vf::Image3D m_taaHistory[2];
     vf::Image3D m_taaResolved;
     bool m_taaEnabled = true;
@@ -247,14 +257,20 @@ bool App::createOffscreen(uint32_t w, uint32_t h)
     vf::destroyImage3D(m_ctx, m_gpos);
     m_hdr = vf::makeImage2D(
         m_ctx, w, h, VK_FORMAT_R16G16B16A16_SFLOAT,
-        VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT);
+        VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT |
+            VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT);
     m_gpos = vf::makeImage2D(
         m_ctx, w, h, VK_FORMAT_R16G16B16A16_SFLOAT,
-        VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT);
+        VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT |
+            VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT);
+    if (!m_splatPass.recreateDepth(w, h))
+        return false;
     if (!m_offscreen.img || !m_taaHistory[0].img || !m_taaHistory[1].img ||
         !m_taaResolved.img || !m_hdr.img || !m_gpos.img)
         return false;
     m_svoPass.updateDescriptors(m_hdr, m_gpos);
+    m_splatPass.updateDescriptors(m_hdr.view, m_gpos.view, m_heightImg.view,
+                                  m_objVolImg.view);
     m_postPass.updateDescriptors(m_hdr.view, m_gpos.view, m_offscreen.view);
     m_taaFirstFrame = true;
     m_taaHistoryIdx = 0;
@@ -330,9 +346,17 @@ bool App::initVulkan()
         return false;
     if (!m_postPass.init(m_ctx))
         return false;
+    if (!m_splatPass.init(m_ctx))
+        return false;
 
     if (!createOffscreen(m_swapchain.extent().width, m_swapchain.extent().height))
         return false;
+
+    // splat backend owns the primary view: build surfels from the live field
+    m_renderMode = (m_args.mode == "svo") ? RenderMode::Svo : RenderMode::Splats;
+    if (m_args.mode != "splat" && m_args.mode != "svo")
+        spdlog::warn("--mode '{}' unknown (use splat|svo), defaulting to splat", m_args.mode);
+    rebuildSurfels();
 
     // frame sync ---------------------------------------------------------
     VkCommandPoolCreateInfo pci { VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO };
@@ -456,8 +480,34 @@ void App::applyWorldReload()
     m_svoPass.setWorld(g.chunkGrid, g.childBase, g.payload, g.handles, g.bricks);
     uploadTerrainTexture(); // layer toggles can change materials too
     uploadObjVolTexture();  // keep AI/object shadows in sync with the SVO
+    rebuildSurfels();       // splat backend follows the same live field
     syncWorldLayerList();
     rescanWorldLayers(); // layers dropped into assets/ while running show up too
+}
+
+void App::rebuildSurfels()
+{
+    if (!m_layers.loaded())
+        return;
+    vkDeviceWaitIdle(m_ctx.device());
+    vf::voxel::SurfelParams sp;
+    sp.sunDir = glm::vec3(m_sunDir);
+    // debug/experiment overrides for the surfel bake (default = tuned values)
+    if (const char* e = getenv("VF_SURFEL_SMOOTH"))
+        sp.smoothNormals = atoi(e) != 0;
+    if (const char* e = getenv("VF_SURFEL_HFBLEND"))
+        sp.terrainHeightfieldNormals = atoi(e) != 0;
+    vf::voxel::SurfelSet set = vf::voxel::buildSurfels(m_layers.field(), sp);
+    std::vector<vf::voxel::Surfel> water =
+        vf::voxel::buildWaterSurfels(m_layers.field());
+    const uint32_t waterStart = uint32_t(set.surfels.size());
+    set.surfels.insert(set.surfels.end(), water.begin(), water.end());
+    // chunkRange only covers opaque surfels; water is one trailing range
+    m_splatPass.setSurfels(set.surfels.data(),
+                           set.surfels.size() * sizeof(vf::voxel::Surfel),
+                           set.surfels.size(), set.chunkRange, waterStart);
+    spdlog::info("splat backend: {} surfels ({} water), {} chunks", set.surfels.size(),
+                 water.size(), set.chunkRange.empty() ? 0 : set.chunkRange.size() - 1);
 }
 
 void App::applyEdit()
@@ -544,7 +594,9 @@ void App::drawHud()
     ImGui::Begin("Voxelforge", nullptr, ImGuiWindowFlags_AlwaysAutoResize);
 
     ImGui::Text("GPU: %s", m_ctx.gpuName());
-    ImGui::Text("Render: chunked SVO");
+    ImGui::Text("Render: %s (F to switch)", m_renderMode == RenderMode::Splats
+                                                ? "Gaussian surfels"
+                                                : "chunked SVO");
     ImGui::Text("%u x %u @ %.1f fps (%.2f ms)", m_swapchain.extent().width,
                 m_swapchain.extent().height, 1000.0 / m_avgMs, m_avgMs);
     ImGui::Separator();
@@ -902,6 +954,9 @@ int App::run(const Args& args)
     }
     const float tanHalfFov = tanf(glm::radians(60.0f) * 0.5f);
     auto last = std::chrono::steady_clock::now();
+    // debug/CI override for the render-flag bitmask (AO/shadow/flora/water/outline)
+    if (const char* rf = getenv("VF_RENDER_FLAGS"))
+        m_renderFlags = atoi(rf);
 
     while (!m_window.shouldClose()) {
         m_window.pollEvents();
@@ -1069,6 +1124,12 @@ int App::run(const Args& args)
                 m_tonemapLook = (m_tonemapLook + 1) % 3;
                 spdlog::info("tonemap look -> {}", m_tonemapLook);
             }
+            if (edge(GLFW_KEY_F, hw)) {
+                m_renderMode = (m_renderMode == RenderMode::Splats) ? RenderMode::Svo
+                                                                    : RenderMode::Splats;
+                spdlog::info("render mode -> {}",
+                             m_renderMode == RenderMode::Splats ? "splats" : "svo");
+            }
             // toggle the carve / add edit tool
             if (edge(GLFW_KEY_C, hw)) {
                 m_editActive = !m_editActive;
@@ -1130,6 +1191,41 @@ int App::run(const Args& args)
             push.sunDir = m_sunDir;
             push.misc = glm::vec4(float(m_renderFlags), m_animTime, float(m_tonemapLook), m_exposure);
             {
+                if (m_renderMode == RenderMode::Splats) {
+                    // splat raster writes linear HDR + G-buffer
+                    vf::transitionImage(fr.cmd, m_hdr.img, VK_IMAGE_ASPECT_COLOR_BIT,
+                                        VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_GENERAL,
+                                        VK_PIPELINE_STAGE_2_NONE, VK_ACCESS_2_NONE,
+                                        VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT,
+                                        VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT);
+                    vf::transitionImage(fr.cmd, m_gpos.img, VK_IMAGE_ASPECT_COLOR_BIT,
+                                        VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_GENERAL,
+                                        VK_PIPELINE_STAGE_2_NONE, VK_ACCESS_2_NONE,
+                                        VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT,
+                                        VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT);
+                    vf::transitionImage(fr.cmd, m_splatPass.depthImage().img,
+                                        VK_IMAGE_ASPECT_DEPTH_BIT,
+                                        VK_IMAGE_LAYOUT_UNDEFINED,
+                                        VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL,
+                                        VK_PIPELINE_STAGE_2_NONE, VK_ACCESS_2_NONE,
+                                        VK_PIPELINE_STAGE_2_EARLY_FRAGMENT_TESTS_BIT,
+                                        VK_ACCESS_2_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT);
+                    m_splatPass.record(fr.cmd, push,
+                                       { m_offscreen.extent.width,
+                                         m_offscreen.extent.height });
+                    // barrier: HDR/G-buffer written -> read by post pass
+                    VkMemoryBarrier2 mb { VK_STRUCTURE_TYPE_MEMORY_BARRIER_2 };
+                    mb.srcStageMask = VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT |
+                                      VK_PIPELINE_STAGE_2_LATE_FRAGMENT_TESTS_BIT;
+                    mb.srcAccessMask = VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT |
+                                       VK_ACCESS_2_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT;
+                    mb.dstStageMask = VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT;
+                    mb.dstAccessMask = VK_ACCESS_2_SHADER_STORAGE_READ_BIT;
+                    VkDependencyInfo di { VK_STRUCTURE_TYPE_DEPENDENCY_INFO };
+                    di.memoryBarrierCount = 1;
+                    di.pMemoryBarriers = &mb;
+                    vkCmdPipelineBarrier2(fr.cmd, &di);
+                } else {
                 // ray-march writes linear HDR + G-buffer
                 vf::transitionImage(fr.cmd, m_hdr.img, VK_IMAGE_ASPECT_COLOR_BIT,
                                     VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_GENERAL,
@@ -1152,6 +1248,7 @@ int App::run(const Args& args)
                 di.memoryBarrierCount = 1;
                 di.pMemoryBarriers = &mb;
                 vkCmdPipelineBarrier2(fr.cmd, &di);
+                }
                 // post pass reads HDR/G-buffer, writes LDR offscreen
                 vf::transitionImage(fr.cmd, m_offscreen.img, VK_IMAGE_ASPECT_COLOR_BIT,
                                     VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_GENERAL,
@@ -1230,7 +1327,28 @@ int App::run(const Args& args)
         push.sunDir = m_sunDir;
         push.misc = glm::vec4(float(m_renderFlags), m_animTime, float(m_tonemapLook), m_exposure);
 
-        // ray-march -> HDR + G-buffer -------------------------------------
+        // splat raster or ray-march -> HDR + G-buffer --------------------
+        if (m_renderMode == RenderMode::Splats) {
+            vf::transitionImage(fr.cmd, m_hdr.img, VK_IMAGE_ASPECT_COLOR_BIT,
+                                VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_GENERAL,
+                                VK_PIPELINE_STAGE_2_NONE, VK_ACCESS_2_NONE,
+                                VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT,
+                                VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT);
+            vf::transitionImage(fr.cmd, m_gpos.img, VK_IMAGE_ASPECT_COLOR_BIT,
+                                VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_GENERAL,
+                                VK_PIPELINE_STAGE_2_NONE, VK_ACCESS_2_NONE,
+                                VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT,
+                                VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT);
+            vf::transitionImage(fr.cmd, m_splatPass.depthImage().img,
+                                VK_IMAGE_ASPECT_DEPTH_BIT,
+                                VK_IMAGE_LAYOUT_UNDEFINED,
+                                VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL,
+                                VK_PIPELINE_STAGE_2_NONE, VK_ACCESS_2_NONE,
+                                VK_PIPELINE_STAGE_2_EARLY_FRAGMENT_TESTS_BIT,
+                                VK_ACCESS_2_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT);
+            m_splatPass.record(fr.cmd, push,
+                               { m_offscreen.extent.width, m_offscreen.extent.height });
+        } else {
         vf::transitionImage(fr.cmd, m_hdr.img, VK_IMAGE_ASPECT_COLOR_BIT,
                             VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_GENERAL,
                             VK_PIPELINE_STAGE_2_NONE, VK_ACCESS_2_NONE,
@@ -1242,10 +1360,18 @@ int App::run(const Args& args)
                             VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
                             VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT);
         m_svoPass.record(fr.cmd, push);
+        }
         // barrier: HDR/G-buffer written -> read by post pass
         VkMemoryBarrier2 mb { VK_STRUCTURE_TYPE_MEMORY_BARRIER_2 };
-        mb.srcStageMask = VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT;
-        mb.srcAccessMask = VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT;
+        if (m_renderMode == RenderMode::Splats) {
+            mb.srcStageMask = VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT |
+                              VK_PIPELINE_STAGE_2_LATE_FRAGMENT_TESTS_BIT;
+            mb.srcAccessMask = VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT |
+                               VK_ACCESS_2_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT;
+        } else {
+            mb.srcStageMask = VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT;
+            mb.srcAccessMask = VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT;
+        }
         mb.dstStageMask = VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT;
         mb.dstAccessMask = VK_ACCESS_2_SHADER_STORAGE_READ_BIT;
         VkDependencyInfo di { VK_STRUCTURE_TYPE_DEPENDENCY_INFO };
@@ -1541,6 +1667,7 @@ void App::destroy()
         vkDestroyCommandPool(m_ctx.device(), m_framePool, nullptr);
 
     m_svoPass.destroy();
+    m_splatPass.destroy();
     m_taaPass.destroy();
     m_postPass.destroy();
     vf::destroyImage3D(m_ctx, m_objVolImg);

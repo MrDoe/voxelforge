@@ -1,9 +1,10 @@
 # AGENTS.md
 
-> **Scope:** The whole project is a **single-path chunked-SVO voxel renderer**
-> with AI-driven world editing. Splats, the dense reference raymarcher and all
-> analytic runtime geometry are **gone** — geometry is derived solely from
-> `.vxw` records via `VoxelField` (`docs/history/rework.md`). Keep this
+> **Scope:** The project renders the voxel world primarily with **Gaussian
+> surfels** rasterized from `.vxw` records, with the chunked-SVO raymarcher
+> kept as the pixel reference (`--mode svo`). The dense reference raymarcher
+> and all analytic runtime geometry are **gone** — geometry is derived solely
+> from `.vxw` records via `VoxelField` (`docs/history/rework.md`). Keep this
 > invariant in every change.
 >
 > **Full developer documentation lives in `docs/`** (start at
@@ -52,9 +53,10 @@
 ## Run
 - `./build/voxelforge` — hero cam `-16,6.5,-14 → 6.5,0.8,11`, sun `34°/238°`.
 - Keys: `WASD/QE` move, `RMB+mouse` look, wheel speed, `Ctrl+LMB` pick anchor,
-  `ESC` quit.
+  `F` toggles splats/SVO renderer, `ESC` quit.
 - Headless: `--selftest`, `--smoke N`, `--shot out.ppm --cam …`,
-  `--probe X Y Z`, `--sun <elev> <azim>`, `--animtime <s>`, `--width/--height`.
+  `--probe X Y Z`, `--sun <elev> <azim>`, `--animtime <s>`, `--width/--height`,
+  `--mode splat|svo` (default `splat`; SVO is the pixel reference).
 - Chat backend: Ollama defaults or any OpenAI-compatible server via
   `VF_LLM_URL=http://host:8080/v1 VF_LLM_MODEL=… ./build/voxelforge`.
   MCP: `./build/vf_mcp` (stdio), registered in `.opencode/opencode.json`.
@@ -87,8 +89,14 @@
   `BRICK_N=8`, palette/material tables, spot constants) **and baker-side
   analytic shapes** (`houseAt/treesAt/…`, used by `heightmap_gen` sweeps and
   tests as authoring truth — NOT linked into the renderer path).
-- `src/render/svo_pass.{hpp,cpp}` — compute pipeline; `RaymarchPush` (128 B)
-  lives here. `taa_pass.*` resolve. `src/rhi/*` Vulkan 1.3 + VMA.
+- `src/render/svo_pass.{hpp,cpp}` — SVO reference compute pipeline;
+  `RaymarchPush` (128 B) lives here. `splat_pass.{hpp,cpp}` — primary
+  Gaussian-surfel raster backend (sky/opaque/water pipelines, chunk draws,
+  frustum culling). `taa_pass.*` resolve. `src/rhi/*` Vulkan 1.3 + VMA.
+- `src/voxel/surfelize.{hpp,cpp}` — CPU surfel extraction from the live
+  `VoxelField` (one anisotropic 2D Gaussian per outer surface cell, mean
+  face normal + smoothing, baked CPU sun-shadow/AO/bent normal, chunk
+  bucketing + water grid); rebuilt on every world reload (`rebuildSurfels`).
 - `src/voxel/heightmap.{hpp,cpp}` — terrain source of truth: 16-bit grayscale
   PNG (`kHmSize=2048`, meters `[-8,24]`); bilinear `sample()` + `gradient()`.
 - `src/voxel/worldfile.{hpp,cpp}` — VXW v1 binary reader/writer (header + SVO
@@ -107,17 +115,32 @@
   renders. `tools/scene_slice.cpp` — ASCII cross-sections of the field.
 
 ## Shaders — data-only rule
-- `shaders/svo_raymarch.comp` is the only render shader (+`taa_resolve.comp`).
+- `shaders/svo_raymarch.comp` is the SVO reference shader (+`taa_resolve.comp`,
+  `post.comp`); `shaders/splat.{vert,frag}` are the primary
+  splat path. Shared lighting lives in `common_base.glsl` (sky/PBR/AO/flora/fog,
+  `applyFlora` with per-backend shadow dispatch) + `common_svo.glsl` (SVO
+  traversal + `shadeTerrain`) + `common_splat.glsl` (splat marches +
+  `shadeSurfel`/`shadeWaterSplat`).
+- Surfel layout (64 B, 4×vec4, std430): `pos_rU`, `normal_rV`, `bent_sh`
+  (bent normal + baked shadow), `mat_ao` (mat/refl/rough/AO+2·water). Rasterized
+  as instanced quads; fragment does ray/disk intersect + compact kernel with
+  opaque core (`coreD2=0.9`) + per-fragment plane depth (`gl_FragDepth`).
+- Shadows for splats are BAKED per-surfel on the CPU (`shadowMarch` over
+  `VoxelField::sample`, binary like SVO `softShadow`); the GPU shadow march
+  (`softShadowSplat`) only serves the water path. `objDist` returns METERS
+  (`r8_snorm × 1.26`); empty reads exactly `+kObjVolMax` (no info beyond).
 - Terrain: bilinear `heightAt()` over `uHeight` (**rg32f**: R=top world Y,
   G=material/255); terrain material from `.g` (`heightMatNearest`).
 - Objects: brick SDF + material byte; **bit 7 of word1.mat = object flag**
   (set by the bake when the object field wins a cell) drives
   `isObjectSurface()` → SVO-gradient normals and brick materials.
-- Shadows march `min(heightfield distance, objDist(uObjVol))` — the coarse
-  r8_snorm 256³ object volume (clamped ±1.26 m) keeps AI-added objects casting
-  shadows without terraced-terrain self-shadowing.
+- SVO shadows are exact binary DDA hits (`softShadow`); splat shadows are the
+  same verdict baked per-surfel on the CPU, so both backends agree. The coarse
+  r8_snorm 256³ object volume (clamped ±1.26 m) is only marched on the GPU for
+  the splat water path now.
 - Water plane `y=-0.9` bidirectional (`waterHit` above+below), `gUnderwater`
-  absorption tint, bed-absorption skip when submerged, fog `0.0012`, ACES.
+  absorption tint, bed-absorption skip when submerged, fog `0.0012`, AgX
+  (post pass; the in-shader `aces()` is dead code).
 - Brick packing: `word0=r|g<<8|b<<16|sdfByte<<24` (decode `raw*VOXEL`),
   `word1=a|refl<<8|rough<<16|(mat|objFlag)<<24`. Empty-cell fallback in
   `map()` is `max(-sdBox(p,cmin,cmax), VOXEL*0.5)` + 6-step bisection.

@@ -84,6 +84,7 @@ target_link_libraries(vf_platform PUBLIC glfw Vulkan::Vulkan vf_glm spdlog::spdl
 
 add_library(vf_core STATIC src/core/camera.cpp
                           src/voxel/layered_world.cpp src/voxel/voxel_field.cpp
+                          src/voxel/surfelize.cpp
                           src/voxel/heightmap.cpp src/voxel/worldfile.cpp
                           src/voxel/picking.cpp src/voxel/editable_world.cpp
                           src/ai/ollama_client.cpp)
@@ -129,7 +130,7 @@ add_custom_target(vf_heightmap DEPENDS ${VF_HEIGHTMAP_PNG} ${VF_WORLD_LAYERS})
 add_library(vf_rhi STATIC src/rhi/context.cpp src/rhi/resources.cpp src/rhi/swapchain.cpp)
 target_link_libraries(vf_rhi PUBLIC vf_platform vf_vma spdlog::spdlog)
 
-add_library(vf_render STATIC src/render/svo_pass.cpp src/render/taa_pass.cpp src/render/post_pass.cpp)
+add_library(vf_render STATIC src/render/svo_pass.cpp src/render/taa_pass.cpp src/render/post_pass.cpp src/render/splat_pass.cpp)
 target_include_directories(vf_render PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/external)
 target_compile_definitions(vf_render PUBLIC
     VOXELFORGE_SHADER_DIR="${CMAKE_CURRENT_BINARY_DIR}/shaders"
@@ -143,14 +144,16 @@ file(MAKE_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}/shaders)
 
 set(VF_SHADER_SRCS ${CMAKE_CURRENT_SOURCE_DIR}/shaders/svo_raymarch.comp
     ${CMAKE_CURRENT_SOURCE_DIR}/shaders/post.comp
-    ${CMAKE_CURRENT_SOURCE_DIR}/shaders/taa_resolve.comp)
+    ${CMAKE_CURRENT_SOURCE_DIR}/shaders/taa_resolve.comp
+    ${CMAKE_CURRENT_SOURCE_DIR}/shaders/splat.vert
+    ${CMAKE_CURRENT_SOURCE_DIR}/shaders/splat.frag)
 set(VF_SHADER_SPVS "")
 foreach(src_file ${VF_SHADER_SRCS})
     get_filename_component(name "${src_file}" NAME)
     set(out_file ${CMAKE_CURRENT_BINARY_DIR}/shaders/${name}.spv)
     add_custom_command(OUTPUT ${out_file}
-        COMMAND ${GLSLANG_VALIDATOR} -V --target-env vulkan1.3 -o ${out_file} ${src_file}
-        DEPENDS ${src_file}
+        COMMAND ${GLSLANG_VALIDATOR} -V --target-env vulkan1.3 -I${CMAKE_CURRENT_SOURCE_DIR}/shaders -o ${out_file} ${src_file}
+        DEPENDS ${src_file} ${CMAKE_CURRENT_SOURCE_DIR}/shaders/common_base.glsl ${CMAKE_CURRENT_SOURCE_DIR}/shaders/common_svo.glsl ${CMAKE_CURRENT_SOURCE_DIR}/shaders/common_splat.glsl
         COMMENT "glslangValidator ${name}")
     list(APPEND VF_SHADER_SPVS ${out_file})
 endforeach()
@@ -170,6 +173,7 @@ add_executable(vf_tests tests/main.cpp tests/test_camera.cpp
                         tests/test_world.cpp tests/test_worldfile.cpp
                         tests/test_authoring.cpp tests/test_chat_tools.cpp
                         tests/test_picking.cpp tests/test_editable.cpp
+                        tests/test_surfelize.cpp
                         src/ai/ollama_client.cpp)
 target_link_libraries(vf_tests PRIVATE vf_core vf_doctest)
 target_compile_definitions(vf_tests PRIVATE DOCTEST_CONFIG_NO_MULTITHREADING)

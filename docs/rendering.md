@@ -3,11 +3,11 @@
 Authoritative sources: `shaders/svo_raymarch.comp`, `src/render/svo_pass.{hpp,cpp}`,
 `src/voxel/world.hpp` (handle encoding), `src/voxel/layered_world.cpp` (baking).
 
-## Descriptor bindings (set 0)
+## Descriptor bindings (set 0, SVO pass)
 
 | binding | resource | format/layout | contents |
 |---|---|---|---|
-| 0 | `uOut` image2D | rgba8, writeonly | raymarch output (offscreen Image3D) |
+| 0 | — | — | intentionally absent (an unwritten binding invalidates the set) |
 | 1 | ChunkGrid SSBO | std430 i32[] | `GRID_N³ = 16³` root handles per chunk (`-1` empty) |
 | 2 | ChildBase SSBO | std430 u32[] | per node: index of its 8 contiguous child handles |
 | 3 | Payload SSBO | std430 u32[] | per node: validMask bits 0–7, solidMask bits 8–15 |
@@ -16,6 +16,13 @@ Authoritative sources: `shaders/svo_raymarch.comp`, `src/render/svo_pass.{hpp,cp
 | 6 | `uHeight` image2D | rg32f | terrain: R = top world Y, G = material/255 |
 | 7 | `uObjVol` image3D | r8_snorm | coarse object-only SDF volume for shadows |
 | 8 | SelectionUBO | std140, 32 B | `uSel` + `uHover` vec4s: xyz = voxel center world pos, w = active flag |
+| 9 | `uHdr` image2D | rgba16f, writeonly | linear HDR scene radiance |
+| 10 | `uGPos` image2D | rgba16f, writeonly | G-buffer: xyz = world pos, w = hit type (0 sky / 1 solid / 2 water) |
+
+The splat pass reuses bindings 6+7 (read-only) with its own set: 0 = surfel
+SSBO (vertex), 1 = `uHeight`, 2 = `uObjVol`, 3 = 16 B params UBO
+(vertex+fragment). HDR/G-buffer are dynamic-rendering attachments there,
+not descriptors.
 
 ## Handle encoding (`world.hpp`)
 
@@ -89,10 +96,12 @@ Don't "fix" either side casually; keep them in sync.
 ## Object shadow volume (`uObjVol`)
 
 256³ int8 snorm texels over the whole world (**0.4 m/texel**). Encoded range
-±1.26 m at ±127; `+127` = far away. Shadow rays march
-`min(heightfieldDist, objDist(uObjVol))` so AI-placed objects cast shadows
-without terraced-terrain self-shadowing. It is deliberately too coarse for
-shading normals — use brick SDFs there.
+±1.26 m at ±127; `+127` = far away. `objDist()` returns **meters** (snorm ×
+1.26); empty space reads exactly `+kObjVolMax` (no information beyond that
+range — marches must skip, not occlude on, the clamp value). The SVO
+reference uses exact DDA hits instead; the splat water path marches
+`min(heightfieldDist, objDist)` with the clamp skipped. It is deliberately
+too coarse for shading normals — use brick SDFs there.
 
 ## Raymarch pipeline summary
 
@@ -107,16 +116,82 @@ shading normals — use brick SDFs there.
    Preetham-ish model), ground bounce, foliage translucency (mat 8),
    grass sprite cards + blade streaks near-field, two-scale heightfield
    normals. Sun/moon constants are plain GLSL; fog density 0.0012.
-6. Post: ACES tonemap → vibrance → split-tone → gamma 2.2.
+6. Post (`post.comp`): HDR bloom → exposure → AgX tonemap (3 looks) →
+   selection outline → gamma 2.2.
 
 All geometry inputs come from bindings 1–7 — **no analytic scene constants
 exist in GLSL by design**; adding any breaks the data-only invariant.
 
+## Gaussian-surfel renderer (primary path, `--mode splat`)
+
+One anisotropic 2D Gaussian disk per outer voxel-surface cell, rasterized as
+instanced quads and composited as **opaque surfaces** (no sorting, no
+transparency). `--mode svo` keeps the raymarcher above as the pixel
+reference; `F` toggles interactively.
+
+**CPU bake** (`src/voxel/surfelize.{hpp,cpp}`, rebuilt on every world reload
+in `App::rebuildSurfels`, ~0.6 s for ~1.3 M surfels):
+- Surface enumeration from the public `VoxelField` API only: terrain columns
+  via `colTops()` (surface range `[minNbrTop, colTop]` per column), objects by
+  scanning `objectBlockMask()` + `sample().obj`. Deduped, NaN-guarded
+  (`safeNormalize`; NaN != NaN would silently break the determinism test).
+- Normal = mean of outward (toward-air) face directions, blended toward the
+  analytic two-scale heightfield normal on terrain tops, then one
+  neighbourhood-averaging pass. Position = cell centre + n·VOXEL/2.
+- **Baked per-surfel**: binary sun shadow (`shadowMarch` over
+  `VoxelField::sample`, same verdict as SVO `softShadow`) and bent-normal AO
+  (`aoBake`, same rings as `splatAO`). Sun comes from `SurfelParams::sunDir`
+  (the app's `--sun`); a sun change needs a rebuild, same as geometry edits.
+- Water grid (0.25 m) wherever terrain tops sit below `WATER_LEVEL`.
+- Chunk bucketing (16³ + 1 `chunkRange` offsets) for per-chunk draws/culling.
+
+**Surfel layout** (64 B, 4×vec4, std430): `pos_rU`, `normal_rV`,
+`bent_sh` (bent normal + baked shadow), `mat_ao`
+(mat/refl/rough/AO + 2 for water). Footprints are isotropic (`rU == rV =
+1.1·VOXEL`), so the vertex shader rebuilds the tangent frame from the normal.
+
+**GPU** (`src/render/splat_pass.{hpp,cpp}`, `shaders/splat.{vert,frag}`):
+dynamic rendering into the same `m_hdr`/`m_gpos`
+targets (plus a `D32_SFLOAT` depth image), so post/TAA/`--shot` work
+unchanged. Three pipelines sharing one layout (surfel SSBO + `uHeight` +
+`uObjVol` + 16 B params UBO):
+1. sky fullscreen triangle (no depth) → `skyColor` + hitType 0;
+2. opaque instanced quads, one `vkCmdDraw(4, n, 0, first)` per visible
+   chunk (CPU frustum cull over chunk AABBs), depth test + write with
+   per-fragment plane depth, alpha blend for the rim;
+3. water surfels (blended, depth-tested, no depth write, `hitType 2`).
+(No depth prepass: the main pass writes `gl_FragDepth`, which disables
+early-z, so a prepass only ever changed rim blending — measured neutral to
+negative. Per-fragment marches were the real cost driver; those are baked
+on the CPU instead.)
+
+**Fragment**: exact ray/disk-plane intersect → per-fragment *plane* depth
+(`gl_FragDepth`, monotonic `1−exp(−t·0.02)` mapping; only relative order
+matters since nothing else reads depth) → compact C1 kernel
+`1−smoothstep(coreD2, 1, d2)` with opaque core `coreD2 = 0.9` (union of
+cores tiles the plane; the thin rim is the analytic AA annulus, widened to
+full opacity with distance) → `shadeSurfel` (twin of `shadeTerrain` with
+baked sh/AO/bent + shared `applyFlora`) → fog → HDR + G-buffer out.
+
+**Cost drivers** (1080p hero, RTX 4090 Laptop): full per-fragment shadow/AO
+marches measured ~13 ms — hence the CPU bake. After baking: ~7.3 ms/frame
+vs ~11.7 ms SVO.
+
+**Tuning/debug**: `VF_SPLAT_CORE`
+(coreD2), `VF_SPLAT_EXTENT`, `VF_SPLAT_NOCULL`/`NOWATER`,
+`VF_SPLAT_DEBUG` (1 flat / 2 normal / 3 depth / 4 no-collapse shading /
+5 facing / 6 albedo / 7 rough / 8 baked-shadow / 9 baked-AO / 10 hf-shadow /
+7 rough / 8 baked-shadow / 9 baked-AO / 10 hf-shadow / 11 objDist /
+12 height-residual / 13 march origin), `VF_RENDER_FLAGS`, `VF_SURFEL_SMOOTH`
+/`VF_SURFEL_HFBLEND` (bake variants).
+
 ## TAA resolve (`taa_resolve.comp`)
 
-AABB-clamped neighborhood history blend, no reprojection (camera motion is
-handled by clamping). History blend factor 0.92 after the first frame;
-disabled entirely in headless modes so shots are deterministic.
+AABB-clamped neighborhood history blend, reprojected with the `uGPos`
+world-position G-buffer plus the previous frame's camera (both backends
+write `gpos`, so TAA works unchanged under splats). History blend factor
+0.92 after the first frame; disabled entirely in headless modes so shots
+are deterministic.
 
 ## Selection highlight
 

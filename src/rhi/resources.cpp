@@ -89,7 +89,8 @@ void destroyImage3D(const Context& ctx, Image3D& im)
 }
 
 Image3D makeImage2D(const Context& ctx, uint32_t w, uint32_t h,
-                     VkFormat format, VkImageUsageFlags usage)
+                     VkFormat format, VkImageUsageFlags usage,
+                     VkImageAspectFlags aspect)
 {
     Image3D im;
     im.extent = { w, h, 1 };
@@ -118,7 +119,7 @@ Image3D makeImage2D(const Context& ctx, uint32_t w, uint32_t h,
     vi.image = im.img;
     vi.viewType = VK_IMAGE_VIEW_TYPE_2D;
     vi.format = format;
-    vi.subresourceRange = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1 };
+    vi.subresourceRange = { aspect, 0, 1, 0, 1 };
     if (vkCreateImageView(ctx.device(), &vi, nullptr, &im.view) != VK_SUCCESS) {
         spdlog::critical("vkCreateImageView(2D) failed");
         return im;
