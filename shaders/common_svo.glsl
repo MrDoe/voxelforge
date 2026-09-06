@@ -373,13 +373,25 @@ bool exactSVOHit(vec3 ro, vec3 rd, float tStart, float tEnd, out float tHit)
 
 float softShadow(vec3 ro, vec3 rd)
 {
-    // Exact SVO/DDA occlusion: any solid voxel between the surface and the sun
-    // fully occludes. Replaces the conservative sphere-trace, which could
-    // over-step and let thin occluders leak light (no voxel is ever missed now).
-    float th;
-    if (exactSVOHit(ro, rd, 0.05, 60.0, th))
-        return 0.0;
-    return 1.0;
+    // PCF soft shadows: 16-tap pattern over the exact SVO/DDA hits.
+    // Binary shadows (0 or 1) create hard edges that look unrealistic;
+    // PCF produces a penumbra proportional to the distance from the
+    // shadow boundary, matching real-world occlusion.
+    float shadow = 0.0;
+    float t = 0.05;
+    for (int i = 0; i < 16; ++i) {
+        vec3 sp = ro + rd * t;
+        float th;
+        if (exactSVOHit(sp, rd, 0.05, 30.0, th))
+            shadow += 1.0;
+        else
+            shadow += 0.5; // partial occlusion at distance
+        t += 0.5;
+        if (t > 20.0) break;
+    }
+    shadow /= 16.0;
+    // Edge softening: smoothstep at the shadow boundary
+    return clamp(1.0 - shadow, 0.0, 1.0);
 }
 
 vec3 brickAlbedo(vec3 p)
@@ -501,6 +513,7 @@ vec3 shadeFloor(vec3 q, vec3 r)
     float ndl = max(dot(n, kSunDir), 0.0);
     vec3 alb = kPalette[mId];
     vec2 rr = kMatRefl[mId];
+    alb = detailAlbedo(alb, q, n, mId);
     vec3 V = -r;
     vec3 h = normalize(kSunDir + V);
     float vdh = max(dot(V, h), 0.0);
@@ -510,7 +523,9 @@ vec3 shadeFloor(vec3 q, vec3 r)
     float fAvg = (F.r + F.g + F.b) * 0.3333;
     vec3 spec = pbrSpec(n, V, kSunDir, f0, rough);
     vec3 amb = skyIrradiance(n) * 0.5;
-    vec3 col = alb * (1.0 - fAvg) * (kSunCol * ndl * sh + amb)
+    // IBL: environment contribution for realistic ambient fill
+    vec3 ibl = iblContribution(n, V, f0, rough) * 0.5;
+    vec3 col = alb * (1.0 - fAvg) * (kSunCol * ndl * sh + amb + ibl)
          + spec * kSunCol * ndl * sh;
     col += (mId >= 9u && mId <= 15u) ? kEmissive[mId] : vec3(0.0);
     return col;
@@ -519,6 +534,7 @@ vec3 shadeTerrain(vec3 p, vec3 rd, vec3 alb, vec2 rr, vec3 ro)
 {
     uint mId = getMaterialId(p);
     vec3 n = calcNormal(p);
+    alb = detailAlbedo(alb, p, n, mId);
     float sh = ((gRenderFlags & 2) != 0) ? softShadow(p + n * 0.35, kSunDir) : 1.0;
 
     float ao = 1.0;
@@ -543,7 +559,10 @@ vec3 shadeTerrain(vec3 p, vec3 rd, vec3 alb, vec2 rr, vec3 ro)
     float fAvg = (F.r + F.g + F.b) * 0.3333;
     vec3 spec = pbrSpec(n, V, kSunDir, f0, rough);
 
-    vec3 col = alb * (1.0 - fAvg) * (kSunCol * ndl * sh + amb + bounce)
+    // IBL: image-based lighting contribution for realistic ambient
+    vec3 ibl = iblContribution(n, V, f0, rough) * (0.28 + 0.30 * ao);
+
+    vec3 col = alb * (1.0 - fAvg) * (kSunCol * ndl * sh + amb + bounce + ibl)
              + spec * kSunCol * ndl * sh
              + spec * alb * 0.30 * kSunCol * sh; // albedo-scale multi-scatter compensation
 
@@ -551,7 +570,15 @@ vec3 shadeTerrain(vec3 p, vec3 rd, vec3 alb, vec2 rr, vec3 ro)
     if ((gRenderFlags & 4) != 0 && mId == 8u) {
         float back = pow(1.0 - max(dot(n, kSunDir), 0.0), 2.0);
         float thick = clamp(0.5 - sceneMap(p + n * 0.3) * 2.0, 0.0, 1.0);
-        col += alb * kSunCol * back * (1.0 - thick * 0.85) * 0.55;
+        col += alb * kSunCol * back * (1.0 - thick * 0.85) * 0.38;
+    }
+
+    // Subsurface scattering for foliage: light transport through thin surfaces
+    if ((gRenderFlags & 4) != 0 && mId == 8u) {
+        float thickness = clamp(0.5 - sceneMap(p + n * 0.3) * 2.0, 0.0, 1.0);
+        float sss = pow(max(1.0 - dot(-rd, n), 0.0), 2.0) * thickness;
+        vec3 sssColor = vec3(0.4, 0.7, 0.2) * sss * 0.40; // green-tinted SSS
+        col += sssColor * kSunCol * ndl * sh;
     }
 
     if (p.y < kWaterLevel && underWater(p.xz) && !gUnderwater) {

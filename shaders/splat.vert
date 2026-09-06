@@ -31,7 +31,8 @@ layout(push_constant) uniform PC {
 
 // quad extent mirror of the fragment UBO (z lane); flushed per record.
 layout(std140, set = 0, binding = 3) uniform SplatUBO {
-    vec4 uSplat;
+    vec4 uSplat;  // x=buried, y=coreD2, z=quad extent, w=debug mode
+    vec4 uSplat2; // x=radius scale (hotkeys [/]), yzw=spare
 } sp;
 
 layout(location = 0) out vec3 vCenter;
@@ -70,17 +71,28 @@ void main()
     vec3 up = abs(n.y) < 0.99 ? vec3(0.0, 1.0, 0.0) : vec3(1.0, 0.0, 0.0);
     vec3 t = normalize(cross(n, up));
     vec3 b = normalize(cross(n, t));
-    float rU = max(s.pos_rU.w, 1e-4);
-    float rV = max(s.normal_rV.w, 1e-4);
+    // runtime radius scale (hotkeys [/]): grows/shrinks disk AND quad
+    // together (vRadii carries the scaled radii so d2 stays consistent)
+    float rScale = clamp(sp.uSplat2.x, 0.5, 2.0);
+    float rU = max(s.pos_rU.w, 1e-4) * rScale;
+    float rV = max(s.normal_rV.w, 1e-4) * rScale;
 
     // Opaque surfels are single-sided: backfaces collapse to a zero-area
-    // quad parked on the centre (reliably culled by the rasterizer).
+    // quad (reliably culled). Skipped in debug views, when the camera is
+    // buried inside solid (uSplat.x), and for foliage (mat 8) + roof slabs
+    // (mat 7): leaf shells are sparse, so the far side must still cover
+    // sightlines through near-side gaps (SVO hits both sides
+    // indiscriminately); stepped roof slabs are thin shells whose top faces
+    // collapse when viewed from below the eaves, leaving see-through slits
+    // between steps unless both sides render.
     float facing = dot(n, pc.camPos.xyz - c);
+    bool foliage = abs(s.mat_ao.x - 8.0) < 0.5;
+    bool thinShell = foliage || abs(s.mat_ao.x - 7.0) < 0.5;
     vec2 corner = vec2((gl_VertexIndex & 1) == 0 ? -1.0 : 1.0,
                        (gl_VertexIndex & 2) == 0 ? -1.0 : 1.0);
     float extent = max(sp.uSplat.z, 1.0);
     vec3 q = c + (t * (corner.x * rU) + b * (corner.y * rV)) * extent;
-    if (facing < 0.0 && sp.uSplat.w < 0.5)
+    if (facing < 0.0 && sp.uSplat.w < 0.5 && sp.uSplat.x < 0.5 && !thinShell)
         q = c;
 
     vCenter = c;
@@ -94,15 +106,18 @@ void main()
     vView = q - pc.camPos.xyz;
 
     // Manual projection with the shared camera convention. w = view depth
-    // (clamped > 0 so near-plane straddlers can't w-flip), giving exact
-    // perspective-correct interpolation of vView; NDC z is any monotonic
-    // function of view depth (only relative order matters - the fragment
-    // shader overwrites depth with the exact plane hit anyway).
+    // EXACTLY (no near-plane clamp): the GPU clips near-straddling quads
+    // itself, which is exact; clamping w > 0 smears behind-camera corners
+    // across the whole screen (giant blob artefacts when looking up past
+    // nearby geometry). Fully-behind quads are culled by the clipper.
+    // NDC z is any monotonic function of view depth (only relative order
+    // matters - the fragment shader overwrites depth with the exact plane
+    // hit anyway).
     vec3 rel = q - pc.camPos.xyz;
     float vz = dot(rel, pc.camFwd.xyz);
     float vx = dot(rel, pc.camRight.xyz);
     float vy = dot(rel, pc.camUp.xyz);
-    float w = max(vz, 0.05);
+    float w = vz;
     vec2 ndc = vec2(vx / (w * pc.a.x * pc.a.y), -vy / (w * pc.a.x));
     float dep = 1.0 - exp(-max(vz, 0.0) * 0.02);
     gl_Position = vec4(ndc * w, dep * w, w);

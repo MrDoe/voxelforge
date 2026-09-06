@@ -138,12 +138,33 @@ in `App::rebuildSurfels`, ~0.6 s for ~1.3 M surfels):
 - Normal = mean of outward (toward-air) face directions, blended toward the
   analytic two-scale heightfield normal on terrain tops, then one
   neighbourhood-averaging pass. Position = cell centre + n·VOXEL/2.
-- **Baked per-surfel**: binary sun shadow (`shadowMarch` over
-  `VoxelField::sample`, same verdict as SVO `softShadow`) and bent-normal AO
-  (`aoBake`, same rings as `splatAO`). Sun comes from `SurfelParams::sunDir`
+- **Baked per-surfel**: binary sun shadow (exact cell-DDA near field +
+  sphere-trace far field over `VoxelField::sample`, same verdict as SVO
+  `softShadow`, then blurred over face neighbours for a 1-cell penumbra
+  instead of disk-shaped scallops) and bent-normal AO (`aoBake`, same rings
+  as `splatAO`). Foliage (mat 8) gets 1.5× disks to close sparse-canopy
+  gaps. Sun comes from `SurfelParams::sunDir`
   (the app's `--sun`); a sun change needs a rebuild, same as geometry edits.
 - Water grid (0.25 m) wherever terrain tops sit below `WATER_LEVEL`.
 - Chunk bucketing (16³ + 1 `chunkRange` offsets) for per-chunk draws/culling.
+- **Micro-detail** (`SurfelParams::microDetail`, app default ON via
+  `VF_MICRO=0` to disable, unit-test default OFF): deterministic 0–2 child
+  disks per base surfel that turn texture texels into real geometry with
+  parallax/occlusion — meadow crumbs, soil pebbles, rock chips, bark relief,
+  roof moss puffs + underside filler seals, canopy leaflets. Children inherit
+  the base cell's chunk, material and baked shadow/AO/bent (no extra marches)
+  with a jittered tangent offset + micro-facet normal from a sin-hash of the
+  lattice coords, so rebuilds stay bit-identical. All-layers count grows
+  ~1.55 M → ~2.4 M.
+- **Photoreal grade** (shared `common_base.glsl`, both backends in sync):
+  `skyColor` adds an fbm cloud deck (thin at zenith so the sky probe stays
+  blue) + golden-hour horizon warmth that tracks `kSunDir.y`; `detailAlbedo`
+  tames the neon bake palette (olive meadows, loam, mossy shingles, pine)
+  with large mottling + fine grain + per-material accents (log courses,
+  roof moss, shore pebbles); `fogColor`/`mistFactor` add sun-warmed valley
+  mist near the water table; water gets a two-lobe sun glitter + pebble
+  sparkle. Foliage translucency/SSS kept modest (0.38/0.40) so canopies stay
+  deep green instead of neon.
 
 **Surfel layout** (64 B, 4×vec4, std430): `pos_rU`, `normal_rV`,
 `bent_sh` (bent normal + baked shadow), `mat_ao`
@@ -153,45 +174,95 @@ in `App::rebuildSurfels`, ~0.6 s for ~1.3 M surfels):
 **GPU** (`src/render/splat_pass.{hpp,cpp}`, `shaders/splat.{vert,frag}`):
 dynamic rendering into the same `m_hdr`/`m_gpos`
 targets (plus a `D32_SFLOAT` depth image), so post/TAA/`--shot` work
-unchanged. Three pipelines sharing one layout (surfel SSBO + `uHeight` +
+unchanged. Four pipelines sharing one layout (surfel SSBO + `uHeight` +
 `uObjVol` + 16 B params UBO):
 1. sky fullscreen triangle (no depth) → `skyColor` + hitType 0;
-2. opaque instanced quads, one `vkCmdDraw(4, n, 0, first)` per visible
-   chunk (CPU frustum cull over chunk AABBs), depth test + write with
-   per-fragment plane depth, alpha blend for the rim;
-3. water surfels (blended, depth-tested, no depth write, `hitType 2`).
-(No depth prepass: the main pass writes `gl_FragDepth`, which disables
-early-z, so a prepass only ever changed rim blending — measured neutral to
-negative. Per-fragment marches were the real cost driver; those are baked
-on the CPU instead.)
+2. opaque cores (`PASS_MODE 1`), one `vkCmdDraw(4, n, 0, first)` per
+   visible chunk: depth test + write with per-fragment plane depth;
+3. Gaussian rims (`PASS_MODE 2`) over the settled cores: depth-tested,
+   no depth write, blended back-to-front;
+4. water surfels (blended, depth-tested, no depth write, `hitType 2`).
+Chunks draw back-to-front (per-frame distance sort, ~100 us for 4096);
+within-chunk order errors are bounded by the 6.4 m chunk size and hidden
+by the depth test for opaque cores. (No depth prepass: the main pass
+writes `gl_FragDepth`, which disables early-z, so a prepass only ever
+changed rim blending — measured neutral to negative.)
 
 **Fragment**: exact ray/disk-plane intersect → per-fragment *plane* depth
 (`gl_FragDepth`, monotonic `1−exp(−t·0.02)` mapping; only relative order
-matters since nothing else reads depth) → compact C1 kernel
-`1−smoothstep(coreD2, 1, d2)` with opaque core `coreD2 = 0.9` (union of
-cores tiles the plane; the thin rim is the analytic AA annulus, widened to
-full opacity with distance) → `shadeSurfel` (twin of `shadeTerrain` with
-baked sh/AO/bent + shared `applyFlora`) → fog → HDR + G-buffer out.
+matters since nothing else reads depth) → kernel with opaque core
+(`d2 < coreD2`, default 0.55) + **true Gaussian rim**
+(`exp(−4·rn²)` matched to 1 at the core boundary) for soft blurred
+silhouette edges → `shadeSurfel` (twin of `shadeTerrain` with baked
+sh/AO/bent + shared `applyFlora`) → fog → HDR + G-buffer out. The
+interior stays watertight through the cores (cell corner at d2 = 0.41 <
+0.55); the rim only ever blends over settled surface or sky, so no
+background leaks through. Far away the core expands to the full disk
+(sub-pixel disks would otherwise wash out).
 
 **Cost drivers** (1080p hero, RTX 4090 Laptop): full per-fragment shadow/AO
-marches measured ~13 ms — hence the CPU bake. After baking: ~7.3 ms/frame
-vs ~11.7 ms SVO.
+marches measured ~13 ms — hence the CPU bake. After baking, core+rim
+split: ~11.6 ms/frame vs ~11.7 ms SVO (parity; the second draw doubles
+vertex/raster work for the blurred-edge look).
+
+**Camera handling**: the vertex shader projects with honest `w = vz` (no
+near-plane clamp — clamping smears behind-camera corners across the
+screen as giant blobs when looking up past nearby geometry; the GPU clips
+straddlers exactly). Backfaces collapse to zero-area quads, except foliage
+(mat 8) + roof slabs (mat 7) which render two-sided (leaf shells are sparse;
+stepped roof tops collapse below the eaves line and leave slits otherwise),
+and except when a
+per-frame CPU probe finds the camera embedded inside solid
+(`sampleWorld(camPos).d < 0` → `setBuried`, `uSplat.x`), in which case
+shells render two-sided instead of flashing sky.
 
 **Tuning/debug**: `VF_SPLAT_CORE`
-(coreD2), `VF_SPLAT_EXTENT`, `VF_SPLAT_NOCULL`/`NOWATER`,
+(coreD2), `VF_SPLAT_EXTENT`, `VF_SPLAT_RADIUS` (disk multiplier, also live
+via hotkeys `[`/`]` which drive the same uniform; 0.5–2.0, default 1.0),
+`VF_SPLAT_NOCULL`/`NOWATER`/`NORIM`/`NOCORE`,
 `VF_SPLAT_DEBUG` (1 flat / 2 normal / 3 depth / 4 no-collapse shading /
 5 facing / 6 albedo / 7 rough / 8 baked-shadow / 9 baked-AO / 10 hf-shadow /
-7 rough / 8 baked-shadow / 9 baked-AO / 10 hf-shadow / 11 objDist /
-12 height-residual / 13 march origin), `VF_RENDER_FLAGS`, `VF_SURFEL_SMOOTH`
-/`VF_SURFEL_HFBLEND` (bake variants).
+11 objDist / 12 height-residual / 13 march origin), `VF_RENDER_FLAGS`, `VF_SURFEL_SMOOTH`
+/`VF_SURFEL_HFBLEND` (bake variants), `VF_MICRO` (micro-surfel detail),
+`VF_VOLFOG` / `VF_MOTIONBLUR` / `VF_DOF` (headless overrides for the J/K/L toggles).
+
+## Photorealism chain (G/H/J/K/L, `App::recordPhotorealism`)
+
+In-place LDR chain on `m_offscreen` after the post pass, shared verbatim by
+the headless and interactive frame paths (interactive runs it before TAA so
+TAA resolves the effected image):
+
+1. SSR (`ssr.comp`, G / bit 5): G-buffer march with a proper camera
+   projection, fresnel blend, water boosted (min 0.30 reflection).
+2. SSAO (`ssao.comp`, H / bit 6): screen-space depth-difference AO —
+   neighbours above the tangent plane occlude; darkens creases/contacts.
+3. Volumetric fog (`volumetric_fog.comp`, J): low-altitude Rayleigh+Mie
+   march; sky pixels reconstruct the camera ray.
+4. Motion blur (`motion_blur.comp`, K): velocity from reprojecting `uGPos`
+   with the previous frame's camera (`m_prevCam`, same source TAA uses);
+   a still camera is a clean no-op. Extra push constants carry the prev
+   camera (`MotionBlurPass::PC`, 208 B total).
+5. DoF (`depth_of_field.comp`, L): CoC from G-buffer distance around
+   `m_dofFocusDist` (10 m) / `m_dofFocalLength` (50); sky stays sharp.
+   Focus params ride trailing push constants (`DepthOfFieldPass::PC`).
+
+Gotchas fixed along the way, don't regress: every photo pass pipeline
+layout's push range must cover its full PC block (a 56 B range with a 128 B
+push silently feeds shaders garbage extents); descriptor-set binding counts
+must match the shader (SSAO declared 2, shader uses 3 — writes vanished);
+effect inputs must be the post-tonemap LDR image, not `m_hdr`.
 
 ## TAA resolve (`taa_resolve.comp`)
 
 AABB-clamped neighborhood history blend, reprojected with the `uGPos`
 world-position G-buffer plus the previous frame's camera (both backends
-write `gpos`, so TAA works unchanged under splats). History blend factor
-0.92 after the first frame; disabled entirely in headless modes so shots
-are deterministic.
+write `gpos`, so TAA works unchanged under splats). Base history blend
+factor 0.92 after the first frame; disabled entirely in headless modes so
+shots are deterministic. Shadow-border hardening: absolute AABB floor
+(~3 LDR codes, dark shadows quantize coarsely) + motion-adaptive clamp
+relaxation in uniform neighbourhoods (a moving shadow border would
+otherwise reject history every frame = flicker) + velocity-driven blend
+reduction and screen-edge fade to bound ghosting.
 
 ## Selection highlight
 

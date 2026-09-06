@@ -18,15 +18,24 @@ namespace vf::voxel {
 
 struct SurfelParams {
     // In-plane radius (m). Must satisfy (halfDiagonal / baseRadius)^2 < coreD2
-    // (splat core threshold, default 0.9): with 0.1 m cells the corner sits at
-    // 0.0707 m, so baseRadius 0.11 puts the corner at d2 = 0.41, well inside
-    // the opaque core, and the union of cores tiles the plane with margin.
-    float baseRadius = 1.1f * VOXEL;
+    // (splat core threshold, default 0.55): with 0.1 m cells the corner sits at
+    // 0.0707 m, so baseRadius 0.14 puts the corner at d2 = 0.26, well inside
+    // the opaque core, with margin for tilted-neighbour wedge gaps and for
+    // voxel-silhouette coverage (a disk covers less of its voxel than the
+    // voxel's projected square). Larger also helps; cost is overdraw.
+    float baseRadius = 1.4f * VOXEL;
     float heightfieldBlend = 0.55f;   // blend terrain-top cells toward the analytic
                                        // two-scale heightfield normal (parity with the
                                        // current shader look)
     bool smoothNormals = true;
     bool terrainHeightfieldNormals = true;
+    // Micro-detail: convert texture detail into real micro-surfel geometry.
+    // Each base surfel spawns 0-2 deterministic child disks (same material,
+    // inherited baked shadow/AO, jittered tangent offset + micro-facet normal)
+    // so close-up surfaces read as moss grain, pebbles, bark relief and
+    // leaflets with true parallax/occlusion instead of flat shader noise.
+    // Default OFF (unit tests pin exact base counts); the app enables it.
+    bool microDetail = false;
     // Sun direction TOWARD the sun (unit): shadows + bent AO are baked
     // per-surfel at build time, so a sun change needs a rebuild (the app
     // passes its --sun direction through here on every reload).
@@ -52,6 +61,12 @@ struct SurfelSet {
     // chunk; the last element is the total count. Monotonically
     // non-decreasing; empty chunks have range[i] == range[i+1].
     std::vector<uint32_t> chunkRange; // GRID_N^3 + 1
+    // microStart[c] = absolute index where chunk c's micro-detail surfels
+    // begin (= its base range end); microStart[GRID_N^3] = total count.
+    // Lets the renderer skip sub-pixel micro geometry in distant chunks.
+    // Empty when microDetail is off (no split). Monotonically
+    // non-decreasing, always within [chunkRange[c], chunkRange[c+1]].
+    std::vector<uint32_t> microStart; // GRID_N^3 + 1, or empty
     float buildMs = 0.0f;
     size_t terrainCount = 0;
     size_t objectCount = 0;

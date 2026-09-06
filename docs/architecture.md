@@ -148,7 +148,7 @@ terrain texture and shadow volume together.
 ```
 poll events → camera update → world poll (0.5 s) → picking (Ctrl+LMB hover/pick)
 → raymarch compute (offscreen rgba8 Image3D)
-→ TAA resolve [interactive only, blend 0.92]
+→ TAA resolve [interactive only, base blend 0.92, motion-adaptive]
 → blit to swapchain image
 → ImGui new frame → HUD/chat draw
 → vkCmdBeginRendering(LOAD op, swapchain view) → ImGui_ImplVulkan_RenderDrawData → vkCmdEndRendering

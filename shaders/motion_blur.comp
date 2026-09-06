@@ -1,0 +1,86 @@
+#version 460
+#extension GL_GOOGLE_include_directive : require
+// Voxelforge - Motion blur (camera motion only).
+// Reconstructs per-pixel velocity by reprojecting the G-buffer world pos
+// with the previous frame's camera (same source TAA uses), then gathers
+// along the velocity vector. A static camera yields ~zero velocity, i.e.
+// the toggle is a clean no-op until you move.
+
+layout(local_size_x = 8, local_size_y = 8, local_size_z = 1) in;
+
+layout(set = 0, binding = 0, rgba16f) uniform readonly image2D uCurrent;
+layout(set = 0, binding = 1, rgba16f) uniform readonly image2D uGPos;
+layout(set = 0, binding = 2, rgba16f) uniform writeonly image2D uOut;
+
+layout(push_constant) uniform PC {
+    vec4 camPos;
+    vec4 camRight;
+    vec4 camUp;
+    vec4 camFwd;
+    vec4 a; // tanHalfFov, aspect, extentX, extentY
+    vec4 b; // worldSize, voxelSize, gridN, frameIdx
+    vec4 sunDir;
+    vec4 misc; // x=renderFlags, y=animTime, z=tonemapLook, w=exposure
+    vec4 prevPos;
+    vec4 prevRight;
+    vec4 prevUp;
+    vec4 prevFwd;
+    vec4 prevParams; // x=tanHalfFov, y=aspect
+} pc;
+
+const float kMaxLength = 16.0;
+const int kSamples = 8;
+
+void main()
+{
+    ivec2 pix = ivec2(gl_GlobalInvocationID.xy);
+    if (pix.x >= int(pc.a.z) || pix.y >= int(pc.a.w)) return;
+
+    vec3 original = imageLoad(uCurrent, pix).rgb;
+    vec4 gp = imageLoad(uGPos, pix);
+    if (gp.w < 0.5) {
+        imageStore(uOut, pix, vec4(original, 1.0));
+        return;
+    }
+
+    // reproject with the previous camera -> velocity in pixels
+    vec3 rel = gp.xyz - pc.prevPos.xyz;
+    float cz = dot(rel, pc.prevFwd.xyz);
+    vec2 velocity = vec2(0.0);
+    if (cz > 0.1) {
+        float cx = dot(rel, pc.prevRight.xyz);
+        float cy = dot(rel, pc.prevUp.xyz);
+        vec2 prevNdc = vec2(cx / (cz * pc.prevParams.x * pc.prevParams.y),
+                            -cy / (cz * pc.prevParams.x));
+        vec2 prevPx = (prevNdc * 0.5 + 0.5) * vec2(pc.a.z, pc.a.w);
+        velocity = (vec2(pix) + 0.5) - prevPx;
+    }
+    float len = length(velocity);
+    if (len < 0.75) {
+        imageStore(uOut, pix, vec4(original, 1.0));
+        return;
+    }
+
+    // Clamp velocity to prevent ghosting on edges
+    velocity = clamp(velocity, vec2(-kMaxLength), vec2(kMaxLength));
+
+    vec3 col = vec3(0.0);
+    float totalW = 0.0;
+    for (int i = 0; i < kSamples; ++i) {
+        float t = float(i) / float(kSamples - 1);
+        vec2 samplePx = (vec2(pix) + 0.5) - velocity * t;
+        if (samplePx.x < 0.0 || samplePx.y < 0.0 ||
+            samplePx.x > pc.a.z - 1.0 || samplePx.y > pc.a.w - 1.0)
+            continue;
+        vec3 s = imageLoad(uCurrent, ivec2(int(samplePx.x), int(samplePx.y))).rgb;
+        float w = 1.0 - abs(t - 0.5) * 2.0; // triangle weight
+        col += s * w;
+        totalW += w;
+    }
+    col /= max(totalW, 1e-3);
+
+    // Blend with original frame for temporal stability
+    col = mix(original, col, 0.6);
+
+    imageStore(uOut, pix, vec4(col, 1.0));
+}

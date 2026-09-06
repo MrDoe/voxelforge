@@ -30,6 +30,15 @@ inline uint64_t packKey(int x, int y, int z) {
     return (uint64_t(std::uint32_t(x)) << 20) | (uint32_t(y) << 10) | uint32_t(z);
 }
 
+// Deterministic 0..1 hash from lattice coords + slot (no RNG state, so two
+// builds are bit-identical). Wraps sin-hash like the shader hashN.
+inline float microHash(int x, int y, int z, int slot)
+{
+    float h = sinf(float(x) * 12.9898f + float(y) * 78.233f +
+                   float(z) * 37.719f + float(slot) * 11.13f) * 43758.55f;
+    return h - floorf(h);
+}
+
 inline void unpackKey(uint64_t k, int& x, int& y, int& z) {
     x = int((k >> 20) & 0x3FFu);
     y = int((k >> 10) & 0x3FFu);
@@ -111,22 +120,54 @@ glm::vec3 meanNormal(const VoxelField& field, int x, int y, int z) {    const in
     return len > 1e-6f ? (n / len) : glm::vec3(0.0f, 1.0f, 0.0f);
 }
 
-// Binary sun-occlusion march over field.sample (sphere-tracing with tight
-// clamps): 0 = a surface comes within tolerance of the ray, 1 = clear.
-// Mirrors softShadowSplat's verdicts (same tolerance) but on the exact
-// oracle instead of the heightfield+objVol approximation, and runs once per
-// surfel at build time instead of once per fragment per frame.
+// Binary sun-occlusion march over field.sample: exact Amanatides DDA over
+// lattice cells for the first 3 m (visits every cell like the SVO
+// reference, so thin eaves/logs are never tunnelled), then sphere-tracing
+// with tight clamps to 60 m. 0 = occluded, 1 = clear.
 float shadowMarch(const VoxelField& f, glm::vec3 ro, glm::vec3 rd)
 {
-    float t = 0.05f;
-    for (int i = 0; i < 80; ++i) {
-        const glm::vec3 sp = ro + rd * t;
-        const float d = f.sampleWorld(sp).d;
-        if (d < -0.02f)
-            return 0.0f;
-        t += glm::clamp(std::fabs(d) * 0.7f, 0.04f, 1.0f);
-        if (t > 60.0f)
-            break;
+    // Phase 1: cell-exact DDA to 3 m. sampleWorld floors to the cell, so
+    // testing every visited cell matches the voxel truth (SVO parity).
+    {
+        glm::vec3 cell = glm::floor((ro + 51.2f) / 0.1f);
+        const glm::vec3 stp = glm::vec3(rd.x >= 0.0f ? 1.0f : -1.0f,
+                                        rd.y >= 0.0f ? 1.0f : -1.0f,
+                                        rd.z >= 0.0f ? 1.0f : -1.0f);
+        const glm::vec3 rdi = glm::vec3(1.0f) / rd;
+        glm::vec3 tMax = ((cell + (stp * 0.5f + 0.5f)) * 0.1f - 51.2f - ro) * rdi;
+        const glm::vec3 tDelta = glm::abs(rdi) * 0.1f;
+        float t = 0.05f;
+        for (int i = 0; i < 64; ++i) {
+            const glm::vec3 sp = ro + rd * t;
+            if (f.sampleWorld(sp).d < -0.02f)
+                return 0.0f;
+            // advance to next cell boundary (NaN-safe: rdi inf -> huge tMax)
+            float tn = tMax.x;
+            int ax = 0;
+            if (tMax.y < tn) { tn = tMax.y; ax = 1; }
+            if (tMax.z < tn) { tn = tMax.z; ax = 2; }
+            if (!(tn > t))
+                tn = t + 0.05f;
+            t = tn + 1e-4f;
+            if (ax == 0) { cell.x += stp.x; tMax.x += tDelta.x; }
+            else if (ax == 1) { cell.y += stp.y; tMax.y += tDelta.y; }
+            else { cell.z += stp.z; tMax.z += tDelta.z; }
+            if (t > 3.0f)
+                break;
+        }
+    }
+    // Phase 2: sphere-tracing to 60 m for hills/treelines.
+    {
+        float t = 3.0f;
+        for (int i = 0; i < 80; ++i) {
+            const glm::vec3 sp = ro + rd * t;
+            const float d = f.sampleWorld(sp).d;
+            if (d < -0.02f)
+                return 0.0f;
+            t += glm::clamp(std::fabs(d) * 0.7f, 0.04f, 1.0f);
+            if (t > 60.0f)
+                break;
+        }
     }
     return 1.0f;
 }
@@ -287,21 +328,34 @@ SurfelSet buildSurfels(const VoxelField& field, const SurfelParams& params) {
                         }
                     }
 
+                    // rChaos grows disks where neighbour normals disagree
+                    // (wedges that leak); 1.0 on agreed patches.
+                    float rChaos = 1.0f;
                     if (params.smoothNormals) {
                         glm::vec3 acc = n;
                         float wsum = 1.0f;
                         const int faceDirs[6][3] = { { 1, 0, 0 }, { -1, 0, 0 },
                                                      { 0, 1, 0 }, { 0, -1, 0 },
                                                      { 0, 0, 1 }, { 0, 0, -1 } };
+                        glm::vec3 agr = rawNormals[i];
+                        float agrN = 1.0f;
                         for (auto& d : faceDirs) {
                             const uint64_t nk = packKey(x + d[0], y + d[1], z + d[2]);
                             auto it = std::lower_bound(keys.begin(), keys.end(), nk);
                             if (it != keys.end() && *it == nk) {
-                                acc += rawNormals[size_t(it - keys.begin())];
+                                const glm::vec3 nn = rawNormals[size_t(it - keys.begin())];
+                                acc += nn;
                                 ++wsum;
+                                agr += nn;
+                                ++agrN;
                             }
                         }
                         n = safeNormalize(acc / wsum);
+                        // local chaos: agreed flat patches keep tight disks,
+                        // disagreeing neighbourhoods (wedges that leak) grow
+                        const float agreement =
+                            glm::clamp(glm::length(agr) / agrN, 0.0f, 1.0f);
+                        rChaos = 1.0f + 0.8f * (1.0f - agreement);
                     }
 
                     const glm::vec3 cellCentre =
@@ -326,9 +380,13 @@ SurfelSet buildSurfels(const VoxelField& field, const SurfelParams& params) {
                     const float refl = kMaterialReflection[std::min(int(mat), 16)].x;
                     const float rough = kMaterialReflection[std::min(int(mat), 16)].y;
 
+                    // foliage reads as volume (chaotic normals already grow
+                    // it via rChaos); cap the combined multiplier
+                    const float rr =
+                        baseR * std::min((mat == 8 ? 2.0f : 1.0f) * rChaos, 2.2f);
                     Surfel sl;
-                    sl.pos_rU = glm::vec4(pos, baseR);
-                    sl.normal_rV = glm::vec4(n, baseR);
+                    sl.pos_rU = glm::vec4(pos, rr);
+                    sl.normal_rV = glm::vec4(n, rr);
                     sl.bent_sh = glm::vec4(bent, shadow);
                     sl.mat_ao = glm::vec4(float(mat), refl, rough, ao);
                     surfels[i] = sl;
@@ -345,6 +403,53 @@ SurfelSet buildSurfels(const VoxelField& field, const SurfelParams& params) {
     }
     set.terrainCount = terrainCount.load();
     set.objectCount = objectCount.load();
+
+    // Shadow penumbra + AO smoothing: the baked march verdict is binary per
+    // surfel (draws shadow boundaries along disk shapes) and the baked AO
+    // steps at staircase-tap granularity (mottles flat walls). Average both
+    // over face-neighbouring surface surfels so all baked fields vary
+    // continuously and adjacent same-color splats shade identically.
+    // Reads snapshots (order-free, deterministic).
+    {
+        std::vector<float> shPrev(n), aoPrev(n);
+        for (int i = 0; i < n; ++i) {
+            shPrev[i] = surfels[i].bent_sh.w;
+            aoPrev[i] = surfels[i].mat_ao.w;
+        }
+        std::atomic<int> next{ 0 };
+        unsigned hc = std::max(1u, std::thread::hardware_concurrency());
+        std::vector<std::thread> threads;
+        const int faceDirs[6][3] = { { 1, 0, 0 }, { -1, 0, 0 },
+                                     { 0, 1, 0 }, { 0, -1, 0 },
+                                     { 0, 0, 1 }, { 0, 0, -1 } };
+        for (unsigned t = 0; t < hc; ++t)
+            threads.emplace_back([&] {
+                for (;;) {
+                    const int i = next.fetch_add(1);
+                    if (i >= n)
+                        break;
+                    int x, y, z;
+                    unpackKey(keys[i], x, y, z);
+                    float acc = shPrev[i];
+                    float aoAcc = aoPrev[i];
+                    float wsum = 1.0f;
+                    for (auto& d : faceDirs) {
+                        const uint64_t nk = packKey(x + d[0], y + d[1], z + d[2]);
+                        auto it = std::lower_bound(keys.begin(), keys.end(), nk);
+                        if (it != keys.end() && *it == nk) {
+                            const size_t j = size_t(it - keys.begin());
+                            acc += shPrev[j];
+                            aoAcc += aoPrev[j];
+                            ++wsum;
+                        }
+                    }
+                    surfels[i].bent_sh.w = acc / wsum;
+                    surfels[i].mat_ao.w = aoAcc / wsum;
+                }
+            });
+        for (auto& th : threads)
+            th.join();
+    }
 
     std::vector<uint64_t> order(n);
     std::iota(order.begin(), order.end(), 0u);
@@ -371,7 +476,7 @@ SurfelSet buildSurfels(const VoxelField& field, const SurfelParams& params) {
     std::vector<Surfel> sorted(n);
     for (int i = 0; i < n; ++i) sorted[i] = surfels[order[i]];
     surfels = std::move(sorted);
-
+    // base-only prefix sums over key chunks (rebuilt below if micros added)
     for (int i = 0; i < n; ++i) {
         int x, y, z;
         unpackKey(keys[order[i]], x, y, z);
@@ -379,6 +484,121 @@ SurfelSet buildSurfels(const VoxelField& field, const SurfelParams& params) {
     }
     for (int c = 1; c <= kSurfGridN * kSurfGridN * kSurfGridN; ++c)
         set.chunkRange[c] += set.chunkRange[c - 1];
+
+    // ---- micro-detail: texture texels become real micro-surfel geometry ----
+    // Deterministic children of the sorted base set (same material, inherited
+    // baked shadow/AO/bent so no extra marches): moss puffs, pebbles, bark
+    // relief, leaflets and roof-underside fillers that seal the stepped-slab
+    // slits seen from below. Micros inherit the base cell's chunk, and
+    // because the base loop below walks chunk by chunk the micro stream is
+    // already chunk-grouped for the final interleave. Single-threaded and
+    // hash-driven: two builds are bit-identical.
+    size_t microTerrain = 0, microObject = 0;
+    if (params.microDetail && n > 0) {
+        std::vector<Surfel> micros;
+        micros.reserve(size_t(n) / 2);
+        std::vector<uint32_t> microCounts(kChunks, 0);
+        for (int i = 0; i < n; ++i) {
+            int x, y, z;
+            unpackKey(keys[order[i]], x, y, z);
+            const Surfel& b = surfels[i];
+            const int mat = int(b.mat_ao.x + 0.5f);
+            if (mat < 0 || mat > 16)
+                continue;
+            if (mat >= 9 && mat <= 15)
+                continue; // emissive: keep crisp, no fuzz
+            glm::vec3 bn(b.normal_rV);
+            bn = safeNormalize(bn);
+            glm::vec3 bp(b.pos_rU);
+            const uint32_t bc = chunkOf[order[i]];
+            const bool isObj = field.sample(x, y, z).obj;
+            glm::vec3 up = std::fabs(bn.y) < 0.99f ? glm::vec3(0.0f, 1.0f, 0.0f)
+                                                   : glm::vec3(1.0f, 0.0f, 0.0f);
+            glm::vec3 t = safeNormalize(glm::cross(bn, up));
+            glm::vec3 bb = safeNormalize(glm::cross(bn, t));
+            auto emit = [&](float o1, float o2, float lift, float tilt,
+                            float rScale, float aoMul, int slot) {
+                float j1 = microHash(x, y, z, slot * 2 + 101) - 0.5f;
+                float j2 = microHash(x, y, z, slot * 2 + 102) - 0.5f;
+                glm::vec3 nn = safeNormalize(bn + (t * j1 + bb * j2) * tilt);
+                glm::vec3 pp = bp + (t * o1 + bb * o2) + bn * lift;
+                Surfel m;
+                const float rr = std::max(b.pos_rU.w * rScale, 1e-4f);
+                m.pos_rU = glm::vec4(pp, rr);
+                m.normal_rV = glm::vec4(nn, rr);
+                m.bent_sh = glm::vec4(safeNormalize(glm::vec3(b.bent_sh) + (nn - bn) * 0.5f),
+                                      b.bent_sh.w);
+                m.mat_ao = glm::vec4(b.mat_ao.x, b.mat_ao.y, b.mat_ao.z,
+                                     glm::clamp(b.mat_ao.w * aoMul, 0.0f, 1.0f));
+                micros.push_back(m);
+                ++microCounts[bc];
+                if (isObj)
+                    ++microObject;
+                else
+                    ++microTerrain;
+            };
+            const float h0 = microHash(x, y, z, 1);
+            const float h1 = microHash(x, y, z, 2);
+            const float h2 = microHash(x, y, z, 3);
+            const float oA = (h1 - 0.5f) * 0.09f;
+            const float oB = (h2 - 0.5f) * 0.09f;
+            if (mat <= 1) { // meadow blades / soil crumbs
+                if (h0 < 0.55f)
+                    emit(oA, oB, 0.018f, 0.55f, 0.42f, 0.92f, 1);
+            } else if (mat == 2 || mat == 3) { // pebbles
+                if (h0 < 0.45f)
+                    emit(oA, oB, 0.008f, 0.45f, 0.28f + 0.18f * h1, 0.93f, 2);
+            } else if (mat == 4 || mat == 5 || mat == 16) { // rock strata chips
+                if (h0 < 0.40f)
+                    emit(oA, oB, 0.010f, 0.60f, 0.50f, 0.88f, 3);
+            } else if (mat == 6) { // bark relief along the tangent
+                if (h0 < 0.55f)
+                    emit(oA * 1.6f, oB * 0.5f, 0.006f, 0.35f, 0.40f, 0.95f, 4);
+            } else if (mat == 7) { // roof: seal undersides, moss the tops
+                if (bn.y < -0.2f) {
+                    emit(0.0f, 0.0f, -0.005f, 0.0f, 1.15f, 1.0f, 5);
+                } else if (h0 < 0.65f) {
+                    emit(oA, oB, 0.014f, 0.70f, 0.55f, 0.90f, 6);
+                }
+            } else if (mat == 8) { // canopy leaflets: real volume
+                if (h0 < 0.70f)
+                    emit(oA * 1.3f, oB * 1.3f, 0.010f, 1.20f, 0.55f + 0.30f * h1, 0.90f, 7);
+                if (h2 < 0.35f)
+                    emit(-oA, -oB, 0.016f, 1.40f, 0.45f, 0.85f, 8);
+            }
+        }
+        if (!micros.empty()) {
+            // interleave: base chunk range first, then that chunk's micros
+            // (micros were emitted in base-sorted order, hence chunk-grouped).
+            std::vector<Surfel> combined;
+            combined.reserve(size_t(n) + micros.size());
+            std::vector<uint32_t> newRange(kChunks + 1, 0);
+            std::vector<uint32_t> microStart(kChunks + 1, 0);
+            size_t mCur = 0;
+            size_t mOff = 0;
+            // micro chunk boundaries: recount in emission order per chunk
+            std::vector<uint32_t> mStarts(kChunks + 1, 0);
+            for (uint32_t c = 0; c < kChunks; ++c)
+                mStarts[c + 1] = mStarts[c] + microCounts[c];
+            for (uint32_t c = 0; c < kChunks; ++c) {
+                const uint32_t b0 = set.chunkRange[c], b1 = set.chunkRange[c + 1];
+                for (uint32_t i = b0; i < b1; ++i)
+                    combined.push_back(surfels[i]);
+                microStart[c] = uint32_t(combined.size()); // base end == micro begin
+                const uint32_t m0 = mStarts[c], m1 = mStarts[c + 1];
+                for (uint32_t i = m0; i < m1; ++i)
+                    combined.push_back(micros[i]);
+                newRange[c + 1] = uint32_t(combined.size());
+                (void)mCur; (void)mOff;
+            }
+            microStart[kChunks] = uint32_t(combined.size());
+            surfels = std::move(combined);
+            set.chunkRange = std::move(newRange);
+            set.microStart = std::move(microStart);
+            set.terrainCount += microTerrain;
+            set.objectCount += microObject;
+        }
+    }
 
     set.surfels = std::move(surfels);
     const auto t1 = std::chrono::steady_clock::now();
@@ -388,7 +608,7 @@ SurfelSet buildSurfels(const VoxelField& field, const SurfelParams& params) {
     set.buildMs = float(ms(t0, t1));
     spdlog::info("surfelize: {} surfels ({} terrain, {} object), {} ms "
                  "(enum+surface {} ms, shade+bucket {} ms)",
-                 n, set.terrainCount, set.objectCount, set.buildMs, ms(t0, tEnum),
+                 set.surfels.size(), set.terrainCount, set.objectCount, set.buildMs, ms(t0, tEnum),
                  ms(tEnum, t1));
     return set;
 }

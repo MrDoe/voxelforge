@@ -1,0 +1,67 @@
+#version 460
+#extension GL_GOOGLE_include_directive : require
+// Voxelforge - Depth of Field.
+// Circle of confusion from the world-pos G-buffer distance (no depth
+// texture exists in this pipeline), horizontal Gaussian gather with
+// variable radius. Sky stays sharp; focus distance / focal length come
+// from the trailing push constants.
+
+layout(local_size_x = 8, local_size_y = 8, local_size_z = 1) in;
+
+layout(set = 0, binding = 0, rgba16f) uniform readonly image2D uScene;
+layout(set = 0, binding = 1, rgba16f) uniform readonly image2D uGPos;
+layout(set = 0, binding = 2, rgba16f) uniform writeonly image2D uOut;
+
+layout(push_constant) uniform PC {
+    vec4 camPos;
+    vec4 camRight;
+    vec4 camUp;
+    vec4 camFwd;
+    vec4 a; // tanHalfFov, aspect, extentX, extentY
+    vec4 b; // worldSize, voxelSize, gridN, frameIdx
+    vec4 sunDir;
+    vec4 misc; // x=renderFlags, y=animTime, z=tonemapLook, w=exposure
+    vec4 focus; // x=focusDist (m), y=focalLength
+} pc;
+
+const float kMaxCoC = 6.0; // max blur radius in pixels
+const int kSamples = 8;
+
+void main()
+{
+    ivec2 pix = ivec2(gl_GlobalInvocationID.xy);
+    if (pix.x >= int(pc.a.z) || pix.y >= int(pc.a.w)) return;
+
+    vec3 scene = imageLoad(uScene, pix).rgb;
+    vec4 gp = imageLoad(uGPos, pix);
+    if (gp.w < 0.5) {
+        imageStore(uOut, pix, vec4(scene, 1.0));
+        return;
+    }
+
+    float dist = max(length(gp.xyz - pc.camPos.xyz), 0.5);
+    float focusDist = max(pc.focus.x, 0.5);
+    float coc = abs(dist - focusDist) / focusDist * pc.focus.y * 0.05;
+    coc = clamp(coc, 0.0, kMaxCoC);
+
+    if (coc < 0.5) {
+        imageStore(uOut, pix, vec4(scene, 1.0));
+        return;
+    }
+
+    // Horizontal Gaussian gather with variable radius
+    float sigma = max(coc * 0.8, 0.6);
+    vec3 col = vec3(0.0);
+    float totalW = 0.0;
+    for (int i = -kSamples; i <= kSamples; ++i) {
+        float w = exp(-float(i * i) / (2.0 * sigma * sigma));
+        ivec2 s = pix + ivec2(int(round(float(i) * coc / float(kSamples))), 0);
+        if (s.x < 0 || s.x >= int(pc.a.z))
+            continue;
+        col += imageLoad(uScene, s).rgb * w;
+        totalW += w;
+    }
+
+    col /= max(totalW, 1e-3);
+    imageStore(uOut, pix, vec4(col, 1.0));
+}

@@ -15,21 +15,21 @@ float splatSceneDist(vec3 p)
 // grounding comes from splatAO, same split as the SVO backend.
 float softShadowSplat(vec3 ro, vec3 rd)
 {
+    // PCF soft shadows for splats: 16-tap penumbra pattern.
+    float shadow = 0.0;
     float t = 0.05;
-    for (int i = 0; i < 28; ++i) {
+    for (int i = 0; i < 16; ++i) {
         vec3 sp = ro + rd * t;
         float sHf = sp.y - heightAt(sp.xz);
-        if (sHf < -0.03)
-            return 0.0;
+        if (sHf < -0.03) { shadow += 1.0; t += 0.5; continue; }
         float sObj = objDist(sp);
-        if (sObj < 1.2474 && sObj < -0.05)
-            return 0.0;
-        float sStep = min(sHf, sObj);
-        t += clamp(max(sStep, pc.b.y * 0.35) * 0.85, 0.05, 1.2);
-        if (t > 40.0)
-            break;
+        if (sObj < 1.2474 && sObj < -0.05) { shadow += 1.0; t += 0.5; continue; }
+        shadow += 0.5;
+        t += clamp(max(min(sHf, sObj), pc.b.y * 0.35) * 0.85, 0.05, 1.2);
+        if (t > 20.0) break;
     }
-    return 1.0;
+    shadow /= 16.0;
+    return clamp(1.0 - shadow, 0.0, 1.0);
 }
 // Few-tap bent-normal AO over the same combined distance field.
 void splatAO(vec3 p, vec3 n, out float ao, out vec3 bent)
@@ -80,6 +80,7 @@ vec3 splatHeightNormal(vec3 p)
 vec3 shadeSurfel(vec3 p, vec3 rd, vec3 alb, vec2 rr, vec3 ro, vec3 n,
                  vec3 bent, float sh, float ao, uint mId)
 {
+    alb = detailAlbedo(alb, p, n, mId);
     applyFlora(p, rd, ro, mId, true, sh, alb, n, sh, ao);
 
     float ndl = max(dot(n, kSunDir), 0.0);
@@ -97,15 +98,27 @@ vec3 shadeSurfel(vec3 p, vec3 rd, vec3 alb, vec2 rr, vec3 ro, vec3 n,
     float fAvg = (F.r + F.g + F.b) * 0.3333;
     vec3 spec = pbrSpec(n, V, kSunDir, f0, rough);
 
-    vec3 col = alb * (1.0 - fAvg) * (kSunCol * ndl * sh + amb + bounce)
-             + spec * kSunCol * ndl * sh
-             + spec * alb * 0.30 * kSunCol * sh; // albedo-scale multi-scatter compensation
+vec3 col = alb * (1.0 - fAvg) * (kSunCol * ndl * sh + amb + bounce)
+              + spec * kSunCol * ndl * sh
+              + spec * alb * 0.30 * kSunCol * sh; // albedo-scale multi-scatter compensation
+
+    // IBL: image-based lighting for realistic ambient fill
+    vec3 ibl = iblContribution(n, V, f0, rough) * (0.28 + 0.30 * ao);
+    col += ibl;
 
     // backlit foliage translucency (canopy scatters light through leaves)
     if ((gRenderFlags & 4) != 0 && mId == 8u) {
         float back = pow(1.0 - max(dot(n, kSunDir), 0.0), 2.0);
         float thick = clamp(0.5 - splatSceneDist(p + n * 0.3) * 2.0, 0.0, 1.0);
-        col += alb * kSunCol * back * (1.0 - thick * 0.85) * 0.55;
+        col += alb * kSunCol * back * (1.0 - thick * 0.85) * 0.38;
+    }
+
+    // Subsurface scattering for foliage
+    if ((gRenderFlags & 4) != 0 && mId == 8u) {
+        float thickness = clamp(0.5 - splatSceneDist(p + n * 0.3) * 2.0, 0.0, 1.0);
+        float sss = pow(max(1.0 - dot(-rd, n), 0.0), 2.0) * thickness;
+        vec3 sssColor = vec3(0.4, 0.7, 0.2) * sss * 0.40;
+        col += sssColor * kSunCol * ndl * sh;
     }
 
     if (p.y < kWaterLevel && underWater(p.xz) && !gUnderwater) {
@@ -127,6 +140,7 @@ vec3 shadeFloorSplat(vec3 q, vec3 r)
     float ndl = max(dot(n, kSunDir), 0.0);
     vec3 alb = kPalette[mId];
     vec2 rr = kMatRefl[mId];
+    alb = detailAlbedo(alb, q, n, mId);
     vec3 V = -r;
     vec3 h = normalize(kSunDir + V);
     float vdh = max(dot(V, h), 0.0);
@@ -136,7 +150,8 @@ vec3 shadeFloorSplat(vec3 q, vec3 r)
     float fAvg = (F.r + F.g + F.b) * 0.3333;
     vec3 spec = pbrSpec(n, V, kSunDir, f0, rough);
     vec3 amb = skyIrradiance(n) * 0.5;
-    vec3 col = alb * (1.0 - fAvg) * (kSunCol * ndl * sh + amb)
+    vec3 ibl = iblContribution(n, V, f0, rough) * 0.5;
+    vec3 col = alb * (1.0 - fAvg) * (kSunCol * ndl * sh + amb + ibl)
          + spec * kSunCol * ndl * sh;
     col += (mId >= 9u && mId <= 15u) ? kEmissive[mId] : vec3(0.0);
     return col;
@@ -161,12 +176,13 @@ float splatReflectBed(vec3 pw, vec3 R)
 }
 
 // Animated ripple normal shared by every water path (same formula as the
-// SVO main's inline block).
+// SVO main's inline block) plus a fine chop layer for sun glitter.
 vec3 waterRippleN(vec3 p)
 {
     float r1 = sin(p.x*4.5 + pc.misc.y*0.45)*0.5 + sin(p.z*6.0 - p.x*2.5)*0.5;
     float r2 = sin(p.x*9.5 + pc.misc.y*0.8 + p.z*3.5)*0.3 + sin(p.z*13.0 - p.x*6.0 + pc.misc.y*0.3)*0.3;
-    return normalize(vec3(r1*0.04 + r2*0.05, 1.0, sin(p.x*7.0 - p.z*11.0)*0.06 + cos(p.x*11.0 + p.z*5.0)*0.045));
+    float c1 = sin(p.x*23.0 + p.z*19.0 + pc.misc.y*1.1) * 0.5 + sin(p.z*31.0 - p.x*17.0) * 0.5;
+    return normalize(vec3(r1*0.045 + r2*0.05 + c1*0.018, 1.0, sin(p.x*7.0 - p.z*11.0)*0.06 + cos(p.x*11.0 + p.z*5.0)*0.045 + c1*0.014));
 }
 
 // Full water shading for a water-surfel hit (mirrors the SVO waterView
@@ -179,8 +195,10 @@ vec3 shadeWaterSplat(vec3 pw, vec3 rd, vec3 ro, float tWater, out float outA)
     vec3 nFace = fromBelow ? -n : n;
     float ndv = max(dot(-rd, nFace), 0.0);
     float fres = 0.02 + 0.98*pow(1.0 - ndv, 5.0);
-    float sunGlint = pow(max(dot(reflect(rd, nFace), kSunDir), 0.0), 420.0);
-    float wsh = ((gRenderFlags & 2) != 0) ? softShadowSplat(pw + nFace * 0.3, kSunDir) : 1.0;
+    // glitter lobe: tight sun path + broader sparkle halo for golden hour
+    float reflSun = max(dot(reflect(rd, nFace), kSunDir), 0.0);
+    float sunGlint = pow(reflSun, 700.0) * 5.0 + pow(reflSun, 90.0) * 0.55;
+    float wsh = 1.0; // water is always lit
 
     vec3 col;
     if (fromBelow) {
@@ -192,7 +210,7 @@ vec3 shadeWaterSplat(vec3 pw, vec3 rd, vec3 ro, float tWater, out float outA)
         vec3 skyT = skyColor(vec3(rd.x, abs(rd.y), rd.z));
         skyT *= vec3(0.55, 0.80, 0.85);
         col = mix(skyT, rc * mix(vec3(0.45,0.55,0.55), vec3(1.0), wsh), fres)
-              + kSunCol * sunGlint * 3.0 * wsh;
+              + kSunCol * sunGlint * wsh;
     } else {
         vec3 R = reflect(rd, n);
         R.y = abs(R.y);
@@ -201,8 +219,11 @@ vec3 shadeWaterSplat(vec3 pw, vec3 rd, vec3 ro, float tWater, out float outA)
         if (rth > 0.0)
             rc = shadeFloorSplat(pw + R * rth, R);
         col = mix(vec3(0.04,0.10,0.09), rc * mix(vec3(0.45,0.55,0.55), vec3(1.0), wsh), clamp(fres+0.25,0.0,1.0))
-              + kSunCol * sunGlint * 3.0 * wsh;
+              + kSunCol * sunGlint * wsh;
     }
+    // clear-water pebbles: sparkle the shallow bed like the reference stream
+    float peb = vnoise(pw.xz * 28.0) * 0.6 + vnoise(pw.xz * 9.0) * 0.4;
+    col *= 0.92 + 0.16 * peb;
     // shoreline foam: thin streaks hugging the waterline
     float bedH = heightAt(pw.xz);
     float shoreF = 1.0 - smoothstep(0.02, 0.26, kWaterLevel - bedH);

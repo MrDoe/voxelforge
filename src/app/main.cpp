@@ -7,6 +7,12 @@
 #include "render/splat_pass.hpp"
 #include "render/post_pass.hpp"
 #include "render/taa_pass.hpp"
+#include "render/ssr_pass.hpp"
+#include "render/ssao_pass.hpp"
+#include "render/volumetric_fog_pass.hpp"
+#include "render/motion_blur_pass.hpp"
+#include "render/dof_pass.hpp"
+#include "render/environment_pass.hpp"
 #include "voxel/surfelize.hpp"
 #include "voxel/worldfile.hpp"
 #include <algorithm>
@@ -28,6 +34,7 @@
 #include <cmath>
 #include <cstring>
 #include <filesystem>
+#include <numeric>
 #include <string>
 #include <vector>
 
@@ -95,7 +102,7 @@ Args parseArgs(int argc, char** argv)
     return a;
 }
 
-constexpr uint32_t kMaxFramesInFlight = 2;
+constexpr uint32_t kMaxFramesInFlight = 3;
 
 struct FrameSync {
     VkSemaphore imageAvailable = VK_NULL_HANDLE;
@@ -124,6 +131,16 @@ private:
     void rescanWorldLayers();
     void applyWorldReload();
     void rebuildSurfels(); // (re)build the surfel set from the live field
+    // Per-frame CPU probe: camera embedded in solid => two-sided shells.
+    void updateBuriedProbe()
+    {
+        m_splatPass.setBuried(m_layers.loaded() &&
+                              m_layers.field().sampleWorld(m_camera.pos).d < 0.0f);
+    }
+    // In-place photorealism chain on m_offscreen (post-tonemap LDR):
+    // SSR/SSAO/volumetric-fog/motion-blur/DoF per the G/H/J/K/L toggles.
+    // Shared by the headless and interactive frame paths so they can't drift.
+    void recordPhotorealism(VkCommandBuffer cmd, const vf::RaymarchPush& push);
 
     Args m_args;
     vf::Window m_window;
@@ -139,21 +156,26 @@ private:
     vf::SplatPass m_splatPass;
     vf::TaaPass m_taaPass;
     vf::PostPass m_postPass;
+    // photorealism passes
+    vf::SSRPass m_ssrPass;
+    vf::SSAOPass m_ssaoPass;
+    vf::VolumetricFogPass m_volFogPass;
+    vf::MotionBlurPass m_motionBlurPass;
+    vf::DepthOfFieldPass m_dofPass;
+    vf::EnvironmentPass m_envPass;
     // primary visibility renderer; SVO kept as the pixel reference
     enum class RenderMode { Splats, Svo };
     RenderMode m_renderMode = RenderMode::Splats;
     vf::Image3D m_taaHistory[2];
     vf::Image3D m_taaResolved;
     bool m_taaEnabled = true;
+    float m_taaBlend = 0.92f; // base history blend (VF_TAA_BLEND overrides)
     bool m_taaFirstFrame = true;
     int m_taaHistoryIdx = 0;
-    vf::TaaPrevCam m_prevCam{};  // previous-frame camera for TAA reprojection
-    glm::vec4 m_pushB { 1.0f };      // shader .b block: worldSize, voxelSize, gridN
-
+    vf::TaaPrevCam m_prevCam{};
+    glm::vec4 m_pushB { 1.0f };
     // layered world state (GUI)
     std::vector<vf::voxel::worldfile::WorldLayer> m_worldLayers;
-
-    // single world source for every renderer path
     vf::voxel::LayeredWorld m_layers;
     float m_layerPollT = 0.f;
     bool m_pendingWorldReload = false;
@@ -176,8 +198,13 @@ private:
     bool m_scenePreview = false;
     float m_animTime = 0.0f;
     int m_tonemapLook = 2;
-    int m_renderFlags = 31;   // bit0 AO,bit1 shadows,bit2 flora,bit3 water,bit4 outline
+    int m_renderFlags = 31;   // bit0 AO,bit1 shadows,bit2 flora,bit3 water,bit4 outline,bit5 SSR,bit6 SSAO,bit7 volFog,bit8 motionBlur,bit9 DoF
     float m_exposure = 1.15f;
+    bool m_volFogEnabled = false;
+    bool m_motionBlurEnabled = false;
+    bool m_dofEnabled = false;
+    float m_dofFocusDist = 10.0f;
+    float m_dofFocalLength = 50.0f;
     uint32_t m_nextAcquire = 0;
 
     // AI chat + picking + editable world
@@ -349,6 +376,14 @@ bool App::initVulkan()
     if (!m_splatPass.init(m_ctx))
         return false;
 
+    // photorealism passes
+    if (!m_ssrPass.init(m_ctx)) return false;
+    if (!m_ssaoPass.init(m_ctx)) return false;
+    if (!m_volFogPass.init(m_ctx)) return false;
+    if (!m_motionBlurPass.init(m_ctx)) return false;
+    if (!m_dofPass.init(m_ctx)) return false;
+    if (!m_envPass.init(m_ctx)) return false;
+
     if (!createOffscreen(m_swapchain.extent().width, m_swapchain.extent().height))
         return false;
 
@@ -485,6 +520,46 @@ void App::applyWorldReload()
     rescanWorldLayers(); // layers dropped into assets/ while running show up too
 }
 
+void App::recordPhotorealism(VkCommandBuffer cmd, const vf::RaymarchPush& push)
+{
+    // In-place LDR chain on m_offscreen (GENERAL layout throughout).
+    // Order: SSR adds reflections -> SSAO grounds contact areas -> volumetric
+    // fog hazes valleys -> motion blur smears camera movement -> DoF pulls
+    // focus. TAA (interactive) resolves afterwards.
+    const uint32_t W = m_offscreen.extent.width, H = m_offscreen.extent.height;
+    auto barrier = [&] {
+        vf::transitionImage(cmd, m_offscreen.img, VK_IMAGE_ASPECT_COLOR_BIT,
+            VK_IMAGE_LAYOUT_GENERAL, VK_IMAGE_LAYOUT_GENERAL,
+            VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT, VK_ACCESS_2_SHADER_STORAGE_READ_BIT,
+            VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT, VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT);
+    };
+    if ((m_renderFlags & (1 << 5)) != 0) {
+        barrier();
+        m_ssrPass.updateDescriptors(m_offscreen.view, m_gpos.view, m_offscreen.view);
+        m_ssrPass.record(cmd, W, H, push);
+    }
+    if ((m_renderFlags & (1 << 6)) != 0) {
+        barrier();
+        m_ssaoPass.updateDescriptors(m_gpos.view, m_offscreen.view, m_offscreen.view);
+        m_ssaoPass.record(cmd, W, H, push);
+    }
+    if (m_volFogEnabled) {
+        barrier();
+        m_volFogPass.updateDescriptors(m_offscreen.view, m_gpos.view, m_offscreen.view);
+        m_volFogPass.record(cmd, W, H, push);
+    }
+    if (m_motionBlurEnabled) {
+        barrier();
+        m_motionBlurPass.updateDescriptors(m_offscreen.view, m_gpos.view, m_offscreen.view);
+        m_motionBlurPass.record(cmd, W, H, push, m_prevCam);
+    }
+    if (m_dofEnabled) {
+        barrier();
+        m_dofPass.updateDescriptors(m_offscreen.view, m_gpos.view, m_offscreen.view);
+        m_dofPass.record(cmd, W, H, push, m_dofFocusDist, m_dofFocalLength);
+    }
+}
+
 void App::rebuildSurfels()
 {
     if (!m_layers.loaded())
@@ -492,6 +567,11 @@ void App::rebuildSurfels()
     vkDeviceWaitIdle(m_ctx.device());
     vf::voxel::SurfelParams sp;
     sp.sunDir = glm::vec3(m_sunDir);
+    // micro-detail: texture texels as real micro-surfel geometry (moss,
+    // pebbles, bark relief, leaflets). VF_MICRO=0 disables for perf/debug.
+    sp.microDetail = true;
+    if (const char* e = getenv("VF_MICRO"))
+        sp.microDetail = atoi(e) != 0;
     // debug/experiment overrides for the surfel bake (default = tuned values)
     if (const char* e = getenv("VF_SURFEL_SMOOTH"))
         sp.smoothNormals = atoi(e) != 0;
@@ -501,11 +581,49 @@ void App::rebuildSurfels()
     std::vector<vf::voxel::Surfel> water =
         vf::voxel::buildWaterSurfels(m_layers.field());
     const uint32_t waterStart = uint32_t(set.surfels.size());
+    // bucket water surfels per chunk (stable order => deterministic) so the
+    // frame loop skips off-screen lake chunks instead of rasterizing the
+    // whole water grid every frame
+    std::vector<uint32_t> waterRange(16 * 16 * 16 + 1, waterStart);
+    if (!water.empty()) {
+        auto chunkOf = [](const vf::voxel::Surfel& s) {
+            const float px = s.pos_rU.x, py = s.pos_rU.y, pz = s.pos_rU.z;
+            const auto ax = std::clamp(int(std::floor((px + 51.2f) / 6.4f)), 0, 15);
+            const auto ay = std::clamp(int(std::floor((py + 51.2f) / 6.4f)), 0, 15);
+            const auto az = std::clamp(int(std::floor((pz + 51.2f) / 6.4f)), 0, 15);
+            return uint32_t((ax * 16 + ay) * 16 + az);
+        };
+        std::vector<uint32_t> order(water.size());
+        std::iota(order.begin(), order.end(), 0u);
+        std::stable_sort(order.begin(), order.end(),
+                         [&](uint32_t a, uint32_t b) {
+                             return chunkOf(water[a]) < chunkOf(water[b]);
+                         });
+        std::vector<vf::voxel::Surfel> sorted;
+        sorted.reserve(water.size());
+        uint32_t open = chunkOf(water[order[0]]);
+        waterRange[open] = waterStart;
+        for (size_t k = 0; k < order.size(); ++k) {
+            const uint32_t c = chunkOf(water[order[k]]);
+            if (c != open) {
+                for (uint32_t f = open + 1; f <= c; ++f)
+                    waterRange[f] = waterStart + uint32_t(k);
+                open = c;
+            }
+            sorted.push_back(water[order[k]]);
+        }
+        for (uint32_t f = open + 1; f < waterRange.size(); ++f)
+            waterRange[f] = waterStart + uint32_t(order.size());
+        water.swap(sorted);
+    }
     set.surfels.insert(set.surfels.end(), water.begin(), water.end());
-    // chunkRange only covers opaque surfels; water is one trailing range
+    // chunkRange only covers opaque surfels; waterRange buckets the trailing
+    // water run per chunk for frustum-culled water draws; microStart splits
+    // each chunk into base + micro-detail for distance culling
     m_splatPass.setSurfels(set.surfels.data(),
                            set.surfels.size() * sizeof(vf::voxel::Surfel),
-                           set.surfels.size(), set.chunkRange, waterStart);
+                           set.surfels.size(), set.chunkRange, waterStart, waterRange,
+                           set.microStart);
     spdlog::info("splat backend: {} surfels ({} water), {} chunks", set.surfels.size(),
                  water.size(), set.chunkRange.empty() ? 0 : set.chunkRange.size() - 1);
 }
@@ -594,11 +712,20 @@ void App::drawHud()
     ImGui::Begin("Voxelforge", nullptr, ImGuiWindowFlags_AlwaysAutoResize);
 
     ImGui::Text("GPU: %s", m_ctx.gpuName());
-    ImGui::Text("Render: %s (F to switch)", m_renderMode == RenderMode::Splats
-                                                ? "Gaussian surfels"
-                                                : "chunked SVO");
-    ImGui::Text("%u x %u @ %.1f fps (%.2f ms)", m_swapchain.extent().width,
-                m_swapchain.extent().height, 1000.0 / m_avgMs, m_avgMs);
+    ImGui::Text("Render: %s (F to switch), TAA: %s (N to switch)",
+                m_renderMode == RenderMode::Splats ? "Gaussian surfels" : "chunked SVO",
+                m_taaEnabled ? "on" : "off");
+    if (m_renderMode == RenderMode::Splats)
+        ImGui::Text("Splat size: %.2f ([ / ] to adjust)", m_splatPass.radiusScale());
+    ImGui::Text("SSR: %s (G), SSAO: %s (H), Fog: %s (J), MotionBlur: %s (K), DoF: %s (L)",
+                 (m_renderFlags & (1 << 5)) ? "on" : "off",
+                 (m_renderFlags & (1 << 6)) ? "on" : "off",
+                 m_volFogEnabled ? "on" : "off",
+                 m_motionBlurEnabled ? "on" : "off",
+                 m_dofEnabled ? "on" : "off");
+    ImGui::Text("Keys: WASD/QE move, RMB+mouse look, wheel speed, Ctrl+LMB pick,");
+    ImGui::Text("F toggle splat/SVO, N TAA on/off, [ / ] splat size, G/H/J/K/L photorealism,");
+    ImGui::Text("T tonemap look, C edit tool, Esc quit");
     ImGui::Separator();
 
     {
@@ -957,6 +1084,18 @@ int App::run(const Args& args)
     // debug/CI override for the render-flag bitmask (AO/shadow/flora/water/outline)
     if (const char* rf = getenv("VF_RENDER_FLAGS"))
         m_renderFlags = atoi(rf);
+    // headless/CI overrides for the photorealism toggles (default off = deterministic)
+    if (const char* e = getenv("VF_VOLFOG"))
+        m_volFogEnabled = atoi(e) != 0;
+    if (const char* e = getenv("VF_MOTIONBLUR"))
+        m_motionBlurEnabled = atoi(e) != 0;
+    if (const char* e = getenv("VF_DOF"))
+        m_dofEnabled = atoi(e) != 0;
+    // TAA history blend override (debug): 1.0 = pure reprojected history.
+    // In a static scene that must stay coherent while rotating (1 frame of
+    // lag); if it tears instead, the G-buffer reprojection itself is broken.
+    if (const char* e = getenv("VF_TAA_BLEND"))
+        m_taaBlend = std::clamp(float(atof(e)), 0.0f, 1.0f);
 
     while (!m_window.shouldClose()) {
         m_window.pollEvents();
@@ -1108,8 +1247,10 @@ int App::run(const Args& args)
             m_camera.update(m_window, dt);
         }
 
-        // ---- render-option hotkeys (edge-triggered) ----
-        if (!chatCaptures) {
+        // ---- render-option hotkeys (edge-triggered, interactive only:
+        // headless runs must stay deterministic - key state on a hidden
+        // window can phantom-trigger toggles) ----
+        if (!chatCaptures && !headlessRun) {
             auto edge = [](int k, GLFWwindow* w) {
                 static std::vector<uint8_t> prev(1024, 0);
                 bool now = glfwGetKey(w, k) == GLFW_PRESS;
@@ -1129,6 +1270,20 @@ int App::run(const Args& args)
                                                                     : RenderMode::Splats;
                 spdlog::info("render mode -> {}",
                              m_renderMode == RenderMode::Splats ? "splats" : "svo");
+            }
+            if (edge(GLFW_KEY_N, hw)) {
+                m_taaEnabled = !m_taaEnabled;
+                m_taaFirstFrame = true; // never blend stale history on re-enable
+                spdlog::info("TAA -> {}", m_taaEnabled ? "on" : "off");
+            }
+            // splat disk size ([ shrink / ] grow), live for the splat backend
+            if (edge(GLFW_KEY_LEFT_BRACKET, hw)) {
+                m_splatPass.setRadiusScale(m_splatPass.radiusScale() / 1.12f);
+                spdlog::info("splat radius -> {:.2f}", m_splatPass.radiusScale());
+            }
+            if (edge(GLFW_KEY_RIGHT_BRACKET, hw)) {
+                m_splatPass.setRadiusScale(m_splatPass.radiusScale() * 1.12f);
+                spdlog::info("splat radius -> {:.2f}", m_splatPass.radiusScale());
             }
             // toggle the carve / add edit tool
             if (edge(GLFW_KEY_C, hw)) {
@@ -1165,6 +1320,27 @@ int App::run(const Args& args)
                 m_renderFlags = 31;
                 spdlog::info("render flags reset -> 31");
             }
+            // photorealism feature toggles
+            if (edge(GLFW_KEY_G, hw)) {
+                m_renderFlags ^= (1 << 5); // SSR
+                spdlog::info("SSR -> {}", (m_renderFlags >> 5) & 1);
+            }
+            if (edge(GLFW_KEY_H, hw)) {
+                m_renderFlags ^= (1 << 6); // SSAO
+                spdlog::info("SSAO -> {}", (m_renderFlags >> 6) & 1);
+            }
+            if (edge(GLFW_KEY_J, hw)) {
+                m_volFogEnabled = !m_volFogEnabled;
+                spdlog::info("volumetric fog -> {}", m_volFogEnabled);
+            }
+            if (edge(GLFW_KEY_K, hw)) {
+                m_motionBlurEnabled = !m_motionBlurEnabled;
+                spdlog::info("motion blur -> {}", m_motionBlurEnabled);
+            }
+            if (edge(GLFW_KEY_L, hw)) {
+                m_dofEnabled = !m_dofEnabled;
+                spdlog::info("depth of field -> {}", m_dofEnabled);
+            }
         }
 
         uint32_t f = m_frameIdx % kMaxFramesInFlight;
@@ -1190,6 +1366,8 @@ int App::run(const Args& args)
             push.b = glm::vec4(m_pushB.x, m_pushB.y, m_pushB.z, float(m_frameIdx % 1024));
             push.sunDir = m_sunDir;
             push.misc = glm::vec4(float(m_renderFlags), m_animTime, float(m_tonemapLook), m_exposure);
+            // buried camera (inside solid): render shells two-sided this frame
+            updateBuriedProbe();
             {
                 if (m_renderMode == RenderMode::Splats) {
                     // splat raster writes linear HDR + G-buffer
@@ -1204,7 +1382,8 @@ int App::run(const Args& args)
                                         VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT,
                                         VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT);
                     vf::transitionImage(fr.cmd, m_splatPass.depthImage().img,
-                                        VK_IMAGE_ASPECT_DEPTH_BIT,
+                                        VkImageAspectFlags(VK_IMAGE_ASPECT_DEPTH_BIT |
+                                                           VK_IMAGE_ASPECT_STENCIL_BIT),
                                         VK_IMAGE_LAYOUT_UNDEFINED,
                                         VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL,
                                         VK_PIPELINE_STAGE_2_NONE, VK_ACCESS_2_NONE,
@@ -1256,6 +1435,9 @@ int App::run(const Args& args)
                                     VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
                                     VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT);
                 m_postPass.record(fr.cmd, push);
+
+                // ---- photorealism passes (G/H/J/K/L toggles, shared helper) ----
+                recordPhotorealism(fr.cmd, push);
             }
             vkEndCommandBuffer(fr.cmd);
             VkSubmitInfo hsi { VK_STRUCTURE_TYPE_SUBMIT_INFO };
@@ -1326,6 +1508,8 @@ int App::run(const Args& args)
         push.b = glm::vec4(m_pushB.x, m_pushB.y, m_pushB.z, float(m_frameIdx % 1024));
         push.sunDir = m_sunDir;
         push.misc = glm::vec4(float(m_renderFlags), m_animTime, float(m_tonemapLook), m_exposure);
+        // buried camera (inside solid): render shells two-sided this frame
+        updateBuriedProbe();
 
         // splat raster or ray-march -> HDR + G-buffer --------------------
         if (m_renderMode == RenderMode::Splats) {
@@ -1340,7 +1524,8 @@ int App::run(const Args& args)
                                 VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT,
                                 VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT);
             vf::transitionImage(fr.cmd, m_splatPass.depthImage().img,
-                                VK_IMAGE_ASPECT_DEPTH_BIT,
+                                VkImageAspectFlags(VK_IMAGE_ASPECT_DEPTH_BIT |
+                                                   VK_IMAGE_ASPECT_STENCIL_BIT),
                                 VK_IMAGE_LAYOUT_UNDEFINED,
                                 VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL,
                                 VK_PIPELINE_STAGE_2_NONE, VK_ACCESS_2_NONE,
@@ -1386,6 +1571,10 @@ int App::run(const Args& args)
                             VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT);
         m_postPass.record(fr.cmd, push);
 
+        // photorealism toggles (G/H/J/K/L) run here so they affect what you
+        // see; TAA resolves the effected image afterwards
+        recordPhotorealism(fr.cmd, push);
+
         // TAA resolve (interactive only, not for headless tests) ----------
         VkImage taaSrc = m_offscreen.img;
         VkImageLayout taaSrcLayout = VK_IMAGE_LAYOUT_GENERAL;
@@ -1415,7 +1604,7 @@ int App::run(const Args& args)
                                 VK_PIPELINE_STAGE_2_NONE, VK_ACCESS_2_NONE,
                                 VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT, VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT);
             m_taaPass.record(fr.cmd, m_offscreen.extent.width, m_offscreen.extent.height,
-                             m_taaFirstFrame ? 0.0f : 0.92f, m_taaFirstFrame, m_prevCam);
+                             m_taaFirstFrame ? 0.0f : m_taaBlend, m_taaFirstFrame, m_prevCam);
             // TAA output -> TRANSFER_SRC for blit, and copy to history for next frame
             vf::transitionImage(fr.cmd, m_taaResolved.img, VK_IMAGE_ASPECT_COLOR_BIT,
                                 VK_IMAGE_LAYOUT_GENERAL, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,

@@ -10,6 +10,11 @@ if(NOT CMAKE_BUILD_TYPE)
 endif()
 
 add_compile_options(-Wall -Wextra -Wno-missing-field-initializers)
+# Native-arch tuning for the hot CPU paths (surfel bake, SVO synthesis,
+# chunk sort). Same-machine gates, so -march=native is safe.
+if(CMAKE_SYSTEM_PROCESSOR MATCHES "x86_64|AMD64")
+    add_compile_options(-march=native)
+endif()
 
 find_package(Vulkan REQUIRED)
 
@@ -130,7 +135,9 @@ add_custom_target(vf_heightmap DEPENDS ${VF_HEIGHTMAP_PNG} ${VF_WORLD_LAYERS})
 add_library(vf_rhi STATIC src/rhi/context.cpp src/rhi/resources.cpp src/rhi/swapchain.cpp)
 target_link_libraries(vf_rhi PUBLIC vf_platform vf_vma spdlog::spdlog)
 
-add_library(vf_render STATIC src/render/svo_pass.cpp src/render/taa_pass.cpp src/render/post_pass.cpp src/render/splat_pass.cpp)
+add_library(vf_render STATIC src/render/svo_pass.cpp src/render/taa_pass.cpp src/render/post_pass.cpp src/render/splat_pass.cpp
+    src/render/ssr_pass.cpp src/render/ssao_pass.cpp src/render/volumetric_fog_pass.cpp
+    src/render/motion_blur_pass.cpp src/render/dof_pass.cpp src/render/environment_pass.cpp)
 target_include_directories(vf_render PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/external)
 target_compile_definitions(vf_render PUBLIC
     VOXELFORGE_SHADER_DIR="${CMAKE_CURRENT_BINARY_DIR}/shaders"
@@ -146,7 +153,13 @@ set(VF_SHADER_SRCS ${CMAKE_CURRENT_SOURCE_DIR}/shaders/svo_raymarch.comp
     ${CMAKE_CURRENT_SOURCE_DIR}/shaders/post.comp
     ${CMAKE_CURRENT_SOURCE_DIR}/shaders/taa_resolve.comp
     ${CMAKE_CURRENT_SOURCE_DIR}/shaders/splat.vert
-    ${CMAKE_CURRENT_SOURCE_DIR}/shaders/splat.frag)
+    ${CMAKE_CURRENT_SOURCE_DIR}/shaders/splat.frag
+    ${CMAKE_CURRENT_SOURCE_DIR}/shaders/ssr.comp
+    ${CMAKE_CURRENT_SOURCE_DIR}/shaders/ssao.comp
+    ${CMAKE_CURRENT_SOURCE_DIR}/shaders/volumetric_fog.comp
+    ${CMAKE_CURRENT_SOURCE_DIR}/shaders/motion_blur.comp
+    ${CMAKE_CURRENT_SOURCE_DIR}/shaders/depth_of_field.comp
+    ${CMAKE_CURRENT_SOURCE_DIR}/shaders/env_map.comp)
 set(VF_SHADER_SPVS "")
 foreach(src_file ${VF_SHADER_SRCS})
     get_filename_component(name "${src_file}" NAME)

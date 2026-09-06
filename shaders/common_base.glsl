@@ -111,6 +111,60 @@ vec3 grassDetail(vec3 alb, vec3 p, inout vec3 n)
     return alb * (0.74 + 0.45 * blade) * (0.90 + 0.20 * f);
 }
 
+// ---- photoreal albedo grade: shared by SVO + splat so backends stay in sync --
+// Tames the neon bake palette toward mossy/earthy tones and adds multi-scale
+// detail (large mottling + fine grain + per-material accents like log courses,
+// roof moss and shoreline pebbles). Pure function of (matId, worldPos, normal).
+vec3 detailAlbedo(vec3 alb, vec3 p, vec3 n, uint mId)
+{
+    // large-scale mottling breaks up flat airbrushed fills
+    float big = fbm(p.xz * 1.7 + p.y * 1.3);
+    alb *= 0.86 + 0.28 * big;
+    // fine grain for close-up texture
+    alb *= 0.93 + 0.10 * vnoise(p.xz * 23.0 + p.y * 17.0);
+    if (mId <= 1u) {
+        // meadow: desaturate neon greens toward olive, patchy dry spots
+        float lum = dot(alb, vec3(0.33));
+        alb = mix(vec3(lum), alb, 0.68);
+        alb *= vec3(0.86, 0.92, 0.78);
+        float dry = smoothstep(0.25, 0.85, fbm(p.xz * 0.9 + 3.7));
+        alb = mix(alb, alb * vec3(1.18, 1.02, 0.72), dry * 0.45);
+    } else if (mId == 2u || mId == 3u) {
+        // soil/sand: pebble speckle + shoreline darkening when damp
+        float peb = vnoise(p.xz * 34.0);
+        alb *= 0.88 + 0.24 * peb;
+        float clod = fbm(p.xz * 5.5);
+        alb *= 0.90 + 0.20 * clod;
+    } else if (mId == 4u || mId == 5u || mId == 16u) {
+        // rock/snow: strata bands + lichen tint on up-faces
+        float strata = vnoise(vec2(p.y * 9.0, dot(p.xz, vec2(0.6, 0.8)) * 2.0));
+        alb *= 0.86 + 0.26 * strata;
+        float lichen = smoothstep(0.55, 0.85, fbm(p.xz * 4.2 + p.y * 2.0)) * clamp(n.y, 0.0, 1.0);
+        alb = mix(alb, vec3(0.35, 0.38, 0.20), lichen * 0.35);
+    } else if (mId == 6u) {
+        // weathered logs: horizontal course grooves every 0.27 m + long grain
+        float course = fract(p.y / 0.27);
+        float groove = smoothstep(0.0, 0.14, course) * smoothstep(1.0, 0.86, course);
+        alb *= 0.78 + 0.22 * groove;
+        float grain = vnoise(vec2((p.x + p.z) * 34.0, p.y * 7.0));
+        alb *= 0.88 + 0.20 * grain;
+        alb *= vec3(0.82, 0.78, 0.75); // knock back the orange bake tint
+    } else if (mId == 7u) {
+        // shingles with moss creeping on up-faces (reference cabin roof)
+        float shingle = vnoise(vec2((p.x + p.z) * 22.0, p.y * 30.0));
+        alb *= 0.85 + 0.25 * shingle;
+        float moss = smoothstep(0.30, 0.80, fbm(p.xz * 3.0 + p.y * 1.5)) * clamp(n.y * 0.5 + 0.5, 0.0, 1.0);
+        alb = mix(alb, vec3(0.26, 0.33, 0.12), moss * 0.60);
+    } else if (mId == 8u) {
+        // canopy: deep pine variation, sun-flecked
+        float lum = dot(alb, vec3(0.33));
+        alb = mix(vec3(lum), alb, 0.70);
+        alb *= vec3(0.60, 0.70, 0.58);
+        alb *= 0.70 + 0.35 * fbm(p.xz * 2.6 + p.y * 2.2);
+    }
+    return alb;
+}
+
 // ---- flora field (deterministic, shared by both backends) ------------------
 // Shading-level micro geometry: tapered grass blades in tufts (kind 0) and
 // irregular leaf clusters with random facet normals (kind 1, bushes/canopy).
@@ -359,6 +413,66 @@ vec3 skyColor(vec3 d)
     // sun disc (sharp) and broad glow, both turbidity-scaled
     col += kSunCol * 0.55 * pow(cosGamma, 1150.0) * clamp(Y * 0.15, 0.0, 2.0);
     col += vec3(1.0, 0.85, 0.6) * 0.48 * pow(cosGamma, 6.0) * clamp(Y * 0.06, 0.2, 1.2);
+    // ---- golden-hour warmth: low sun tints the horizon amber/pink ----
+    // kSunDir.y ~ sin(elev): 0.56 at 34 deg, ~0.31 at 18 deg, ~0.17 at 10 deg.
+    float lowSun = 1.0 - smoothstep(0.08, 0.55, kSunDir.y);
+    float horizBand = pow(1.0 - cosTheta, 3.0);
+    vec3 sunsetTint = mix(vec3(1.0, 0.62, 0.32), vec3(0.95, 0.45, 0.45), clamp(cosGamma, 0.0, 1.0) * 0.5);
+    col += sunsetTint * horizBand * lowSun * (0.25 + 0.55 * pow(cosGamma, 2.0));
+    col = mix(col, col * vec3(1.06, 0.94, 0.86) + vec3(0.03, 0.01, 0.0), lowSun * 0.45 * horizBand);
+    // ---- procedural clouds: fbm deck, thin at zenith (keeps sky probe blue),
+    // thick toward the horizon like a valley overcast with a sunset break ----
+    if (d.y > -0.02) {
+        vec2 sk = d.xz / (abs(d.y) + 0.22);
+        float drift = pc.misc.y * 0.006;
+        float cm = fbm(sk * 1.35 + vec2(drift, drift * 0.4));
+        cm = cm * 0.65 + 0.35 * fbm(sk * 3.1 - vec2(drift * 1.7, 0.0));
+        float cover = 0.46 + 0.10 * (1.0 - smoothstep(0.0, 0.6, kSunDir.y));
+        float cmask = smoothstep(cover, cover + 0.28, cm + (1.0 - cosTheta) * 0.12);
+        float cweight = cmask * smoothstep(-0.02, 0.14, d.y);
+        // keep zenith mostly clear so the top-strip sky probe stays blue
+        cweight *= mix(0.35, 1.0, 1.0 - smoothstep(0.45, 0.95, d.y));
+        vec3 cloudShadow = vec3(0.38, 0.42, 0.52);
+        vec3 cloudLit = vec3(1.08, 0.98, 0.90);
+        // warm lit edges near the sun, pink-grey away; low sun deepens contrast
+        vec3 cloudCol = mix(cloudShadow, cloudLit, 0.35 + 0.65 * pow(cosGamma, 2.0));
+        cloudCol += sunsetTint * lowSun * pow(cosGamma, 3.0) * 0.55;
+        cloudCol *= 0.85 + 0.30 * cm;
+        col = mix(col, cloudCol, clamp(cweight, 0.0, 1.0) * 0.85);
+    }
+    return col;
+}
+
+// Cloud-free sky variant for indirect taps (irradiance / fog): the fbm
+// cloud deck dominates per-fragment ALU but barely modulates diffuse
+// ambient, so indirect lighting uses the analytic gradient + sun only.
+// Direct sky pixels and reflections keep the full cloudy skyColor.
+vec3 skyColorFast(vec3 d)
+{
+    float cosTheta = clamp(d.y, 0.0, 1.0);
+    float cosGamma = max(dot(d, kSunDir), 0.0);
+    float gamma = acos(clamp(cosGamma, 0.0, 1.0));
+    const float T = 2.2;
+    float Ay = 0.1787 * T - 1.4630;
+    float By = -0.3554 * T + 0.4275;
+    float Cy = -0.0227 * T + 5.3251;
+    float Dy = 0.1206 * T - 2.5771;
+    float Ey = -0.0670 * T + 0.3703;
+    float cosThetaSafe = max(cosTheta, 0.07);
+    float Ftheta = (1.0 + Ay * exp(By / cosThetaSafe)) / (1.0 + Ay * exp(By));
+    float Fgamma = 1.0 + Cy * exp(Dy * gamma) + Ey * cosGamma * cosGamma;
+    float Y = Ftheta * Fgamma; // luminance distribution, 1 at zenith/sun
+    vec3 base = mix(kHorizon * 1.05, kZenith * 0.95, pow(max(cosTheta, 0.0), 0.55));
+    vec3 col = base * (0.82 + 0.30 * clamp(Y * 0.08, 0.0, 1.5));
+    // sun disc (sharp) and broad glow, both turbidity-scaled
+    col += kSunCol * 0.55 * pow(cosGamma, 1150.0) * clamp(Y * 0.15, 0.0, 2.0);
+    col += vec3(1.0, 0.85, 0.6) * 0.48 * pow(cosGamma, 6.0) * clamp(Y * 0.06, 0.2, 1.2);
+    // ---- golden-hour warmth: low sun tints the horizon amber/pink ----
+    float lowSun = 1.0 - smoothstep(0.08, 0.55, kSunDir.y);
+    float horizBand = pow(1.0 - cosTheta, 3.0);
+    vec3 sunsetTint = mix(vec3(1.0, 0.62, 0.32), vec3(0.95, 0.45, 0.45), clamp(cosGamma, 0.0, 1.0) * 0.5);
+    col += sunsetTint * horizBand * lowSun * (0.25 + 0.55 * pow(cosGamma, 2.0));
+    col = mix(col, col * vec3(1.06, 0.94, 0.86) + vec3(0.03, 0.01, 0.0), lowSun * 0.45 * horizBand);
     return col;
 }
 
@@ -462,16 +576,64 @@ vec3 skyIrradiance(vec3 n)
     vec3 a = normalize(n * 0.6 + up * 0.4);
     vec3 b = normalize(n * 0.7 + kSunDir * 0.3);
     vec3 c = normalize(n * 0.15 + up * 0.85);
-    return skyColor(a) * 0.42 + skyColor(b) * 0.28 + skyColor(c) * 0.30;
+    return skyColorFast(a) * 0.42 + skyColorFast(b) * 0.28 + skyColorFast(c) * 0.30;
 }
 
 // aerial-perspective fog: sky-tinted, sun-warmed, altitude-attenuated
 vec3 fogColor(vec3 rd, vec3 p)
 {
-    vec3 fc = skyColor(rd) * 0.88;
-    fc += vec3(1.0, 0.75, 0.45) * 0.10 * pow(clamp(dot(rd, kSunDir), 0.0, 1.0), 3.0);
+    vec3 fc = skyColorFast(rd) * 0.88;
+    float sunAmt = pow(clamp(dot(rd, kSunDir), 0.0, 1.0), 3.0);
+    float lowSun = 1.0 - smoothstep(0.08, 0.55, kSunDir.y);
+    fc += mix(vec3(1.0, 0.75, 0.45), vec3(1.0, 0.55, 0.30), lowSun) * (0.10 + 0.12 * lowSun) * sunAmt;
     fc *= clamp(0.60 + 0.40 * clamp((p.y + 1.5) * 0.08, 0.0, 1.0), 0.0, 1.0);
     return fc;
+}
+
+// valley/river mist factor: dense near the water table, fading with height.
+// Shared by both backends so mist over the stream matches the reference mood.
+float mistFactor(vec3 ro, vec3 p, float t)
+{
+    float h = max(p.y + 0.9, 0.0);
+    float lowBand = exp(-h * 0.55);
+    float dist = 1.0 - exp(-t * 0.006);
+    float drift = 0.75 + 0.25 * vnoise(p.xz * 0.8 + vec2(pc.misc.y * 0.05, 0.0));
+    return clamp(lowBand * dist * drift, 0.0, 1.0);
+}
+
+// ---- IBL infrastructure (environment cubemap + BRDF LUT) ----------
+
+// IBL: pre-filtered environment cubemap + BRDF LUT
+layout(set = 0, binding = 11) uniform samplerCube uEnvCubemap;
+layout(set = 0, binding = 12) uniform sampler2D uBRDFLUT;
+const float kIBLIntensity = 1.0;
+
+// Pre-filtered mip levels for IBL (0 = rough, 5 = smooth)
+const float kEnvMipLevels = 5.0;
+
+vec3 sampleEnv(vec3 d)
+{
+    return textureLod(uEnvCubemap, d, 0.0).rgb * kIBLIntensity;
+}
+
+vec3 iblIrradiance(vec3 n)
+{
+    vec3 irr = textureLod(uEnvCubemap, n, 1.0).rgb * PI;
+    return irr;
+}
+
+vec3 iblContribution(vec3 n, vec3 V, vec3 f0, float rough)
+{
+    vec3 R = reflect(-V, n);
+    float vdh = max(dot(R, V), 0.0);
+    float envRough = max(rough, 0.05);
+    vec3 prefiltered = sampleEnv(R);
+    vec2 brdf = texture(uBRDFLUT, vec2(vdh, envRough)).rg;
+    vec3 kS = f0 + (1.0 - f0) * pow(1.0 - vdh, 5.0);
+    vec3 kD = (1.0 - kS) * (1.0 - f0);
+    vec3 diffuse = iblIrradiance(n) * kD;
+    vec3 specular = prefiltered * (kS * envRough + (1.0 - envRough) * vec3(brdf, 0.0));
+    return kD * diffuse + specular;
 }
 
 // terrain-only shadow: same march but occluders are the records-derived

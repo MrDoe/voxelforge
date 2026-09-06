@@ -87,16 +87,36 @@ bool SplatPass::init(const Context& ctx)
     if (vkAllocateDescriptorSets(dev, &ai, &m_set) != VK_SUCCESS)
         return false;
 
-    m_paramsBuf = makeBuffer(ctx, sizeof(glm::vec4),
+    m_paramsBuf = makeBuffer(ctx, 2 * sizeof(glm::vec4),
                              VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT,
                              VMA_MEMORY_USAGE_AUTO_PREFER_HOST, true);
     if (!m_paramsBuf.buf || !m_paramsBuf.mapped)
         return false;
-    memcpy(m_paramsBuf.mapped, &m_params, sizeof(m_params));
+    {
+        glm::vec4 init[2] = { m_params, glm::vec4(m_radiusScale, 0.0f, 0.0f, 0.0f) };
+        memcpy(m_paramsBuf.mapped, init, sizeof(init));
+    }
     VkDescriptorBufferInfo pi3 { m_paramsBuf.buf, 0, VK_WHOLE_SIZE };
     VkWriteDescriptorSet w { VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, nullptr, m_set, 3, 0, 1,
                              VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, nullptr, &pi3, nullptr };
     vkUpdateDescriptorSets(dev, 1, &w, 0, nullptr);
+    // per-frame indirect draw command buffers (one vkCmdDraw per visible
+    // chunk would be ~12k API calls/frame; indirect collapses each opaque
+    // pass to a single call)
+    for (auto& c : m_drawCmds) {
+        c = makeBuffer(ctx, kMaxChunkDraws * sizeof(VkDrawIndirectCommand),
+                       VK_BUFFER_USAGE_INDIRECT_BUFFER_BIT,
+                       VMA_MEMORY_USAGE_AUTO_PREFER_HOST, true);
+        if (!c.buf || !c.mapped)
+            return false;
+    }
+    for (auto& c : m_waterCmds) {
+        c = makeBuffer(ctx, kMaxChunkDraws * sizeof(VkDrawIndirectCommand),
+                       VK_BUFFER_USAGE_INDIRECT_BUFFER_BIT,
+                       VMA_MEMORY_USAGE_AUTO_PREFER_HOST, true);
+        if (!c.buf || !c.mapped)
+            return false;
+    }
     return true;
 }
 
@@ -158,12 +178,15 @@ bool SplatPass::createPipelines(VkFormat hdrFormat)
     // depth), which disables early-z, so a prepass cannot reduce fragment
     // cost - it only ever changed rim blending. Per-fragment marches were
     // the real cost driver; those are baked on the CPU instead.
-    auto makePipe = [&](int skyMode, bool depthTest,
+    auto makePipe = [&](int skyMode, int passMode, bool depthTest,
                         bool depthWrite, VkCompareOp depthOp, bool blend,
+                        VkBlendOp blendOp, bool stencilTest, VkCompareOp stencilOp,
+                        uint32_t stencilRef, bool stencilWrite,
                         VkFormat depthFmt, VkPipeline* out) {
-        VkSpecializationMapEntry entry { 0, 0, sizeof(int32_t) };
-        int32_t mode = skyMode;
-        VkSpecializationInfo spec { 1, &entry, sizeof(mode), &mode };
+        VkSpecializationMapEntry entries[2] = { { 0, 0, sizeof(int32_t) },
+                                                { 1, sizeof(int32_t), sizeof(int32_t) } };
+        int32_t specData[2] = { skyMode, passMode };
+        VkSpecializationInfo spec { 2, entries, sizeof(specData), &specData };
         VkPipelineShaderStageCreateInfo st[2] = { stages[0], stages[1] };
         st[0].pSpecializationInfo = &spec;
         st[1].pSpecializationInfo = &spec;
@@ -174,18 +197,37 @@ bool SplatPass::createPipelines(VkFormat hdrFormat)
         ds.depthTestEnable = depthTest ? VK_TRUE : VK_FALSE;
         ds.depthWriteEnable = depthWrite ? VK_TRUE : VK_FALSE;
         ds.depthCompareOp = depthOp;
+        // Stencil marks core-covered pixels (core pipe) so the two rim
+        // blends can tell surface-interior apart from true silhouette.
+        ds.stencilTestEnable = stencilTest ? VK_TRUE : VK_FALSE;
+        VkStencilOpState stencilState {};
+        stencilState.failOp = VK_STENCIL_OP_KEEP;
+        stencilState.passOp = stencilWrite ? VK_STENCIL_OP_REPLACE
+                                           : VK_STENCIL_OP_KEEP;
+        stencilState.depthFailOp = VK_STENCIL_OP_KEEP;
+        stencilState.compareOp = stencilOp;
+        stencilState.compareMask = 0xFF;
+        stencilState.writeMask = stencilWrite ? 0xFF : 0x00;
+        stencilState.reference = stencilRef;
+        ds.front = stencilState;
+        ds.back = stencilState;
 
         VkPipelineColorBlendAttachmentState cba[2] = {};
         cba[0].colorWriteMask =
             VK_COLOR_COMPONENT_R_BIT | VK_COLOR_COMPONENT_G_BIT |
             VK_COLOR_COMPONENT_B_BIT | VK_COLOR_COMPONENT_A_BIT;
         cba[1].colorWriteMask = cba[0].colorWriteMask;
-        // att0 (HDR): alpha blend for the AA annulus / water; att1 (G-buffer
-        // world pos) must never blend.
+        // att0 (HDR): alpha blend for rims/water, lighten-only MAX for
+        // interior rims (never darken settled surface); att1 (G-buffer
+        // world pos) must never blend. (MAX ignores factors per spec, but
+        // ONE/ONE is set anyway so both interpretations agree.)
+        const bool useMax = (blendOp == VK_BLEND_OP_MAX);
         cba[0].blendEnable = blend ? VK_TRUE : VK_FALSE;
-        cba[0].srcColorBlendFactor = VK_BLEND_FACTOR_SRC_ALPHA;
-        cba[0].dstColorBlendFactor = VK_BLEND_FACTOR_ONE_MINUS_SRC_ALPHA;
-        cba[0].colorBlendOp = VK_BLEND_OP_ADD;
+        cba[0].srcColorBlendFactor =
+            useMax ? VK_BLEND_FACTOR_ONE : VK_BLEND_FACTOR_SRC_ALPHA;
+        cba[0].dstColorBlendFactor =
+            useMax ? VK_BLEND_FACTOR_ONE : VK_BLEND_FACTOR_ONE_MINUS_SRC_ALPHA;
+        cba[0].colorBlendOp = blendOp;
         cba[0].srcAlphaBlendFactor = VK_BLEND_FACTOR_ONE;
         cba[0].dstAlphaBlendFactor = VK_BLEND_FACTOR_ONE_MINUS_SRC_ALPHA;
         cba[0].alphaBlendOp = VK_BLEND_OP_ADD;
@@ -216,13 +258,27 @@ bool SplatPass::createPipelines(VkFormat hdrFormat)
                VK_SUCCESS;
     };
 
+    // Core pass settles opaque depth+color and marks stencil (any order:
+    // all fragments opaque); rim pass splits by stencil: interior rims
+    // lighten-only (MAX, never darken settled surface), silhouette rims
+    // alpha-blend over sky. Water stays a single full-disk pass.
+    // Rim depth test is strict LESS against the (slightly toward-camera
+    // biased) core depth: same-surface overlap rims can never pass it, so
+    // they can't flicker on an LEQUAL coin-flip; true silhouettes clear it
+    // by centimetres and are unaffected.
+    const VkFormat kDepthFmt = VK_FORMAT_D24_UNORM_S8_UINT;
     bool ok =
-        makePipe(1, false, false, VK_COMPARE_OP_LESS, false, VK_FORMAT_UNDEFINED,
+        makePipe(1, 0, false, false, VK_COMPARE_OP_LESS, false, VK_BLEND_OP_ADD,
+                 false, VK_COMPARE_OP_ALWAYS, 0, false, VK_FORMAT_UNDEFINED,
                  &m_skyPipe) &&
-        makePipe(0, true, true, VK_COMPARE_OP_LESS, true, VK_FORMAT_D32_SFLOAT,
-                 &m_opaquePipe) &&
-        makePipe(0, true, false, VK_COMPARE_OP_LESS, true, VK_FORMAT_D32_SFLOAT,
-                 &m_waterPipe);
+        makePipe(0, 1, true, true, VK_COMPARE_OP_LESS, true, VK_BLEND_OP_ADD,
+                 true, VK_COMPARE_OP_ALWAYS, 1, true, kDepthFmt, &m_corePipe) &&
+        makePipe(0, 2, true, false, VK_COMPARE_OP_LESS, true, VK_BLEND_OP_MAX,
+                 true, VK_COMPARE_OP_EQUAL, 1, false, kDepthFmt, &m_rimInPipe) &&
+        makePipe(0, 2, true, false, VK_COMPARE_OP_LESS, true, VK_BLEND_OP_ADD,
+                 true, VK_COMPARE_OP_EQUAL, 0, false, kDepthFmt, &m_rimOutPipe) &&
+        makePipe(0, 0, true, false, VK_COMPARE_OP_LESS, true, VK_BLEND_OP_ADD,
+                 false, VK_COMPARE_OP_ALWAYS, 0, false, kDepthFmt, &m_waterPipe);
     vkDestroyShaderModule(dev, vsm, nullptr);
     vkDestroyShaderModule(dev, fsm, nullptr);
     if (!ok)
@@ -231,7 +287,9 @@ bool SplatPass::createPipelines(VkFormat hdrFormat)
 }
 
 void SplatPass::setSurfels(const void* data, size_t bytes, size_t count,
-                           const std::vector<uint32_t>& chunkRange, uint32_t waterStart)
+                           const std::vector<uint32_t>& chunkRange, uint32_t waterStart,
+                           const std::vector<uint32_t>& waterChunkRange,
+                           const std::vector<uint32_t>& microStart)
 {
     if (m_surfelBuf) {
         vmaDestroyBuffer(m_ctx->allocator(), m_surfelBuf, m_surfelAlloc);
@@ -272,14 +330,23 @@ void SplatPass::setSurfels(const void* data, size_t bytes, size_t count,
     m_count = (data && bytes) ? count : 0;
     m_waterStart = (data && bytes) ? waterStart : 0;
     m_chunkRange = chunkRange;
+    m_waterChunkRange = ((data && bytes) && waterChunkRange.size() == 16 * 16 * 16 + 1)
+                            ? waterChunkRange
+                            : std::vector<uint32_t>();
+    m_microStart = ((data && bytes) && microStart.size() == 16 * 16 * 16 + 1)
+                       ? microStart
+                       : std::vector<uint32_t>();
 }
 
 bool SplatPass::recreateDepth(uint32_t w, uint32_t h)
 {
     destroyImage3D(*m_ctx, m_depth);
-    m_depth = makeImage2D(*m_ctx, w, h, VK_FORMAT_D32_SFLOAT,
+    // D24+S8: depth for plane ordering, stencil to tell interior rims
+    // (lighten-only blend) apart from silhouette rims (alpha blend)
+    m_depth = makeImage2D(*m_ctx, w, h, VK_FORMAT_D24_UNORM_S8_UINT,
                           VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT,
-                          VK_IMAGE_ASPECT_DEPTH_BIT);
+                          VkImageAspectFlags(VK_IMAGE_ASPECT_DEPTH_BIT |
+                                             VK_IMAGE_ASPECT_STENCIL_BIT));
     return m_depth.img != VK_NULL_HANDLE;
 }
 
@@ -348,59 +415,110 @@ bool SplatPass::chunkVisible(const glm::vec4 planes[6], uint32_t chunk) const
     return true;
 }
 
-void SplatPass::drawChunks(VkCommandBuffer cmd, const RaymarchPush& push) const
+void SplatPass::computeDraws(const RaymarchPush& push)
 {
+    m_cpuDraws.clear();
+    m_cpuWaterDraws.clear();
+    m_waterDraws = 0;
     if (m_count == 0)
         return;
     const uint32_t opaqueEnd =
         m_waterStart > 0 ? std::min(m_waterStart, uint32_t(m_count)) : uint32_t(m_count);
     if (opaqueEnd == 0)
         return;
-    if (m_chunkRange.size() == 16 * 16 * 16 + 1) {
-        glm::vec4 planes[6];
-        frustumPlanes(push, planes);
-        // back-to-front chunk order: with translucent Gaussian rims, far
-        // must blend first so near geometry (and the sky behind silhouettes)
-        // composites correctly. 4096 distance evaluations + sort per frame
-        // is ~100 us; within-chunk order errors are bounded by the 6.4 m
-        // chunk size and resolved by the depth test for opaque cores.
-        struct Draw {
-            float dist2;
-            uint32_t first, count;
-        };
-        std::vector<Draw> draws;
-        draws.reserve(512);
-        const glm::vec3 camPos = glm::vec3(push.camPos);
-        const bool cull = !getenv("VF_SPLAT_NOCULL");
-        for (uint32_t c = 0; c < 16 * 16 * 16; ++c) {
-            uint32_t first = m_chunkRange[c];
-            uint32_t last = m_chunkRange[c + 1];
-            if (last > opaqueEnd)
-                last = opaqueEnd;
-            if (last <= first)
-                continue;
-            if (cull && !chunkVisible(planes, c))
-                continue;
-            const uint32_t cx = c / 256, cy = (c / 16) % 16, cz = c % 16;
-            const glm::vec3 ctr(-51.2f + (float(cx) + 0.5f) * 6.4f,
-                                -51.2f + (float(cy) + 0.5f) * 6.4f,
-                                -51.2f + (float(cz) + 0.5f) * 6.4f);
-            const glm::vec3 d = ctr - camPos;
-            draws.push_back({ glm::dot(d, d), first, last - first });
-        }
-        std::sort(draws.begin(), draws.end(),
-                  [](const Draw& a, const Draw& b) { return a.dist2 > b.dist2; });
-        for (const Draw& dr : draws)
-            vkCmdDraw(cmd, 4, dr.count, 0, dr.first);
-    } else {
+    if (m_chunkRange.size() != 16 * 16 * 16 + 1) {
         // no chunking info (should not happen): draw everything opaque
-        vkCmdDraw(cmd, 4, opaqueEnd, 0, 0);
+        m_cpuDraws.push_back({ 4, opaqueEnd, 0, 0 });
+        return;
     }
+    glm::vec4 planes[6];
+    frustumPlanes(push, planes);
+    // back-to-front chunk order: with translucent Gaussian rims, far
+    // must blend first so near geometry (and the sky behind silhouettes)
+    // composites correctly. 4096 distance evaluations + sort per frame
+    // is ~100 us; within-chunk order errors are bounded by the 6.4 m
+    // chunk size and resolved by the depth test for opaque cores.
+    struct Draw {
+        float dist2;
+        uint32_t first, count;
+    };
+    std::vector<Draw> draws;
+    draws.reserve(1024);
+    const glm::vec3 camPos = glm::vec3(push.camPos);
+    const bool cull = !getenv("VF_SPLAT_NOCULL");
+    // Micro-detail cull distance: micro disks (0.04-0.09 m) are sub-pixel
+    // beyond this range and hide inside their base footprint, so distant
+    // chunks draw base only. VF_MICRO_DIST=0 keeps all micros (legacy).
+    float microDist2 = 40.0f * 40.0f;
+    if (const char* e = getenv("VF_MICRO_DIST"))
+        microDist2 = float(atof(e)) * float(atof(e));
+    const bool hasMicroSplit = m_microStart.size() == 16 * 16 * 16 + 1;
+    for (uint32_t c = 0; c < 16 * 16 * 16; ++c) {
+        uint32_t first = m_chunkRange[c];
+        uint32_t last = m_chunkRange[c + 1];
+        if (last > opaqueEnd)
+            last = opaqueEnd;
+        if (last <= first)
+            continue;
+        if (cull && !chunkVisible(planes, c))
+            continue;
+        const uint32_t cx = c / 256, cy = (c / 16) % 16, cz = c % 16;
+        const glm::vec3 ctr(-51.2f + (float(cx) + 0.5f) * 6.4f,
+                            -51.2f + (float(cy) + 0.5f) * 6.4f,
+                            -51.2f + (float(cz) + 0.5f) * 6.4f);
+        const glm::vec3 d = ctr - camPos;
+        const float dist2 = glm::dot(d, d);
+        uint32_t split = last;
+        if (hasMicroSplit)
+            split = std::min(m_microStart[c], last);
+        if (split < first)
+            split = first;
+        draws.push_back({ dist2, first, split > first ? split - first : 0 });
+        // near chunks also draw their micro tail (same sort key: stable
+        // sort below keeps base-then-micro order within the chunk)
+        if (last > split && (microDist2 <= 0.0f || dist2 < microDist2))
+            draws.push_back({ dist2, split, last - split });
+    }
+    // stable: equal keys (base + micro of one chunk) keep insertion order
+    std::stable_sort(draws.begin(), draws.end(),
+                     [](const Draw& a, const Draw& b) { return a.dist2 > b.dist2; });
+    m_cpuDraws.reserve(draws.size());
+    for (const Draw& dr : draws) {
+        if (dr.count == 0)
+            continue;
+        m_cpuDraws.push_back({ 4, dr.count, 0, dr.first });
+    }
+    // water chunks: same frustum cull, no sorting needed (single
+    // blended pass, depth-tested). Off-screen lake chunks emit no
+    // commands at all instead of rasterizing thousands of quads.
+    if (m_waterStart > 0 && uint64_t(m_waterStart) < m_count &&
+        !getenv("VF_SPLAT_NOWATERCULL")) {
+        if (m_waterChunkRange.size() == 16 * 16 * 16 + 1) {
+            for (uint32_t c = 0; c < 16 * 16 * 16; ++c) {
+                uint32_t first = m_waterChunkRange[c];
+                uint32_t last = m_waterChunkRange[c + 1];
+                if (last <= first)
+                    continue;
+                if (cull && !chunkVisible(planes, c))
+                    continue;
+                m_cpuWaterDraws.push_back({ 4, last - first, 0, first });
+            }
+        }
+    }
+    if (m_cpuWaterDraws.empty() && m_waterStart > 0 &&
+        uint64_t(m_waterStart) < m_count) {
+        // legacy: unbucketed water draws in one call
+        // (record() still gates on VF_SPLAT_NOWATER)
+        m_cpuWaterDraws.push_back(
+            { 4, uint32_t(m_count) - m_waterStart, 0, m_waterStart });
+    }
+    m_waterDraws = uint32_t(m_cpuWaterDraws.size());
 }
 
 void SplatPass::record(VkCommandBuffer cmd, const RaymarchPush& push, VkExtent2D extent)
 {
     glm::vec4 params = m_params;
+    params.x = m_buried ? 1.0f : 0.0f;
     if (const char* e = getenv("VF_SPLAT_CORE"))
         params.y = float(atof(e));
     if (const char* e = getenv("VF_SPLAT_EXTENT"))
@@ -409,8 +527,13 @@ void SplatPass::record(VkCommandBuffer cmd, const RaymarchPush& push, VkExtent2D
     // 3 = plane-depth heat. VS skips backface collapse when != 0.
     if (const char* e = getenv("VF_SPLAT_DEBUG"))
         params.w = float(atof(e));
-    if (m_paramsBuf.mapped)
-        memcpy(m_paramsBuf.mapped, &params, sizeof(params));
+    if (const char* e = getenv("VF_SPLAT_RADIUS"))
+        m_radiusScale = glm::clamp(float(atof(e)), 0.5f, 2.0f);
+    if (m_paramsBuf.mapped) {
+        glm::vec4 words[2] = { params,
+                               glm::vec4(m_radiusScale, 0.0f, 0.0f, 0.0f) };
+        memcpy(m_paramsBuf.mapped, words, sizeof(words));
+    }
 
     VkRenderingAttachmentInfo colors[2] = {};
     colors[0].sType = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO;
@@ -436,6 +559,9 @@ void SplatPass::record(VkCommandBuffer cmd, const RaymarchPush& push, VkExtent2D
     ri.colorAttachmentCount = 2;
     ri.pColorAttachments = colors;
     ri.pDepthAttachment = &depth;
+    // stencil shares the depth image: same view/layout, cleared together
+    // (loadOp CLEAR above zeroes it; DONT_CARE store)
+    ri.pStencilAttachment = &depth;
     vkCmdBeginRendering(cmd, &ri);
 
     VkViewport vp { 0.0f, 0.0f, float(extent.width), float(extent.height), 0.0f, 1.0f };
@@ -453,16 +579,67 @@ void SplatPass::record(VkCommandBuffer cmd, const RaymarchPush& push, VkExtent2D
     vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, m_skyPipe);
     vkCmdDraw(cmd, 3, 1, 0, 0);
 
-    // opaque surfels, one draw per visible chunk (depth test + write with
-    // per-fragment plane depth: nearest disk wins, rims blend over it)
-    vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, m_opaquePipe);
-    drawChunks(cmd, push);
-
-    // water surfels: blended over, depth-tested, no depth write
-    if (!getenv("VF_SPLAT_NOWATER") && m_waterStart > 0 && uint64_t(m_waterStart) < m_count) {
-        vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, m_waterPipe);
-        vkCmdDraw(cmd, 4, uint32_t(m_count) - m_waterStart, 0, m_waterStart);
+    // opaque cores first (any order: every fragment opaque, depth settles
+    // the watertight surface and marks stencil), then rims split by stencil:
+    // interior rims lighten-only (MAX: soft edges that can never darken
+    // settled surface), silhouette rims alpha-blended over sky.
+    computeDraws(push);
+    const uint32_t nDraws = uint32_t(m_cpuDraws.size());
+    constexpr VkDeviceSize stride = sizeof(VkDrawIndirectCommand);
+    // VF_SPLAT_DIRECT=1: legacy one-vkCmdDraw-per-chunk path (A/B only).
+    const bool direct = getenv("VF_SPLAT_DIRECT") != nullptr;
+    auto drawOpaque = [&](VkPipeline pipe) {
+        vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pipe);
+        if (direct) {
+            for (const auto& d : m_cpuDraws)
+                vkCmdDraw(cmd, d.vertexCount, d.instanceCount, d.firstVertex,
+                          d.firstInstance);
+        } else {
+            vkCmdDrawIndirect(cmd, m_drawCmds[m_cmdSlot].buf, 0, nDraws, stride);
+        }
+    };
+    if (!direct && (nDraws > 0 || m_waterDraws > 0) &&
+        !getenv("VF_NO_INDIRECT_BARRIER")) {
+        // host-written commands -> indirect-command read
+        VkMemoryBarrier2 mb { VK_STRUCTURE_TYPE_MEMORY_BARRIER_2 };
+        mb.srcStageMask = VK_PIPELINE_STAGE_2_HOST_BIT;
+        mb.srcAccessMask = VK_ACCESS_2_HOST_WRITE_BIT;
+        mb.dstStageMask = VK_PIPELINE_STAGE_2_DRAW_INDIRECT_BIT;
+        mb.dstAccessMask = VK_ACCESS_2_INDIRECT_COMMAND_READ_BIT;
+        VkDependencyInfo di { VK_STRUCTURE_TYPE_DEPENDENCY_INFO };
+        di.memoryBarrierCount = 1;
+        di.pMemoryBarriers = &mb;
+        vkCmdPipelineBarrier2(cmd, &di);
+        auto* dst =
+            static_cast<VkDrawIndirectCommand*>(m_drawCmds[m_cmdSlot].mapped);
+        auto* wdst =
+            static_cast<VkDrawIndirectCommand*>(m_waterCmds[m_cmdSlot].mapped);
+        if (dst && m_cpuDraws.size() <= kMaxChunkDraws)
+            memcpy(dst, m_cpuDraws.data(), m_cpuDraws.size() * stride);
+        if (wdst && m_cpuWaterDraws.size() <= kMaxChunkDraws)
+            memcpy(wdst, m_cpuWaterDraws.data(), m_cpuWaterDraws.size() * stride);
     }
+    if (nDraws > 0) {
+        if (!getenv("VF_SPLAT_NORIM"))
+            drawOpaque(m_corePipe);
+        if (!getenv("VF_SPLAT_NOCORE")) {
+            drawOpaque(m_rimInPipe);
+            drawOpaque(m_rimOutPipe);
+        }
+    }
+    // water surfels: blended over, depth-tested, no depth write.
+    // Culled per chunk like opaque (off-screen lake chunks emit nothing).
+    if (!getenv("VF_SPLAT_NOWATER") && m_waterDraws > 0) {
+        vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, m_waterPipe);
+        if (direct) {
+            for (const auto& d : m_cpuWaterDraws)
+                vkCmdDraw(cmd, d.vertexCount, d.instanceCount, d.firstVertex,
+                          d.firstInstance);
+        } else {
+            vkCmdDrawIndirect(cmd, m_waterCmds[m_cmdSlot].buf, 0, m_waterDraws, stride);
+        }
+    }
+    m_cmdSlot = (m_cmdSlot + 1) % 3;
 
     vkCmdEndRendering(cmd);
 }
@@ -476,6 +653,12 @@ void SplatPass::destroy()
         vmaDestroyBuffer(m_ctx->allocator(), m_surfelBuf, m_surfelAlloc);
     if (m_paramsBuf.buf)
         destroyBuffer(*m_ctx, m_paramsBuf);
+    for (auto& c : m_drawCmds)
+        if (c.buf)
+            destroyBuffer(*m_ctx, c);
+    for (auto& c : m_waterCmds)
+        if (c.buf)
+            destroyBuffer(*m_ctx, c);
     destroyImage3D(*m_ctx, m_depth);
     if (m_pool)
         vkDestroyDescriptorPool(dev, m_pool, nullptr);
@@ -485,15 +668,19 @@ void SplatPass::destroy()
         vkDestroyPipelineLayout(dev, m_layout, nullptr);
     if (m_skyPipe)
         vkDestroyPipeline(dev, m_skyPipe, nullptr);
-    if (m_opaquePipe)
-        vkDestroyPipeline(dev, m_opaquePipe, nullptr);
+    if (m_corePipe)
+        vkDestroyPipeline(dev, m_corePipe, nullptr);
+    if (m_rimInPipe)
+        vkDestroyPipeline(dev, m_rimInPipe, nullptr);
+    if (m_rimOutPipe)
+        vkDestroyPipeline(dev, m_rimOutPipe, nullptr);
     if (m_waterPipe)
         vkDestroyPipeline(dev, m_waterPipe, nullptr);
     m_surfelBuf = VK_NULL_HANDLE;
     m_pool = VK_NULL_HANDLE;
     m_setLayout = VK_NULL_HANDLE;
     m_layout = VK_NULL_HANDLE;
-    m_skyPipe = m_opaquePipe = m_waterPipe = VK_NULL_HANDLE;
+    m_skyPipe = m_corePipe = m_rimInPipe = m_rimOutPipe = m_waterPipe = VK_NULL_HANDLE;
 }
 
 } // namespace vf

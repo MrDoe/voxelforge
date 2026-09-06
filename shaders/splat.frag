@@ -25,7 +25,8 @@ layout(push_constant) uniform PC {
 // y=core threshold, z=quad extent, w=spare. Persistently mapped UBO,
 // flushed by SplatPass::record like the SVO highlight feeds.
 layout(std140, set = 0, binding = 3) uniform SplatUBO {
-    vec4 uSplat;
+    vec4 uSplat;  // x=buried, y=coreD2, z=quad extent, w=debug mode
+    vec4 uSplat2; // x=radius scale (hotkeys [/]), yzw=spare
 } sp;
 
 layout(location = 0) in vec3 vCenter;
@@ -42,6 +43,12 @@ layout(location = 0) out vec4 oHdr;
 layout(location = 1) out vec4 oGPos;
 
 layout(constant_id = 0) const int SKY_MODE = 0;
+// Pass split for correct translucent compositing (opaque cores must settle
+// depth/color before rims blend, so they are separate draws):
+//   0 = full disk (water path, single pass),
+//   1 = core only  (d2 <= coreD2; writes depth),
+//   2 = rim only   (d2 > coreD2; depth-tested, no depth write, blends over).
+layout(constant_id = 1) const int PASS_MODE = 0;
 
 const float kWaterLevel = -0.9;
 
@@ -80,6 +87,10 @@ void main()
 
     vec3 rd = normalize(vView);
     vec3 n = normalize(vN);
+    // two-sided foliage + roof shells (VS never collapses mat 7/8 there):
+    // light the visible side so undersides close the silhouette
+    if (vFace < 0.0 && (abs(vMat.x - 8.0) < 0.5 || abs(vMat.x - 7.0) < 0.5))
+        n = -n;
     float denom = dot(rd, n);
     if (abs(denom) < 1e-6)
         discard;
@@ -104,6 +115,10 @@ void main()
     // rim blend against the surface/sky correctly. Far away the core
     // expands to the full disk (sub-pixel disks would otherwise wash out).
     float coreD2 = mix(sp.uSplat.y, 1.0, smoothstep(10.0, 40.0, t));
+    if (PASS_MODE == 1 && d2 > coreD2)
+        discard;
+    if (PASS_MODE == 2 && d2 <= coreD2)
+        discard;
     float alpha;
     if (d2 < coreD2) {
         alpha = 1.0;
@@ -118,12 +133,19 @@ void main()
     float aoBaked = vMat.w - (isWater ? 2.0 : 0.0);
     vec3 col;
     float hitType = 1.0;
+    // depth-tie preference for the shadowed side (set in the opaque branch):
+    // at same-surface overlaps the shadowed disk deterministically wins core
+    // ties, so borders can't shimmer between lit/dark winners with the view.
+    float winBias = 0.0;
     float dbg = sp.uSplat.w;
     if (dbg > 0.5) {
         // debug views (flat, no lighting)
-        if (dbg > 12.5) {
-            // first march sample s at t=0.05 towards the sun (expect ~0.4,
-            // red = buried origin, blue = far above field)
+        if (dbg > 13.5) {
+            // rim mask: white = rim fragment (d2 > core), grey = core.
+            // Shows the boundary web directly.
+            col = (d2 > coreD2) ? vec3(1.0) : vec3(0.35);
+            alpha = 1.0;
+        } else if (dbg > 12.5) {
             vec3 roDbg = q + normalize(vN) * 0.35;
             vec3 spDbg = roDbg + kSunDir * 0.05;
             float sDbg = spDbg.y - heightAt(spDbg.xz);
@@ -186,10 +208,24 @@ void main()
             alpha = 1.0;
         }
     } else if (isWater) {
+        // PLANAR water: intersect the global water plane, never the disk.
+        // Every water fragment on the plane then shades identically no
+        // matter which disk covered it (reflection/shadow marches restart
+        // from the same point), so adjacent splats are indistinguishable
+        // and no disk borders can form. Disks remain pure coverage stamps.
+        float tW = (kWaterLevel - ro.y) / rd.y;
+        if (!(tW > 0.0))
+            discard;
+        vec3 pw = ro + rd * tW;
         float wa = 1.0;
-        col = shadeWaterSplat(q, rd, ro, t, wa);
-        alpha *= wa;
+        col = shadeWaterSplat(pw, rd, ro, tW, wa);
+        // uniform absorption alpha (no kernel falloff): per-disk rim alpha
+        // would mottle overlapping translucent layers; the d2 discard above
+        // already clips coverage, TAA resolves the 1px shore step
+        alpha = wa;
         hitType = 2.0;
+        t = tW;
+        q = pw;
     } else {
         uint mId = uint(vMat.x + 0.5);
         vec3 alb = kPalette[clamp(mId, 0u, 16u)];
@@ -197,11 +233,21 @@ void main()
         // baked sun shadow + bent AO (built from the exact oracle); the
         // render-flag gates stay live so keys 1/2 keep working
         float shB = ((gRenderFlags & 2) != 0 && dot(n, kSunDir) > 0.02) ? vShade.w : 1.0;
+        // Deterministic overlap winner: shadowed side first, then higher
+        // material id — same pair always resolves the same way regardless of
+        // viewpoint, so adjacent surfels of different shadow/color can't
+        // shimmer between winners. Steps (5e-5 / 3e-6) dwarf float jitter
+        // (~1e-7) but stay mm-scale in t, far below real occlusions.
+        winBias = (1.0 - shB) * 5e-5 + float(mId) * 3e-6;
         float aoB = ((gRenderFlags & 1) != 0) ? clamp(aoBaked, 0.0, 1.0) : 1.0;
         vec3 bentB = normalize(vShade.xyz);
         col = shadeSurfel(q, rd, alb, rr, ro, n, bentB, shB, aoB, mId);
-        float fog = 1.0 - exp(-t * 0.0012);
-        col = mix(col, fogColor(rd, q), fog);
+        float fog = 1.0 - exp(-t * 0.0016);
+        vec3 fc = fogColor(rd, q);
+        // valley mist over the stream + damp hollows (reference river mood)
+        float mist = mistFactor(ro, q, t);
+        fc = mix(fc, fc * vec3(1.04, 0.99, 0.94) + vec3(0.02, 0.015, 0.01), mist);
+        col = mix(col, fc, clamp(fog + mist * 0.45, 0.0, 1.0));
     }
 
     // underwater volumetric when the camera itself is submerged
@@ -210,7 +256,21 @@ void main()
         col = mix(col, vec3(0.05, 0.14, 0.13), clamp(t * 0.8, 0.0, 0.85));
     }
 
-    gl_FragDepth = 1.0 - exp(-t * 0.02);
-    oHdr = vec4(col * alpha, alpha);
+    // Core depth bias: cores settle slightly toward the camera so same-surface
+    // overlap rims — whose plane depths equal the settled depth up to float
+    // jitter — deterministically FAIL the rim strict-LESS test instead of
+    // flickering on an LEQUAL coin-flip with subpixel camera moves. 5e-5 depth
+    // units is mm-scale in t (far below real silhouette gaps, far above
+    // jitter); water writes no depth so only cores are biased. winBias adds
+    // a shadow-side-first, higher-material-id-first preference so core ties
+    // between different shadow/color neighbours also resolve deterministically.
+    float fragDepth = 1.0 - exp(-t * 0.02);
+    if (PASS_MODE == 1)
+        fragDepth = max(fragDepth - (5e-5 + winBias), 0.0);
+    gl_FragDepth = fragDepth;
+    // rim passes (PASS_MODE 2, MAX blend) output straight color: MAX takes
+    // the brighter of src/dst, so premultiplying would dim rims into dark
+    // fringes. Core/water keep premultiplied (their alpha is 1 / absorptive).
+    oHdr = (PASS_MODE == 2) ? vec4(col, alpha) : vec4(col * alpha, alpha);
     oGPos = vec4(q, hitType);
 }

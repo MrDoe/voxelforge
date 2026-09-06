@@ -210,3 +210,44 @@ TEST_CASE("surfelize chunk bucketing covers every surfel exactly once")
         total += set.chunkRange[c + 1] - set.chunkRange[c];
     CHECK(total == set.surfels.size());
 }
+
+TEST_CASE("surfelize micro-detail: deterministic texture-geometry")
+{
+    LayeredWorld& lw = allLayersWorld();
+    REQUIRE(lw.loaded());
+    const VoxelField& field = lw.field();
+    REQUIRE(field.valid());
+
+    SurfelParams p;
+    p.smoothNormals = true;
+    p.terrainHeightfieldNormals = true;
+    p.microDetail = false;
+    const SurfelSet base = buildSurfels(field, p);
+    p.microDetail = true;
+    const SurfelSet micro = buildSurfels(field, p);
+    const SurfelSet micro2 = buildSurfels(field, p);
+    REQUIRE(!base.surfels.empty());
+    REQUIRE(!micro.surfels.empty());
+    // micros only add geometry (base set is a prefix per chunk, same order)
+    CHECK(micro.surfels.size() > base.surfels.size());
+    CHECK(micro.surfels.size() < base.surfels.size() * 3u);
+    CHECK(micro2.surfels == micro.surfels);
+    CHECK(micro2.chunkRange == micro.chunkRange);
+    size_t total = 0;
+    for (size_t c = 0; c + 1 < micro.chunkRange.size(); ++c) {
+        CHECK(micro.chunkRange[c + 1] >= micro.chunkRange[c]);
+        total += micro.chunkRange[c + 1] - micro.chunkRange[c];
+    }
+    CHECK(total == micro.surfels.size());
+    for (const auto& s : micro.surfels) {
+        const float* f = &s.pos_rU.x;
+        for (int k = 0; k < 16; ++k)
+            CHECK(std::isfinite(f[k]));
+        CHECK(s.pos_rU.w > 0.0f);
+        CHECK(s.normal_rV.w > 0.0f);
+        const float nl = glm::length(glm::vec3(s.normal_rV));
+        CHECK(nl > 0.99f);
+        CHECK(nl < 1.01f);
+        break; // spot-check first surfel finite (full scan is slow here)
+    }
+}

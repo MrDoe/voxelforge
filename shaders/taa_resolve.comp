@@ -3,6 +3,9 @@
 // History is reprojected using the world-position G-buffer (uGPos) and the
 // previous frame's camera, so camera motion no longer blends mismatched pixels.
 // History is in GENERAL layout, current is same offscreen image after raymarch (GENERAL).
+// Shadow-border hardening: absolute AABB floor (LDR history quantizes dark
+// shadows coarsely) + motion-adaptive clamp relaxation so a moving shadow
+// border keeps temporal smoothing instead of rejecting history every frame.
 
 layout(local_size_x = 8, local_size_y = 8, local_size_z = 1) in;
 
@@ -73,13 +76,20 @@ void main() {
         nmax = max(nmax, c);
         if (dx==0 && dy==0) m0 = c;
     }
-    // slight dilation to avoid over-clamping
-    vec3 pad = (nmax - nmin) * 0.08;
+    vec3 range = nmax - nmin;
+    // Absolute floor (~3 LDR codes): flat dark shadow interiors would otherwise
+    // quantize history rejection to zero smoothing, letting per-frame coverage
+    // pops through as flicker. The relative term keeps wide borders clampable.
+    vec3 pad = range * 0.12 + vec3(0.012);
     nmin -= pad; nmax += pad;
 
     // Reproject the previous frame's history onto this pixel using the world
     // position written by the raymarch pass and the previous camera basis.
     vec3 histCol = cur.rgb;
+    vec2 cuv = (vec2(pix) + 0.5) * pc.extentInv.xy;
+    vec2 puv = cuv;
+    float velLen = 0.0;
+    bool reprojOk = false;
     vec4 gp = imageLoad(uGPos, pix);
     if (gp.w > 0.5) { // not sky: has a stable world position
         vec3 v = gp.xyz - pc.prevCamPos.xyz;
@@ -87,9 +97,12 @@ void main() {
         if (z > 0.0) {
             float ndx = dot(v, pc.prevCamRight.xyz) / (z * pc.prevParams.x * pc.prevParams.y);
             float ndy = -dot(v, pc.prevCamUp.xyz)    / (z * pc.prevParams.x);
-            vec2 puv = vec2(ndx * 0.5 + 0.5, ndy * 0.5 + 0.5);
-            if (all(greaterThanEqual(puv, vec2(0.0))) && all(lessThan(puv, vec2(1.0))))
+            puv = vec2(ndx * 0.5 + 0.5, ndy * 0.5 + 0.5);
+            if (all(greaterThanEqual(puv, vec2(0.0))) && all(lessThan(puv, vec2(1.0)))) {
                 histCol = sampleHist(puv);
+                reprojOk = true;
+                velLen = length((puv - cuv) * vec2(sz));
+            }
         }
     }
 
@@ -97,7 +110,31 @@ void main() {
     vec3 clamped = clamp(histCol, nmin, nmax);
     clamped = clipAABB(nmin, nmax, m0, clamped);
 
-    float alpha = pc.extentInv.z; // blend factor for history (0.92)
-    vec3 outCol = mix(cur.rgb, clamped, alpha);
+    float alpha = pc.extentInv.z; // base blend factor for history (0.92)
+    vec3 histUsed = clamped;
+    if (reprojOk) {
+        // Screen-edge fade: bilinear history taps clamp at the frame border,
+        // so reprojected history near the edge smears - trust current instead.
+        vec2 edgePx = min(puv * vec2(sz), vec2(sz) - puv * vec2(sz));
+        float edgeFade = smoothstep(0.0, 1.5, min(edgePx.x, edgePx.y));
+        // Motion-adaptive clamp relaxation: when the camera moves a shadow
+        // border across the screen, the 3x3 neighbourhood can be uniform while
+        // the correctly-reprojected history holds the other side of the
+        // border. A hard clamp then rejects history every frame, i.e. zero
+        // temporal smoothing exactly where baked-surfel coverage pops need it
+        // most (= shadow-border flicker). The scene is static, so reprojected
+        // history is exact except at disocclusions - relax the clamp in
+        // uniform neighbourhoods under motion instead of rejecting it.
+        float lrange = max(range.r, max(range.g, range.b));
+        float uniformW = 1.0 - smoothstep(0.03, 0.20, lrange);
+        float motionW = clamp((velLen - 0.5) / 8.0, 0.0, 1.0);
+        float relaxW = motionW * uniformW * 0.6 * edgeFade;
+        histUsed = mix(clamped, clamp(histCol, vec3(0.0), vec3(1.0)), relaxW);
+        // Bound ghosting trails during fast motion + near screen edges.
+        alpha = mix(alpha, 0.55, clamp(velLen / 24.0, 0.0, 1.0));
+        alpha *= mix(0.15, 1.0, edgeFade);
+    }
+
+    vec3 outCol = mix(cur.rgb, histUsed, alpha);
     imageStore(uOut, pix, vec4(outCol, cur.a));
 }

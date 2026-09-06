@@ -53,7 +53,7 @@
 ## Run
 - `./build/voxelforge` — hero cam `-16,6.5,-14 → 6.5,0.8,11`, sun `34°/238°`.
 - Keys: `WASD/QE` move, `RMB+mouse` look, wheel speed, `Ctrl+LMB` pick anchor,
-  `F` toggles splats/SVO renderer, `ESC` quit.
+  `F` toggles splats/SVO renderer, `N` toggles TAA, `[`/`]` shrink/grow splat disks, `ESC` quit.
 - Headless: `--selftest`, `--smoke N`, `--shot out.ppm --cam …`,
   `--probe X Y Z`, `--sun <elev> <azim>`, `--animtime <s>`, `--width/--height`,
   `--mode splat|svo` (default `splat`; SVO is the pixel reference).
@@ -123,8 +123,13 @@
   `shadeSurfel`/`shadeWaterSplat`).
 - Surfel layout (64 B, 4×vec4, std430): `pos_rU`, `normal_rV`, `bent_sh`
   (bent normal + baked shadow), `mat_ao` (mat/refl/rough/AO+2·water). Rasterized
-  as instanced quads; fragment does ray/disk intersect + compact kernel with
-  opaque core (`coreD2=0.9`) + per-fragment plane depth (`gl_FragDepth`).
+  as instanced quads drawn back-to-front per chunk; fragment does ray/disk
+  intersect + opaque core (`coreD2=0.55`) + true Gaussian rim, with
+  per-fragment plane depth (`gl_FragDepth`). Core pass settles depth, rim
+  pass blends without writing it — soft edges, no background leaks.
+  VS projects with honest `w = vz` (never clamp: it smears behind-camera
+  corners into giant blobs); backfaces collapse except when a per-frame CPU
+  probe finds the camera buried in solid (`setBuried` → two-sided shells).
 - Shadows for splats are BAKED per-surfel on the CPU (`shadowMarch` over
   `VoxelField::sample`, binary like SVO `softShadow`); the GPU shadow march
   (`softShadowSplat`) only serves the water path. `objDist` returns METERS
