@@ -18,6 +18,14 @@ layout(set = 0, binding = 0) readonly buffer Surfels {
     Surfel uSurfels[];
 };
 
+// compaction indirection: slot -> surfel index. Identity-filled at upload;
+// the GPU cull pre-pass (splat_cull.comp) rewrites each chunk's range with
+// only the surviving surfel indices, so the indirect draws consume fewer
+// instances for the same image.
+layout(set = 0, binding = 4) readonly buffer Compact {
+    uint uCompact[];
+};
+
 layout(push_constant) uniform PC {
     vec4 camPos;
     vec4 camRight;
@@ -62,7 +70,7 @@ void main()
         gl_Position = vec4(ndc, 0.5, 1.0);
         return;
     }
-    Surfel s = uSurfels[gl_InstanceIndex];
+    Surfel s = uSurfels[uCompact[gl_InstanceIndex]];
     vec3 c = s.pos_rU.xyz;
     vec3 n = normalize(s.normal_rV.xyz);
     // footprints are isotropic (rU == rV), so any orthonormal in-plane frame

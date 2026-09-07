@@ -7,6 +7,7 @@
 #include <cmath>
 #include <cstring>
 #include <thread>
+#include <unordered_map>
 #include <vector>
 
 namespace vf::voxel {
@@ -271,6 +272,7 @@ SurfelSet buildSurfels(const VoxelField& field, const SurfelParams& params) {
 
     std::vector<glm::vec3> rawNormals(n);
     std::vector<Surfel> surfels(n);
+    std::vector<uint8_t> isObj(n); // pass-2 snapshot: object-field winners
 
     // Pass 1: raw mean normals (sharded). Smoothing lookups below use
     // binary search over the sorted keys (lock-free, no hash build).
@@ -390,6 +392,7 @@ SurfelSet buildSurfels(const VoxelField& field, const SurfelParams& params) {
                     sl.bent_sh = glm::vec4(bent, shadow);
                     sl.mat_ao = glm::vec4(float(mat), refl, rough, ao);
                     surfels[i] = sl;
+                    isObj[i] = s.obj ? 1 : 0;
                     if (s.obj)
                         ++locObject;
                     else
@@ -484,6 +487,144 @@ SurfelSet buildSurfels(const VoxelField& field, const SurfelParams& params) {
     }
     for (int c = 1; c <= kSurfGridN * kSurfGridN * kSurfGridN; ++c)
         set.chunkRange[c] += set.chunkRange[c - 1];
+
+    // ---- LOD rings: merged-terrain surfels per chunk (terrain cells only,
+    // object-field winners keep their own base surfels). Blocks of
+    // 2x2x2 (LOD1) / 4x4x4 (LOD2) lattice cells merge the already-shaded
+    // base surfels: position/normal/bent/shadow/AO are area-weighted means
+    // (cells are equal), material is the majority. The merged radius covers
+    // the union of member footprints (half of the member-centre AABB
+    // diagonal + mean member radius) and keeps splat.frag's wedge-gap
+    // invariant ((blockHalfDiag/r)^2 < coreD2; baked against the smallest
+    // coreD2 any LOD1 band can see, 0.55 => cover base 0.20 m). LOD2 chunks
+    // are far enough that coreD2 = 1.0, so only footprint coverage applies.
+    // Deterministic: members accumulate in base-array order, blocks emit in
+    // sorted block-key order.
+    std::vector<std::vector<Surfel>> lod1ByChunk, lod2ByChunk;
+    if (params.lodRings && n > 0) {
+        auto buildRing = [&](int shift, std::vector<std::vector<Surfel>>& byChunk) {
+            const int blocksPerAxis = 64 >> shift; // 32 (2x) / 16 (4x)
+            const float coverBase = shift == 1 ? 0.20f : 0.30f;
+            struct LodAcc {
+                glm::vec3 posSum { 0.0f };
+                glm::vec3 posMin { 0.0f, 0.0f, 0.0f };
+                glm::vec3 posMax { 0.0f, 0.0f, 0.0f };
+                glm::vec3 nSum { 0.0f };
+                glm::vec3 bentSum { 0.0f };
+                int matCounts[17] {};
+                float shSum = 0.0f, aoSum = 0.0f, rSum = 0.0f;
+                int count = 0;
+            };
+            std::atomic<int> next{ 0 };
+            unsigned hc = std::max(1u, std::thread::hardware_concurrency());
+            std::vector<std::thread> threads;
+            for (unsigned t = 0; t < hc; ++t)
+                threads.emplace_back([&] {
+                    std::unordered_map<uint32_t, LodAcc> acc;
+                    for (;;) {
+                        const uint32_t c = next.fetch_add(1);
+                        if (c >= kChunks)
+                            return;
+                        acc.clear();
+                        const uint32_t b0 = set.chunkRange[c];
+                        const uint32_t b1 = set.chunkRange[c + 1];
+                        for (uint32_t i = b0; i < b1; ++i) {
+                            if (isObj[order[i]]) {
+                                // Objects ride along UNMERGED: the LOD run
+                                // replaces the whole chunk draw at draw
+                                // time, so dropping them here would make
+                                // trees vanish in LOD bands. Terrain-only
+                                // merging keeps every object cell visible.
+                                byChunk[c].push_back(surfels[i]);
+                                continue;
+                            }
+                            int x, y, z;
+                            unpackKey(keys[order[i]], x, y, z);
+                            const uint32_t bid =
+                                (((x & 63) >> shift) * blocksPerAxis +
+                                 ((y & 63) >> shift)) * blocksPerAxis +
+                                ((z & 63) >> shift);
+                            auto it = acc.find(bid);
+                            if (it == acc.end()) {
+                                LodAcc a;
+                                const glm::vec3 p(surfels[i].pos_rU);
+                                a.posSum = p;
+                                a.posMin = a.posMax = p;
+                                a.nSum = glm::vec3(surfels[i].normal_rV);
+                                a.bentSum = glm::vec3(surfels[i].bent_sh);
+                                a.matCounts[int(surfels[i].mat_ao.x + 0.5f)] = 1;
+                                a.shSum = surfels[i].bent_sh.w;
+                                a.aoSum = surfels[i].mat_ao.w;
+                                a.rSum = surfels[i].pos_rU.w;
+                                a.count = 1;
+                                acc.emplace(bid, a);
+                            } else {
+                                LodAcc& a = it->second;
+                                const glm::vec3 p(surfels[i].pos_rU);
+                                a.posSum += p;
+                                a.posMin = glm::min(a.posMin, p);
+                                a.posMax = glm::max(a.posMax, p);
+                                a.nSum += glm::vec3(surfels[i].normal_rV);
+                                a.bentSum += glm::vec3(surfels[i].bent_sh);
+                                a.matCounts[int(surfels[i].mat_ao.x + 0.5f)]++;
+                                a.shSum += surfels[i].bent_sh.w;
+                                a.aoSum += surfels[i].mat_ao.w;
+                                a.rSum += surfels[i].pos_rU.w;
+                                ++a.count;
+                            }
+                        }
+                        if (acc.empty())
+                            continue;
+                        // deterministic emission: sorted block ids
+                        std::vector<uint32_t> bids;
+                        bids.reserve(acc.size());
+                        for (auto& e : acc)
+                            bids.push_back(e.first);
+                        std::sort(bids.begin(), bids.end());
+                        for (uint32_t bid : bids) {
+                            const LodAcc& a = acc[bid];
+                            const float fc = float(a.count);
+                            const glm::vec3 pos = a.posSum / fc;
+                            const glm::vec3 nn = safeNormalize(a.nSum);
+                            int mat = 0, best = 0;
+                            for (int m = 0; m <= 16; ++m)
+                                if (a.matCounts[m] > best) {
+                                    best = a.matCounts[m];
+                                    mat = m;
+                                }
+                            const float meanR = a.rSum / fc;
+                            const float spread =
+                                0.5f * glm::length(a.posMax - a.posMin);
+                            const float r = glm::min(
+                                0.5f, std::max(coverBase, spread + meanR));
+                            Surfel sl;
+                            sl.pos_rU = glm::vec4(pos, r);
+                            sl.normal_rV = glm::vec4(nn, r);
+                            sl.bent_sh = glm::vec4(
+                                safeNormalize(a.bentSum), a.shSum / fc);
+                            sl.mat_ao =
+                                glm::vec4(float(mat), kMaterialReflection[mat].x,
+                                          kMaterialReflection[mat].y,
+                                          glm::clamp(a.aoSum / fc, 0.0f, 1.0f));
+                            byChunk[c].push_back(sl);
+                        }
+                    }
+                });
+            for (auto& th : threads)
+                th.join();
+        };
+        lod1ByChunk.resize(kChunks);
+        buildRing(1, lod1ByChunk);
+        lod2ByChunk.resize(kChunks);
+        buildRing(2, lod2ByChunk);
+        size_t l1 = 0, l2 = 0;
+        for (uint32_t c = 0; c < kChunks; ++c) {
+            l1 += lod1ByChunk[c].size();
+            l2 += lod2ByChunk[c].size();
+        }
+        set.lod1Count = l1;
+        set.lod2Count = l2;
+    }
 
     // ---- micro-detail: texture texels become real micro-surfel geometry ----
     // Deterministic children of the sorted base set (same material, inherited
@@ -617,15 +758,38 @@ SurfelSet buildSurfels(const VoxelField& field, const SurfelParams& params) {
         }
     }
 
+    // ---- append LOD rings after the base+micro stream (absolute offsets) --
+    if (!lod1ByChunk.empty()) {
+        const uint32_t l1Start = uint32_t(surfels.size());
+        set.lod1Range.assign(kChunks + 1, 0);
+        for (uint32_t c = 0; c < kChunks; ++c) {
+            set.lod1Range[c] = uint32_t(surfels.size());
+            surfels.insert(surfels.end(), lod1ByChunk[c].begin(),
+                           lod1ByChunk[c].end());
+        }
+        set.lod1Range[kChunks] = uint32_t(surfels.size());
+        (void)l1Start;
+    }
+    if (!lod2ByChunk.empty()) {
+        set.lod2Range.assign(kChunks + 1, 0);
+        for (uint32_t c = 0; c < kChunks; ++c) {
+            set.lod2Range[c] = uint32_t(surfels.size());
+            surfels.insert(surfels.end(), lod2ByChunk[c].begin(),
+                           lod2ByChunk[c].end());
+        }
+        set.lod2Range[kChunks] = uint32_t(surfels.size());
+    }
+
     set.surfels = std::move(surfels);
     const auto t1 = std::chrono::steady_clock::now();
     auto ms = [](const auto& a, const auto& b) {
         return std::chrono::duration_cast<std::chrono::milliseconds>(b - a).count();
     };
     set.buildMs = float(ms(t0, t1));
-    spdlog::info("surfelize: {} surfels ({} terrain, {} object), {} ms "
+    spdlog::info("surfelize: {} surfels ({} terrain, {} object, lod1 {} lod2 {}), {} ms "
                  "(enum+surface {} ms, shade+bucket {} ms)",
-                 set.surfels.size(), set.terrainCount, set.objectCount, set.buildMs, ms(t0, tEnum),
+                 set.surfels.size(), set.terrainCount, set.objectCount,
+                 set.lod1Count, set.lod2Count, set.buildMs, ms(t0, tEnum),
                  ms(tEnum, t1));
     return set;
 }

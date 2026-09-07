@@ -1,0 +1,132 @@
+#version 460
+// Voxelforge GPU-driven splat cull (compute pre-pass).
+//
+// One workgroup per opaque draw entry (chunk run, far->near sorted). Each
+// workgroup compacts the entry's surfels: keeps only quads that can emit
+// fragments (VS collapse rule for opaque backfaces + behind-camera + chunk
+// frustum spheres), writing the surviving surfel indices into uCompact at
+// the entry's own slot range in ORDER-PRESERVING sequence (stripe-wise
+// shared-memory prefix scan, no atomics: two builds and every frame
+// produce identical raster order, so rim blending stays deterministic).
+//
+// The workgroup leader then writes the draw entry's VkDrawIndirectCommand
+// into uCmds with the compacted instanceCount; the graphics draws run via
+// vkCmdDrawIndirectCount, reading those counts from the command buffer
+// itself (offset 8 = instanceCount word, stride 16).
+//
+// Exactness: culled quads produce zero fragments today (zero-area collapse,
+// behind-camera clip, chunk AABB frustum cull is a superset), so the
+// rendered image is unchanged - only vertex/clipper work disappears.
+
+struct Surfel {
+    vec4 pos_rU;    // xyz = centre (m), w = radiusU (m)
+    vec4 normal_rV; // xyz = geometric normal, w = radiusV (m)
+    vec4 bent_sh;
+    vec4 mat_ao;
+};
+
+layout(set = 0, binding = 0) readonly buffer Surfels { Surfel uSurfels[]; };
+// compaction slots: surviving surfel index per draw slot (written by this
+// dispatch; the VS reads it for indirection)
+layout(set = 0, binding = 4) buffer Compact { uint uCompact[]; };
+// per-entry selection: x = firstInstance (surfel index), y = count
+layout(set = 0, binding = 5) readonly buffer Sel { uvec4 uSel[]; };
+// draw command stream: 4 x uint32 per entry (same order as uSel)
+layout(set = 0, binding = 6) buffer Cmds { uint uCmds[]; };
+// per-frame frustum planes (inward normals, d already folded) + camera
+layout(std140, set = 0, binding = 7) readonly uniform FrameP {
+    vec4 uPlanes[6];
+} fp;
+
+layout(push_constant) uniform PC {
+    vec4 camPos;
+    vec4 camRight;
+    vec4 camUp;
+    vec4 camFwd;
+    vec4 a; // tanHalfFov, aspect, extentX, extentY
+    vec4 b; // worldSize, voxelSize, gridN, frameIdx
+    vec4 sunDir;
+    vec4 misc;
+} pc;
+
+// shared kernel-tuning UBO: x=buried, y=coreD2, z=quad extent, w=debug mode;
+// uSplat2.x = radius scale (mirrors splat.vert)
+layout(std140, set = 0, binding = 3) uniform SplatUBO {
+    vec4 uSplat;
+    vec4 uSplat2;
+} sp;
+
+layout(local_size_x = 128) in;
+shared uint sKeep[128];
+shared uint sBase;
+
+void main()
+{
+    const uint e = gl_WorkGroupID.x;
+    const uvec4 sel = uSel[e];
+    const uint first = sel.x;
+    const uint count = sel.y;
+    const uint li = gl_LocalInvocationID.x;
+    const vec3 camPos = pc.camPos.xyz;
+    const float ext = max(sp.uSplat.z, 1.0);
+    const float rScale = clamp(sp.uSplat2.x, 0.5, 2.0);
+    const bool noCollapse = sp.uSplat.x > 0.5 || sp.uSplat.w > 0.5; // buried | debug
+    if (li == 0)
+        sBase = 0u;
+    barrier();
+
+    for (uint b = 0u; b < count; b += 128u) {
+        const uint i = b + li;
+        bool keep = false;
+        if (i < count) {
+            Surfel s = uSurfels[first + i];
+            const vec3 c = s.pos_rU.xyz;
+            const vec3 n = normalize(s.normal_rV.xyz);
+            // identical collapse rule to splat.vert: opaque backfaces fold
+            // to zero-area quads (foliage mat 8 and roof shells mat 7 stay)
+            const float facing = dot(n, camPos - c);
+            const float mat = s.mat_ao.x;
+            const bool thinShell = abs(mat - 8.0) < 0.5 || abs(mat - 7.0) < 0.5;
+            const bool collapse = facing < 0.0 && !noCollapse && !thinShell;
+            if (!collapse) {
+                // conservative sphere frustum test (radii grow with the
+                // runtime scale like the VS quads do)
+                const float rU = max(s.pos_rU.w, 1e-4) * rScale;
+                const float rV = max(s.normal_rV.w, 1e-4) * rScale;
+                const float maxR = ext * sqrt(rU * rU + rV * rV);
+                keep = true;
+                for (int p = 0; p < 6; ++p) {
+                    if (dot(fp.uPlanes[p].xyz, c) + fp.uPlanes[p].w + maxR < 0.0) {
+                        keep = false;
+                        break;
+                    }
+                }
+            }
+        }
+        sKeep[li] = keep ? 1u : 0u;
+        barrier();
+        // Kogge-Stone inclusive scan of sKeep (deterministic, 7 steps)
+        for (uint o = 1u; o < 128u; o <<= 1u) {
+            uint v = sKeep[li];
+            if (li >= o)
+                v += sKeep[li - o];
+            barrier();
+            sKeep[li] = v;
+            barrier();
+        }
+        // exclusive index for kept entries: inclusive scan - 1
+        const uint slot = keep ? sKeep[li] - 1u : 0u;
+        if (keep)
+            uCompact[first + sBase + slot] = first + i;
+        barrier();
+        if (li == 0u)
+            sBase += sKeep[127]; // inclusive total of the stripe
+        barrier();
+    }
+    if (li == 0u) {
+        uCmds[e * 4u + 0u] = 4u;
+        uCmds[e * 4u + 1u] = sBase;
+        uCmds[e * 4u + 2u] = 0u;
+        uCmds[e * 4u + 3u] = first;
+    }
+}

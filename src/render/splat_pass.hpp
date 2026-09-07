@@ -31,10 +31,16 @@ public:
     // microStart optionally splits each chunk into [base, micro) (same
     // GRID_N^3 + 1 layout, absolute offsets); empty = no split. Distant
     // chunks skip their sub-pixel micro range (VF_MICRO_DIST, default 40 m).
+    // lod1Range/lod2Range hold the merged-terrain LOD ring runs per chunk
+    // (same layout); draw-time selection picks a ring by chunk distance
+    // (VF_LOD1/VF_LOD2, default 20/60 m) with base-range fallback for
+    // object-only chunks.
     void setSurfels(const void* data, size_t bytes, size_t count,
                     const std::vector<uint32_t>& chunkRange, uint32_t waterStart,
                     const std::vector<uint32_t>& waterChunkRange = {},
-                    const std::vector<uint32_t>& microStart = {});
+                    const std::vector<uint32_t>& microStart = {},
+                    const std::vector<uint32_t>& lod1Range = {},
+                    const std::vector<uint32_t>& lod2Range = {});
     // Depth target follows the offscreen extent (D32_SFLOAT).
     bool recreateDepth(uint32_t w, uint32_t h);
     void updateDescriptors(VkImageView hdrView, VkImageView gposView,
@@ -66,13 +72,20 @@ public:
 
 private:
     bool createPipelines(VkFormat hdrFormat);
+    bool createCullPipeline();
     void frustumPlanes(const RaymarchPush& push, glm::vec4 planes[6]) const;
     bool chunkVisible(const glm::vec4 planes[6], uint32_t chunk) const;
     // one instanced-quad draw per visible opaque chunk (shared by the depth
     // prepass and the shading pass)
     // Computes the frustum-culled, back-to-front sorted opaque chunk draws
     // plus the culled water-chunk draws into m_cpuDraws/m_cpuWaterDraws.
-    // record() then executes them either as 4 indirect draws (default) or,
+    // Chunks whose AABB nearest point lies beyond the rim fade distance
+    // (m_rimDist, default 42 m) emit core-only commands: splat.frag ramps
+    // coreD2 -> 1.0 by 40 m, so those rim fragments would all discard.
+    // record() executes the core pipe over all draws and the two rim pipes
+    // over the contiguous near tail [m_rimStart, end) (sort order is
+    // far->near, so the near tail is one contiguous indirect range).
+    // record() then executes them either as 3 indirect draws (default) or,
     // with VF_SPLAT_DIRECT=1, as one vkCmdDraw per chunk (A/B benchmark).
     void computeDraws(const RaymarchPush& push);
 
@@ -86,6 +99,17 @@ private:
     VkPipeline m_rimInPipe = VK_NULL_HANDLE;
     VkPipeline m_rimOutPipe = VK_NULL_HANDLE;
     VkPipeline m_waterPipe = VK_NULL_HANDLE;
+    // GPU-driven cull pre-pass (splat_cull.comp): compacts each draw
+    // entry's surfels to fragment-producing ones and rewrites the entry's
+    // instanceCount in the draw command stream; the graphics passes draw
+    // the compacted stream via plain indirect draws. VF_NO_GPU_CULL=1
+    // falls back to CPU counts (identity compaction -> identical image;
+    // both paths are visually exact).
+    VkPipeline m_cullPipe = VK_NULL_HANDLE;
+    Buffer m_compactBuf {};  // slot -> surfel index (identity at upload)
+    size_t m_compactBytes = 0;
+    Buffer m_selBufs[3] {};  // per-frame selection entries {first, count, 0, 0}
+    Buffer m_planesBuf {};   // per-frame frustum planes (inward normals)
 
     VkBuffer m_surfelBuf = VK_NULL_HANDLE;
     VmaAllocation m_surfelAlloc = VK_NULL_HANDLE;
@@ -105,6 +129,15 @@ private:
     // copied into the indirect buffers above).
     std::vector<VkDrawIndirectCommand> m_cpuDraws;
     std::vector<VkDrawIndirectCommand> m_cpuWaterDraws;
+    // First index in m_cpuDraws whose chunk still carries rim geometry
+    // (nearest-point distance <= m_rimDist). The far->near sort keeps all
+    // core-only chunks in the contiguous prefix; rim passes draw
+    // [m_rimStart, nDraws) only. == m_cpuDraws.size() when nothing has rim.
+    uint32_t m_rimStart = 0;
+    // Rim fade distance (m): chunks whose AABB is entirely beyond it draw
+    // core only. 42 m > the 40 m coreD2->1.0 ramp end in splat.frag, so the
+    // skip is exact. 0 disables the split (legacy: all chunks keep rims).
+    float m_rimDist = 42.0f;
     glm::vec4 m_params { 0.0f, 0.55f, 1.02f, 0.0f };
     float m_radiusScale = 1.0f;
     bool m_buried = false;
@@ -114,6 +147,8 @@ private:
     std::vector<uint32_t> m_chunkRange;
     std::vector<uint32_t> m_waterChunkRange; // GRID_N^3 + 1 absolute offsets, or empty
     std::vector<uint32_t> m_microStart;      // per-chunk base/micro split, or empty
+    std::vector<uint32_t> m_lod1Range;       // merged-terrain LOD rings, or empty
+    std::vector<uint32_t> m_lod2Range;
     VkImageView m_hdrView = VK_NULL_HANDLE;
     VkImageView m_gposView = VK_NULL_HANDLE;
     VkImageView m_heightView = VK_NULL_HANDLE;

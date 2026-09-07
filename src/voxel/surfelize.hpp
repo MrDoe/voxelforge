@@ -40,6 +40,12 @@ struct SurfelParams {
     // per-surfel at build time, so a sun change needs a rebuild (the app
     // passes its --sun direction through here on every reload).
     glm::vec3 sunDir { 0.449f, 0.8338f, 0.3207f };
+    // LOD rings: extra merged-terrain surfel arrays per chunk (2x2x2 and
+    // 4x4x4 cell blocks, baked CPU-side from the already-shaded base set).
+    // The renderer picks a ring per chunk by chunk-AABB distance, cutting
+    // far instance counts 4x / 16x. Default OFF (unit tests pin exact base
+    // counts); the app enables it.
+    bool lodRings = false;
 };
 
 struct Surfel {
@@ -67,6 +73,13 @@ struct SurfelSet {
     // Empty when microDetail is off (no split). Monotonically
     // non-decreasing, always within [chunkRange[c], chunkRange[c+1]].
     std::vector<uint32_t> microStart; // GRID_N^3 + 1, or empty
+    // LOD rings (only when params.lodRings): GRID_N^3 + 1 absolute offsets
+    // into surfels for merged-terrain surfel runs per chunk (same layout as
+    // chunkRange; equal entries = no merged surfel in that chunk). lod1 =
+    // 2x2x2 cell merges, lod2 = 4x4x4. Emitted after the base+micro stream;
+    // object-only chunks keep empty ranges (draw-time fallback to base).
+    std::vector<uint32_t> lod1Range, lod2Range;
+    size_t lod1Count = 0, lod2Count = 0;
     float buildMs = 0.0f;
     size_t terrainCount = 0;
     size_t objectCount = 0;

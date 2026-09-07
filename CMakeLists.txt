@@ -154,6 +154,7 @@ set(VF_SHADER_SRCS ${CMAKE_CURRENT_SOURCE_DIR}/shaders/svo_raymarch.comp
     ${CMAKE_CURRENT_SOURCE_DIR}/shaders/taa_resolve.comp
     ${CMAKE_CURRENT_SOURCE_DIR}/shaders/splat.vert
     ${CMAKE_CURRENT_SOURCE_DIR}/shaders/splat.frag
+    ${CMAKE_CURRENT_SOURCE_DIR}/shaders/splat_cull.comp
     ${CMAKE_CURRENT_SOURCE_DIR}/shaders/ssr.comp
     ${CMAKE_CURRENT_SOURCE_DIR}/shaders/ssao.comp
     ${CMAKE_CURRENT_SOURCE_DIR}/shaders/volumetric_fog.comp

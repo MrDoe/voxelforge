@@ -111,6 +111,14 @@ struct FrameSync {
     VkCommandBuffer cmd = VK_NULL_HANDLE;
 };
 
+// GPU timestamp profiling: kProfMarks timestamps per frame slot; the
+// consecutive deltas give per-pass GPU ms (geo = splat raster | SVO march,
+// post, fx = photorealism chain, taa, tail = blit+UI+transitions). Slot
+// results are read right after that slot's fence wait (its submission from
+// kMaxFramesInFlight frames ago is then complete) and reset inside the next
+// recording of the same slot.
+constexpr uint32_t kProfMarks = 6;
+
 class App {
 public:
     int run(const Args& args);
@@ -131,6 +139,31 @@ private:
     void rescanWorldLayers();
     void applyWorldReload();
     void rebuildSurfels(); // (re)build the surfel set from the live field
+    // GPU timestamp profiling (no-op until m_profPool exists)
+    void accumulateProf(uint32_t slot, uint64_t frameIdx)
+    {
+        if (m_profPool == VK_NULL_HANDLE || frameIdx < kMaxFramesInFlight)
+            return;
+        uint64_t t[kProfMarks] {};
+        if (vkGetQueryPoolResults(m_ctx.device(), m_profPool, slot * kProfMarks,
+                                  kProfMarks, sizeof(t), t, sizeof(uint64_t),
+                                  VK_QUERY_RESULT_64_BIT) != VK_SUCCESS)
+            return;
+        auto ms = [&](uint32_t a, uint32_t b) {
+            return double(t[b] - t[a]) * m_profPeriodNs * 1e-6;
+        };
+        constexpr double w = 0.05;
+        m_profAvg[0] += (ms(0, 1) - m_profAvg[0]) * w; // splat | svo
+        m_profAvg[1] += (ms(1, 2) - m_profAvg[1]) * w; // post
+        m_profAvg[2] += (ms(2, 3) - m_profAvg[2]) * w; // photorealism fx
+        m_profAvg[3] += (ms(3, 4) - m_profAvg[3]) * w; // taa
+        m_profAvg[4] += (ms(4, 5) - m_profAvg[4]) * w; // blit + UI + transitions
+        if (getenv("VF_TRACE") && frameIdx % 120 == 0)
+            spdlog::info("gpu[{}]: geo {:.2f} post {:.2f} fx {:.2f} taa {:.2f} "
+                         "tail {:.2f} ms",
+                         frameIdx, m_profAvg[0], m_profAvg[1],
+                         m_profAvg[2], m_profAvg[3], m_profAvg[4]);
+    }
     // Per-frame CPU probe: camera embedded in solid => two-sided shells.
     void updateBuriedProbe()
     {
@@ -192,6 +225,10 @@ private:
     double m_avgMs = 16.7f;
     float m_minMs = 1e9f, m_maxMs = 0.0f;
     uint64_t m_frameIdx = 0;
+    // GPU timestamp profiling state (see kProfMarks)
+    VkQueryPool m_profPool = VK_NULL_HANDLE;
+    double m_profPeriodNs = 1.0;
+    double m_profAvg[5] = { 0, 0, 0, 0, 0 };
     bool m_showControls = true;
     VkSampler m_uiSampler = VK_NULL_HANDLE;
     ImTextureID m_sceneTexId = 0;
@@ -417,6 +454,18 @@ bool App::initVulkan()
         ai.commandBufferCount = 1;
         vkAllocateCommandBuffers(m_ctx.device(), &ai, &f.cmd);
     }
+
+    // GPU timestamp profiling pool: kProfMarks per frame slot
+    VkPhysicalDeviceProperties pp {};
+    vkGetPhysicalDeviceProperties(m_ctx.physicalDevice(), &pp);
+    m_profPeriodNs = double(pp.limits.timestampPeriod);
+    VkQueryPoolCreateInfo qpi { VK_STRUCTURE_TYPE_QUERY_POOL_CREATE_INFO };
+    qpi.queryType = VK_QUERY_TYPE_TIMESTAMP;
+    qpi.queryCount = kProfMarks * kMaxFramesInFlight;
+    if (vkCreateQueryPool(m_ctx.device(), &qpi, nullptr, &m_profPool) != VK_SUCCESS) {
+        m_profPool = VK_NULL_HANDLE; // profiling is best-effort, never fatal
+        spdlog::warn("timestamp query pool unavailable - GPU profiling disabled");
+    }
     return true;
 }
 
@@ -572,6 +621,11 @@ void App::rebuildSurfels()
     sp.microDetail = true;
     if (const char* e = getenv("VF_MICRO"))
         sp.microDetail = atoi(e) != 0;
+    // LOD rings: baked 2x2x2 / 4x4x4 merged-terrain surfel runs per chunk;
+    // the renderer picks a ring per chunk by distance (VF_LOD1/VF_LOD2).
+    sp.lodRings = true;
+    if (const char* e = getenv("VF_LOD"))
+        sp.lodRings = atoi(e) != 0;
     // debug/experiment overrides for the surfel bake (default = tuned values)
     if (const char* e = getenv("VF_SURFEL_SMOOTH"))
         sp.smoothNormals = atoi(e) != 0;
@@ -623,9 +677,11 @@ void App::rebuildSurfels()
     m_splatPass.setSurfels(set.surfels.data(),
                            set.surfels.size() * sizeof(vf::voxel::Surfel),
                            set.surfels.size(), set.chunkRange, waterStart, waterRange,
-                           set.microStart);
-    spdlog::info("splat backend: {} surfels ({} water), {} chunks", set.surfels.size(),
-                 water.size(), set.chunkRange.empty() ? 0 : set.chunkRange.size() - 1);
+                           set.microStart, set.lod1Range, set.lod2Range);
+    spdlog::info("splat backend: {} surfels ({} water), {} chunks, lod1 {} lod2 {}",
+                 set.surfels.size(), water.size(),
+                 set.chunkRange.empty() ? 0 : set.chunkRange.size() - 1,
+                 set.lod1Count, set.lod2Count);
 }
 
 void App::applyEdit()
@@ -715,6 +771,8 @@ void App::drawHud()
     ImGui::Text("Render: %s (F to switch), TAA: %s (N to switch)",
                 m_renderMode == RenderMode::Splats ? "Gaussian surfels" : "chunked SVO",
                 m_taaEnabled ? "on" : "off");
+    ImGui::Text("GPU ms: geo %.1f | post %.1f | fx %.1f | taa %.1f | tail %.1f",
+                m_profAvg[0], m_profAvg[1], m_profAvg[2], m_profAvg[3], m_profAvg[4]);
     if (m_renderMode == RenderMode::Splats)
         ImGui::Text("Splat size: %.2f ([ / ] to adjust)", m_splatPass.radiusScale());
     ImGui::Text("SSR: %s (G), SSAO: %s (H), Fog: %s (J), MotionBlur: %s (K), DoF: %s (L)",
@@ -1347,6 +1405,8 @@ int App::run(const Args& args)
         uint32_t f = m_frameIdx % kMaxFramesInFlight;
         FrameSync& fr = m_frames[f];
         vkWaitForFences(m_ctx.device(), 1, &fr.inFlight, VK_TRUE, UINT64_MAX);
+        // that slot's submission (3 frames ago) is complete: harvest its marks
+        accumulateProf(f, m_frameIdx);
 
         if (headlessRun) {
             // Automated mode: zero window-system interaction.
@@ -1354,6 +1414,15 @@ int App::run(const Args& args)
             vkResetCommandBuffer(fr.cmd, 0);
             VkCommandBufferBeginInfo hbi { VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO };
             vkBeginCommandBuffer(fr.cmd, &hbi);
+            const uint32_t profBase = uint32_t(m_frameIdx % kMaxFramesInFlight) * kProfMarks;
+            if (m_profPool)
+                vkCmdResetQueryPool(fr.cmd, m_profPool, profBase, kProfMarks);
+            auto profMark = [&](uint32_t mark) {
+                if (m_profPool)
+                    vkCmdWriteTimestamp2(fr.cmd, VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT,
+                                         m_profPool, profBase + mark);
+            };
+            profMark(0);
 
             vf::RaymarchPush push {};
             push.camPos = glm::vec4(m_camera.pos, 0);
@@ -1429,6 +1498,7 @@ int App::run(const Args& args)
                 di.pMemoryBarriers = &mb;
                 vkCmdPipelineBarrier2(fr.cmd, &di);
                 }
+                profMark(1);
                 // post pass reads HDR/G-buffer, writes LDR offscreen
                 vf::transitionImage(fr.cmd, m_offscreen.img, VK_IMAGE_ASPECT_COLOR_BIT,
                                     VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_GENERAL,
@@ -1436,10 +1506,14 @@ int App::run(const Args& args)
                                     VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
                                     VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT);
                 m_postPass.record(fr.cmd, push);
+                profMark(2);
 
                 // ---- photorealism passes (G/H/J/K/L toggles, shared helper) ----
                 recordPhotorealism(fr.cmd, push);
+                profMark(3);
+                profMark(4); // no TAA in headless: fx == taa mark, tail = 0
             }
+            profMark(5);
             vkEndCommandBuffer(fr.cmd);
             VkSubmitInfo hsi { VK_STRUCTURE_TYPE_SUBMIT_INFO };
             hsi.commandBufferCount = 1;
@@ -1497,6 +1571,15 @@ int App::run(const Args& args)
 
         VkCommandBufferBeginInfo bi { VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO };
         vkBeginCommandBuffer(fr.cmd, &bi);
+        const uint32_t profBase = uint32_t(m_frameIdx % kMaxFramesInFlight) * kProfMarks;
+        if (m_profPool)
+            vkCmdResetQueryPool(fr.cmd, m_profPool, profBase, kProfMarks);
+        auto profMark = [&](uint32_t mark) {
+            if (m_profPool)
+                vkCmdWriteTimestamp2(fr.cmd, VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT,
+                                     m_profPool, profBase + mark);
+        };
+        profMark(0);
 
         vf::RaymarchPush push {};
         push.camPos = glm::vec4(m_camera.pos, 0);
@@ -1547,6 +1630,7 @@ int App::run(const Args& args)
                             VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT);
         m_svoPass.record(fr.cmd, push);
         }
+        profMark(1);
         // barrier: HDR/G-buffer written -> read by post pass
         VkMemoryBarrier2 mb { VK_STRUCTURE_TYPE_MEMORY_BARRIER_2 };
         if (m_renderMode == RenderMode::Splats) {
@@ -1571,10 +1655,12 @@ int App::run(const Args& args)
                             VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
                             VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT);
         m_postPass.record(fr.cmd, push);
+        profMark(2);
 
         // photorealism toggles (G/H/J/K/L) run here so they affect what you
         // see; TAA resolves the effected image afterwards
         recordPhotorealism(fr.cmd, push);
+        profMark(3);
 
         // TAA resolve (interactive only, not for headless tests) ----------
         VkImage taaSrc = m_offscreen.img;
@@ -1651,6 +1737,7 @@ int App::run(const Args& args)
             taaSrcStage = VK_PIPELINE_STAGE_2_TRANSFER_BIT;
             taaSrcAccess = VK_ACCESS_2_TRANSFER_READ_BIT;
         }
+        profMark(4);
         // swapchain -> transfer-dst, blit ----------
         vf::transitionImage(fr.cmd, m_swapchain.image(imgIdx), VK_IMAGE_ASPECT_COLOR_BIT,
                             VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
@@ -1766,6 +1853,7 @@ int App::run(const Args& args)
                             VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT,
                             VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT,
                             VK_PIPELINE_STAGE_2_NONE, VK_ACCESS_2_NONE);
+        profMark(5);
         vkEndCommandBuffer(fr.cmd);
 
         VkPipelineStageFlags waitStage = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
@@ -1860,6 +1948,8 @@ void App::destroy()
     m_splatPass.destroy();
     m_taaPass.destroy();
     m_postPass.destroy();
+    if (m_profPool)
+        vkDestroyQueryPool(m_ctx.device(), m_profPool, nullptr);
     vf::destroyImage3D(m_ctx, m_objVolImg);
     vf::destroyImage3D(m_ctx, m_heightImg);
     vf::destroyImage3D(m_ctx, m_offscreen);

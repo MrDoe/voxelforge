@@ -40,7 +40,7 @@ bool SplatPass::init(const Context& ctx)
     m_ctx = &ctx;
     VkDevice dev = ctx.device();
 
-    VkDescriptorSetLayoutBinding b[4] = {};
+    VkDescriptorSetLayoutBinding b[8] = {};
     b[0] = { 0, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1,
              VK_SHADER_STAGE_VERTEX_BIT, nullptr };
     b[1] = { 1, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 1,
@@ -48,16 +48,26 @@ bool SplatPass::init(const Context& ctx)
     b[2] = { 2, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 1,
              VK_SHADER_STAGE_FRAGMENT_BIT, nullptr };
     b[3] = { 3, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, 1,
-             VkShaderStageFlags(VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT),
+             VkShaderStageFlags(VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT |
+                                VK_SHADER_STAGE_COMPUTE_BIT),
              nullptr };
+    b[4] = { 4, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1,
+             VK_SHADER_STAGE_VERTEX_BIT, nullptr }; // compact indirection
+    b[5] = { 5, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1,
+             VK_SHADER_STAGE_COMPUTE_BIT, nullptr }; // selection entries
+    b[6] = { 6, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1,
+             VK_SHADER_STAGE_COMPUTE_BIT, nullptr }; // draw command stream
+    b[7] = { 7, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, 1,
+             VK_SHADER_STAGE_COMPUTE_BIT, nullptr }; // frustum planes
     VkDescriptorSetLayoutCreateInfo li { VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO };
-    li.bindingCount = 4;
+    li.bindingCount = 8;
     li.pBindings = b;
     if (vkCreateDescriptorSetLayout(dev, &li, nullptr, &m_setLayout) != VK_SUCCESS)
         return false;
 
     VkPushConstantRange pc { VkShaderStageFlags(VK_SHADER_STAGE_VERTEX_BIT |
-                                                VK_SHADER_STAGE_FRAGMENT_BIT),
+                                                VK_SHADER_STAGE_FRAGMENT_BIT |
+                                                VK_SHADER_STAGE_COMPUTE_BIT),
                              0, sizeof(RaymarchPush) };
     VkPipelineLayoutCreateInfo pli { VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO };
     pli.setLayoutCount = 1;
@@ -117,6 +127,21 @@ bool SplatPass::init(const Context& ctx)
         if (!c.buf || !c.mapped)
             return false;
     }
+    // compaction slots: slot -> surfel index, identity-filled at upload;
+    // sized on demand in setSurfels (recreated when the set grows)
+    if (!createCullPipeline())
+        return false;    for (auto& s : m_selBufs) {
+        s = makeBuffer(ctx, kMaxChunkDraws * sizeof(uint32_t) * 4,
+                       VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
+                       VMA_MEMORY_USAGE_AUTO_PREFER_HOST, true);
+        if (!s.buf || !s.mapped)
+            return false;
+    }
+    m_planesBuf = makeBuffer(ctx, 6 * sizeof(glm::vec4),
+                             VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT,
+                             VMA_MEMORY_USAGE_AUTO_PREFER_HOST, true);
+    if (!m_planesBuf.buf || !m_planesBuf.mapped)
+        return false;
     return true;
 }
 
@@ -289,7 +314,9 @@ bool SplatPass::createPipelines(VkFormat hdrFormat)
 void SplatPass::setSurfels(const void* data, size_t bytes, size_t count,
                            const std::vector<uint32_t>& chunkRange, uint32_t waterStart,
                            const std::vector<uint32_t>& waterChunkRange,
-                           const std::vector<uint32_t>& microStart)
+                           const std::vector<uint32_t>& microStart,
+                           const std::vector<uint32_t>& lod1Range,
+                           const std::vector<uint32_t>& lod2Range)
 {
     if (m_surfelBuf) {
         vmaDestroyBuffer(m_ctx->allocator(), m_surfelBuf, m_surfelAlloc);
@@ -327,6 +354,62 @@ void SplatPass::setSurfels(const void* data, size_t bytes, size_t count,
     VkWriteDescriptorSet w { VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, nullptr, m_set, 0, 0, 1,
                              VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, nullptr, &bi0, nullptr };
     vkUpdateDescriptorSets(m_ctx->device(), 1, &w, 0, nullptr);
+    // compaction indirection: identity (slot == surfel index). The GPU cull
+    // pre-pass rewrites each entry's range per frame; with culling disabled
+    // the identity keeps the VS path equivalent to the direct index.
+    const size_t need = up; // bytes of the surfel stream
+    if (need > m_compactBytes) {
+        if (m_compactBuf.buf)
+            destroyBuffer(*m_ctx, m_compactBuf);
+        m_compactBuf = makeBuffer(*m_ctx, need,
+                                  VK_BUFFER_USAGE_STORAGE_BUFFER_BIT |
+                                      VK_BUFFER_USAGE_TRANSFER_DST_BIT,
+                                  VMA_MEMORY_USAGE_AUTO_PREFER_DEVICE, false);
+        m_compactBytes = m_compactBuf.buf ? need : 0;
+        if (!m_compactBuf.buf)
+            return;
+        Buffer idStaging = makeBuffer(*m_ctx, need, VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
+                                      VMA_MEMORY_USAGE_AUTO_PREFER_HOST, true);
+        if (idStaging.mapped) {
+            auto* ids = static_cast<uint32_t*>(idStaging.mapped);
+            for (size_t i = 0; i < need / 4; ++i)
+                ids[i] = uint32_t(i);
+            m_ctx->immediateSubmit([&](VkCommandBuffer cmd) {
+                VkBufferCopy c { 0, 0, need };
+                vkCmdCopyBuffer(cmd, idStaging.buf, m_compactBuf.buf, 1, &c);
+            });
+        }
+        destroyBuffer(*m_ctx, idStaging);
+    }
+    VkDescriptorBufferInfo ci0 { m_compactBuf.buf, 0, VK_WHOLE_SIZE };
+    VkWriteDescriptorSet wc { VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, nullptr, m_set, 4, 0, 1,
+                              VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, nullptr, &ci0, nullptr };
+    vkUpdateDescriptorSets(m_ctx->device(), 1, &wc, 0, nullptr);
+    // cull-only bindings: selection entries (slot 5, set at record time),
+    // command stream (slot 6 = the indirect buffers), frustum planes (slot 7)
+    VkDescriptorBufferInfo selInfo { m_selBufs[0].buf, 0, VK_WHOLE_SIZE };
+    VkDescriptorBufferInfo cmdInfo { m_drawCmds[0].buf, 0, VK_WHOLE_SIZE };
+    VkDescriptorBufferInfo plInfo { m_planesBuf.buf, 0, VK_WHOLE_SIZE };
+    VkWriteDescriptorSet wcc[3] = {};
+    wcc[0].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+    wcc[0].dstSet = m_set;
+    wcc[0].dstBinding = 5;
+    wcc[0].descriptorCount = 1;
+    wcc[0].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+    wcc[0].pBufferInfo = &selInfo;
+    wcc[1].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+    wcc[1].dstSet = m_set;
+    wcc[1].dstBinding = 6;
+    wcc[1].descriptorCount = 1;
+    wcc[1].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+    wcc[1].pBufferInfo = &cmdInfo;
+    wcc[2].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+    wcc[2].dstSet = m_set;
+    wcc[2].dstBinding = 7;
+    wcc[2].descriptorCount = 1;
+    wcc[2].descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
+    wcc[2].pBufferInfo = &plInfo;
+    vkUpdateDescriptorSets(m_ctx->device(), 3, wcc, 0, nullptr);
     m_count = (data && bytes) ? count : 0;
     m_waterStart = (data && bytes) ? waterStart : 0;
     m_chunkRange = chunkRange;
@@ -336,6 +419,39 @@ void SplatPass::setSurfels(const void* data, size_t bytes, size_t count,
     m_microStart = ((data && bytes) && microStart.size() == 16 * 16 * 16 + 1)
                        ? microStart
                        : std::vector<uint32_t>();
+    m_lod1Range = ((data && bytes) && lod1Range.size() == 16 * 16 * 16 + 1)
+                      ? lod1Range
+                      : std::vector<uint32_t>();
+    m_lod2Range = ((data && bytes) && lod2Range.size() == 16 * 16 * 16 + 1)
+                      ? lod2Range
+                      : std::vector<uint32_t>();
+}
+
+bool SplatPass::createCullPipeline()
+{
+    VkDevice dev = m_ctx->device();
+    auto spirv = loadSpirv(std::string(VOXELFORGE_SHADER_DIR) + "/splat_cull.comp.spv");
+    if (spirv.empty())
+        return false;
+    VkShaderModuleCreateInfo mci { VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO };
+    mci.codeSize = spirv.size();
+    mci.pCode = reinterpret_cast<const uint32_t*>(spirv.data());
+    VkShaderModule mod = makeModule(dev, spirv);
+    if (!mod)
+        return false;
+    VkComputePipelineCreateInfo cpi { VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO };
+    cpi.layout = m_layout;
+    cpi.stage = { VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO };
+    cpi.stage.stage = VK_SHADER_STAGE_COMPUTE_BIT;
+    cpi.stage.module = mod;
+    cpi.stage.pName = "main";
+    VkResult r = vkCreateComputePipelines(dev, VK_NULL_HANDLE, 1, &cpi, nullptr, &m_cullPipe);
+    vkDestroyShaderModule(dev, mod, nullptr);
+    if (r != VK_SUCCESS) {
+        spdlog::critical("splat: cull pipeline failed");
+        return false;
+    }
+    return true;
 }
 
 bool SplatPass::recreateDepth(uint32_t w, uint32_t h)
@@ -441,18 +557,43 @@ void SplatPass::computeDraws(const RaymarchPush& push)
     struct Draw {
         float dist2;
         uint32_t first, count;
+        bool rim; // chunk still carries rim geometry (near-field AA band)
     };
     std::vector<Draw> draws;
     draws.reserve(1024);
     const glm::vec3 camPos = glm::vec3(push.camPos);
     const bool cull = !getenv("VF_SPLAT_NOCULL");
+    // Rim fade: splat.frag ramps coreD2 -> 1.0 by 40 m, so rim fragments of
+    // chunks entirely beyond that distance all discard. Compare the chunk
+    // AABB's nearest point to the camera (conservative: keeps rims whenever
+    // any surfel could still be inside the ramp).
+    float rimDist2 = m_rimDist * m_rimDist;
+    if (const char* e = getenv("VF_RIM_DIST"))
+        rimDist2 = float(atof(e)) * float(atof(e));
+    const bool hasRimSplit = rimDist2 > 0.0f;
+    // LOD ring selection: chunks past VF_LOD1 (default 20 m) draw their
+    // merged-terrain LOD1 run instead of base+micro; past VF_LOD2 (60 m)
+    // the LOD2 run. Object-only chunks (empty merged runs) fall back to
+    // the base range. 0 disables the ring.
+    float lod1Dist = 20.0f, lod2Dist = 60.0f;
+    if (const char* e = getenv("VF_LOD1"))
+        lod1Dist = float(atof(e));
+    if (const char* e = getenv("VF_LOD2"))
+        lod2Dist = float(atof(e));
+    const bool hasLod1 =
+        m_lod1Range.size() == 16 * 16 * 16 + 1 && lod1Dist > 0.0f;
+    const bool hasLod2 =
+        m_lod2Range.size() == 16 * 16 * 16 + 1 && lod2Dist > 0.0f;
     // Micro-detail cull distance: micro disks (0.04-0.09 m) are sub-pixel
-    // beyond this range and hide inside their base footprint, so distant
-    // chunks draw base only. VF_MICRO_DIST=0 keeps all micros (legacy).
-    float microDist2 = 40.0f * 40.0f;
+    // beyond ~20 m (1-2 px at 720p) and hide inside their base footprint, so
+    // distant chunks draw base only. Measured cost of 20-40 m micros:
+    // ~19 ms/frame at the reference view; visual diff 0.45% pixels >10
+    // (hero view). VF_MICRO_DIST=0 keeps all micros (legacy), 40 = old value.
+    float microDist2 = 20.0f * 20.0f;
     if (const char* e = getenv("VF_MICRO_DIST"))
         microDist2 = float(atof(e)) * float(atof(e));
     const bool hasMicroSplit = m_microStart.size() == 16 * 16 * 16 + 1;
+    const float cs = 102.4f / 16.0f;
     for (uint32_t c = 0; c < 16 * 16 * 16; ++c) {
         uint32_t first = m_chunkRange[c];
         uint32_t last = m_chunkRange[c + 1];
@@ -468,25 +609,96 @@ void SplatPass::computeDraws(const RaymarchPush& push)
                             -51.2f + (float(cz) + 0.5f) * 6.4f);
         const glm::vec3 d = ctr - camPos;
         const float dist2 = glm::dot(d, d);
+        // nearest point of the chunk AABB: conservative rim eligibility and
+        // LOD ring selection (slightly aggressive for LOD: surfel distances
+        // can only be larger than the AABB nearest point)
+        glm::vec3 ncp = camPos;
+        if (hasRimSplit || hasLod1 || hasLod2) {
+            const glm::vec3 mn(-51.2f + float(cx) * cs, -51.2f + float(cy) * cs,
+                               -51.2f + float(cz) * cs);
+            ncp = glm::clamp(camPos, mn, mn + glm::vec3(cs));
+        }
+        const float nearDist = std::sqrt(glm::dot(ncp - camPos, ncp - camPos));
+        bool rim = !hasRimSplit || glm::dot(ncp - camPos, ncp - camPos) <= rimDist2;
         uint32_t split = last;
         if (hasMicroSplit)
             split = std::min(m_microStart[c], last);
         if (split < first)
             split = first;
-        draws.push_back({ dist2, first, split > first ? split - first : 0 });
+        // LOD ring selection replaces the chunk's base terrain run; object
+        // surfels ride along unmerged inside the ring (trees must never
+        // vanish). The chunk's micro tail still applies on top, gated by
+        // the same micro distance as base chunks.
+        if (hasLod2 && nearDist >= lod2Dist &&
+            m_lod2Range[c + 1] > m_lod2Range[c]) {
+            draws.push_back({ dist2, m_lod2Range[c],
+                              m_lod2Range[c + 1] - m_lod2Range[c], rim });
+            if (hasMicroSplit && (microDist2 <= 0.0f || dist2 < microDist2)) {
+                const uint32_t mf = std::min(m_microStart[c], opaqueEnd);
+                const uint32_t ml = std::min(m_chunkRange[c + 1], opaqueEnd);
+                if (ml > mf)
+                    draws.push_back({ dist2, mf, ml - mf, rim });
+            }
+            continue;
+        }
+        if (hasLod1 && nearDist >= lod1Dist &&
+            m_lod1Range[c + 1] > m_lod1Range[c]) {
+            draws.push_back({ dist2, m_lod1Range[c],
+                              m_lod1Range[c + 1] - m_lod1Range[c], rim });
+            if (hasMicroSplit && (microDist2 <= 0.0f || dist2 < microDist2)) {
+                const uint32_t mf = std::min(m_microStart[c], opaqueEnd);
+                const uint32_t ml = std::min(m_chunkRange[c + 1], opaqueEnd);
+                if (ml > mf)
+                    draws.push_back({ dist2, mf, ml - mf, rim });
+            }
+            continue;
+        }
+        draws.push_back({ dist2, first, split > first ? split - first : 0, rim });
         // near chunks also draw their micro tail (same sort key: stable
         // sort below keeps base-then-micro order within the chunk)
         if (last > split && (microDist2 <= 0.0f || dist2 < microDist2))
-            draws.push_back({ dist2, split, last - split });
+            draws.push_back({ dist2, split, last - split, rim });
     }
     // stable: equal keys (base + micro of one chunk) keep insertion order
     std::stable_sort(draws.begin(), draws.end(),
                      [](const Draw& a, const Draw& b) { return a.dist2 > b.dist2; });
     m_cpuDraws.reserve(draws.size());
+    // far->near order: core-only (rim=false) chunks form the contiguous
+    // prefix, rim-carrying chunks the tail. First rim entry = rim passes'
+    // indirect start (base + micro of one near chunk are adjacent entries).
+    m_rimStart = uint32_t(draws.size());
+    for (uint32_t i = 0; i < draws.size(); ++i) {
+        if (draws[i].rim) {
+            m_rimStart = i;
+            break;
+        }
+    }
     for (const Draw& dr : draws) {
         if (dr.count == 0)
             continue;
         m_cpuDraws.push_back({ 4, dr.count, 0, dr.first });
+    }
+    if (getenv("VF_TRACE") && int(push.b.w) % 60 == 0) {
+        double b[5] = {}; // <10, 10-20, 20-40, >40 m: base quads
+        uint32_t micro = 0, rimBase = 0, farBase = 0;
+        for (const Draw& dr : draws) {
+            if (dr.count == 0)
+                continue;
+            const float d = std::sqrt(dr.dist2);
+            double& acc = d < 10 ? b[0] : d < 20 ? b[1] : d < 40 ? b[2] : b[3];
+            acc += dr.count;
+            if (dr.rim)
+                rimBase += dr.count;
+            else
+                farBase += dr.count;
+        }
+        b[4] = 0;
+        for (const auto& c : m_cpuWaterDraws)
+            b[4] += c.instanceCount;
+        spdlog::info(
+            "splat bands: <10 {:.0f} | 10-20 {:.0f} | 20-40 {:.0f} | >40 {:.0f}"
+            " | rim {:.0f} | water {:.0f}",
+            b[0], b[1], b[2], b[3], double(rimBase), b[4]);
     }
     // water chunks: same frustum cull, no sorting needed (single
     // blended pass, depth-tested). Off-screen lake chunks emit no
@@ -533,6 +745,82 @@ void SplatPass::record(VkCommandBuffer cmd, const RaymarchPush& push, VkExtent2D
         glm::vec4 words[2] = { params,
                                glm::vec4(m_radiusScale, 0.0f, 0.0f, 0.0f) };
         memcpy(m_paramsBuf.mapped, words, sizeof(words));
+    }
+
+    // GPU-driven cull pre-pass (before rendering scope: compute may not run
+    // inside vkCmdBeginRendering). Compacts every entry to its
+    // fragment-producing surfels and rewrites the entry's instanceCount in
+    // the indirect command stream; the draws then run via
+    // vkCmdDrawIndirectCount. Culled quads emit zero fragments today, so
+    // the image is unchanged - only vertex/clipper work disappears.
+    computeDraws(push);
+    const uint32_t nDraws = uint32_t(m_cpuDraws.size());
+    if (getenv("VF_TRACE") && int(push.b.w) % 60 == 0) {
+        uint32_t nTotal = 0;
+        for (const auto& d : m_cpuDraws)
+            nTotal += d.instanceCount;
+        spdlog::info("splat pre-cull: {} quads in {} draws (rim from {}), water {}",
+                     nTotal, nDraws, m_rimStart, m_waterDraws);
+    }
+    const bool direct = getenv("VF_SPLAT_DIRECT") != nullptr; // legacy A/B path
+    const bool gpuCull =
+        !direct && !getenv("VF_NO_GPU_CULL") && nDraws > 0 && m_cullPipe &&
+        m_compactBuf.buf && m_selBufs[0].buf && m_planesBuf.buf;
+    if (gpuCull) {
+        // active triple-buffer slot into the descriptor set
+        VkDescriptorBufferInfo selInfo { m_selBufs[m_cmdSlot].buf, 0, VK_WHOLE_SIZE };
+        VkDescriptorBufferInfo cmdInfo { m_drawCmds[m_cmdSlot].buf, 0, VK_WHOLE_SIZE };
+        VkWriteDescriptorSet wcc[2] = {};
+        wcc[0] = { VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, nullptr, m_set, 5, 0, 1,
+                   VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, nullptr, &selInfo, nullptr };
+        wcc[1] = { VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, nullptr, m_set, 6, 0, 1,
+                   VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, nullptr, &cmdInfo, nullptr };
+        vkUpdateDescriptorSets(m_ctx->device(), 2, wcc, 0, nullptr);
+        auto* sel = static_cast<uint32_t*>(m_selBufs[m_cmdSlot].mapped);
+        if (sel) {
+            for (uint32_t i = 0; i < nDraws; ++i) {
+                sel[i * 4 + 0] = m_cpuDraws[i].firstInstance;
+                sel[i * 4 + 1] = m_cpuDraws[i].instanceCount;
+                sel[i * 4 + 2] = 0;
+                sel[i * 4 + 3] = 0;
+            }
+        }
+        glm::vec4 planes[6];
+        frustumPlanes(push, planes);
+        if (m_planesBuf.mapped)
+            memcpy(m_planesBuf.mapped, planes, sizeof(planes));
+        // host-written selection/planes -> compute reads
+        VkMemoryBarrier2 hb { VK_STRUCTURE_TYPE_MEMORY_BARRIER_2 };
+        hb.srcStageMask = VK_PIPELINE_STAGE_2_HOST_BIT;
+        hb.srcAccessMask = VK_ACCESS_2_HOST_WRITE_BIT;
+        hb.dstStageMask = VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT;
+        hb.dstAccessMask = VK_ACCESS_2_SHADER_STORAGE_READ_BIT |
+                           VK_ACCESS_2_UNIFORM_READ_BIT;
+        VkDependencyInfo hdi { VK_STRUCTURE_TYPE_DEPENDENCY_INFO };
+        hdi.memoryBarrierCount = 1;
+        hdi.pMemoryBarriers = &hb;
+        vkCmdPipelineBarrier2(cmd, &hdi);
+        vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, m_cullPipe);
+        vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, m_layout, 0, 1,
+                                &m_set, 0, nullptr);
+        vkCmdPushConstants(cmd, m_layout,
+                           VkShaderStageFlags(VK_SHADER_STAGE_VERTEX_BIT |
+                                              VK_SHADER_STAGE_FRAGMENT_BIT |
+                                              VK_SHADER_STAGE_COMPUTE_BIT),
+                           0, sizeof(push), &push);
+        vkCmdDispatch(cmd, nDraws, 1, 1);
+        // cull writes (command stream + compaction) -> indirect + VS reads
+        VkMemoryBarrier2 mb { VK_STRUCTURE_TYPE_MEMORY_BARRIER_2 };
+        mb.srcStageMask = VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT;
+        mb.srcAccessMask = VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT;
+        mb.dstStageMask = VK_PIPELINE_STAGE_2_DRAW_INDIRECT_BIT |
+                          VK_PIPELINE_STAGE_2_VERTEX_SHADER_BIT;
+        mb.dstAccessMask = VK_ACCESS_2_INDIRECT_COMMAND_READ_BIT |
+                           VK_ACCESS_2_SHADER_STORAGE_READ_BIT;
+        VkDependencyInfo di { VK_STRUCTURE_TYPE_DEPENDENCY_INFO };
+        di.memoryBarrierCount = 1;
+        di.pMemoryBarriers = &mb;
+        vkCmdPipelineBarrier2(cmd, &di);
     }
 
     VkRenderingAttachmentInfo colors[2] = {};
@@ -583,22 +871,27 @@ void SplatPass::record(VkCommandBuffer cmd, const RaymarchPush& push, VkExtent2D
     // the watertight surface and marks stencil), then rims split by stencil:
     // interior rims lighten-only (MAX: soft edges that can never darken
     // settled surface), silhouette rims alpha-blended over sky.
-    computeDraws(push);
-    const uint32_t nDraws = uint32_t(m_cpuDraws.size());
     constexpr VkDeviceSize stride = sizeof(VkDrawIndirectCommand);
-    // VF_SPLAT_DIRECT=1: legacy one-vkCmdDraw-per-chunk path (A/B only).
-    const bool direct = getenv("VF_SPLAT_DIRECT") != nullptr;
-    auto drawOpaque = [&](VkPipeline pipe) {
+    // drawOpaque draws [from, nDraws); the core pipe uses 0 (all chunks),
+    // the rim pipes start at m_rimStart (far chunks are core-only: their
+    // rim fragments would all discard beyond the 40 m coreD2 ramp).
+    // With the GPU cull pre-pass active the command stream is GPU-written
+    // (instanceCount per entry = compacted count), so plain indirect draws
+    // consume the compacted instance counts directly.
+    auto drawOpaque = [&](VkPipeline pipe, uint32_t from) {
         vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pipe);
         if (direct) {
-            for (const auto& d : m_cpuDraws)
+            for (uint32_t i = from; i < nDraws; ++i) {
+                const auto& d = m_cpuDraws[i];
                 vkCmdDraw(cmd, d.vertexCount, d.instanceCount, d.firstVertex,
                           d.firstInstance);
+            }
         } else {
-            vkCmdDrawIndirect(cmd, m_drawCmds[m_cmdSlot].buf, 0, nDraws, stride);
+            vkCmdDrawIndirect(cmd, m_drawCmds[m_cmdSlot].buf,
+                              VkDeviceSize(from) * stride, nDraws - from, stride);
         }
     };
-    if (!direct && (nDraws > 0 || m_waterDraws > 0) &&
+    if (!direct && !gpuCull && (nDraws > 0 || m_waterDraws > 0) &&
         !getenv("VF_NO_INDIRECT_BARRIER")) {
         // host-written commands -> indirect-command read
         VkMemoryBarrier2 mb { VK_STRUCTURE_TYPE_MEMORY_BARRIER_2 };
@@ -618,13 +911,32 @@ void SplatPass::record(VkCommandBuffer cmd, const RaymarchPush& push, VkExtent2D
             memcpy(dst, m_cpuDraws.data(), m_cpuDraws.size() * stride);
         if (wdst && m_cpuWaterDraws.size() <= kMaxChunkDraws)
             memcpy(wdst, m_cpuWaterDraws.data(), m_cpuWaterDraws.size() * stride);
+    } else if (gpuCull && m_waterDraws > 0) {
+        // cull mode: opaque command stream is GPU-written; water stream
+        // stays CPU-written and still needs its own host->indirect barrier
+        VkMemoryBarrier2 mb { VK_STRUCTURE_TYPE_MEMORY_BARRIER_2 };
+        mb.srcStageMask = VK_PIPELINE_STAGE_2_HOST_BIT;
+        mb.srcAccessMask = VK_ACCESS_2_HOST_WRITE_BIT;
+        mb.dstStageMask = VK_PIPELINE_STAGE_2_DRAW_INDIRECT_BIT;
+        mb.dstAccessMask = VK_ACCESS_2_INDIRECT_COMMAND_READ_BIT;
+        VkDependencyInfo di { VK_STRUCTURE_TYPE_DEPENDENCY_INFO };
+        di.memoryBarrierCount = 1;
+        di.pMemoryBarriers = &mb;
+        vkCmdPipelineBarrier2(cmd, &di);
+        auto* wdst =
+            static_cast<VkDrawIndirectCommand*>(m_waterCmds[m_cmdSlot].mapped);
+        if (wdst && m_cpuWaterDraws.size() <= kMaxChunkDraws)
+            memcpy(wdst, m_cpuWaterDraws.data(), m_cpuWaterDraws.size() * stride);
     }
     if (nDraws > 0) {
         if (!getenv("VF_SPLAT_NORIM"))
-            drawOpaque(m_corePipe);
-        if (!getenv("VF_SPLAT_NOCORE")) {
-            drawOpaque(m_rimInPipe);
-            drawOpaque(m_rimOutPipe);
+            drawOpaque(m_corePipe, 0);
+        // Rim passes draw only the near tail (rim-carrying chunks). The
+        // env names are swapped vs the pipes they skip (historical quirk):
+        // VF_SPLAT_NOCORE skips the rim pipes, VF_SPLAT_NORIM the core pipe.
+        if (!getenv("VF_SPLAT_NOCORE") && m_rimStart < nDraws) {
+            drawOpaque(m_rimInPipe, m_rimStart);
+            drawOpaque(m_rimOutPipe, m_rimStart);
         }
     }
     // water surfels: blended over, depth-tested, no depth write.
