@@ -130,7 +130,8 @@ bool SplatPass::init(const Context& ctx)
     // compaction slots: slot -> surfel index, identity-filled at upload;
     // sized on demand in setSurfels (recreated when the set grows)
     if (!createCullPipeline())
-        return false;    for (auto& s : m_selBufs) {
+        return false;
+    for (auto& s : m_selBufs) {
         s = makeBuffer(ctx, kMaxChunkDraws * sizeof(uint32_t) * 4,
                        VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
                        VMA_MEMORY_USAGE_AUTO_PREFER_HOST, true);
@@ -433,9 +434,6 @@ bool SplatPass::createCullPipeline()
     auto spirv = loadSpirv(std::string(VOXELFORGE_SHADER_DIR) + "/splat_cull.comp.spv");
     if (spirv.empty())
         return false;
-    VkShaderModuleCreateInfo mci { VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO };
-    mci.codeSize = spirv.size();
-    mci.pCode = reinterpret_cast<const uint32_t*>(spirv.data());
     VkShaderModule mod = makeModule(dev, spirv);
     if (!mod)
         return false;
@@ -679,8 +677,8 @@ void SplatPass::computeDraws(const RaymarchPush& push)
         m_cpuDraws.push_back({ 4, dr.count, 0, dr.first });
     }
     if (getenv("VF_TRACE") && int(push.b.w) % 60 == 0) {
-        double b[5] = {}; // <10, 10-20, 20-40, >40 m: base quads
-        uint32_t micro = 0, rimBase = 0, farBase = 0;
+        double b[4] = {}; // <10, 10-20, 20-40, >40 m: quads per band
+        uint32_t rimBase = 0;
         for (const Draw& dr : draws) {
             if (dr.count == 0)
                 continue;
@@ -689,16 +687,11 @@ void SplatPass::computeDraws(const RaymarchPush& push)
             acc += dr.count;
             if (dr.rim)
                 rimBase += dr.count;
-            else
-                farBase += dr.count;
         }
-        b[4] = 0;
-        for (const auto& c : m_cpuWaterDraws)
-            b[4] += c.instanceCount;
         spdlog::info(
             "splat bands: <10 {:.0f} | 10-20 {:.0f} | 20-40 {:.0f} | >40 {:.0f}"
-            " | rim {:.0f} | water {:.0f}",
-            b[0], b[1], b[2], b[3], double(rimBase), b[4]);
+            " | rim-eligible {:.0f}",
+            b[0], b[1], b[2], b[3], double(rimBase));
     }
     // water chunks: same frustum cull, no sorting needed (single
     // blended pass, depth-tested). Off-screen lake chunks emit no
