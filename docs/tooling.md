@@ -18,7 +18,7 @@ sun elevation 34° / azimuth 238°, animtime 0.
 | `--llm-url URL` / `--ollama-url URL` | chat backend override |
 | `--llm-model M` / `--ollama-model M` | chat model override |
 
-Interactive defaults: hero camera `-16,6.5,-14 → 6.5,0.8,11`, TAA on.
+Interactive defaults: reference camera `1.0,2.0,1.5 → 5.3,1.0,11.3` (house.jpeg view), TAA on.
 
 ### Environment variables
 

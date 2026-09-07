@@ -79,6 +79,11 @@ float analyticD(glm::vec3 p)
     dObj = glm::min(dObj, bushesAt(p).d);
     dObj = glm::min(dObj, fenceAt(p).d);
     dObj = glm::min(dObj, alpacaAt(p).d);
+    dObj = glm::min(dObj, bridgeAt(p).d);
+    dObj = glm::min(dObj, forestAt(p).d);
+    dObj = glm::min(dObj, docksideAt(p).d);
+    dObj = glm::min(dObj, shoreAt(p).d);
+    dObj = glm::min(dObj, fernsAt(p).d);
     return glm::min(dTerrain, dObj);
 }
 TEST_CASE("layered world synthesizes a sparse SVO")

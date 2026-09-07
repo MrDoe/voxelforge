@@ -81,6 +81,7 @@ SurfelSet buildSurfels(const VoxelField& field, const SurfelParams& params = {})
 // top sits below WATER_LEVEL. Normal +Y, mat id 0, mat_ao.w = 3 (ao 1 +
 // water flag 2; the splat shader branches to water shading on the flag).
 // Append after the opaque set; the append offset is the water range start.
-std::vector<Surfel> buildWaterSurfels(const VoxelField& field, float spacing = 0.25f);
+// Default 0.2 m keeps water grain at the micro-surfel scale of the banks.
+std::vector<Surfel> buildWaterSurfels(const VoxelField& field, float spacing = 0.20f);
 
 } // namespace vf::voxel

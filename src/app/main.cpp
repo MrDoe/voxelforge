@@ -1052,9 +1052,10 @@ int App::run(const Args& args)
     }
 
     // per-backend camera spawn
-    // hero shot: across the river toward the cabin, sun raking from the west
-    m_camera.pos = { -16.f, 6.5f, -14.f };
-    glm::vec3 dir = glm::normalize(glm::vec3(6.5f, 0.8f, 11.0f) - m_camera.pos);
+    // reference view (house.jpeg): over the pond toward the cabin, dock
+    // left-of-centre, cabin right, sun raking from the west
+    m_camera.pos = { 1.0f, 2.0f, 1.5f };
+    glm::vec3 dir = glm::normalize(glm::vec3(5.3f, 1.0f, 11.3f) - m_camera.pos);
     m_camera.yaw = atan2(dir.z, dir.x);
     m_camera.pitch = asin(dir.y);
 

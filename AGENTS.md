@@ -32,11 +32,12 @@
 - **Runtime truth = records.** `LayeredWorld` merges enabled layers
   (first-wins-a-cell), builds `VoxelField`, and synthesizes the SVO.
   `reloadIfChanged()` polls mtimes every ~0.5 s; GUI toggles reload instantly.
-- **Default world = terrain only**: world.json ships with `landscape` +
-  `ai_edits` enabled; every other baked layer is opt-in via the "World layers"
-  panel (a plain .vxw file list). Toggling triggers an incremental rebuild and
-  refreshes SVO + terrain texture + shadow volume together (`applyWorldReload`).
-  Content tests generate their own all-enabled manifest (`world_all.json`).
+- **Default world = full reference scene**: world.json ships with every baked
+  layer enabled (cabin + conifer forest + orchard + dock/canoe + shore + ferns +
+  bridge + terrain); layers are opt-out via the "World layers" panel (a plain
+  .vxw file list). Toggling triggers an incremental rebuild and refreshes SVO +
+  terrain texture + shadow volume together (`applyWorldReload`). Content tests
+  generate their own all-enabled manifest (`world_all.json`).
 - **Layer files hold absolute lattice coords; enabling shows the object where
   it was baked.** To place a copy at the picked anchor, use the per-layer
   "Import" button (or `EditableWorld::importLayer(path, anchor)`): it
@@ -51,7 +52,7 @@
   appends + saves immediately.
 
 ## Run
-- `./build/voxelforge` — hero cam `-16,6.5,-14 → 6.5,0.8,11`, sun `34°/238°`.
+- `./build/voxelforge` — reference cam `1.0,2.0,1.5 → 5.3,1.0,11.3` (house.jpeg view), sun `34°/238°`.
 - Keys: `WASD/QE` move, `RMB+mouse` look, wheel speed, `Ctrl+LMB` pick anchor,
   `F` toggles splats/SVO renderer, `N` toggles TAA, `[`/`]` shrink/grow splat disks, `ESC` quit.
 - Headless: `--selftest`, `--smoke N`, `--shot out.ppm --cam …`,

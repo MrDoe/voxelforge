@@ -70,13 +70,23 @@ float terrainHeightAt(float x, float z)
     float bed = WATER_LEVEL - 2.7f + fbm2(x * 0.23f, z * 0.23f) * 0.14f;
     float h = glm::mix(floorH, bed, bowl);
 
-    // building pad: flatten ground under the riverside house
-    // (trees & rocks hug the natural ground via sampled bases - no pads needed)
+    // building pad: flatten ground under the riverside house (covers the
+    // cabin + porch + woodpile, ~5 m; feather to 7.2 m). Trees & rocks hug
+    // the natural ground via sampled bases - no pads needed.
     auto pad = [&](glm::vec2 c, float r0, float r1) {
         float dd = glm::length(glm::vec2(x, z) - c);
         h = glm::mix(kPadY, h, smoothstepf(r0, r1, dd));
     };
-    pad(kHousePos, 4.6f, 7.5f);
+    pad(kHousePos, 5.0f, 7.2f);
+    // pond cove: a still inlet bay reaching toward the porch steps so the
+    // waterfront (dock + canoe + pebble shore) sits steps from the cabin,
+    // like the reference. Dug after the pad so it cuts through the apron.
+    {
+        float pdx = (x - 3.6f) / 2.6f, pdz = (z - 6.6f) / 2.0f;
+        float pd = std::sqrt(pdx * pdx + pdz * pdz);
+        float pondBed = WATER_LEVEL - 1.9f + fbm2(x * 0.23f, z * 0.23f) * 0.14f;
+        h = glm::mix(pondBed, h, smoothstepf(0.55f, 1.0f, pd));
+    }
     return glm::clamp(h, kHmMinMeters + 0.05f, kHmMaxMeters - 0.05f);
 }
 
@@ -326,8 +336,8 @@ int main(int argc, char** argv)
     houseL.pos = { kHousePos.x, kPadY, kHousePos.y };
     sweep(houseL, [](glm::vec3 p) { return vf::voxel::houseAt(p); },
           cellOf(kHousePos.x - 5.f), cellOf(kHousePos.x + 5.f),
-          cellOf(kPadY - 1.f), cellOf(kPadY + 5.f),
-          cellOf(kHousePos.y - 5.f), cellOf(kHousePos.y + 5.f));
+          cellOf(kPadY - 1.5f), cellOf(kPadY + 6.f),
+          cellOf(kHousePos.y - 6.5f), cellOf(kHousePos.y + 5.f));
 
     for (size_t t = 0; t < kTreeSpots.size(); ++t) {
         auto& L = layers.emplace_back();
@@ -407,6 +417,126 @@ int main(int argc, char** argv)
           cellOf(-3.4f), cellOf(2.0f),
           cellOf(kBridgePos.y - 6.5f), cellOf(kBridgePos.y + 6.5f));
 
+    // conifer forest backdrop: one layer, per-spot vertical bands
+    {
+        auto& L = layers.emplace_back();
+        L.file = "forest.vxw";
+        L.role = "object";
+        L.name = "forest";
+        L.pos = { 4.f, 0.f, 14.f };
+        const HeightMap& hm = sharedHeightmap();
+        for (size_t i = 0; i < kConiferSpots.size(); ++i) {
+            glm::vec2 s = kConiferSpots[i];
+            float gr = hm.sample(s.x, s.y);
+            float seed = vf::voxel::hash2(float(i) * 13.13f + 1.7f,
+                                          float(i) * 7.71f + 9.2f);
+            sweep(L,
+                  [&, s, gr, seed](glm::vec3 p) {
+                      return vf::voxel::coniferAt(p, s, gr, seed);
+                  },
+                  cellOf(s.x - 3.2f), cellOf(s.x + 3.2f),
+                  cellOf(gr - 0.7f), cellOf(gr + 12.2f),
+                  cellOf(s.y - 3.2f), cellOf(s.y + 3.2f));
+        }
+    }
+
+    // dock + canoe as one waterfront layer
+    {
+        auto& L = layers.emplace_back();
+        L.file = "dock.vxw";
+        L.role = "object";
+        L.name = "dock";
+        L.pos = { kDockPos.x, WATER_LEVEL, kDockPos.y };
+        sweep(L, [](glm::vec3 p) { return vf::voxel::docksideAt(p); },
+              cellOf(0.0f), cellOf(6.5f), cellOf(WATER_LEVEL - 3.4f),
+              cellOf(1.2f), cellOf(3.8f), cellOf(9.2f));
+    }
+
+    // shoreline boulders + waterline pebbles
+    {
+        auto& L = layers.emplace_back();
+        L.file = "shore.vxw";
+        L.role = "scatter";
+        L.name = "shore";
+        sweep(L, [](glm::vec3 p) { return vf::voxel::shoreAt(p); },
+              cellOf(-5.0f), cellOf(10.0f), cellOf(WATER_LEVEL - 2.0f),
+              cellOf(1.5f), cellOf(1.5f), cellOf(12.5f));
+    }
+
+    // foreground ferns: iterate fern CELLS like bushes so only real tufts bake
+    {
+        auto& L = layers.emplace_back();
+        L.file = "ferns.vxw";
+        L.role = "scatter";
+        L.name = "ferns";
+        const HeightMap& hm = sharedHeightmap();
+        const float cell = kFernCell;
+        int nc = int(WORLD / cell) + 1;
+        for (int cz = -1; cz <= nc; ++cz)
+            for (int cx = -1; cx <= nc; ++cx) {
+                float hCell = vf::voxel::hash2(float(cx) * 11.7f + 2.0f,
+                                               float(cz) * 9.3f);
+                if (hCell < 0.55f)
+                    continue;
+                float jx = vf::voxel::hash2(float(cx) * 7.3f, float(cz) * 11.1f);
+                float jz = vf::voxel::hash2(float(cx) * 13.7f, float(cz) * 17.3f);
+                float hr = vf::voxel::hash2(float(cx) * 23.1f, float(cz) * 29.7f);
+                glm::vec2 cc((cx + jx) * cell, (cz + jz) * cell);
+                if (fabs(cc.x) > 0.5f * WORLD || fabs(cc.y) > 0.5f * WORLD)
+                    continue;
+                {
+                    float hdx = cc.x - kHousePos.x, hdz = cc.y - kHousePos.y;
+                    if (hdx * hdx + hdz * hdz < 30.0f)
+                        continue;
+                    float ddx = cc.x - kDockPos.x, ddz = cc.y - kDockPos.y;
+                    if (ddx * ddx + ddz * ddz < 9.0f)
+                        continue;
+                    if (vf::voxel::inPaddock(cc.x, cc.y, 1.5f))
+                        continue;
+                    if (std::fabs(cc.x - kBridgePos.x) < 2.4f && cc.y > -1.0f &&
+                        cc.y < 14.0f)
+                        continue;
+                }
+                float H = hm.sample(cc.x, cc.y);
+                uint8_t mat = latMat(cc.x, cc.y, H);
+                if (mat != 0 && mat != 1 && mat != 2)
+                    continue;
+                float wd = WATER_LEVEL - H;
+                if (wd < -2.2f || wd > 0.6f)
+                    continue;
+                if (glm::length(hm.gradient(cc.x, cc.y)) > 1.0f)
+                    continue;
+                float r = 0.28f + hr * 0.30f;
+                glm::vec3 c(cc.x, H + r * 0.45f, cc.y);
+                sweep(L,
+                      [c, r](glm::vec3 p) {
+                          float d =
+                              glm::length((p - c) / glm::vec3(1.f, 0.62f, 1.f)) *
+                                  r -
+                              r;
+                          glm::vec3 tipA(c.x - r * 0.8f, c.y + r * 1.05f,
+                                         c.z + r * 0.3f);
+                          glm::vec3 tipB(c.x + r * 0.8f, c.y + r * 1.05f,
+                                         c.z - r * 0.3f);
+                          auto cap = [](glm::vec3 p, glm::vec3 a, glm::vec3 b,
+                                        float rr) {
+                              glm::vec3 pa = p - a, ba = b - a;
+                              float h = glm::clamp(
+                                  glm::dot(pa, ba) /
+                                      glm::max(glm::dot(ba, ba), 1e-8f),
+                                  0.f, 1.f);
+                              return glm::length(pa - ba * h) - rr;
+                          };
+                          d = glm::min(d, cap(p, c, tipA, 0.10f));
+                          d = glm::min(d, cap(p, c, tipB, 0.10f));
+                          return vf::voxel::ObjHit { d, uint8_t(8) };
+                      },
+                      cellOf(c.x - r - 1.2f), cellOf(c.x + r + 1.2f),
+                      cellOf(c.y - r - 0.6f), cellOf(c.y + r * 1.6f + 0.6f),
+                      cellOf(c.z - r - 1.2f), cellOf(c.z + r + 1.2f));
+            }
+    }
+
     auto& bushL = layers.emplace_back();
     bushL.file = "bushes.vxw";
     bushL.role = "scatter";
@@ -426,6 +556,8 @@ int main(int argc, char** argv)
                 float hr = vf::voxel::hash2(float(cx) * 23.1f, float(cz) * 29.7f);
                 glm::vec2 bc((cx + jx) * cell, (cz + jz) * cell);
                 if (fabs(bc.x) > 0.5f * WORLD || fabs(bc.y) > 0.5f * WORLD) continue;
+                if (vf::voxel::inPaddock(bc.x, bc.y, 1.5f))
+                    continue;
                 float H = hm.sample(bc.x, bc.y);
                 uint8_t mat = latMat(bc.x, bc.y, H);
                 if (mat != 0 && mat != 1) continue;
@@ -488,10 +620,10 @@ int main(int argc, char** argv)
     manifestLayers.reserve(layers.size());
     size_t totalRecords = 0;
     for (const LayerOut& L : layers) {
-        // default manifest: terrain-only world. Content layers ship disabled
-        // and are opted into via the GUI / enable_layer; ai_edits is enabled
-        // exactly when it carries records. It is also first in the vector,
-        // i.e. highest merge priority.
+        // default manifest: the full detailed scene from house.jpeg ships
+        // enabled (cabin + forest + waterfront + scatter + terrain). Users can
+        // still opt layers out via the GUI / enable_layer; ai_edits is first
+        // in the vector, i.e. highest merge priority.
         vf::voxel::worldfile::WorldLayer wl;
         wl.file = L.file;
         wl.role = L.role;
@@ -500,8 +632,7 @@ int main(int argc, char** argv)
         wl.pos[1] = L.pos.y;
         wl.pos[2] = L.pos.z;
         wl.rotDeg = 0.f;
-        wl.enabled = L.role == "landscape" || L.file == "ai_edits.vxw" ||
-                     L.file == "bridge.vxw";
+        wl.enabled = true;
         wl.listed = true;
         // NEVER write ai_edits.vxw back: the packer only consumes it. Writing
         // would stomp edits appended while this bake was running.

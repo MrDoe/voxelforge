@@ -542,29 +542,46 @@ SurfelSet buildSurfels(const VoxelField& field, const SurfelParams& params) {
             const float h2 = microHash(x, y, z, 3);
             const float oA = (h1 - 0.5f) * 0.09f;
             const float oB = (h2 - 0.5f) * 0.09f;
+            // micro-grain: small dense children (2-6 cm apparent) so
+            // close-ups read as moss grain, sand, bark fibre and leaflets
+            // instead of flat 10 cm disks. Spawn rates are high on purpose:
+            // the renderer distance-culls micros in far chunks.
             if (mat <= 1) { // meadow blades / soil crumbs
-                if (h0 < 0.55f)
-                    emit(oA, oB, 0.018f, 0.55f, 0.42f, 0.92f, 1);
-            } else if (mat == 2 || mat == 3) { // pebbles
-                if (h0 < 0.45f)
-                    emit(oA, oB, 0.008f, 0.45f, 0.28f + 0.18f * h1, 0.93f, 2);
+                if (h0 < 0.80f)
+                    emit(oA, oB, 0.014f, 0.55f, 0.30f, 0.92f, 1);
+                if (h2 < 0.30f)
+                    emit(-oA, -oB, 0.020f, 0.70f, 0.24f, 0.88f, 11);
+            } else if (mat == 2 || mat == 3) { // pebbles / sand grain
+                if (h0 < 0.70f)
+                    emit(oA, oB, 0.006f, 0.45f, 0.20f + 0.12f * h1, 0.93f, 2);
+                if (h2 < 0.30f)
+                    emit(-oA * 0.7f, -oB * 0.7f, 0.004f, 0.60f, 0.16f, 0.90f, 12);
             } else if (mat == 4 || mat == 5 || mat == 16) { // rock strata chips
-                if (h0 < 0.40f)
-                    emit(oA, oB, 0.010f, 0.60f, 0.50f, 0.88f, 3);
+                if (h0 < 0.65f)
+                    emit(oA, oB, 0.008f, 0.60f, 0.34f, 0.88f, 3);
+                if (h2 < 0.25f)
+                    emit(-oA, -oB, 0.012f, 0.80f, 0.26f, 0.85f, 13);
             } else if (mat == 6) { // bark relief along the tangent
-                if (h0 < 0.55f)
-                    emit(oA * 1.6f, oB * 0.5f, 0.006f, 0.35f, 0.40f, 0.95f, 4);
+                if (h0 < 0.80f)
+                    emit(oA * 1.6f, oB * 0.5f, 0.005f, 0.35f, 0.28f, 0.95f, 4);
+                if (h2 < 0.35f)
+                    emit(-oA * 1.2f, oB * 0.8f, 0.004f, 0.50f, 0.22f, 0.93f, 14);
             } else if (mat == 7) { // roof: seal undersides, moss the tops
                 if (bn.y < -0.2f) {
                     emit(0.0f, 0.0f, -0.005f, 0.0f, 1.15f, 1.0f, 5);
-                } else if (h0 < 0.65f) {
-                    emit(oA, oB, 0.014f, 0.70f, 0.55f, 0.90f, 6);
+                } else {
+                    if (h0 < 0.85f)
+                        emit(oA, oB, 0.011f, 0.70f, 0.38f, 0.90f, 6);
+                    if (h2 < 0.40f)
+                        emit(-oA, -oB, 0.015f, 0.90f, 0.30f, 0.86f, 16);
                 }
             } else if (mat == 8) { // canopy leaflets: real volume
-                if (h0 < 0.70f)
-                    emit(oA * 1.3f, oB * 1.3f, 0.010f, 1.20f, 0.55f + 0.30f * h1, 0.90f, 7);
-                if (h2 < 0.35f)
-                    emit(-oA, -oB, 0.016f, 1.40f, 0.45f, 0.85f, 8);
+                if (h0 < 0.90f)
+                    emit(oA * 1.3f, oB * 1.3f, 0.008f, 1.20f, 0.38f + 0.20f * h1, 0.90f, 7);
+                if (h2 < 0.55f)
+                    emit(-oA, -oB, 0.013f, 1.40f, 0.30f, 0.85f, 8);
+                if (microHash(x, y, z, 9) < 0.30f)
+                    emit(oB, -oA, 0.018f, 1.10f, 0.26f, 0.88f, 19);
             }
         }
         if (!micros.empty()) {
