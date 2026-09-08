@@ -58,6 +58,35 @@
 - Headless: `--selftest`, `--smoke N`, `--shot out.ppm --cam …`,
   `--probe X Y Z`, `--sun <elev> <azim>`, `--animtime <s>`, `--width/--height`,
   `--mode splat|svo` (default `splat`; SVO is the pixel reference).
+- Splat perf knobs (all env, default tuned): `VF_LOD=0` disables the baked
+  merged-terrain LOD rings (surfelize 2x2x2 / 4x4x4, draw-time selection
+  `VF_LOD1`/`VF_LOD2` = 20/60 m; objects ride along unmerged — trees must
+  never vanish), `VF_RIM_DIST` (42 m rim-fade skip: chunks beyond it draw
+  core only, exact because coreD2 hits 1.0 at 40 m), `VF_MICRO_DIST`
+  (default 20 m micro cull), `VF_NO_GPU_CULL=1` disables the GPU per-surfel
+  cull pre-pass (compute compaction + GPU-written indirect counts;
+  bit-exact), `VF_SPLAT_DIRECT`/`VF_NO_INDIRECT_BARRIER` legacy A/B paths.
+- Tile splat path (WIP, `VF_TILE=1`): compute-only pipeline
+  `splat_tile_{bin,scan,base,render}.comp` — project+bin surfels into 16×16
+  tiles via a (tile × entry) counts matrix, scan per-tile ranges
+  (offsets/ends), convert counts to exclusive entry bases, fill the dup
+  stream atomically (entry-private cursors, lane-0 ordered walk = exact
+  forward submission order), and blend per pixel in registers over two
+  loops (cores, then rims+water — mirrors the forward pipes; a single
+  loop annihilates earlier rims that the forward MAXes). Replaces the
+  three forward raster passes. Status: renders the full scene; components
+  near-exact in isolation (cores 97% >4LSB, rims 98%, water bit-exact,
+  albedo/rim-mask/gpos views 95-99%), but the full composite still shows
+  ~32% pixels differing (16% >4LSB, dense small deltas — per-component fp
+  noise summing through the blend chain plus unresolved rim-order
+  subtleties). Perf NOT yet a win: 143 ms vs 57 ms forward geo at 720p
+  hero (bin/fill 65 ms incl. two projection passes + contended atomics,
+  render 78 ms from full-tile per-pixel loops) — forward remains the
+  default until parity is proven per scene
+  (hero/corner/overview/house/water). Fragments quantize depth to 1e-5
+  units (both backends) so near-tie cores resolve identically.
+- GPU timestamp profiler: HUD "GPU ms" line + `VF_TRACE` log (`geo/post/fx/
+  taa/tail`), 6 marks × 3 frame slots, readback after each slot's fence wait.
 - Chat backend: Ollama defaults or any OpenAI-compatible server via
   `VF_LLM_URL=http://host:8080/v1 VF_LLM_MODEL=… ./build/voxelforge`.
   MCP: `./build/vf_mcp` (stdio), registered in `.opencode/opencode.json`.

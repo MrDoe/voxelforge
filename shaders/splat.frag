@@ -265,6 +265,12 @@ void main()
     // a shadow-side-first, higher-material-id-first preference so core ties
     // between different shadow/color neighbours also resolve deterministically.
     float fragDepth = 1.0 - exp(-t * 0.02);
+    // quantize depth to 1e-5 units (≈0.5 mm in t): near-tie cores
+    // (same-mat neighbours agreeing to fp jitter) resolve identically in
+    // every backend (same quantum -> first-in-order wins), so settled
+    // depths — and hence rim depth tests — agree bit-for-bit. The quantum
+    // dwarfs jitter (~1e-7) but is far below visible relief.
+    fragDepth = floor(fragDepth * 100000.0 + 0.5) / 100000.0;
     if (PASS_MODE == 1)
         fragDepth = max(fragDepth - (5e-5 + winBias), 0.0);
     gl_FragDepth = fragDepth;

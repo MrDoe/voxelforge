@@ -155,6 +155,10 @@ set(VF_SHADER_SRCS ${CMAKE_CURRENT_SOURCE_DIR}/shaders/svo_raymarch.comp
     ${CMAKE_CURRENT_SOURCE_DIR}/shaders/splat.vert
     ${CMAKE_CURRENT_SOURCE_DIR}/shaders/splat.frag
     ${CMAKE_CURRENT_SOURCE_DIR}/shaders/splat_cull.comp
+    ${CMAKE_CURRENT_SOURCE_DIR}/shaders/splat_tile_bin.comp
+    ${CMAKE_CURRENT_SOURCE_DIR}/shaders/splat_tile_scan.comp
+    ${CMAKE_CURRENT_SOURCE_DIR}/shaders/splat_tile_base.comp
+    ${CMAKE_CURRENT_SOURCE_DIR}/shaders/splat_tile_render.comp
     ${CMAKE_CURRENT_SOURCE_DIR}/shaders/ssr.comp
     ${CMAKE_CURRENT_SOURCE_DIR}/shaders/ssao.comp
     ${CMAKE_CURRENT_SOURCE_DIR}/shaders/volumetric_fog.comp

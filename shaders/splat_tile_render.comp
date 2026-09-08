@@ -1,0 +1,272 @@
+#version 460
+#extension GL_GOOGLE_include_directive : require
+#define SPLAT_BACKEND 1
+// Voxelforge tile splat renderer (unified compute pass).
+//
+// Replaces the three forward raster passes (opaque core, interior rim MAX,
+// silhouette rim ADD, water) with a single per-pixel loop over the tile's
+// dup list. The dup stream is built by the (tile, entry) counting scheme:
+// base[tile][entry] + localIdx places entry e's local surfel i at a unique
+// slot, so within-tile order = (entry asc, local asc) = the forward
+// submission order EXACTLY (far->near opaque, then water; instance order
+// within a draw), and the per-layer math below mirrors splat.frag's
+// main() branch-for-branch:
+//
+//  - per-pixel state (hdr, gpos, depth=1.0, coreFlag=false) replaces the
+//    HDR/G-buffer/depth/stencil attachments; blending happens in registers
+//    (no framebuffer read-modify-write stalls, no stencil round-trip)
+//  - depth state is core-only (rims and water never store, like the
+//    forward pipes); core tests use the biased written value, rims the
+//    strict-LESS unbiased test, water the opqaue-pipe test
+//  - rimIn vs rimOut is decided by the core flag (== stencil 1/0), with
+//    the same MAX vs over blends; alpha-channel rules match the forward
+//    blend factors exactly (core->1, rim/water standard accumulate)
+//  - gpos is written by every surviving layer (no blend on att1, like HW)
+//  - an alpha==1 core annihilates prior blends, so the unified single
+//    evaluation order (core+rim per surfel, in submission order) equals the
+//    forward multi-pass sequence pixel-for-pixel
+//
+// Water surfels ride in the same dup stream (pass bit 1, after opaque),
+// depth-tested in software against the same core-only depth state.
+
+struct Surfel {
+    vec4 pos_rU;
+    vec4 normal_rV;
+    vec4 bent_sh;
+    vec4 mat_ao;
+};
+
+layout(set = 0, binding = 0) readonly buffer Surfels { Surfel uSurfels[]; };
+layout(set = 0, binding = 1, rg32f) uniform readonly highp image2D uHeight;
+layout(set = 0, binding = 2, r8_snorm) uniform readonly highp image3D uObjVol;
+layout(set = 0, binding = 14, rgba16f) uniform highp image2D uHdr;
+layout(set = 0, binding = 15, rgba16f) uniform highp image2D uGPos;
+
+layout(std140, set = 0, binding = 3) uniform SplatUBO {
+    vec4 uSplat;
+    vec4 uSplat2;
+} sp;
+
+layout(set = 0, binding = 6) readonly buffer TileOffsets { uint uTileOffsets[]; };
+layout(set = 0, binding = 7) readonly buffer TileEnds { uint uTileEnds[]; };
+layout(set = 0, binding = 10) readonly buffer DupVals { uint uDupVals[]; };
+layout(set = 0, binding = 20) readonly buffer TotalFb { uint uTotalFb[]; };
+
+layout(std140, set = 0, binding = 8) uniform Frame {
+    vec4 uTileInfo; // x = tilesX, y = tilesY, z = nEntries, w = scanN
+    vec4 uSortInfo; // x = dupCap, y = slot
+} fr;
+
+layout(push_constant) uniform PC {
+    vec4 camPos;
+    vec4 camRight;
+    vec4 camUp;
+    vec4 camFwd;
+    vec4 a; // tanHalfFov, aspect, extentX, extentY
+    vec4 b;
+    vec4 sunDir;
+    vec4 misc; // x=renderFlags, y=animTime, z=tonemapLook, w=exposure
+} pc;
+
+const float kWaterLevel = -0.9;
+
+#include "common_base.glsl"
+#include "common_splat.glsl"
+
+layout(local_size_x = 16, local_size_y = 16) in;
+
+void main()
+{
+    const ivec2 pix = ivec2(gl_GlobalInvocationID.xy);
+    const int W = int(pc.a.z + 0.5);
+    const int H = int(pc.a.w + 0.5);
+    if (pix.x >= W || pix.y >= H)
+        return;
+    // dup-stream overflow (see scan): skip, record() falls back to forward
+    if (uTotalFb[uint(fr.uSortInfo.y + 0.5) * 5u + 4u] != 0u)
+        return;
+    // debug views fall back to the forward path (record() routes there);
+    // never shade them here
+    if (sp.uSplat.w > 0.5)
+        return;
+
+    kSunDir = normalize(pc.sunDir.xyz);
+    gRenderFlags = int(pc.misc.x + 0.5);
+    vec3 ro = pc.camPos.xyz;
+    gUnderwater = ((gRenderFlags & 8) != 0) && ro.y < kWaterLevel && underWater(ro.xz);
+
+    // exact per-pixel ray (== the FS's perspective-correct vView at the
+    // pixel centre); NDC y=-1 is the top row under the VS projection
+    const vec2 ndcPx = vec2((float(pix.x) + 0.5) / float(W) * 2.0 - 1.0,
+                            (float(pix.y) + 0.5) / float(H) * 2.0 - 1.0);
+    const vec3 rd = normalize(pc.camFwd.xyz + ndcPx.x * pc.a.x * pc.a.y * pc.camRight.xyz
+                                               - ndcPx.y * pc.a.x * pc.camUp.xyz);
+
+
+    // per-pixel compositing state (== HDR/G-buffer/depth/stencil targets)
+    vec4 hdr = imageLoad(uHdr, pix);
+    vec4 gpos = imageLoad(uGPos, pix);
+    float depth = 1.0;
+    bool coreFlag = false;
+
+    const int tilesX = int(fr.uTileInfo.x + 0.5);
+    const uint tile = uint((pix.y / 16) * tilesX + (pix.x / 16));
+    // dup-stream range: exclusive per-tile offset + end (scan + base)
+    const uint b0 = uTileOffsets[tile];
+    const uint b1 = uTileEnds[tile];
+    if (b0 >= b1)
+        return;
+    const float extent = max(sp.uSplat.z, 1.0);
+    const float rScale = clamp(sp.uSplat2.x, 0.5, 2.0);
+    const bool noCollapse = sp.uSplat.x > 0.5; // buried (debug excluded above)
+
+    // Two passes over the tile's dup list, mirroring the forward pipes:
+    // pass 0 settles all cores (opaque replace, order-free min-reduction),
+    // pass 1 blends rims (MAX when a core settled, OVER otherwise) then
+    // water. A single interleaved loop would let a later core annihilate
+    // an earlier rim via replace, while the forward MAXes nearer rims
+    // over the settled core — the composites differ.
+    for (int tpass = 0; tpass < 2; ++tpass) {
+    for (uint b = b0; b < b1; ++b) {
+        Surfel s = uSurfels[uDupVals[b]];
+        const vec3 c = s.pos_rU.xyz;
+        vec3 n = normalize(s.normal_rV.xyz);
+        const float facing = dot(n, ro - c);
+        const float rU = max(s.pos_rU.w, 1e-4) * rScale;
+        const float rV = max(s.normal_rV.w, 1e-4) * rScale;
+        const float matf = s.mat_ao.x;
+        const bool thinShell = abs(matf - 8.0) < 0.5 || abs(matf - 7.0) < 0.5;
+        // VS collapse rule: culled quads never reach the FS; the binning
+        // pass already dropped them, but two-sided shells and buried mode
+        // keep both sides exactly like the FS's vFace rule below
+        if (facing < 0.0 && !noCollapse && !thinShell)
+            continue;
+        if (facing < 0.0 && thinShell)
+            n = -n;
+        // tangent frame mirrors splat.vert
+        const vec3 upRef = abs(n.y) < 0.99 ? vec3(0.0, 1.0, 0.0) : vec3(1.0, 0.0, 0.0);
+        const vec3 tT = normalize(cross(n, upRef));
+        const vec3 tB = normalize(cross(n, tT));
+
+        const float denom = dot(rd, n);
+        if (abs(denom) < 1e-6)
+            continue;
+        float t = dot(c - ro, n) / denom;
+        if (t <= 0.0)
+            continue;
+        vec3 q = ro + rd * t;
+
+        float u = dot(q - c, tT) / max(rU, 1e-5);
+        float v = dot(q - c, tB) / max(rV, 1e-5);
+        float d2 = u * u + v * v;
+        if (d2 > extent * extent)
+            continue;
+
+        const float coreD2 = mix(sp.uSplat.y, 1.0, smoothstep(10.0, 40.0, t));
+        const bool isCore = d2 <= coreD2;
+        float alpha;
+        if (d2 < coreD2) {
+            alpha = 1.0;
+        } else {
+            const float rn = (d2 - coreD2) / max(1.0 - coreD2, 1e-3);
+            alpha = exp(-4.0 * rn * rn);
+        }
+        if (alpha < 0.004)
+            continue;
+
+        const vec4 vMat = s.mat_ao;
+        const bool isWater = vMat.w > 1.5;
+        if (tpass == 0) {
+            // core pipe: opaque cores only (water has its own pipe, last)
+            if (isWater || !isCore)
+                continue;
+        } else {
+            // rim + water pipes: non-core opaque dups, then water dups
+            // (water entries ride last in the stream, like the water pipe)
+            if (!isWater && isCore)
+                continue;
+        }
+        const float aoBaked = vMat.w - (isWater ? 2.0 : 0.0);
+        vec3 col;
+        float hitType = 1.0;
+        float winBias = 0.0;
+        const uint mIdA = uint(vMat.x + 0.5);
+        if (isWater) {
+            // PLANAR water: identical to the FS water branch
+            const float tW = (kWaterLevel - ro.y) / rd.y;
+            if (!(tW > 0.0))
+                continue;
+            const vec3 pw = ro + rd * tW;
+            float wa = 1.0;
+            col = shadeWaterSplat(pw, rd, ro, tW, wa);
+            alpha = wa;
+            hitType = 2.0;
+            t = tW;
+            q = pw;
+        } else {
+            const uint mId = uint(vMat.x + 0.5);
+            const vec3 alb = kPalette[clamp(mId, 0u, 16u)];
+            const vec2 rr = vec2(vMat.y, vMat.z) / 255.0;
+            const float shB = ((gRenderFlags & 2) != 0 && dot(n, kSunDir) > 0.02)
+                                  ? s.bent_sh.w
+                                  : 1.0;
+            winBias = (1.0 - shB) * 5e-5 + float(mId) * 3e-6;
+            const float aoB = ((gRenderFlags & 1) != 0) ? clamp(aoBaked, 0.0, 1.0) : 1.0;
+            const vec3 bentB = normalize(s.bent_sh.xyz);
+            col = shadeSurfel(q, rd, alb, rr, ro, n, bentB, shB, aoB, mId);
+            const float fog = 1.0 - exp(-t * 0.0016);
+            vec3 fc = fogColor(rd, q);
+            const float mist = mistFactor(ro, q, t);
+            fc = mix(fc, fc * vec3(1.04, 0.99, 0.94) + vec3(0.02, 0.015, 0.01), mist);
+            col = mix(col, fc, clamp(fog + mist * 0.45, 0.0, 1.0));
+        }
+
+        if (gUnderwater) {
+            col *= exp(-t * vec3(0.35, 0.18, 0.12) * 3.0);
+            col = mix(col, vec3(0.05, 0.14, 0.13), clamp(t * 0.8, 0.0, 0.85));
+        }
+
+        const float fragDepthQ = floor((1.0 - exp(-t * 0.02)) * 100000.0 + 0.5) / 100000.0;
+        // quantized like the FS (see splat.frag): near-tie cores resolve
+        // identically so settled depths and rim tests agree bit-for-bit
+        const float fragDepth = fragDepthQ;
+        if (isWater) {
+            // water pipe: depth-tested, blended, no depth write, no stencil.
+            // The FS outputs premultiplied (col*alpha) and the pipe blends
+            // with (SRC_ALPHA, ONE_MINUS_SRC_ALPHA), so the net is
+            // col*a^2 + dst*(1-a) — mirrored exactly here.
+            if (!(fragDepth < depth))
+                continue;
+            hdr.rgb = hdr.rgb * (1.0 - alpha) + col * alpha * alpha;
+            hdr.a = hdr.a * (1.0 - alpha) + alpha;
+            gpos = vec4(q, hitType);
+        } else if (isCore) {
+            // core pipe: biased depth settle, opaque replace, marks core
+            const float biased = max(fragDepth - (5e-5 + winBias), 0.0);
+            if (!(biased < depth))
+                continue;
+            depth = biased;
+            coreFlag = true;
+            hdr = vec4(col, 1.0);
+            gpos = vec4(q, hitType);
+        } else if (coreFlag) {
+            // interior rim: strict-LESS, lighten-only MAX (incl. alpha lane)
+            if (!(fragDepth < depth))
+                continue;
+            hdr.rgb = max(hdr.rgb, col);
+            hdr.a = max(hdr.a, alpha);
+            gpos = vec4(q, hitType);
+        } else {
+            // silhouette rim: strict-LESS, over-blend
+            if (!(fragDepth < depth))
+                continue;
+            hdr.rgb = hdr.rgb * (1.0 - alpha) + col * alpha;
+            hdr.a = hdr.a * (1.0 - alpha) + alpha;
+            gpos = vec4(q, hitType);
+        }
+    }
+    }
+
+    imageStore(uHdr, pix, hdr);
+    imageStore(uGPos, pix, gpos);
+}

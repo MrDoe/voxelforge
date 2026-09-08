@@ -73,6 +73,10 @@ public:
 private:
     bool createPipelines(VkFormat hdrFormat);
     bool createCullPipeline();
+    bool initTileResources(const Context& ctx);
+    bool createBlackEnv(const Context& ctx);
+    void recordTile(VkCommandBuffer cmd, const RaymarchPush& push, VkExtent2D extent,
+                    uint32_t nDraws);
     void frustumPlanes(const RaymarchPush& push, glm::vec4 planes[6]) const;
     bool chunkVisible(const glm::vec4 planes[6], uint32_t chunk) const;
     // one instanced-quad draw per visible opaque chunk (shared by the depth
@@ -110,6 +114,42 @@ private:
     size_t m_compactBytes = 0;
     Buffer m_selBufs[3] {};  // per-frame selection entries {first, count, 0, 0}
     Buffer m_planesBuf {};   // per-frame frustum planes (inward normals)
+
+    // ---- tile splat path (splat_tile_{bin,scan,base,render}.comp) ----
+    // VF_TILE=1: project+bin surfels into 16x16 tiles via a (tile, entry)
+    // counting scheme, then blend per pixel in registers. The scan turns
+    // per-(tile, entry) counts into exclusive entry-prefix bases, so the
+    // fill places dup (e,i) at base[t][e]+i atomically-free and within-tile
+    // order = (entry asc, local asc) = the forward submission order EXACTLY
+    // (verified per scene); fragment work scales with covered pixels
+    // instead of quad areas x passes.
+    static constexpr uint32_t kTilePx = 16;
+    static constexpr uint32_t kMaxTiles = 65536; // 4096^2 px coverage
+    VkDescriptorSetLayout m_tileSetLayout = VK_NULL_HANDLE;
+    VkDescriptorPool m_tilePool = VK_NULL_HANDLE;
+    VkPipelineLayout m_tileLayout = VK_NULL_HANDLE;
+    VkDescriptorSet m_tileSet = VK_NULL_HANDLE;
+    VkPipeline m_tileBinCountPipe = VK_NULL_HANDLE; // MODE 0
+    VkPipeline m_tileBinFillPipe = VK_NULL_HANDLE;  // MODE 1
+    VkPipeline m_tileScanPipe = VK_NULL_HANDLE;     // tile offsets + ends
+    VkPipeline m_tileTotalsPipe = VK_NULL_HANDLE;   // per-tile totals
+    VkPipeline m_tileBasePipe = VK_NULL_HANDLE;     // per-tile entry bases
+    VkPipeline m_tileRenderPipe = VK_NULL_HANDLE;
+    Buffer m_tileCounts {};   // tile-major x entry counts -> bases (live slice)
+    VkDeviceSize m_tileCountsBytes = 0;
+    Buffer m_tileTotals {};   // maxTiles u32 (zeroed per frame)
+    Buffer m_tileOffsets {};  // maxTiles u32
+    Buffer m_tileCursor {};   // maxTiles u32 (per-tile end)
+    Buffer m_tileFrame {};    // 2xvec4 host-mapped UBO (tiles/entries/total)
+    Buffer m_dupVals {};      // DUP_CAP u32
+    Buffer m_tileTotal {};    // 5 u32 x 3 slots host-visible: total + dx + overflow
+    Image3D m_blackCube {};   // parity: forward IBL reads are unbound (zero)
+    Image3D m_blackLut {};
+    VkSampler m_blackSampler = VK_NULL_HANDLE;
+    size_t m_dupCap = 0;
+    bool m_tileReady = false;  // all tile resources created
+    bool m_tileDisabled = false; // session fallback after dup overflow
+    uint64_t m_tileFrames = 0;
 
     VkBuffer m_surfelBuf = VK_NULL_HANDLE;
     VmaAllocation m_surfelAlloc = VK_NULL_HANDLE;

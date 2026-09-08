@@ -1,0 +1,50 @@
+#version 460
+// Per-tile totals and entry bases for the tile splat path.
+//
+// Two pipelines from one source (TOTBASE specialization):
+//   TOTBASE 0 (totals): one thread per tile sums the tile's entry counts
+//     from the counts matrix into uTileTotals (input of the serial tile
+//     scan).
+//   TOTBASE 1 (bases): one thread per tile turns the counts into
+//     exclusive entry-prefix bases, overwriting the matrix in place:
+//     base[t][e] = uTileOffsets[t] + sum(counts[t][e' < e]). The fill
+//     pass then places entry e's local surfel i at base[t][e] + i with
+//     no atomics, giving exact submission order within each tile.
+//
+// Per-thread cost is O(nEntries) serial adds (~161 for the reference
+// scene), fully parallel across tiles.
+
+layout(set = 0, binding = 5) buffer Counts { uint uCounts[]; }; // tile-major matrix
+layout(set = 0, binding = 6) readonly buffer TileOffsets { uint uTileOffsets[]; };
+layout(set = 0, binding = 9) buffer TileTotals { uint uTileTotals[]; };
+
+layout(std140, set = 0, binding = 8) uniform Frame {
+    vec4 uTileInfo; // x = tilesX, y = tilesY, z = nEntries (strideE), w = nTiles
+    vec4 uSortInfo;
+} fr;
+
+layout(constant_id = 0) const int TOTBASE = 0;
+layout(local_size_x = 64) in;
+
+void main()
+{
+    const uint tile = gl_GlobalInvocationID.x;
+    const uint nTiles = uint(fr.uTileInfo.w + 0.5);
+    if (tile >= nTiles)
+        return;
+    const uint strideE = uint(fr.uTileInfo.z + 0.5);
+    if (TOTBASE == 0) {
+        uint sum = 0u;
+        for (uint e = 0u; e < strideE; ++e)
+            sum += uCounts[tile * strideE + e];
+        uTileTotals[tile] = sum;
+    } else {
+        const uint off = uTileOffsets[tile];
+        uint running = 0u;
+        for (uint e = 0u; e < strideE; ++e) {
+            const uint base = off + running;
+            running += uCounts[tile * strideE + e];
+            uCounts[tile * strideE + e] = base;
+        }
+    }
+}

@@ -1634,10 +1634,14 @@ int App::run(const Args& args)
         // barrier: HDR/G-buffer written -> read by post pass
         VkMemoryBarrier2 mb { VK_STRUCTURE_TYPE_MEMORY_BARRIER_2 };
         if (m_renderMode == RenderMode::Splats) {
+            // forward raster writes attachments; the tile path (VF_TILE)
+            // writes HDR/G-buffer from compute instead - cover both
             mb.srcStageMask = VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT |
-                              VK_PIPELINE_STAGE_2_LATE_FRAGMENT_TESTS_BIT;
+                              VK_PIPELINE_STAGE_2_LATE_FRAGMENT_TESTS_BIT |
+                              VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT;
             mb.srcAccessMask = VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT |
-                               VK_ACCESS_2_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT;
+                               VK_ACCESS_2_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT |
+                               VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT;
         } else {
             mb.srcStageMask = VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT;
             mb.srcAccessMask = VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT;

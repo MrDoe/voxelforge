@@ -1,0 +1,50 @@
+#version 460
+// Tile-level scans for the tile splat path.
+//
+// SCAN_MODE 0 (tiles): in = uTileTotals (per-tile dup counts from the
+//   tileTotals kernel), out = uTileOffsets (exclusive prefix) and
+//   uTileEnds (offset + total, consumed directly by the tile render),
+//   total = uTotalDups (slot-tripled: total, dispatch dx, 1, 1, overflow).
+// Serial cost is ~N adds on one lane (~15 us for 3600 tiles); inputs are
+// binding-specialized per use via pipelines from this one source.
+
+layout(set = 0, binding = 9) readonly buffer TileTotals { uint uTileTotals[]; };
+layout(set = 0, binding = 6) buffer TileOffsets { uint uTileOffsets[]; };
+layout(set = 0, binding = 7) buffer TileEnds { uint uTileEnds[]; };
+layout(set = 0, binding = 20) buffer Total { uint uTotal[]; };
+// uTotal doubles as the indirect-dispatch args for the hist/scatter
+// passes: [total, dx, 1, 1]; the sort dispatches run vkCmdDispatchIndirect
+// at offset 4 so no CPU readback of the dup total is ever needed.
+
+layout(std140, set = 0, binding = 8) uniform Frame {
+    vec4 uTileInfo; // x = tilesX, y = tilesY, z = nEntries, w = scanN
+    vec4 uSortInfo; // x = dupCap, y = slot, z/w unused
+} fr;
+
+layout(constant_id = 0) const int SCAN_MODE = 0;
+layout(local_size_x = 1) in;
+
+void main()
+{
+    const uint n = uint(fr.uTileInfo.w + 0.5);
+    uint running = 0u;
+    if (SCAN_MODE == 0) {
+        for (uint i = 0u; i < n; ++i) {
+            uTileOffsets[i] = running;
+            running += uTileTotals[i];
+            uTileEnds[i] = running;
+        }
+        // slot-tripled totals: [total, dx, 1, 1, overflow]. On overflow the
+        // dup stream is unusable; record() notices the stale flag and
+        // falls back to forward rendering.
+        const uint slot = uint(fr.uSortInfo.y + 0.5);
+        const uint cap = uint(fr.uSortInfo.x + 0.5);
+        const uint base = slot * 5u;
+        const bool overflow = running > cap;
+        uTotal[base + 0u] = running;
+        uTotal[base + 1u] = overflow ? 0u : (running + 255u) / 256u;
+        uTotal[base + 2u] = 1u;
+        uTotal[base + 3u] = 1u;
+        uTotal[base + 4u] = overflow ? 1u : 0u;
+    }
+}

@@ -1,0 +1,205 @@
+#version 460
+// Voxelforge tile binning (compute pre-pass for the tile splat path).
+//
+// One workgroup per draw entry (opaque chunk runs + water runs, submission
+// order = far->near opaque then water). Each workgroup stripes over its
+// surfel range, projects every surfel's quad exactly like splat.vert
+// (same tangent frame, collapse rule, corner math, manual projection),
+// clips the quad against the near plane in view space and bins the pixel
+// bbox into 16x16 tiles.
+//
+// MODE 0 (count): atomic-adds per-(tile, entry) dup counts into the
+//   tile-major counts matrix (tile * nEntries + entry). Order-free: the
+//   sums are correct regardless of atomic arrival order.
+// MODE 1 (fill): places surfel indices at base[tile][entry] + rank, where
+//   the base kernel turned counts into exclusive entry-prefix bases and
+//   the same matrix cells now act as the entry-private cursors. Lane 0 of
+//   the entry's workgroup walks its surfels in index order (the order the
+//   forward rasterizer draws instances), so within-tile order == forward
+//   submission order EXACTLY (far->near opaque, then water; instance
+//   order within a draw). No cross-workgroup contention exists on any
+//   cell: every (tile, entry) cell belongs to exactly one workgroup.
+//
+// Culled quads (VS collapse rule / fully behind the near plane) emit no
+// dups, exactly like their zero-area/clipped forward counterparts.
+
+struct Surfel {
+    vec4 pos_rU;
+    vec4 normal_rV;
+    vec4 bent_sh;
+    vec4 mat_ao;
+};
+
+layout(set = 0, binding = 0) readonly buffer Surfels { Surfel uSurfels[]; };
+// per-entry selection: x = first (surfel index), y = count, z = pass bit
+// (0 = opaque, 1 = water)
+layout(set = 0, binding = 4) readonly buffer Sel { uvec4 uSel[]; };
+// tile-major x entry counts (fill: per-(tile, entry) slot cursors)
+layout(set = 0, binding = 5) buffer Counts { uint uCounts[]; };
+layout(set = 0, binding = 10) buffer DupVals { uint uDupVals[]; };
+
+layout(std140, set = 0, binding = 3) uniform SplatUBO {
+    vec4 uSplat;  // x=buried, y=coreD2, z=quad extent, w=debug mode
+    vec4 uSplat2; // x=radius scale
+} sp;
+
+layout(std140, set = 0, binding = 8) uniform Frame {
+    vec4 uTileInfo; // x = tilesX, y = tilesY, z = nEntries (strideE), w = nTiles
+    vec4 uSortInfo;
+} fr;
+
+layout(push_constant) uniform PC {
+    vec4 camPos;
+    vec4 camRight;
+    vec4 camUp;
+    vec4 camFwd;
+    vec4 a; // tanHalfFov, aspect, extentX, extentY
+    vec4 b;
+    vec4 sunDir;
+    vec4 misc;
+} pc;
+
+layout(constant_id = 0) const int MODE = 0; // 0 = count, 1 = fill
+layout(local_size_x = 128) in;
+
+// shared per-chunk surfel tile bboxes (packed: tx0|ty0, tx1|ty1;
+// 0xFFFFFFFF = culled or degenerate)
+shared uvec2 shBbox[128];
+
+void main()
+{
+    const uint e = gl_WorkGroupID.x;
+    const uvec4 sel = uSel[e];
+    const uint first = sel.x;
+    const uint count = sel.y;
+    const uint li = gl_LocalInvocationID.x;
+    const uint strideE = uint(fr.uTileInfo.z + 0.5);
+
+    const vec3 camP = pc.camPos.xyz;
+    const vec3 fwd = pc.camFwd.xyz;
+    const vec3 right = pc.camRight.xyz;
+    const vec3 up = pc.camUp.xyz;
+    const float tanH = pc.a.x;
+    const float asp = pc.a.y;
+    const float extW = pc.a.z;
+    const float extH = pc.a.w;
+    const float ext = max(sp.uSplat.z, 1.0);
+    const float rScale = clamp(sp.uSplat2.x, 0.5, 2.0);
+    const bool noCollapse = sp.uSplat.x > 0.5 || sp.uSplat.w > 0.5; // buried | debug
+    const int tilesX = int((uint(extW) + 15u) / 16u);
+    const int tilesY = int((uint(extH) + 15u) / 16u);
+
+    for (uint b = 0u; b < count; b += 128u) {
+        const uint i = b + li;
+        uvec2 bbox = uvec2(0xFFFFFFFFu);
+        if (i < count) {
+            Surfel s = uSurfels[first + i];
+            const vec3 c = s.pos_rU.xyz;
+            const vec3 n = normalize(s.normal_rV.xyz);
+            const float facing = dot(n, camP - c);
+            const float mat = s.mat_ao.x;
+            const bool thinShell = abs(mat - 8.0) < 0.5 || abs(mat - 7.0) < 0.5;
+            if (facing >= 0.0 || noCollapse || thinShell) {
+                // tangent frame mirrors splat.vert exactly
+                const vec3 upRef = abs(n.y) < 0.99 ? vec3(0.0, 1.0, 0.0) : vec3(1.0, 0.0, 0.0);
+                const vec3 t = normalize(cross(n, upRef));
+                const vec3 bb = normalize(cross(n, t));
+                const float rU = max(s.pos_rU.w, 1e-4) * rScale;
+                const float rV = max(s.normal_rV.w, 1e-4) * rScale;
+                // quad corners in view space (vx, vy, vz)
+                vec3 vpos[4];
+                for (int k = 0; k < 4; ++k) {
+                    const float cx = (k & 1) == 0 ? -1.0 : 1.0;
+                    const float cy = (k & 2) == 0 ? -1.0 : 1.0;
+                    const vec3 q = c + (t * (cx * rU) + bb * (cy * rV)) * ext;
+                    const vec3 rel = q - camP;
+                    vpos[k] = vec3(dot(rel, right), dot(rel, up), dot(rel, fwd));
+                }
+                // Sutherland-Hodgman clip against vz >= 0.05 (view space).
+                // The quad is convex; clipped polygon has <= 6 vertices.
+                vec3 poly[8];
+                int np = 4;
+                for (int k = 0; k < 4; ++k)
+                    poly[k] = vpos[k];
+                const float nearZ = 0.05;
+                for (int edge = 0; edge < 4; ++edge) {
+                    vec3 clip[8];
+                    int no = 0;
+                    for (int k = 0; k < np; ++k) {
+                        const vec3 cur = poly[k];
+                        const vec3 prv = poly[(k + np - 1) % np];
+                        const bool curIn = cur.z >= nearZ;
+                        const bool prvIn = prv.z >= nearZ;
+                        if (curIn) {
+                            if (!prvIn) {
+                                const float f = (nearZ - prv.z) / (cur.z - prv.z);
+                                clip[no++] = mix(prv, cur, f);
+                            }
+                            clip[no++] = cur;
+                        } else if (prvIn) {
+                            const float f = (nearZ - prv.z) / (cur.z - prv.z);
+                            clip[no++] = mix(prv, cur, f);
+                        }
+                    }
+                    np = no;
+                    for (int k = 0; k < no; ++k)
+                        poly[k] = clip[k];
+                    if (np == 0)
+                        break;
+                }
+                if (np > 0) {
+                    // project kept vertices, pixel bbox
+                    float mnx = 1e9, mxx = -1e9, mny = 1e9, mxy = -1e9;
+                    for (int k = 0; k < np; ++k) {
+                        const vec3 v = poly[k];
+                        const float nx = v.x / (v.z * tanH * asp);
+                        const float ny = -v.y / (v.z * tanH);
+                        const float px = (nx * 0.5 + 0.5) * extW;
+                        const float py = (ny * 0.5 + 0.5) * extH;
+                        mnx = min(mnx, px); mxx = max(mxx, px);
+                        mny = min(mny, py); mxy = max(mxy, py);
+                    }
+                    int tx0 = int(floor(mnx / 16.0));
+                    int tx1 = int(floor(mxx / 16.0));
+                    int ty0 = int(floor(mny / 16.0));
+                    int ty1 = int(floor(mxy / 16.0));
+                    tx0 = clamp(tx0, 0, tilesX - 1); tx1 = clamp(tx1, 0, tilesX - 1);
+                    ty0 = clamp(ty0, 0, tilesY - 1); ty1 = clamp(ty1, 0, tilesY - 1);
+                    if (tx1 >= tx0 && ty1 >= ty0) {
+                        bbox = uvec2(uint(tx0) | (uint(ty0) << 16u),
+                                     uint(tx1) | (uint(ty1) << 16u));
+                        if (MODE == 0) {
+                            for (int ty = ty0; ty <= ty1; ++ty)
+                                for (int tx = tx0; tx <= tx1; ++tx)
+                                    atomicAdd(
+                                        uCounts[uint(ty * tilesX + tx) * strideE + e],
+                                        1u);
+                        }
+                    }
+                }
+            }
+        }
+        shBbox[li] = bbox;
+        barrier();
+        if (MODE == 1 && li == 0u) {
+            // ordered slot assignment (see header): lane 0 walks the chunk's
+            // surfels in index order, claiming slots from the entry-private
+            // per-(tile, entry) cursors
+            for (uint k = 0u; k < 128u && b + k < count; ++k) {
+                const uvec2 bx = shBbox[k];
+                if (bx.x == 0xFFFFFFFFu)
+                    continue;
+                const int bx0 = int(bx.x & 0xFFFFu);
+                const int by0 = int(bx.x >> 16u);
+                const int bx1 = int(bx.y & 0xFFFFu);
+                const int by1 = int(bx.y >> 16u);
+                for (int ty = by0; ty <= by1; ++ty)
+                    for (int tx = bx0; tx <= bx1; ++tx) {
+                        const uint cell = uint(ty * tilesX + tx) * strideE + e;
+                        uDupVals[atomicAdd(uCounts[cell], 1u)] = first + b + k;
+                    }
+            }
+        }
+        barrier(); // shared bbox reused by the next chunk
+    }
+}
