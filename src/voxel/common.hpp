@@ -375,20 +375,21 @@ inline StampHit stampAt(glm::vec3 p, glm::vec3 origin, const StampCell* cells, s
     return best;
 }
 
-// log cabin (house.jpeg reference): stone foundation -> alternating log
-// courses with crossed corner joints -> carved door/windows -> plank gables ->
-// mossy stepped shingle roof -> stone chimney with cap+flue -> full-width
-// river-side porch (deck, posts, balustrade, steps, shed roof) -> side
-// firewood lean-to -> warm emissive window glass + porch lantern.
-// Footprint ~5.2 x 4.0 m, ridge ~4.1 m above the pad. Probe contract (kept):
+// log cabin (house.jpeg reference, micro-voxel rebuild): coursed fieldstone
+// foundation with per-stone facing -> hand-hewn log walls with chinking ->
+// carved openings with log-end reveals -> plank door + emissive lamplit glass
+// -> full-width porch with plank deck, balusters, rafters -> stepped shingle
+// roof with purlins, bargeboards, moss colonies -> coursed stone chimney ->
+// side firewood lean-to with log stacks, stump+axe -> stepping-stone path.
+// Footprint ~5.2 x 4.0 m, ridge ~4.3 m above the pad. Probe contract (kept):
 //   wall probe (0, 0.565, -hz) solid wood, door probe (-0.7, 1.30, -hz) empty.
 inline ObjHit houseAt(glm::vec3 p)
 {
     glm::vec3 q(p.x - kHousePos.x, p.y - kPadY, p.z - kHousePos.y);
     const float hx = 2.6f, hz = 2.0f;
-    // cheap reject: house + porch + woodpile bounds
-    if (q.x < -4.8f || q.x > 4.8f || q.z < -6.4f || q.z > 3.4f || q.y < -1.2f ||
-        q.y > 5.8f)
+    // cheap reject: house + porch + woodpile + stone path bounds
+    if (q.x < -4.8f || q.x > 4.8f || q.z < -7.2f || q.z > 3.4f || q.y < -1.2f ||
+        q.y > 6.0f)
         return { 1e9f, 6u };
     ObjHit best { 1e9f, 4u };
     auto improve = [&](float d, uint8_t m) {
@@ -398,41 +399,114 @@ inline ObjHit houseAt(glm::vec3 p)
         }
     };
 
-    // L0: stone foundation slab, mottled 4/5 per position hash (fieldstone)
+    // L0: coursed fieldstone foundation. Backing slab (solid) + two staggered
+    // facing courses of individual stones protruding ~6 cm, plus porch piers
+    // and a stepping-stone path toward the dock.
     {
         float d = sdBoxF(q, glm::vec3(0.f, 0.05f, 0.f),
                          glm::vec3(hx + 0.28f, 0.30f, hz + 0.28f));
-        float h = hash2(q.x * 4.3f + 7.1f, q.z * 4.3f - 3.7f);
+        float h = hash2(std::floor(q.x * 4.3f + 7.1f), std::floor(q.z * 4.3f - 3.7f));
         improve(d, h > 0.5f ? uint8_t(5) : uint8_t(4));
-        // foundation piers under the porch deck
-        for (int i = -2; i <= 2; ++i) {
-            float px = float(i) * 1.25f;
-            float dp = sdBoxF(q, glm::vec3(px, 0.10f, -hz - 1.0f),
-                              glm::vec3(0.13f, 0.22f, 1.05f));
+        // facing stones: two courses around all four sides
+        for (int course = 0; course < 2; ++course) {
+            float y = -0.10f + float(course) * 0.24f;
+            // front / back rows (along X)
+            for (int i = 0; i < 12; ++i) {
+                float fx = -2.70f + (float(i) + 0.5f) * 0.45f +
+                           (hash2(float(i) * 3.1f, float(course) * 7.7f) - 0.5f) * 0.10f;
+                float fw = 0.19f + hash2(float(i) * 5.3f, float(course) * 1.9f) * 0.05f;
+                for (float sz : { -hz - 0.30f, hz + 0.30f }) {
+                    float dz = (hash2(fx * 9.1f, sz * 3.3f + float(course)) - 0.5f) * 0.04f;
+                    float ds = sdBoxF(q, glm::vec3(fx, y, sz + dz),
+                                      glm::vec3(fw, 0.105f, 0.09f));
+                    float hm2 = hash2(fx * 12.7f, y * 31.0f + sz);
+                    improve(ds, hm2 > 0.45f ? uint8_t(5) : uint8_t(4));
+                }
+            }
+            // side rows (along Z)
+            for (int i = 0; i < 9; ++i) {
+                float fz = -1.90f + (float(i) + 0.5f) * 0.45f +
+                           (hash2(float(i) * 4.7f, float(course) * 3.9f) - 0.5f) * 0.10f;
+                float fw = 0.19f + hash2(float(i) * 1.7f, float(course) * 8.3f) * 0.05f;
+                for (float sx : { -hx - 0.30f, hx + 0.30f }) {
+                    float dx = (hash2(sx * 7.7f, fz * 5.1f + float(course)) - 0.5f) * 0.04f;
+                    float ds = sdBoxF(q, glm::vec3(sx + dx, y, fz),
+                                      glm::vec3(0.09f, 0.105f, fw));
+                    float hm2 = hash2(sx * 17.3f, fz * 11.1f + y * 29.0f);
+                    improve(ds, hm2 > 0.45f ? uint8_t(5) : uint8_t(4));
+                }
+            }
+        }
+        // stone piers under the porch deck (3) + timber sill beams on top
+        for (int i = -1; i <= 1; ++i) {
+            float px = float(i) * 1.9f;
+            float dp = sdBoxF(q, glm::vec3(px, -0.02f, -hz - 1.0f),
+                              glm::vec3(0.20f, 0.24f, 0.20f));
             float hp = hash2(px * 9.1f, -hz * 3.3f);
             improve(dp, hp > 0.5f ? uint8_t(5) : uint8_t(4));
+            improve(sdBoxF(q, glm::vec3(px, 0.24f, -hz - 1.0f),
+                           glm::vec3(0.10f, 0.08f, 1.05f)),
+                    6u);
+        }
+        // stepping-stone path: porch steps -> dock (3 river-washed slabs)
+        {
+            const HeightMap& hmH = sharedHeightmap();
+            for (int i = 0; i < 3; ++i) {
+                float wx = kHousePos.x - 0.7f + (hash2(float(i) * 3.3f, 1.1f) - 0.5f) * 0.3f;
+                float wz = kHousePos.y - 5.05f - float(i) * 0.62f;
+                float gy = hmH.sample(wx, wz);
+                glm::vec3 c(wx - kHousePos.x, gy - kPadY + 0.02f, wz - kHousePos.y);
+                float r = 0.30f + hash2(float(i) * 7.7f, 2.2f) * 0.10f;
+                improve(sdEllipsoid(q, c, glm::vec3(r, 0.07f, r * 0.8f)),
+                        i % 2 ? uint8_t(4) : uint8_t(5));
+            }
         }
     }
 
-    // L1..L8: stacked log courses, corners crossed (+0.22 overhang) like
-    // real blockwork
-    const float lr = 0.145f, pitch = 0.27f;
-    float ry0 = 0.42f + lr + 7.f * pitch + 0.22f; // roof base (q.y)
-    float wall = 1e9f;
-    for (int k = 0; k < 8; ++k) {
-        float y = 0.42f + lr + float(k) * pitch;
-        if (k % 2 == 0)
-            wall = glm::min(wall, glm::min(sdLogX(q, 0.f, hx + 0.22f, y, hz, lr),
-                                           sdLogX(q, 0.f, hx + 0.22f, y, -hz, lr)));
-        else
-            wall = glm::min(wall, glm::min(sdLogZ(q, 0.f, hz + 0.22f, y, hx, lr),
-                                           sdLogZ(q, 0.f, hz + 0.22f, y, -hx, lr)));
+    // L1: hand-hewn log courses (9), corners crossed like blockwork. Course 0
+    // is pinned to the probe contract (y=0.565, r=0.145); upper courses vary
+    // in girth/overhang per-course hash + recessed daub chinking between them.
+    const float pitch = 0.26f;
+    float logY[9], logR[9], logOv[9];
+    for (int k = 0; k < 9; ++k) {
+        if (k == 0) {
+            logR[k] = 0.145f;
+            logY[k] = 0.565f;
+            logOv[k] = 0.22f;
+        } else {
+            logR[k] = 0.132f + hash2(float(k) * 7.13f, 3.3f) * 0.022f;
+            logY[k] = 0.565f + float(k) * pitch +
+                      (hash2(float(k) * 3.71f, 9.2f) - 0.5f) * 0.020f;
+            logOv[k] = 0.22f + hash2(float(k) * 5.17f, 1.7f) * 0.05f;
+        }
     }
-    // openings: river-side door (deep entry alcove), shallow window reveals
-    // cut through the logs with ~0.3 into the core (two front windows
-    // flanking the door, clear of the door probe at x=-0.7; side windows on
-    // both long walls; attic vents). Glass sits backed against the reveal
-    // back so its baked normal faces outward and the emissive reads.
+    float ry0 = logY[8] + logR[8] + 0.22f; // roof base (q.y)
+    float wall = 1e9f;
+    for (int k = 0; k < 9; ++k) {
+        float y = logY[k], lr = logR[k], ov = logOv[k];
+        if (k % 2 == 0)
+            wall = glm::min(wall, glm::min(sdLogX(q, 0.f, hx + ov, y, hz, lr),
+                                           sdLogX(q, 0.f, hx + ov, y, -hz, lr)));
+        else
+            wall = glm::min(wall, glm::min(sdLogZ(q, 0.f, hz + ov, y, hx, lr),
+                                           sdLogZ(q, 0.f, hz + ov, y, -hx, lr)));
+        // butt-joint shadow rings where crossing logs meet the perpendicular
+        // wall (short collar logs, 0.5 m stubs) — reads as saddle notches.
+        if (k % 2 == 0) {
+            for (float sx : { -hx, hx }) {
+                float collar = sdLogZ(q, 0.f, 0.30f, y, sx, lr * 0.92f);
+                wall = glm::min(wall, collar);
+            }
+        } else {
+            for (float sz : { -hz, hz }) {
+                float collar = sdLogX(q, 0.f, 0.30f, y, sz, lr * 0.92f);
+                wall = glm::min(wall, collar);
+            }
+        }
+    }
+    // openings first (needed to mask the chinking below): river-side door
+    // (deep entry alcove), shallow window reveals, attic vents. Glass sits
+    // backed against the reveal back so its baked normal faces outward.
     float door = sdBoxF(q, glm::vec3(-0.7f, 1.30f, -hz), glm::vec3(0.52f, 0.95f, 0.6f));
     float winF1 = sdBoxF(q, glm::vec3(-1.90f, 1.62f, -hz - 0.20f), glm::vec3(0.40f, 0.38f, 0.15f));
     float winF2 = sdBoxF(q, glm::vec3(1.20f, 1.62f, -hz - 0.20f), glm::vec3(0.40f, 0.38f, 0.15f));
@@ -451,16 +525,40 @@ inline ObjHit houseAt(glm::vec3 p)
     carve = glm::max(carve, -winD);
     carve = glm::max(carve, -atticE);
     carve = glm::max(carve, -atticW);
+    // daub chinking: recessed soil lines in the shadow gaps between courses.
+    // Masked by the opening carves so doors/windows stay clear.
+    for (int k = 0; k < 8; ++k) {
+        float ym = 0.5f * (logY[k] + logY[k + 1]);
+        float ch = 0.030f;
+        improve(glm::max(sdBoxF(q, glm::vec3(0.f, ym, hz - 0.03f),
+                                glm::vec3(hx + 0.16f, ch, 0.055f)),
+                        carve),
+                2u);
+        improve(glm::max(sdBoxF(q, glm::vec3(0.f, ym, -hz + 0.03f),
+                                glm::vec3(hx + 0.16f, ch, 0.055f)),
+                        carve),
+                2u);
+        improve(glm::max(sdBoxF(q, glm::vec3(hx - 0.03f, ym, 0.f),
+                                glm::vec3(0.055f, ch, hz + 0.16f)),
+                        carve),
+                2u);
+        improve(glm::max(sdBoxF(q, glm::vec3(-hx + 0.03f, ym, 0.f),
+                                glm::vec3(0.055f, ch, hz + 0.16f)),
+                        carve),
+                2u);
+    }
     wall = glm::max(wall, carve);
-    // solid interior (negative inside) so the cabin reads solid at distance
+    // solid interior (negative inside) so the cabin reads solid at distance.
+    // Faces sit just inside the log centre planes so the hand-hewn log
+    // surfaces (not this box) always win the bake band at the shell.
     float solidBox = sdBoxF(q, glm::vec3(0.f, (0.35f + ry0) * 0.5f, 0.f),
-                            glm::vec3(hx + 0.20f, (ry0 - 0.35f) * 0.5f, hz + 0.20f));
+                            glm::vec3(hx - 0.05f, (ry0 - 0.35f) * 0.5f, hz - 0.05f));
     solidBox = glm::max(solidBox, carve);
     improve(solidBox, 6u);
     improve(wall, 6u);
 
-    // L2: warm emissive glass recessed in every opening (mat 10 ember glow,
-    // like lamplit windows at dusk) + wood mullion crosses + frames
+    // L2: lamplit openings — recessed ember glass, log-end reveals, sills,
+    // lintels, trim, plank door with battens + ironwork, twin lanterns.
     auto glassPane = [&](glm::vec3 c, glm::vec3 h) {
         improve(sdBoxF(q, c, h), 10u);
     };
@@ -472,30 +570,83 @@ inline ObjHit houseAt(glm::vec3 p)
     glassPane(glm::vec3(hx + 0.10f, 1.62f, 0.75f), glm::vec3(0.05f, 0.32f, 0.35f));
     glassPane(glm::vec3(-hx - 0.10f, 1.62f, -0.85f), glm::vec3(0.05f, 0.30f, 0.32f));
     glassPane(glm::vec3(hx + 0.10f, 1.62f, -0.85f), glm::vec3(0.05f, 0.30f, 0.32f));
-    // attic vents read as dark shutters, not lamps
+    // attic vents read as dark shutters, not lamps + louver slats
     improve(sdBoxF(q, glm::vec3(hx - 0.25f, 2.95f, 0.f),
                    glm::vec3(0.05f, 0.24f, 0.26f)),
             6u);
     improve(sdBoxF(q, glm::vec3(-hx + 0.25f, 2.95f, 0.f),
                    glm::vec3(0.05f, 0.24f, 0.26f)),
             6u);
-    // front window mullion crosses floating just off the glow + sills
-    for (float wx : { -1.90f, 1.20f }) {
-        improve(sdBoxF(q, glm::vec3(wx, 1.62f, -hz - 0.16f),
-                       glm::vec3(0.05f, 0.34f, 0.03f)),
+    for (float ly : { 2.88f, 2.95f, 3.02f }) {
+        improve(sdBoxF(q, glm::vec3(hx - 0.28f, ly, 0.f),
+                       glm::vec3(0.04f, 0.03f, 0.24f)),
                 6u);
-        improve(sdBoxF(q, glm::vec3(wx, 1.62f, -hz - 0.16f),
-                       glm::vec3(0.36f, 0.05f, 0.03f)),
-                6u);
-        improve(sdBoxF(q, glm::vec3(wx, 1.20f, -hz - 0.02f),
-                       glm::vec3(0.44f, 0.06f, 0.12f)),
+        improve(sdBoxF(q, glm::vec3(-hx + 0.28f, ly, 0.f),
+                       glm::vec3(0.04f, 0.03f, 0.24f)),
                 6u);
     }
-    // recessed plank door + frame + lintel (probe at the wall plane stays
-    // open with margin: panel front sits 0.6 inside the facade)
-    improve(sdBoxF(q, glm::vec3(-0.7f, 1.25f, -hz + 0.55f),
-                   glm::vec3(0.44f, 0.88f, 0.08f)),
-            6u);
+    // log-end reveals: short perpendicular stubs framing each front opening
+    // (reads as adzed jamb logs) + protruding sill + oversized lintel log
+    for (float wx : { -1.90f, 1.20f }) {
+        for (float jx : { wx - 0.38f, wx + 0.38f })
+            improve(sdBoxF(q, glm::vec3(jx, 1.62f, -hz - 0.05f),
+                           glm::vec3(0.07f, 0.40f, 0.22f)),
+                    6u);
+        improve(sdLogX(q, wx, 0.48f, 2.06f, -hz - 0.02f, 0.10f), 6u); // lintel
+        improve(sdBoxF(q, glm::vec3(wx, 1.18f, -hz - 0.06f),
+                       glm::vec3(0.46f, 0.07f, 0.20f)),
+                6u); // sill
+        // trim boards + mullion cross just off the glow
+        improve(sdBoxF(q, glm::vec3(wx, 1.62f, -hz - 0.16f),
+                       glm::vec3(0.05f, 0.36f, 0.03f)),
+                6u);
+        improve(sdBoxF(q, glm::vec3(wx, 1.62f, -hz - 0.16f),
+                       glm::vec3(0.38f, 0.05f, 0.03f)),
+                6u);
+        improve(sdBoxF(q, glm::vec3(wx, 2.02f, -hz - 0.08f),
+                       glm::vec3(0.50f, 0.07f, 0.14f)),
+                6u); // head casing
+    }
+    // side window dress: sills + lintels + mullions
+    for (float sz : { 0.75f, -0.85f }) {
+        for (float sx : { -hx - 0.05f, hx + 0.05f }) {
+            improve(sdBoxF(q, glm::vec3(sx, 1.18f, sz),
+                           glm::vec3(0.20f, 0.07f, 0.46f)),
+                    6u);
+            improve(sdLogZ(q, 0.f, 0.48f, 2.06f, sx, 0.10f), 6u);
+        }
+    }
+    for (float sz : { 0.75f, -0.85f }) {
+        improve(sdBoxF(q, glm::vec3(-hx - 0.16f, 1.62f, sz),
+                       glm::vec3(0.03f, 0.36f, 0.05f)),
+                6u);
+        improve(sdBoxF(q, glm::vec3(hx + 0.16f, 1.62f, sz),
+                       glm::vec3(0.03f, 0.36f, 0.05f)),
+                6u);
+    }
+    // plank door: 4 vertical boards with groove shadow gaps + 2 ledges,
+    // recessed 0.6 inside the facade so the wall-plane probe stays open.
+    for (int b = 0; b < 4; ++b) {
+        float bx = -0.7f - 0.33f + float(b) * 0.22f;
+        improve(sdBoxF(q, glm::vec3(bx, 1.25f, -hz + 0.55f),
+                       glm::vec3(0.095f, 0.88f, 0.07f)),
+                6u);
+    }
+    for (float ly : { 0.78f, 1.72f })
+        improve(sdBoxF(q, glm::vec3(-0.7f, ly, -hz + 0.47f),
+                       glm::vec3(0.44f, 0.10f, 0.05f)),
+                6u);
+    // iron strap hinges + ring handle (dark rock) + stone threshold
+    for (float hy : { 0.95f, 1.60f })
+        improve(sdBoxF(q, glm::vec3(-0.38f, hy, -hz + 0.47f),
+                       glm::vec3(0.18f, 0.05f, 0.03f)),
+                4u);
+    improve(sdBoxF(q, glm::vec3(-0.42f, 1.28f, -hz + 0.44f),
+                   glm::vec3(0.04f, 0.10f, 0.05f)),
+            4u);
+    improve(sdBoxF(q, glm::vec3(-0.7f, 0.36f, -hz + 0.30f),
+                   glm::vec3(0.55f, 0.06f, 0.35f)),
+            5u);
     improve(sdBoxF(q, glm::vec3(-0.7f, 2.20f, -hz + 0.05f),
                    glm::vec3(0.62f, 0.10f, 0.30f)),
             6u);
@@ -503,105 +654,282 @@ inline ObjHit houseAt(glm::vec3 p)
         improve(sdBoxF(q, glm::vec3(sx, 1.30f, -hz + 0.05f),
                        glm::vec3(0.08f, 1.00f, 0.28f)),
                 6u);
-    // porch lantern beside the door: ember lamp + wood cap
-    improve(sdBoxF(q, glm::vec3(0.05f, 1.95f, -hz - 0.10f),
-                   glm::vec3(0.09f, 0.12f, 0.09f)),
-            10u);
-    improve(sdBoxF(q, glm::vec3(0.05f, 2.10f, -hz - 0.10f),
-                   glm::vec3(0.14f, 0.05f, 0.14f)),
-            6u);
+    // twin porch lanterns flanking the door: ember lamp + cap + bracket
+    for (float lx : { -1.45f, 0.05f }) {
+        improve(sdBoxF(q, glm::vec3(lx, 1.95f, -hz - 0.10f),
+                       glm::vec3(0.09f, 0.12f, 0.09f)),
+                10u);
+        improve(sdBoxF(q, glm::vec3(lx, 2.10f, -hz - 0.10f),
+                       glm::vec3(0.14f, 0.05f, 0.14f)),
+                6u);
+        improve(sdBoxF(q, glm::vec3(lx, 1.82f, -hz - 0.06f),
+                       glm::vec3(0.05f, 0.04f, 0.12f)),
+                6u);
+    }
 
-    // L3: river-side porch — deck, steps toward the water, posts, balustrade
+    // L3: river-side porch — individual deck planks on joists, four steps
+    // with stringers + stone cheeks, four posts with brackets, three-rail
+    // balustrade with balusters, raftered shed roof, bench + chair.
     const float pz0 = -hz - 1.90f, pz1 = -hz - 0.02f;
     const float pzc = 0.5f * (pz0 + pz1);
     const float pzd = 0.5f * (pz1 - pz0);
-    improve(sdBoxF(q, glm::vec3(0.f, 0.30f, pzc), glm::vec3(hx + 0.30f, 0.09f, pzd)),
-            6u);
-    // three steps down, centred on the door
-    improve(sdBoxF(q, glm::vec3(-0.7f, 0.20f, -hz - 2.06f),
-                   glm::vec3(0.65f, 0.07f, 0.18f)),
-            6u);
-    improve(sdBoxF(q, glm::vec3(-0.7f, 0.06f, -hz - 2.38f),
-                   glm::vec3(0.65f, 0.07f, 0.18f)),
-            4u);
-    improve(sdBoxF(q, glm::vec3(-0.7f, -0.06f, -hz - 2.70f),
-                   glm::vec3(0.65f, 0.07f, 0.18f)),
-            4u);
-    // posts (deck -> porch roof)
-    for (float px : { -hx - 0.15f, hx + 0.15f })
-        improve(sdBoxF(q, glm::vec3(px, 1.40f, -hz - 1.72f),
-                       glm::vec3(0.07f, 1.02f, 0.07f)),
+    // deck planks (6 along X, 0.28 wide, 0.05 gaps) + rim + joists
+    for (int i = 0; i < 6; ++i) {
+        float zz = pz0 + 0.16f + float(i) * 0.315f;
+        improve(sdBoxF(q, glm::vec3(0.f, 0.30f, zz),
+                       glm::vec3(hx + 0.30f, 0.055f, 0.13f)),
                 6u);
-    // front rails with a stair gap |x+0.7| < 0.75
+    }
+    improve(sdBoxF(q, glm::vec3(0.f, 0.22f, pzc), glm::vec3(hx + 0.30f, 0.05f, pzd)),
+            6u); // rim/bed
+    for (float jx : { -hx + 0.3f, 0.f, hx - 0.3f })
+        improve(sdLogZ(q, pzc, pzd - 0.05f, 0.16f, jx, 0.06f), 6u); // joists
+    // four steps down, centred on the door + stringers + stone cheeks
+    auto sHash = [&](float v) { return hash2(v * 9.17f, 4.4f); };
+    for (int s = 0; s < 4; ++s) {
+        float sy = 0.22f - float(s) * 0.135f;
+        float sz = -hz - 2.02f - float(s) * 0.30f;
+        improve(sdBoxF(q, glm::vec3(-0.7f, sy, sz),
+                       glm::vec3(0.65f, 0.055f, 0.17f)),
+                6u);
+        if (s == 3)
+            improve(sdBoxF(q, glm::vec3(-0.7f, sy - 0.06f, sz),
+                           glm::vec3(0.65f, 0.05f, 0.17f)),
+                    4u); // worn nosing stone
+    }
+    for (float sx : { -1.42f, 0.02f })
+        improve(sdBoxF(q, glm::vec3(sx, -0.02f, -hz - 2.45f),
+                       glm::vec3(0.08f, 0.30f, 1.10f)),
+                6u); // stringers
+    for (float sx : { -1.55f, 0.15f })
+        improve(sdBoxF(q, glm::vec3(sx, -0.10f, -hz - 2.50f),
+                       glm::vec3(0.14f, 0.20f, 1.20f)),
+                sHash(sx) > 0.5f ? 5u : 4u); // stone cheeks
+    // posts (deck -> porch roof) with cap + diagonal brackets
+    for (float px : { -hx - 0.15f, -0.95f, 0.95f, hx + 0.15f })
+        improve(sdBoxF(q, glm::vec3(px, 1.40f, -hz - 1.72f),
+                       glm::vec3(0.075f, 1.02f, 0.075f)),
+                6u);
+    for (float px : { -hx - 0.15f, -0.95f, 0.95f, hx + 0.15f }) {
+        improve(sdBoxF(q, glm::vec3(px, 2.38f, -hz - 1.72f),
+                       glm::vec3(0.11f, 0.07f, 0.11f)),
+                6u); // caps
+        improve(sdCapsule(q, glm::vec3(px, 2.05f, -hz - 1.72f),
+                          glm::vec3(px * 0.96f, 2.32f, -hz - 1.15f), 0.045f),
+                6u); // brackets to beam
+    }
+    improve(sdLogX(q, 0.f, hx + 0.30f, 2.38f, -hz - 1.72f, 0.075f), 6u); // beam
+    // front rails (3 bars) with a stair gap |x+0.7| < 0.75 + shaped balusters
     const float railZ = -hz - 1.74f;
     for (float seg : { -1.85f, 1.05f }) {
         float cx = seg < 0.f ? -1.85f : 1.30f;
         float hw = seg < 0.f ? 0.95f : 1.50f;
         (void)seg;
-        improve(sdBoxF(q, glm::vec3(cx, 1.06f, railZ), glm::vec3(hw, 0.05f, 0.05f)),
-                6u);
-        improve(sdBoxF(q, glm::vec3(cx, 0.58f, railZ), glm::vec3(hw, 0.04f, 0.04f)),
-                6u);
+        improve(sdBoxF(q, glm::vec3(cx, 1.10f, railZ), glm::vec3(hw, 0.055f, 0.06f)),
+                6u); // top rail
+        improve(sdBoxF(q, glm::vec3(cx, 0.82f, railZ), glm::vec3(hw, 0.035f, 0.035f)),
+                6u); // mid rail
+        improve(sdBoxF(q, glm::vec3(cx, 0.52f, railZ), glm::vec3(hw, 0.04f, 0.04f)),
+                6u); // bottom rail
     }
-    for (float bx = -hx - 0.10f; bx <= hx + 0.11f; bx += 0.28f) {
+    for (float bx = -hx - 0.10f; bx <= hx + 0.11f; bx += 0.24f) {
         if (std::fabs(bx + 0.7f) < 0.78f)
             continue; // stair opening
-        improve(sdBoxF(q, glm::vec3(bx, 0.82f, railZ),
-                       glm::vec3(0.045f, 0.24f, 0.045f)),
+        improve(sdBoxF(q, glm::vec3(bx, 0.81f, railZ),
+                       glm::vec3(0.04f, 0.26f, 0.04f)),
                 6u);
+        improve(sdBoxF(q, glm::vec3(bx, 0.81f, railZ),
+                       glm::vec3(0.07f, 0.06f, 0.07f)),
+                6u); // baluster collar
     }
     // side rails (wall -> front posts)
     for (float sx : { -hx - 0.15f, hx + 0.15f }) {
-        improve(sdBoxF(q, glm::vec3(sx, 1.06f, pzc), glm::vec3(0.05f, 0.05f, pzd)),
+        improve(sdBoxF(q, glm::vec3(sx, 1.10f, pzc), glm::vec3(0.06f, 0.055f, pzd)),
                 6u);
-        improve(sdBoxF(q, glm::vec3(sx, 0.58f, pzc), glm::vec3(0.04f, 0.04f, pzd)),
+        improve(sdBoxF(q, glm::vec3(sx, 0.82f, pzc), glm::vec3(0.035f, 0.035f, pzd)),
                 6u);
-        for (float bz = -hz - 1.55f; bz < -hz - 0.15f; bz += 0.30f)
-            improve(sdBoxF(q, glm::vec3(sx, 0.82f, bz),
-                           glm::vec3(0.045f, 0.24f, 0.045f)),
+        improve(sdBoxF(q, glm::vec3(sx, 0.52f, pzc), glm::vec3(0.04f, 0.04f, pzd)),
+                6u);
+        for (float bz = -hz - 1.55f; bz < -hz - 0.15f; bz += 0.26f) {
+            improve(sdBoxF(q, glm::vec3(sx, 0.81f, bz),
+                           glm::vec3(0.04f, 0.26f, 0.04f)),
                     6u);
+        }
     }
-    // porch shed roof (shingle, mossy) + ridge flashing
-    {
-        float d = sdBoxF(q, glm::vec3(0.f, 2.50f, pzc),
-                         glm::vec3(hx + 0.55f, 0.08f, pzd + 0.35f));
-        float h = hash2(q.x * 1.9f + 3.0f, q.z * 1.9f);
+    // porch furniture: bench (left) + chair (right) from slab + legs
+    improve(sdBoxF(q, glm::vec3(-1.75f, 0.72f, -hz - 0.55f),
+                   glm::vec3(0.55f, 0.06f, 0.22f)),
+            6u);
+    for (float lx : { -2.20f, -1.30f })
+        for (float lz : { -hz - 0.70f, -hz - 0.40f })
+            improve(sdBoxF(q, glm::vec3(lx, 0.50f, lz),
+                           glm::vec3(0.05f, 0.18f, 0.05f)),
+                    6u);
+    improve(sdBoxF(q, glm::vec3(1.75f, 0.72f, -hz - 0.55f),
+                   glm::vec3(0.45f, 0.06f, 0.40f)),
+            6u);
+    improve(sdBoxF(q, glm::vec3(1.75f, 1.05f, -hz - 0.20f),
+                   glm::vec3(0.45f, 0.45f, 0.06f)),
+            6u); // chair back
+    // porch shed roof: rafters + 3 shingle courses + moss tufts
+    for (int r = 0; r < 7; ++r) {
+        float rx = -hx - 0.45f + float(r) * (2.f * (hx + 0.45f) / 6.f);
+        improve(sdLogZ(q, pzc, pzd + 0.30f, 2.42f, rx, 0.055f), 6u); // rafters
+    }
+    for (int c = 0; c < 3; ++c) {
+        float cy = 2.52f + float(c) * 0.075f;
+        float cz = pzc - float(c) * 0.12f;
+        float d = sdBoxF(q, glm::vec3(0.f, cy, cz),
+                         glm::vec3(hx + 0.55f, 0.055f, pzd + 0.30f - float(c) * 0.10f));
+        float h = hash2(q.x * 2.3f + float(c) * 5.1f, q.z * 2.3f);
         improve(d, h > 0.55f ? (h > 0.8f ? uint8_t(1) : uint8_t(0)) : uint8_t(7));
     }
+    for (int m = 0; m < 4; ++m) {
+        float mx = -2.0f + hash2(float(m) * 7.3f, 2.1f) * 4.0f;
+        float mz = pzc + (hash2(float(m) * 3.9f, 8.8f) - 0.5f) * 1.2f;
+        improve(sdEllipsoid(q, glm::vec3(mx, 2.68f, mz),
+                            glm::vec3(0.28f, 0.06f, 0.22f)),
+                m % 2 ? uint8_t(1) : uint8_t(0));
+    }
 
-    // L4: stepped shingle roof, moss patches on the upper courses (gable X)
-    for (int i = 0; i < 10; ++i) {
-        float t = float(i) / 9.0f;
-        float rz = glm::mix(hz + 0.66f, 0.14f, t);
-        float dslab = sdBoxF(q, glm::vec3(0.f, ry0 + float(i) * 0.145f, 0.f),
-                             glm::vec3(hx + 0.58f, 0.09f, rz));
-        float h = hash2(q.x * 1.9f + float(i) * 3.3f, q.z * 1.9f - float(i));
-        uint8_t m = (i >= 3 && h > 0.52f) ? (h > 0.78f ? uint8_t(1) : uint8_t(0))
+    // L4: stepped shingle roof (12 fine courses), protruding purlins,
+    // bargeboards, plank gables with battens, moss colonies, gable window.
+    const int kRoofN = 12;
+    for (int i = 0; i < kRoofN; ++i) {
+        float t = float(i) / float(kRoofN - 1);
+        float rz = glm::mix(hz + 0.70f, 0.13f, t);
+        float jit = (hash2(float(i) * 3.7f, 6.1f) - 0.5f) * 0.06f;
+        float dslab = sdBoxF(q, glm::vec3(jit * 0.3f, ry0 + float(i) * 0.125f, 0.f),
+                             glm::vec3(hx + 0.62f + jit, 0.075f, rz));
+        float h = hash2(std::floor(q.x * 2.1f + float(i) * 3.3f),
+                        std::floor(q.z * 2.1f - float(i)));
+        uint8_t m = (i >= 4 && h > 0.50f) ? (h > 0.76f ? uint8_t(1) : uint8_t(0))
                                           : uint8_t(7);
         improve(dslab, m);
+        // exposed shingle butt ends: thin lip under each course front/back
+        improve(sdBoxF(q, glm::vec3(0.f, ry0 + float(i) * 0.125f - 0.075f, rz - 0.02f),
+                       glm::vec3(hx + 0.60f, 0.03f, 0.05f)),
+                7u);
+        improve(sdBoxF(q, glm::vec3(0.f, ry0 + float(i) * 0.125f - 0.075f, -rz + 0.02f),
+                       glm::vec3(hx + 0.60f, 0.03f, 0.05f)),
+                7u);
     }
-    // ridge beam
-    improve(sdBoxF(q, glm::vec3(0.f, ry0 + 9.f * 0.145f + 0.14f, 0.f),
-                   glm::vec3(hx + 0.60f, 0.07f, 0.12f)),
-            6u);
-
-    // L5: stone chimney with cap + open flue
+    float ridgeY = ry0 + float(kRoofN - 1) * 0.125f + 0.14f;
+    // ridge beam + cap shingles
+    improve(sdLogX(q, 0.f, hx + 0.62f, ridgeY, 0.f, 0.09f), 6u);
+    improve(sdBoxF(q, glm::vec3(0.f, ridgeY + 0.10f, 0.f),
+                   glm::vec3(hx + 0.60f, 0.06f, 0.20f)),
+            7u);
+    // purlin logs protruding through both gables (3 per side)
+    for (float py : { ry0 + 0.35f, ry0 + 0.80f, ridgeY - 0.12f }) {
+        float tt = (py - ry0) / (ridgeY - ry0);
+        float pzz = (hz + 0.55f) * (1.f - tt) + 0.10f;
+        improve(sdLogX(q, 0.f, hx + 0.78f, py, pzz, 0.07f), 6u);
+        improve(sdLogX(q, 0.f, hx + 0.78f, py, -pzz, 0.07f), 6u);
+    }
+    // bargeboards along the sloped gable edges
+    for (float sx : { -hx - 0.62f, hx + 0.62f }) {
+        improve(sdCapsule(q, glm::vec3(sx, ry0 - 0.05f, hz + 0.70f),
+                          glm::vec3(sx, ridgeY + 0.08f, 0.10f), 0.06f),
+                6u);
+        improve(sdCapsule(q, glm::vec3(sx, ry0 - 0.05f, -hz - 0.70f),
+                          glm::vec3(sx, ridgeY + 0.08f, -0.10f), 0.06f),
+                6u);
+    }
+    // plank gables: vertical boards with battens (front + back)
+    for (float gz : { hz - 0.05f, -hz + 0.05f }) {
+        for (int b = 0; b < 11; ++b) {
+            float bx = -2.5f + float(b) * 0.5f;
+            float topY = ridgeY - 0.05f - std::fabs(bx) * 0.18f;
+            if (topY < ry0)
+                continue;
+            float cy = 0.5f * (ry0 + topY);
+            improve(sdBoxF(q, glm::vec3(bx, cy, gz),
+                           glm::vec3(0.21f, 0.5f * (topY - ry0) + 0.05f, 0.07f)),
+                    6u);
+        }
+        improve(sdBoxF(q, glm::vec3(0.f, 0.5f * (ry0 + ridgeY), gz),
+                       glm::vec3(0.09f, 0.5f * (ridgeY - ry0), 0.10f)),
+                6u); // centre batten
+    }
+    // front gable lamplit window (reference peak window) + trim
     {
+        float gz = -hz + 0.05f;
+        float gy = ridgeY - 0.55f;
+        float carveG = sdBoxF(q, glm::vec3(0.f, gy, gz), glm::vec3(0.26f, 0.28f, 0.15f));
+        // cut into gable boards: handled by min/max via wall? apply locally:
+        // place ember pane + frame (boards behind stay, pane floats off face)
+        improve(sdBoxF(q, glm::vec3(0.f, gy, gz - 0.06f),
+                       glm::vec3(0.20f, 0.22f, 0.05f)),
+                10u);
+        improve(sdBoxF(q, glm::vec3(0.f, gy, gz - 0.10f),
+                       glm::vec3(0.05f, 0.26f, 0.04f)),
+                6u);
+        improve(sdBoxF(q, glm::vec3(0.f, gy, gz - 0.10f),
+                       glm::vec3(0.26f, 0.05f, 0.04f)),
+                6u);
+        (void)carveG;
+    }
+    // moss colonies: flattened blobs on the upper roof slopes (both sides)
+    for (int m = 0; m < 14; ++m) {
+        float mx = -2.6f + hash2(float(m) * 5.13f, 1.7f) * 5.2f;
+        float side = (m % 2 == 0) ? 1.f : -1.f;
+        float tt = 0.35f + hash2(float(m) * 9.31f, 4.2f) * 0.55f;
+        float my = ry0 + tt * (ridgeY - ry0) + 0.09f;
+        float mz = side * ((hz + 0.55f) * (1.f - tt) + 0.05f);
+        improve(sdEllipsoid(q, glm::vec3(mx, my, mz),
+                            glm::vec3(0.22f + hash2(float(m), 7.7f) * 0.22f, 0.055f,
+                                      0.18f + hash2(float(m), 3.1f) * 0.16f)),
+                hash2(float(m) * 1.3f, 9.9f) > 0.4f ? uint8_t(0) : uint8_t(1));
+    }
+
+    // L5: coursed rubble-stone chimney with shoulders, cap + twin flues.
+    {
+        // shaft backing (solid) from roof slope through the top
         float chim = sdBoxF(q, glm::vec3(1.55f, ry0 + 0.85f, 0.75f),
                             glm::vec3(0.30f, 1.45f, 0.30f));
-        float h = hash2(q.y * 5.1f, (q.x + q.z) * 5.1f);
+        float h = hash2(std::floor(q.y * 5.1f), std::floor((q.x + q.z) * 5.1f));
         improve(chim, h > 0.5f ? uint8_t(5) : uint8_t(4));
-        improve(sdBoxF(q, glm::vec3(1.55f, ry0 + 2.35f, 0.75f),
-                       glm::vec3(0.42f, 0.10f, 0.42f)),
+        // facing stones: staggered courses up the shaft
+        for (int c = 0; c < 9; ++c) {
+            float cy = ry0 - 0.30f + float(c) * 0.30f;
+            for (int s = 0; s < 2; ++s) {
+                float off = (c % 2 ? 0.15f : 0.f) + (hash2(float(c), float(s)) - 0.5f) * 0.06f;
+                improve(sdBoxF(q, glm::vec3(1.55f - 0.15f + off, cy, 0.75f + 0.30f),
+                               glm::vec3(0.16f, 0.13f, 0.06f)),
+                        (c + s) % 2 ? 5u : 4u);
+                improve(sdBoxF(q, glm::vec3(1.55f - 0.15f + off, cy, 0.75f - 0.30f),
+                               glm::vec3(0.16f, 0.13f, 0.06f)),
+                        (c + s + 1) % 2 ? 5u : 4u);
+                improve(sdBoxF(q, glm::vec3(1.55f + 0.30f, cy, 0.75f - 0.15f + off),
+                               glm::vec3(0.06f, 0.13f, 0.16f)),
+                        (c + s) % 2 ? 4u : 5u);
+                improve(sdBoxF(q, glm::vec3(1.55f - 0.30f, cy, 0.75f - 0.15f + off),
+                               glm::vec3(0.06f, 0.13f, 0.16f)),
+                        (c + s + 1) % 2 ? 4u : 5u);
+            }
+        }
+        // shoulders where the stack leaves the roof + cap slab + twin flues
+        improve(sdBoxF(q, glm::vec3(1.55f, ry0 + 0.10f, 0.75f),
+                       glm::vec3(0.42f, 0.18f, 0.42f)),
+                4u);
+        improve(sdBoxF(q, glm::vec3(1.55f, ry0 + 2.32f, 0.75f),
+                       glm::vec3(0.44f, 0.10f, 0.44f)),
                 5u);
-        float flue = sdBoxF(q, glm::vec3(1.55f, ry0 + 2.38f, 0.75f),
-                            glm::vec3(0.16f, 0.12f, 0.16f));
-        // carve the flue mouth out of whatever won (cap/rock) nearby
+        for (float fx : { 1.44f, 1.66f })
+            improve(sdBoxF(q, glm::vec3(fx, ry0 + 2.44f, 0.75f),
+                           glm::vec3(0.11f, 0.14f, 0.11f)),
+                    4u);
+        float flue = sdBoxF(q, glm::vec3(1.55f, ry0 + 2.42f, 0.75f),
+                            glm::vec3(0.24f, 0.14f, 0.16f));
+        // carve the flue mouths out of whatever won (cap/rock) nearby
         if (flue < 0.25f && best.d > -flue)
             best.d = glm::max(best.d, -flue);
     }
 
-    // L6: firewood lean-to on the east wall (reference right-side stack)
+    // L6: firewood lean-to on the east wall (reference right-side stack):
+    // deck, posts, slanted shingle roof, 4x6 cordwood rows with varied girth,
+    // bark-side out, plus chopping stump + axe.
     {
         const float lx = hx + 0.85f;
         improve(sdBoxF(q, glm::vec3(lx, 0.28f, 0.60f), glm::vec3(0.65f, 0.08f, 1.00f)),
@@ -609,24 +937,45 @@ inline ObjHit houseAt(glm::vec3 p)
         for (float px : { lx - 0.55f, lx + 0.55f })
             for (float pz : { -0.30f, 1.50f })
                 improve(sdBoxF(q, glm::vec3(px, 0.85f, pz),
-                               glm::vec3(0.06f, 0.65f, 0.06f)),
+                               glm::vec3(0.07f, 0.65f, 0.07f)),
                         6u);
-        improve(sdBoxF(q, glm::vec3(lx, 1.55f, 0.60f), glm::vec3(0.78f, 0.07f, 1.12f)),
+        // slanted roof: 2 courses + edge trim
+        improve(sdBoxF(q, glm::vec3(lx, 1.52f, 0.60f), glm::vec3(0.80f, 0.06f, 1.14f)),
                 7u);
-        for (int row = 0; row < 3; ++row)
-            for (int k = 0; k < 5; ++k) {
-                float y = 0.48f + float(row) * 0.20f;
-                float z = -0.08f + float(k) * 0.30f + float(row) * 0.05f;
-                improve(sdLogX(q, lx, 0.42f, y, z, 0.09f), 6u);
+        improve(sdBoxF(q, glm::vec3(lx, 1.60f, 0.60f), glm::vec3(0.82f, 0.05f, 1.16f)),
+                7u);
+        improve(sdBoxF(q, glm::vec3(lx, 1.50f, -0.52f), glm::vec3(0.80f, 0.07f, 0.07f)),
+                6u);
+        // cordwood: 4 rows x 6 sticks, each its own girth/length jitter
+        for (int row = 0; row < 4; ++row)
+            for (int k = 0; k < 6; ++k) {
+                float y = 0.46f + float(row) * 0.185f;
+                float z = -0.12f + float(k) * 0.27f + float(row) * 0.04f;
+                float r = 0.080f + hash2(float(k) * 3.3f, float(row) * 7.1f) * 0.025f;
+                float hl = 0.40f + (hash2(float(k) * 9.7f, float(row) * 1.3f) - 0.5f) * 0.06f;
+                improve(sdLogX(q, lx, hl, y, z, r), 6u);
+                // split-face wedge on every other stick (small flat box end)
+                if ((k + row) % 2 == 0)
+                    improve(sdBoxF(q, glm::vec3(lx + hl - 0.02f, y, z),
+                                   glm::vec3(0.03f, r * 0.7f, r * 0.7f)),
+                            2u);
             }
+        // chopping stump + buried axe (handle capsule + head wedge)
+        improve(sdCylY(q, glm::vec2(lx + 0.1f, 2.15f), 0.0f, 0.45f, 0.22f), 6u);
+        improve(sdCylY(q, glm::vec2(lx + 0.1f, 2.15f), 0.45f, 0.48f, 0.23f), 2u);
+        improve(sdCapsule(q, glm::vec3(lx - 0.05f, 0.48f, 2.10f),
+                          glm::vec3(lx + 0.35f, 0.95f, 2.20f), 0.03f),
+                6u);
+        improve(sdBoxF(q, glm::vec3(lx + 0.02f, 0.55f, 2.12f),
+                       glm::vec3(0.05f, 0.09f, 0.03f)),
+                4u);
     }
     return best;
 }
 
-// orchard broadleaf: root flare -> short trunk -> four compact foliage
-// tiers (~4 m). Homestead fruit-tree scale: crowns stay below the sky band
-// of the fixed house-test cam while trunks keep framing the view. Base y
-// comes from the heightmap so trees hug whatever ground they stand on.
+// broadleaf homestead tree (rewritten): buttress roots -> leaning tapered
+// trunk with bark ridges -> 4 limbs -> 9-lobed canopy with light gaps.
+// ~4 m scale; crowns stay below the sky band of the fixed house-test cam.
 inline ObjHit treeAt(glm::vec3 p, glm::vec2 spot, float groundY)
 {
     glm::vec3 q(p.x - spot.x, p.y - groundY, p.z - spot.y);
@@ -641,24 +990,59 @@ inline ObjHit treeAt(glm::vec3 p, glm::vec2 spot, float groundY)
             best.mat = m;
         }
     };
-    improve(sdCylY(qs, glm::vec2(0.f), -0.05f, 0.20f, 0.37f), 6u); // root flare
-    improve(sdCylY(qs, glm::vec2(0.f), 0.20f, 0.45f, 0.28f), 6u);
-    improve(sdCylY(qs, glm::vec2(0.f), 0.45f, 1.70f, 0.235f), 6u);
-    improve(sdCylY(qs, glm::vec2(0.f), 1.70f, 2.70f, 0.195f), 6u);
-    improve(sdCylY(qs, glm::vec2(0.f), 2.70f, 3.25f, 0.165f), 6u);
+    float lean = (hash2(spot.x * 3.1f, spot.y * 7.7f) - 0.5f) * 0.5f;
+    float lean2 = (hash2(spot.y * 5.3f, spot.x * 1.9f) - 0.5f) * 0.4f;
+    // L0: buttress roots (4 toes) + flare
+    improve(sdCylY(qs, glm::vec2(0.f), -0.05f, 0.22f, 0.36f), 6u);
+    for (int r = 0; r < 4; ++r) {
+        float a = float(r) * 1.5707f + hash2(spot.x, float(r)) * 0.5f;
+        glm::vec3 tip(std::cos(a) * 0.75f, -0.02f, std::sin(a) * 0.75f);
+        improve(sdCapsule(qs, glm::vec3(0.f, 0.18f, 0.f), tip, 0.16f), 6u);
+    }
+    // L1: leaning tapered trunk (3 segments) + bark ridges
+    improve(sdCylY(qs, glm::vec2(0.f), 0.20f, 1.10f, 0.27f), 6u);
+    improve(sdCapsule(qs, glm::vec3(0.f, 1.05f, 0.f),
+                      glm::vec3(lean * 0.5f, 2.10f, lean2 * 0.5f), 0.225f),
+            6u);
+    improve(sdCapsule(qs, glm::vec3(lean * 0.5f, 2.05f, lean2 * 0.5f),
+                      glm::vec3(lean, 3.10f, lean2), 0.175f),
+            6u);
+    for (int b = 0; b < 3; ++b) {
+        float a = float(b) * 2.094f + lean;
+        glm::vec3 base(std::cos(a) * 0.24f, 0.5f, std::sin(a) * 0.24f);
+        glm::vec3 top(lean * 0.4f + std::cos(a) * 0.18f, 2.4f,
+                      lean2 * 0.4f + std::sin(a) * 0.18f);
+        improve(sdCapsule(qs, base, top, 0.055f), 6u); // bark ridges
+    }
+    // L2: 4 limbs from the crown base outward/up
+    glm::vec3 crownBase(lean, 3.05f, lean2);
+    const glm::vec3 limbTips[4] = {
+        crownBase + glm::vec3(-1.15f, 0.85f, 0.55f),
+        crownBase + glm::vec3(1.10f, 0.95f, -0.50f),
+        crownBase + glm::vec3(0.15f, 1.25f, 1.05f),
+        crownBase + glm::vec3(-0.10f, 1.35f, -1.00f),
+    };
+    for (int i = 0; i < 4; ++i)
+        improve(sdCapsule(qs, crownBase, limbTips[i], 0.11f - float(i) * 0.012f), 6u);
 
-    auto tier = [&](glm::vec3 c, float r) {
-        float ds = glm::length(qs - c) - r;
+    // L3: 9-lobed canopy — overlapping ellipsoids with gaps for light
+    auto blob = [&](glm::vec3 c, glm::vec3 r) {
+        float ds = sdEllipsoid(qs, c, r);
         ds *= kS;
         if (ds < best.d) {
             best.d = ds;
             best.mat = 8;
         }
     };
-    tier(glm::vec3(-0.45f, 3.75f, 0.30f), 1.50f);
-    tier(glm::vec3(0.50f, 4.35f, -0.25f), 1.70f);
-    tier(glm::vec3(0.00f, 5.25f, 0.10f), 1.50f);
-    tier(glm::vec3(0.10f, 6.05f, -0.05f), 1.05f);
+    blob(crownBase + glm::vec3(-0.85f, 0.75f, 0.45f), glm::vec3(1.05f, 0.85f, 0.95f));
+    blob(crownBase + glm::vec3(0.90f, 0.90f, -0.35f), glm::vec3(1.10f, 0.90f, 1.00f));
+    blob(crownBase + glm::vec3(0.10f, 1.30f, 0.75f), glm::vec3(1.00f, 0.85f, 0.95f));
+    blob(crownBase + glm::vec3(-0.05f, 1.40f, -0.75f), glm::vec3(1.05f, 0.90f, 0.95f));
+    blob(crownBase + glm::vec3(0.05f, 2.05f, 0.10f), glm::vec3(1.15f, 0.95f, 1.05f));
+    blob(crownBase + glm::vec3(-0.70f, 1.90f, -0.40f), glm::vec3(0.80f, 0.70f, 0.75f));
+    blob(crownBase + glm::vec3(0.75f, 1.95f, 0.45f), glm::vec3(0.82f, 0.72f, 0.78f));
+    blob(crownBase + glm::vec3(0.15f, 2.75f, -0.05f), glm::vec3(0.85f, 0.70f, 0.80f));
+    blob(crownBase + glm::vec3(-0.30f, 1.10f, -0.10f), glm::vec3(0.90f, 0.75f, 0.85f));
     return best;
 }
 
@@ -698,12 +1082,22 @@ inline ObjHit rocksAt(glm::vec3 p)
         float dx = p.x - s.x, dz = p.z - s.y;
         if (dx * dx + dz * dz > (r + 0.4f) * (r + 0.4f))
             continue;
-        // half-buried: center sits below local ground
+        // half-buried: faceted erratic with moss saddle (same centre/radius)
         glm::vec3 c(s.x, hm.sample(s.x, s.y) + r * 0.30f, s.y);
-        float d = glm::length(p - c) - r;
+        float d = sdEllipsoid(p, c, glm::vec3(r, r * 0.78f, r * 0.92f));
+        d += fbm2(p.x * 3.7f + float(i) * 5.0f, p.z * 3.7f) * r * 0.10f;
         if (d < best.d) {
             best.d = d;
             best.mat = uint8_t(i == 1 ? 5 : 4);
+        }
+        // moss saddle on top
+        {
+            float md = sdEllipsoid(p, c + glm::vec3(0.f, r * 0.72f, 0.f),
+                                   glm::vec3(r * 0.55f, r * 0.14f, r * 0.50f));
+            if (md < best.d) {
+                best.d = md;
+                best.mat = 1;
+            }
         }
     }
     return best;
@@ -745,6 +1139,11 @@ inline ObjHit bushesAt(glm::vec3 p)
         glm::vec2 center((cx + jx) * cell, (cz + jz) * cell);
         if (inPaddock(center.x, center.y, 1.5f))
             continue; // keep the fence/alpaca shells intact (see above)
+        {
+            float hdx = center.x - kHousePos.x, hdz = center.y - kHousePos.y;
+            if (hdx * hdx + hdz * hdz < 25.0f)
+                continue; // keep the cabin + porch shells intact
+        }
         float H = hm.sample(center.x, center.y);
         uint8_t mat = materialAt(center.x, center.y, H);
         if (mat != 0 && mat != 1) continue;
@@ -754,7 +1153,21 @@ inline ObjHit bushesAt(glm::vec3 p)
         glm::vec3 c(center.x, H + r * 0.55f, center.y);
         // vertical cull
         if (p.y < H - 0.5f || p.y > c.y + r + 1.0f) continue;
+        // three-lobed shrub: main crown + two side puffs + woody stems.
+        // Same centre/radius contract as before; lobes stay inside r*1.15.
         float d = glm::length(p - c) - r;
+        {
+            glm::vec3 l1(center.x - r * 0.55f, H + r * 0.45f, center.y + r * 0.25f);
+            glm::vec3 l2(center.x + r * 0.55f, H + r * 0.50f, center.y - r * 0.20f);
+            d = glm::min(d, glm::length(p - l1) - r * 0.62f);
+            d = glm::min(d, glm::length(p - l2) - r * 0.58f);
+            d += fbm2(p.x * 5.0f + float(cx), p.z * 5.0f + float(cz)) * r * 0.12f;
+            // stems visible under the crown skirt
+            glm::vec3 base(center.x, H - 0.05f, center.y);
+            d = glm::min(d, sdCapsule(p, base, c, 0.05f));
+            d = glm::min(d, sdCapsule(p, base, l1, 0.035f));
+            d = glm::min(d, sdCapsule(p, base, l2, 0.035f));
+        }
         if (d < best.d) best.d = d;
     }
     return best;
@@ -801,6 +1214,10 @@ inline ObjHit fenceAt(glm::vec3 p)
                 continue; // keep the gate opening clear
             float dp = post(xy);
             if (dp < best.d) best.d = dp;
+            // pointed cap on every post (above rail height; tests untouched)
+            float g = hm.sample(xy.x, xy.y);
+            float cap = sdConeY(p, xy, g + 0.85f, g + 0.97f, 0.075f, 0.01f);
+            if (cap < best.d) best.d = cap;
         }
         for (int i = 0; i < n; ++i) {
             glm::vec2 a0 = a + d * (float(i) / float(n));
@@ -836,7 +1253,7 @@ inline ObjHit alpacaAt(glm::vec3 p)
     glm::vec3 q(p.x - kAlpacaSpot.x, p.y - g, p.z - kAlpacaSpot.y);
     ObjHit best { 1e9f, 5u };
 
-    // L0: four thin dark legs, slightly splayed
+    // L0: four thin dark legs, slightly splayed + hooves
     const glm::vec2 legXY[4] = { { -0.30f, 0.150f }, { -0.26f, -0.160f },
                                  { 0.28f, 0.155f },  { 0.32f, -0.150f } };
     for (const glm::vec2& l : legXY) {
@@ -845,9 +1262,15 @@ inline ObjHit alpacaAt(glm::vec3 p)
             best.d = dl;
             best.mat = 2;
         }
+        float hoof = sdCylY(q, l, 0.0f, 0.09f, 0.062f);
+        if (hoof < best.d) {
+            best.d = hoof;
+            best.mat = 2;
+        }
     }
 
     // L1: woolly body - barrel capsule smoothed into shoulder and rump blobs
+    // + staple-length fleece puffs along the back and flanks (mat 5 kept)
     float body = sdCapsule(q, glm::vec3(-0.34f, 0.66f, 0.f),
                            glm::vec3(0.30f, 0.62f, 0.f), 0.295f);
     body = smin(body, sdEllipsoid(q, glm::vec3(-0.24f, 0.62f, 0.f),
@@ -857,6 +1280,16 @@ inline ObjHit alpacaAt(glm::vec3 p)
     if (body < best.d) {
         best.d = body;
         best.mat = 5;
+    }
+    for (int f = 0; f < 6; ++f) {
+        float fx = -0.30f + float(f) * 0.12f;
+        float fz = (f % 2 ? 0.20f : -0.20f) + hash2(float(f), 3.3f) * 0.06f;
+        float fleece = sdEllipsoid(q, glm::vec3(fx, 0.90f, fz),
+                                   glm::vec3(0.10f, 0.09f, 0.09f));
+        if (fleece < best.d) {
+            best.d = fleece;
+            best.mat = 5;
+        }
     }
 
     // L2: neck rising from the chest, then the head
@@ -918,47 +1351,105 @@ inline ObjHit bridgeAt(glm::vec3 p)
     const HeightMap& hm = sharedHeightmap();
     float gL = hm.sample(bx, bz - halfL);
     float gR = hm.sample(bx, bz + halfL);
-    float u = (lz + halfL) / (2.0f * halfL);          // 0..1 along span
-    float u01 = glm::clamp(u, 0.0f, 1.0f);
-    float chord = glm::mix(gL, gR, u01);
-    float yDeck = chord + arch * std::sin(3.14159265f * u01); // clear the water
+    auto deckYAt = [&](float zp) {
+        float u = (zp + halfL) / (2.0f * halfL);
+        float u01 = glm::clamp(u, 0.0f, 1.0f);
+        return glm::mix(gL, gR, u01) + arch * std::sin(3.14159265f * u01);
+    };
+    ObjHit best { 1e9f, 6u };
+    auto improve = [&](float dd, uint8_t m) {
+        if (dd < best.d) {
+            best.d = dd;
+            best.mat = m;
+        }
+    };
 
-    // deck slab
-    float plank = 0.14f;
-    float d = sdBoxF(p, glm::vec3(bx, yDeck - plank * 0.5f, bz),
-                     glm::vec3(halfW, plank * 0.5f, halfL));
-
-    // side rails (logs along Z) with uprights at intervals
-    float railY = yDeck + 0.42f, railR = 0.06f;
-    float railL = sdLogZ(p, bz, halfL - 0.2f, railY, bx - (halfW - 0.06f), railR);
-    float railRr = sdLogZ(p, bz, halfL - 0.2f, railY, bx + (halfW - 0.06f), railR);
-    d = glm::min(d, glm::min(railL, railRr));
-    for (float zp = -halfL + 0.4f; zp <= halfL - 0.4f + 1e-3f; zp += 1.5f) {
-        for (int s = -1; s <= 1; s += 2) {
-            float xp = bx + s * (halfW - 0.06f);
-            d = glm::min(d, sdCylY(p, glm::vec2(xp, bz + zp), yDeck, railY, 0.05f));
+    // stone abutments both ends (coursed blocks)
+    for (float ez : { -halfL, halfL }) {
+        float gy = hm.sample(bx, bz + ez);
+        improve(sdBoxF(p, glm::vec3(bx, gy + 0.05f, bz + ez),
+                       glm::vec3(halfW + 0.35f, 0.45f, 0.65f)),
+                4u);
+        improve(sdBoxF(p, glm::vec3(bx, gy + 0.42f, bz + ez),
+                       glm::vec3(halfW + 0.25f, 0.10f, 0.55f)),
+                5u); // cap
+    }
+    // deck: individual cross-planks with gaps + wheel-guard curbs + stringers
+    for (float zp = -halfL + 0.18f; zp <= halfL - 0.18f + 1e-3f; zp += 0.32f) {
+        float yd = deckYAt(zp);
+        float wjit = (hash2(zp * 7.7f, 1.1f) - 0.5f) * 0.02f;
+        improve(sdBoxF(p, glm::vec3(bx + wjit, yd - 0.07f, bz + zp),
+                       glm::vec3(halfW - 0.02f, 0.06f, 0.12f)),
+                6u);
+    }
+    for (float sx : { -halfW + 0.10f, halfW - 0.10f })
+        improve(sdBoxF(p, glm::vec3(bx + sx, deckYAt(0.f) + 0.02f, bz),
+                       glm::vec3(0.09f, 0.10f, halfL - 0.1f)),
+                6u); // wheel guards (follow mid height; arch is gentle)
+    for (float sx : { -halfW + 0.30f, halfW - 0.30f }) {
+        // stringers follow the arch in 3 chord segments
+        for (int s = 0; s < 3; ++s) {
+            float z0 = -halfL + float(s) * (2.f * halfL / 3.f);
+            float z1 = -halfL + float(s + 1) * (2.f * halfL / 3.f);
+            glm::vec3 a(bx + sx, deckYAt(z0) - 0.18f, bz + z0);
+            glm::vec3 b(bx + sx, deckYAt(z1) - 0.18f, bz + z1);
+            improve(sdCapsule(p, a, b, 0.075f), 6u);
         }
     }
 
-    // trestle legs dropping to the local ground (banks or riverbed), with
-    // cross beams under the deck
+    // side rails: double top logs + mid rail, uprights, X-braced panels
+    for (float sx : { -halfW + 0.06f, halfW - 0.06f }) {
+        for (int s = 0; s < 3; ++s) {
+            float z0 = -halfL + 0.2f + float(s) * ((2.f * halfL - 0.4f) / 3.f);
+            float z1 = -halfL + 0.2f + float(s + 1) * ((2.f * halfL - 0.4f) / 3.f);
+            float y0 = deckYAt(z0) + 0.55f, y1 = deckYAt(z1) + 0.55f;
+            improve(sdCapsule(p, glm::vec3(bx + sx, y0, bz + z0),
+                              glm::vec3(bx + sx, y1, bz + z1), 0.055f),
+                    6u); // top rail
+            improve(sdCapsule(p, glm::vec3(bx + sx, y0 - 0.28f, bz + z0),
+                              glm::vec3(bx + sx, y1 - 0.28f, bz + z1), 0.04f),
+                    6u); // mid rail
+            // X brace in the panel
+            improve(sdCapsule(p, glm::vec3(bx + sx, y0 - 0.28f, bz + z0),
+                              glm::vec3(bx + sx, y1, bz + z1), 0.03f),
+                    6u);
+        }
+        for (float zp = -halfL + 0.4f; zp <= halfL - 0.4f + 1e-3f; zp += 1.5f) {
+            float yd = deckYAt(zp);
+            improve(sdCylY(p, glm::vec2(bx + sx, bz + zp), yd, yd + 0.55f, 0.05f),
+                    6u);
+        }
+    }
+
+    // trestle bents: splayed legs to the ground + cap beam + diagonal + pads
     for (float zp = -halfL + 1.0f; zp <= halfL - 1.0f + 1e-3f; zp += 2.0f) {
+        float yd = deckYAt(zp);
         for (int s = -1; s <= 1; s += 2) {
-            float xp = bx + s * (halfW - 0.25f);
-            float gLeg = hm.sample(xp, bz + zp);
-            float yBot = glm::min(gLeg, WATER_LEVEL - 2.0f) - 0.4f; // embed
-            d = glm::min(d, sdCylY(p, glm::vec2(xp, bz + zp), yBot,
-                                   yDeck - plank, 0.10f));
+            float xtop = bx + s * (halfW - 0.25f);
+            float xbot = bx + s * (halfW + 0.05f); // batter (splay)
+            float gLeg = hm.sample(xbot, bz + zp);
+            float yBot = glm::min(gLeg, WATER_LEVEL - 2.0f) - 0.4f;
+            improve(sdCapsule(p, glm::vec3(xbot, yBot, bz + zp),
+                              glm::vec3(xtop, yd - 0.14f, bz + zp), 0.10f),
+                    6u);
+            improve(sdBoxF(p, glm::vec3(xbot, gLeg + 0.02f, bz + zp),
+                           glm::vec3(0.22f, 0.12f, 0.22f)),
+                    4u); // stone footing pad
         }
-        d = glm::min(d, sdLogX(p, bx, halfW - 0.2f, yDeck - plank - 0.12f,
-                               bz + zp, 0.07f));
+        improve(sdCapsule(p, glm::vec3(bx - halfW + 0.2f, yd - 0.20f, bz + zp),
+                          glm::vec3(bx + halfW - 0.2f, yd - 0.20f, bz + zp), 0.07f),
+                6u); // cap beam
+        improve(sdCapsule(p, glm::vec3(bx - halfW + 0.25f, yd - 0.25f, bz + zp),
+                          glm::vec3(bx + halfW - 0.25f, yd - 1.1f, bz + zp), 0.045f),
+                6u); // diagonal brace
     }
-    return { d, 6u }; // wood
+    return best;
 }
 
-// --- conifer forest backdrop (house.jpeg treeline) ---------------------------
-// Narrow spruce/fir: root flare -> tapered trunk -> 5 stacked foliage cones.
-// base y hugs the heightmap; seed in [0,1) varies height/girth deterministically.
+// --- conifer forest backdrop (house.jpeg treeline, rewritten) ----------------
+// Spruce/fir: buttress roots -> tapered leaning trunk -> 6 whorled branch
+// tiers (capsule branches + drooping foliage skirts) -> leader spike.
+// Base hugs the heightmap; seed varies height/girth/crown density.
 inline ObjHit coniferAt(glm::vec3 p, glm::vec2 spot, float groundY, float seed)
 {
     float dx = p.x - spot.x, dz = p.z - spot.y;
@@ -967,6 +1458,7 @@ inline ObjHit coniferAt(glm::vec3 p, glm::vec2 spot, float groundY, float seed)
     glm::vec3 q(p.x - spot.x, p.y - groundY, p.z - spot.y);
     float hScale = 0.78f + seed * 0.38f; // 6..9 m tall (sky stays visible)
     float gScale = 0.85f + hash2(seed * 91.7f, seed * 57.3f) * 0.4f;
+    float density = 0.75f + hash2(seed * 13.3f, seed * 41.1f) * 0.5f;
     ObjHit best { 1e9f, 6u };
     auto improve = [&](float d, uint8_t m) {
         if (d < best.d) {
@@ -974,34 +1466,86 @@ inline ObjHit coniferAt(glm::vec3 p, glm::vec2 spot, float groundY, float seed)
             best.mat = m;
         }
     };
-    // L0: root flare + trunk (two segments, slight lean by seed)
+    // L0: buttress roots + trunk (two segments, slight lean by seed)
     float lean = (hash2(seed * 31.1f, 4.2f) - 0.5f) * 0.3f;
-    improve(sdCylY(q, glm::vec2(0.f), -0.05f, 0.30f, 0.30f * gScale), 6u);
-    improve(sdCylY(q, glm::vec2(lean * 0.3f), 0.30f, 1.60f * hScale, 0.22f * gScale),
+    float lean2 = (hash2(seed * 17.7f, 8.9f) - 0.5f) * 0.25f;
+    improve(sdCylY(q, glm::vec2(0.f), -0.05f, 0.32f, 0.30f * gScale), 6u);
+    for (int r = 0; r < 5; ++r) {
+        float a = float(r) * 1.2566f + seed * 6.28f;
+        glm::vec3 tip(std::cos(a) * 0.65f * gScale, 0.0f, std::sin(a) * 0.65f * gScale);
+        improve(sdCapsule(q, glm::vec3(0.f, 0.22f, 0.f), tip, 0.10f * gScale), 6u);
+    }
+    improve(sdCapsule(q, glm::vec3(0.f, 0.30f, 0.f),
+                      glm::vec3(lean * 0.5f, 1.60f * hScale, lean2 * 0.5f),
+                      0.22f * gScale),
             6u);
-    improve(sdCylY(q, glm::vec2(lean), 1.60f * hScale, 2.60f * hScale,
-                   0.15f * gScale),
+    improve(sdCapsule(q, glm::vec3(lean * 0.5f, 1.55f * hScale, lean2 * 0.5f),
+                      glm::vec3(lean, 2.90f * hScale, lean2), 0.14f * gScale),
             6u);
-    // L1..L5: five foliage cones, wide skirts low, tight spike on top
-    const float baseY = 1.35f * hScale;
-    const float tierH = 1.45f * hScale;
-    for (int i = 0; i < 5; ++i) {
-        float y0 = baseY + float(i) * 0.95f * hScale;
-        float r0 = (1.75f - float(i) * 0.30f) * gScale;
-        float r1 = (1.15f - float(i) * 0.24f) * gScale;
-        if (r1 < 0.12f)
-            r1 = 0.12f;
+    // bark plates: 3 vertical ridges up the bole
+    for (int b = 0; b < 3; ++b) {
+        float a = seed * 6.28f + float(b) * 2.094f;
+        glm::vec3 base(std::cos(a) * 0.20f * gScale, 0.4f, std::sin(a) * 0.20f * gScale);
+        glm::vec3 top(lean * 0.4f + std::cos(a) * 0.13f * gScale, 1.9f * hScale,
+                      lean2 * 0.4f + std::sin(a) * 0.13f * gScale);
+        improve(sdCapsule(q, base, top, 0.05f * gScale), 6u);
+    }
+    // L1..L6: six whorled tiers — branches first, then drooping skirt cones.
+    // Skirt bottoms flare past the branch tips; each tier is jittered so the
+    // silhouette reads feathery, not lathed.
+    const float baseY = 1.15f * hScale;
+    for (int i = 0; i < 6; ++i) {
+        float yT = baseY + float(i) * 0.88f * hScale;
+        float rT = (1.85f - float(i) * 0.26f) * gScale * density;
+        if (rT < 0.18f)
+            rT = 0.18f;
+        float cx = lean * (0.3f + 0.15f * float(i));
+        float cz = lean2 * (0.3f + 0.12f * float(i));
+        // 5 branches per whorl, alternating offset per tier
+        int nBr = (i < 2) ? 6 : 5;
+        for (int b = 0; b < nBr; ++b) {
+            float a = (float(b) / float(nBr)) * 6.2831f + float(i) * 0.55f + seed * 3.0f;
+            glm::vec3 tip(cx + std::cos(a) * rT * 0.92f, yT + 0.12f * hScale,
+                          cz + std::sin(a) * rT * 0.92f);
+            improve(sdCapsule(q, glm::vec3(cx, yT + 0.25f * hScale, cz), tip,
+                              0.055f * gScale + 0.015f),
+                    6u);
+            // drooping branchlets near the tip (short down-angled capsules)
+            glm::vec3 mid = glm::mix(glm::vec3(cx, yT + 0.25f * hScale, cz), tip, 0.7f);
+            improve(sdCapsule(q, mid, mid + glm::vec3(0.f, -0.28f * hScale, 0.f),
+                              0.04f * gScale + 0.01f),
+                    8u);
+        }
+        float tierH = (i < 5 ? 1.30f : 1.05f) * hScale;
+        float r1 = rT * 0.62f;
+        if (r1 < 0.10f)
+            r1 = 0.10f;
         float jx = (hash2(seed * 77.7f, float(i) * 3.1f) - 0.5f) * 0.20f;
         float jz = (hash2(seed * 55.5f, float(i) * 7.7f) - 0.5f) * 0.20f;
-        improve(sdConeY(q, glm::vec2(jx + lean * (0.3f + 0.15f * float(i)), jz),
-                        y0, y0 + tierH, r0, r1),
+        improve(sdConeY(q, glm::vec2(cx + jx, cz + jz), yT - 0.15f * hScale,
+                        yT + tierH, rT, r1),
                 8u);
     }
-    // L6: dead snag spike above the crown on mature trees
-    if (seed > 0.55f)
-        improve(sdCylY(q, glm::vec2(lean * 1.1f), baseY + 4.75f * hScale,
-                       baseY + 5.35f * hScale, 0.05f),
-                6u);
+    // L7: leader spike + top tuft; dead snag stubs low on mature trees
+    improve(sdCapsule(q, glm::vec3(lean, baseY + 5.0f * hScale, lean2),
+                      glm::vec3(lean * 1.1f, baseY + 5.9f * hScale, lean2), 0.06f),
+            6u);
+    improve(sdEllipsoid(q, glm::vec3(lean * 1.1f, baseY + 5.85f * hScale, lean2),
+                        glm::vec3(0.22f * gScale, 0.35f * hScale, 0.22f * gScale)),
+            8u);
+    if (seed > 0.45f) {
+        for (int s = 0; s < 3; ++s) {
+            float a = seed * 9.0f + float(s) * 2.1f;
+            float sy = (0.9f + float(s) * 0.5f) * hScale;
+            glm::vec3 tip(std::cos(a) * 0.9f * gScale, sy - 0.15f,
+                          std::sin(a) * 0.9f * gScale);
+            improve(sdCapsule(q, glm::vec3(0.f, sy, 0.f), tip, 0.035f), 6u);
+        }
+        if (seed > 0.62f)
+            improve(sdCylY(q, glm::vec2(lean * 1.1f), baseY + 5.9f * hScale,
+                           baseY + 6.4f * hScale, 0.045f),
+                    6u);
+    }
     return best;
 }
 
@@ -1064,48 +1608,119 @@ inline ObjHit docksideAt(glm::vec3 p)
             best.mat = m;
         }
     };
-    // jetty deck: plank slab + two stringers, low over the pond (top 0.55
-    // above the water, a hand above the north bank). Reaches from the bank
-    // (north end) into the cove (south end).
+    // jetty: individual cross-planks with gaps on twin stringers, low over
+    // the cove. Reaches from the bank (north end) into the water (south).
     const float deckY = -0.35f;
     if (nearDock) {
-        improve(sdBoxF(p, glm::vec3(kDockPos.x, deckY - 0.07f, kDockPos.y),
-                       glm::vec3(0.80f, 0.07f, 1.75f)),
-                6u);
+        // 11 cross-planks (0.24 deep, 0.06 gaps) + rim boards
+        for (int i = 0; i < 11; ++i) {
+            float zz = kDockPos.y - 1.60f + float(i) * 0.305f;
+            float wjit = (hash2(float(i) * 7.7f, 2.2f) - 0.5f) * 0.03f;
+            improve(sdBoxF(p, glm::vec3(kDockPos.x + wjit, deckY - 0.045f, zz),
+                           glm::vec3(0.78f, 0.055f, 0.12f)),
+                    6u);
+        }
+        for (float sx : { -0.78f, 0.78f })
+            improve(sdBoxF(p, glm::vec3(kDockPos.x + sx, deckY - 0.05f, kDockPos.y),
+                           glm::vec3(0.06f, 0.09f, 1.72f)),
+                    6u); // rim boards
         for (float sx : { -0.55f, 0.55f })
             improve(sdLogZ(p, kDockPos.y, 1.70f, deckY - 0.17f,
-                           kDockPos.x + sx, 0.07f),
-                    6u);
-        // pile pairs down into the bed + two taller mooring posts
-        for (float zp : { -1.45f, -0.30f, 0.85f, 1.60f })
+                           kDockPos.x + sx, 0.075f),
+                    6u); // stringers
+        // pile pairs down into the bed with pointed shoes + X cross-bracing
+        for (float zp : { -1.45f, -0.30f, 0.85f, 1.60f }) {
             for (float xp : { -0.62f, 0.62f }) {
                 float yBot = WATER_LEVEL - 2.6f;
                 improve(sdCylY(p, glm::vec2(kDockPos.x + xp, kDockPos.y + zp),
-                               yBot, deckY - 0.05f, 0.09f),
+                               yBot, deckY - 0.05f, 0.095f),
                         6u);
+                improve(sdConeY(p, glm::vec2(kDockPos.x + xp, kDockPos.y + zp),
+                                yBot - 0.25f, yBot + 0.05f, 0.02f, 0.095f),
+                        2u); // shoe
             }
-        for (float xp : { -0.62f, 0.62f })
-            improve(sdCylY(p, glm::vec2(kDockPos.x + xp, kDockPos.y - 1.70f),
-                           deckY - 0.05f, deckY + 0.75f, 0.08f),
+            // cross-brace between the pair (below deck, above water)
+            glm::vec3 a(kDockPos.x - 0.62f, deckY - 0.55f, kDockPos.y + zp);
+            glm::vec3 b(kDockPos.x + 0.62f, deckY - 1.15f, kDockPos.y + zp);
+            improve(sdCapsule(p, a, b, 0.045f), 6u);
+            improve(sdCapsule(p, glm::vec3(a.x, b.y, a.z), glm::vec3(b.x, a.y, b.z),
+                              0.045f),
                     6u);
-        // plank end cleat
-        improve(sdBoxF(p, glm::vec3(kDockPos.x, deckY + 0.03f, kDockPos.y + 1.65f),
+        }
+        // two taller mooring posts + caps + rope to the canoe + cleat
+        for (float xp : { -0.62f, 0.62f }) {
+            improve(sdCylY(p, glm::vec2(kDockPos.x + xp, kDockPos.y - 1.70f),
+                           deckY - 0.05f, deckY + 0.75f, 0.085f),
+                    6u);
+            improve(sdCylY(p, glm::vec2(kDockPos.x + xp, kDockPos.y - 1.70f),
+                           deckY + 0.75f, deckY + 0.83f, 0.105f),
+                    6u); // cap
+        }
+        improve(sdCapsule(p,
+                          glm::vec3(kDockPos.x - 0.62f, deckY + 0.55f, kDockPos.y - 1.70f),
+                          glm::vec3(kCanoePos.x + 0.25f, WATER_LEVEL + 0.22f,
+                                    kCanoePos.y - 1.20f),
+                          0.025f),
+                2u); // painter rope
+        improve(sdBoxF(p, glm::vec3(kDockPos.x, deckY + 0.05f, kDockPos.y + 1.65f),
                        glm::vec3(0.80f, 0.05f, 0.10f)),
-                6u);
+                6u); // end cleat board
+        // shore ramp: two bank boards from the north end onto the grass
+        for (float sx : { -0.40f, 0.40f })
+            improve(sdCapsule(p, glm::vec3(kDockPos.x + sx, deckY - 0.05f,
+                                           kDockPos.y - 1.70f),
+                              glm::vec3(kDockPos.x + sx * 1.3f, deckY + 0.25f,
+                                        kDockPos.y - 2.60f),
+                              0.06f),
+                    6u);
     }
-    // canoe: solid hull with an open cockpit (1-voxel rim survives the bake)
+    // canoe: cedar-strip hull (outer minus cockpit), gunwale rails, keel,
+    // bow/stern decks, 3 thwarts, ribs. Rides low with a laden waterline.
     if (nearCanoe) {
-        glm::vec3 hc(kCanoePos.x, WATER_LEVEL + 0.12f, kCanoePos.y);
-        float outer =
-            sdEllipsoid(p, hc, glm::vec3(0.35f, 0.28f, 1.80f));
-        float inner = sdEllipsoid(p, hc + glm::vec3(0.f, 0.14f, 0.f),
-                                  glm::vec3(0.25f, 0.24f, 1.60f));
-        improve(glm::max(outer, -inner), 6u);
-        // thwarts (seats) across the cockpit
-        for (float sz : { -0.60f, 0.60f })
-            improve(sdBoxF(p, glm::vec3(kCanoePos.x, WATER_LEVEL + 0.10f,
+        glm::vec3 hc(kCanoePos.x, WATER_LEVEL + 0.10f, kCanoePos.y);
+        float outer = sdEllipsoid(p, hc, glm::vec3(0.36f, 0.30f, 1.85f));
+        float inner = sdEllipsoid(p, hc + glm::vec3(0.f, 0.16f, 0.f),
+                                  glm::vec3(0.25f, 0.25f, 1.62f));
+        float hull = glm::max(outer, -inner);
+        improve(hull, 6u);
+        // gunwale rails (port/starboard sheer logs) + keel strip
+        for (float gx : { -0.27f, 0.27f })
+            improve(sdCapsule(p,
+                              glm::vec3(kCanoePos.x + gx, WATER_LEVEL + 0.30f,
+                                        kCanoePos.y - 1.60f),
+                              glm::vec3(kCanoePos.x + gx * 0.4f, WATER_LEVEL + 0.34f,
+                                        kCanoePos.y + 1.60f),
+                              0.045f),
+                    6u);
+        improve(sdCapsule(p,
+                          glm::vec3(kCanoePos.x, WATER_LEVEL - 0.18f, kCanoePos.y - 1.5f),
+                          glm::vec3(kCanoePos.x, WATER_LEVEL - 0.18f, kCanoePos.y + 1.5f),
+                          0.04f),
+                2u);
+        // bow/stern decks + stem posts
+        for (float ez : { -1.62f, 1.62f }) {
+            improve(sdBoxF(p, glm::vec3(kCanoePos.x, WATER_LEVEL + 0.22f,
+                                        kCanoePos.y + ez),
+                           glm::vec3(0.20f, 0.04f, 0.22f)),
+                    6u);
+            improve(sdCapsule(p,
+                              glm::vec3(kCanoePos.x, WATER_LEVEL - 0.05f,
+                                        kCanoePos.y + ez * 1.02f),
+                              glm::vec3(kCanoePos.x, WATER_LEVEL + 0.32f,
+                                        kCanoePos.y + ez * 0.97f),
+                              0.04f),
+                    6u);
+        }
+        // floorboards (3 longitudinal strips low in the hull) + thwarts
+        for (float fx : { -0.12f, 0.f, 0.12f })
+            improve(sdBoxF(p, glm::vec3(kCanoePos.x + fx, WATER_LEVEL - 0.08f,
+                                        kCanoePos.y),
+                           glm::vec3(0.05f, 0.03f, 1.30f)),
+                    2u);
+        for (float sz : { -0.60f, 0.05f, 0.65f })
+            improve(sdBoxF(p, glm::vec3(kCanoePos.x, WATER_LEVEL + 0.12f,
                                         kCanoePos.y + sz),
-                           glm::vec3(0.22f, 0.04f, 0.10f)),
+                           glm::vec3(0.24f, 0.04f, 0.11f)),
                     6u);
     }
     return best;
@@ -1127,58 +1742,141 @@ inline ObjHit shoreAt(glm::vec3 p)
 {
     const HeightMap& hm = sharedHeightmap();
     ObjHit best { 1e9f, 4u };
-    // half-buried boulders: centres ride the max(bed, waterline-0.3)
+    auto improve = [&](float d, uint8_t m) {
+        if (d < best.d) {
+            best.d = d;
+            best.mat = m;
+        }
+    };
+    // half-buried boulders: faceted glacial erratics with moss caps and a
+    // dark wet waterline band. Centres ride max(bed, waterline-0.3).
     for (size_t i = 0; i < kShoreRocks.size(); ++i) {
         float sx = kShoreRocks[i].x, sz = kShoreRocks[i].z;
         float r = kShoreRadii[i];
         float dx = p.x - sx, dz = p.z - sz;
-        if (dx * dx + dz * dz > (r + 0.5f) * (r + 0.5f))
+        if (dx * dx + dz * dz > (r + 0.6f) * (r + 0.6f))
             continue;
         float g = hm.sample(sx, sz);
         float cy = glm::max(g, WATER_LEVEL - 0.30f) + r * 0.25f;
         float jx = (hash2(float(i) * 3.7f, 1.1f) - 0.5f) * 0.2f;
-        float d = sdEllipsoid(p, glm::vec3(sx + jx, cy, sz),
-                              glm::vec3(r, r * 0.75f, r * 0.9f));
-        if (d < best.d) {
-            best.d = d;
-            best.mat = uint8_t(i % 3 == 1 ? 5 : 4);
+        float jz = (hash2(float(i) * 8.3f, 4.4f) - 0.5f) * 0.2f;
+        glm::vec3 c(sx + jx, cy, sz + jz);
+        glm::vec3 rad(r, r * 0.72f, r * 0.88f);
+        float d = sdEllipsoid(p, c, rad);
+        // facets: two intersecting plane cuts + noise dents (glacial faces)
+        float facet = sdBoxF(p, c + glm::vec3(r * 0.35f, r * 0.30f, 0.f),
+                             glm::vec3(r * 0.55f, r * 0.45f, r * 0.70f));
+        d = glm::max(d, -(facet + r * 0.18f));
+        d += fbm2(p.x * 3.1f + float(i) * 7.0f, p.z * 3.1f) * r * 0.10f;
+        if (d < 0.35f) {
+            uint8_t m = uint8_t(i % 3 == 1 ? 5 : 4);
+            // wet band near the waterline reads darker
+            if (p.y < WATER_LEVEL + 0.12f)
+                m = 4;
+            improve(d, m);
+            // moss cap on the sheltered top (north-east bias, like the ref)
+            glm::vec3 mc(c.x + r * 0.10f, c.y + rad.y * 0.92f, c.z - r * 0.05f);
+            float md = sdEllipsoid(p, mc, glm::vec3(r * 0.55f, r * 0.16f, r * 0.50f));
+            improve(md, (i % 2) ? uint8_t(0) : uint8_t(1));
+            // perched pebble on big boulders
+            if (r > 0.65f) {
+                glm::vec3 pc(c.x - r * 0.25f, c.y + rad.y + 0.03f, c.z + r * 0.2f);
+                improve(glm::length(p - pc) - 0.09f, 5u);
+            }
         }
     }
-    // pebble hash grid along the waterline band (10-18 cm stones)
+    // rapids boulders mid-channel upstream (whitewater of the reference):
+    // break the surface over the riffle bars.
     {
-        const float cell = 1.6f;
+        const glm::vec2 rapids[4] = { { -5.5f, 6.2f }, { -8.0f, 3.4f },
+                                      { -11.0f, 5.2f }, { -3.0f, 8.6f } };
+        for (int i = 0; i < 4; ++i) {
+            float sx = rapids[i].x, sz = rapids[i].y;
+            float r = 0.55f + hash2(float(i) * 3.3f, 8.8f) * 0.35f;
+            float dx = p.x - sx, dz = p.z - sz;
+            if (dx * dx + dz * dz > (r + 0.6f) * (r + 0.6f))
+                continue;
+            float g = hm.sample(sx, sz);
+            float cy = glm::max(g, WATER_LEVEL - 0.55f) + r * 0.45f;
+            float d = sdEllipsoid(p, glm::vec3(sx, cy, sz),
+                                  glm::vec3(r, r * 0.8f, r * 0.9f));
+            d += fbm2(p.x * 4.0f + float(i) * 3.0f, p.z * 4.0f) * r * 0.12f;
+            improve(d, i % 2 ? 5u : 4u);
+        }
+    }
+    // pebble + cobble hash grid along the waterline band (5-22 cm stones,
+    // two size classes; cobbles cluster at riffle heads like the reference)
+    {
+        const float cell = 1.25f;
         int ix = int(floor(p.x / cell)), iz = int(floor(p.z / cell));
         for (int oz = -1; oz <= 1; ++oz)
             for (int ox = -1; ox <= 1; ++ox) {
                 int cxx = ix + ox, czz = iz + oz;
                 float hCell = hash2(float(cxx) * 3.1f + 5.0f, float(czz) * 4.7f);
-                if (hCell < 0.45f)
+                if (hCell < 0.38f)
                     continue;
                 float jx = hash2(float(cxx) * 7.3f, float(czz) * 1.9f);
                 float jz = hash2(float(cxx) * 1.3f, float(czz) * 9.1f);
                 float hr = hash2(float(cxx) * 5.9f, float(czz) * 3.3f);
+                float hr2 = hash2(float(cxx) * 9.4f + 2.0f, float(czz) * 6.1f);
                 glm::vec2 cc((cxx + jx) * cell, (czz + jz) * cell);
-                // keep pebbles off the jetty + canoe shells
-                if (std::fabs(cc.x - kDockPos.x) < 1.5f &&
-                    std::fabs(cc.y - kDockPos.y) < 2.6f)
+                // keep pebbles off the jetty + canoe shells (with air-band
+                // margin: a neighbour component's air band must not reach
+                // solid cells)
+                if (std::fabs(cc.x - kDockPos.x) < 2.2f &&
+                    std::fabs(cc.y - kDockPos.y) < 3.2f)
                     continue;
                 {
                     float cdx = cc.x - kCanoePos.x, cdz = cc.y - kCanoePos.y;
-                    if (cdx * cdx + cdz * cdz < 4.0f)
+                    if (cdx * cdx + cdz * cdz < 7.5f)
+                        continue;
+                }
+                // keep clear of the cabin + porch + path (footprint + margin),
+                // the paddock, and the bridge trestle strip
+                {
+                    float hdx = cc.x - kHousePos.x, hdz = cc.y - kHousePos.y;
+                    float qx = std::fabs(hdx) - 2.9f; // half footprint x
+                    float qz1 = hdz - 2.3f;           // beyond back wall (+z)
+                    float qz0 = -hdz - 4.7f;          // beyond porch steps (-z)
+                    float ox = glm::max(qx, 0.f);
+                    float oz = glm::max(glm::max(qz1, qz0), 0.f);
+                    float rectD = std::hypot(ox, oz);
+                    if (rectD < 0.9f)
+                        continue;
+                    if (inPaddock(cc.x, cc.y, 1.5f))
+                        continue;
+                    if (std::fabs(cc.x - kBridgePos.x) < 2.4f && cc.y > -1.0f &&
+                        cc.y < 14.0f)
                         continue;
                 }
                 float H = hm.sample(cc.x, cc.y);
                 float wd = WATER_LEVEL - H;
-                if (wd < -0.55f || wd > 0.45f)
+                if (wd < -0.60f || wd > 0.50f)
                     continue; // waterline band only
-                float r = 0.10f + hr * 0.09f;
+                float r = (hr2 > 0.72f ? 0.14f + hr * 0.09f : 0.05f + hr * 0.07f);
                 if (p.y < H - 0.3f || p.y > H + r + 0.6f)
                     continue;
-                float d =
-                    glm::length(p - glm::vec3(cc.x, H + r * 0.5f, cc.y)) - r;
+                glm::vec3 pc(cc.x, H + r * 0.45f, cc.y);
+                float d = sdEllipsoid(p, pc,
+                                      glm::vec3(r, r * 0.62f, r * 0.85f));
                 if (d < best.d) {
                     best.d = d;
-                    best.mat = uint8_t(hr > 0.6f ? 5 : 4);
+                    // wet stones below the waterline read dark, dry ones pale
+                    uint8_t m;
+                    if (H < WATER_LEVEL + 0.05f)
+                        m = 4;
+                    else
+                        m = uint8_t(hr > 0.55f ? 5 : 4);
+                    best.mat = m;
+                }
+                // satellite grit beside big cobbles
+                if (hr2 > 0.72f) {
+                    glm::vec3 gc(cc.x + r * 1.6f, H + 0.02f, cc.y - r * 1.2f);
+                    float gd = glm::length(p - gc) - 0.035f;
+                    if (gd < best.d) {
+                        best.d = gd;
+                        best.mat = 5;
+                    }
                 }
             }
     }
@@ -1232,13 +1930,28 @@ inline ObjHit fernsAt(glm::vec3 p)
             glm::vec3 c(cc.x, H + r * 0.45f, cc.y);
             if (p.y < H - 0.4f || p.y > c.y + r + 0.8f)
                 continue;
-            // tuft = squashed sphere + two crossed leaf blades (capsules).
-            // Blades stay >= 1 voxel thick so the shell bakes connected.
+            // fern rosette: heart bulb + 6 arching fronds (2-segment each)
+            // + 2 upright fiddleheads. All blades >= 1 voxel thick.
             float d = glm::length((p - c) / glm::vec3(1.f, 0.62f, 1.f)) * r - r;
-            glm::vec3 tipA(cc.x - r * 0.8f, H + r * 1.5f, cc.y + r * 0.3f);
-            glm::vec3 tipB(cc.x + r * 0.8f, H + r * 1.5f, cc.y - r * 0.3f);
-            d = glm::min(d, sdCapsule(p, c, tipA, 0.10f));
-            d = glm::min(d, sdCapsule(p, c, tipB, 0.10f));
+            for (int f = 0; f < 6; ++f) {
+                float a = (float(f) / 6.f) * 6.2831f +
+                          hash2(float(cxx) * 3.7f, float(czz) * 5.9f) * 6.28f;
+                float len = r * (0.95f + hash2(float(f) * 7.1f, hr * 9.0f) * 0.5f);
+                glm::vec3 elbow(cc.x + std::cos(a) * len * 0.55f, H + r * 1.05f,
+                                cc.y + std::sin(a) * len * 0.55f);
+                glm::vec3 tip(cc.x + std::cos(a) * len, H + r * 0.75f,
+                              cc.y + std::sin(a) * len);
+                d = glm::min(d, sdCapsule(p, c, elbow, 0.055f));
+                d = glm::min(d, sdCapsule(p, elbow, tip, 0.045f));
+            }
+            d = glm::min(d, sdCapsule(p, c,
+                                      glm::vec3(cc.x, H + r * 1.45f, cc.y), 0.06f));
+            for (int f = 0; f < 2; ++f) {
+                float a = hash2(float(f) * 11.0f, hr * 7.0f) * 6.28f;
+                glm::vec3 tip(cc.x + std::cos(a) * r * 0.2f, H + r * 1.35f,
+                              cc.y + std::sin(a) * r * 0.2f);
+                d = glm::min(d, sdCapsule(p, c, tip, 0.05f));
+            }
             if (d < best.d) {
                 best.d = d;
                 best.mat = 8;

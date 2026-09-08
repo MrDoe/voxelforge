@@ -99,7 +99,7 @@
   `visual_check` (headless PPM). Must pass before any shader/world change is done.
 - `./build/vf_tests --test-case="*world*"` for a single suite.
 - `python3 tests/visual_check.py build/voxelforge` — hero/house/water shots;
-  coverage 3–97 %, black-in-silhouette <5 %, blue sky probe.
+  coverage 3–98.5 %, black-in-silhouette <5 %, blue sky probe.
 - `./build/voxelforge --selftest --width 640 --height 360` — sky probe +
   coverage acceptance.
 - `--probe X Y Z` reflects the live layered field (loads `world.json`).

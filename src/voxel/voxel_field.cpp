@@ -638,11 +638,23 @@ void VoxelField::build(const std::vector<VoxelRecord>& records,
         skipped = skippedAtomic.load();
     }
 
-    // deterministic merge into hash + presence blocks + shadow volume
+    // deterministic merge into hash + presence blocks + shadow volume.
+    // Collision rule: a solid cell (negative SDF) always beats an air-band
+    // cell (positive SDF) for the same key, so one component's air band can
+    // never erase another component's shell (e.g. a pebble next to a cabin
+    // wall). Solid-vs-solid keeps first-wins (layer priority: ai_edits and
+    // earlier manifest layers claim shared cells); air-vs-air keeps first.
     for (const CompOut& o : outs) {
         for (size_t i = 0; i < o.keys.size(); ++i) {
             uint32_t k = o.keys[i];
-            oinsert(k, o.vals[i]);
+            uint32_t nv = o.vals[i];
+            uint32_t ev = 0;
+            if (ofind(k, ev)) {
+                int8_t ed = int8_t(ev & 0xFF), nd = int8_t(nv & 0xFF);
+                if (ed < 0 || nd >= 0)
+                    continue; // existing solid wins; air-vs-air keeps first
+            }
+            oinsert(k, nv);
             int x = int(k >> 20), y = int((k >> 10) & 0x3FFu), z = int(k & 0x3FFu);
             markObjBlock(x, y, z);
             objVolSplat(x, y, z, int(int8_t(o.vals[i] & 0xFF)));
@@ -650,7 +662,6 @@ void VoxelField::build(const std::vector<VoxelRecord>& records,
     }
     if (skipped)
         spdlog::warn("voxel_field: {} oversized component(s) skipped", skipped);
-
     // ---- carve field: subtractive volume cut through terrain + objects ---------
     // Built from the same component/Dijkstra machinery as the object field, then
     // its signed distance is negated in sample() so the carved region reads as

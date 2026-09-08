@@ -56,6 +56,13 @@ layout(std140, set = 0, binding = 3) uniform SplatUBO {
     vec4 uSplat2;
 } sp;
 
+// Hi-Z pyramid (binding 10) + occlusion parameters (binding 11)
+layout(set = 0, binding = 10) uniform sampler2D uHiz;
+layout(set = 0, binding = 11) uniform OcclParams {
+    int occlEnabled;
+    int hizNumMips;
+} oc;
+
 layout(local_size_x = 128) in;
 shared uint sKeep[128];
 shared uint sBase;
@@ -100,6 +107,59 @@ void main()
                         keep = false;
                         break;
                     }
+                }
+            }
+            // ---- occlusion cull via Hi-Z ----
+            if (keep && oc.occlEnabled != 0) {
+                vec3 cn = normalize(s.normal_rV.xyz);
+                vec3 up = abs(cn.y) < 0.99 ? vec3(0.0, 1.0, 0.0) : vec3(1.0, 0.0, 0.0);
+                vec3 t = normalize(cross(cn, up));
+                vec3 b = normalize(cross(cn, t));
+                const float rScale = clamp(sp.uSplat2.x, 0.5, 2.0);
+                const float rU = max(s.pos_rU.w, 1e-4) * rScale;
+                const float rV = max(s.normal_rV.w, 1e-4) * rScale;
+                const float extent = max(sp.uSplat.z, 1.0);
+                vec2 minNdc = vec2(1e10);
+                vec2 maxNdc = vec2(-1e10);
+                float minDepth = 1e10;
+                bool ok = true;
+                for (int ci = 0; ci < 4; ++ci) {
+                    float cx = (ci & 1) == 0 ? -1.0 : 1.0;
+                    float cy = (ci & 2) == 0 ? -1.0 : 1.0;
+                    vec3 q = c + (t * (cx * rU) + b * (cy * rV)) * extent;
+                    vec3 rel = q - pc.camPos.xyz;
+                    float vz = dot(rel, pc.camFwd.xyz);
+                    if (vz <= 0.001) { ok = false; break; }
+                    float vx = dot(rel, pc.camRight.xyz);
+                    float vy = dot(rel, pc.camUp.xyz);
+                    float w = vz;
+                    vec2 ndc = vec2(vx / (w * pc.a.x * pc.a.y), -vy / (w * pc.a.x));
+                    float depth = 1.0 - exp(-vz * 0.02);
+                    minNdc = min(minNdc, ndc);
+                    maxNdc = max(maxNdc, ndc);
+                    minDepth = min(minDepth, depth);
+                }
+                if (ok && minDepth > 0.0 && minDepth < 0.99) {
+                    vec2 aabbNdc = maxNdc - minNdc;
+                    float pixW = aabbNdc.x * pc.a.z * 0.5;
+                    float pixH = aabbNdc.y * pc.a.w * 0.5;
+                    float maxPix = max(pixW, pixH);
+                    int L = 0;
+                    if (maxPix > 1.0) {
+                        L = int(ceil(log2(maxPix)));
+                        L = min(L, oc.hizNumMips - 1);
+                    }
+                    vec2 centerNdc = (minNdc + maxNdc) * 0.5;
+                    vec2 centerUV = centerNdc * 0.5 + 0.5;
+                    vec2 oneTexelUV = vec2(1u << uint(L), 1u << uint(L)) / vec2(pc.a.z, pc.a.w);
+                    vec2 halfTexelUV = oneTexelUV * 0.5;
+                    float d00 = textureLod(uHiz, centerUV - halfTexelUV, float(L)).r;
+                    float d10 = textureLod(uHiz, centerUV + vec2(halfTexelUV.x, -halfTexelUV.y), float(L)).r;
+                    float d01 = textureLod(uHiz, centerUV + vec2(-halfTexelUV.x, halfTexelUV.y), float(L)).r;
+                    float d11 = textureLod(uHiz, centerUV + halfTexelUV, float(L)).r;
+                    float maxD = max(max(d00, d10), max(d01, d11));
+                    if (minDepth > maxD)
+                        keep = false;
                 }
             }
         }

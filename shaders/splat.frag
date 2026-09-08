@@ -119,6 +119,24 @@ void main()
         discard;
     if (PASS_MODE == 2 && d2 <= coreD2)
         discard;
+    if (PASS_MODE == 3) {
+        if (d2 > coreD2) discard;
+        // depth-only prepass: replicate the core pass depth exactly
+        // so the Hi-Z pyramid sees the same depth the core pass writes.
+        // No shading, no colour output.
+        float fragDepth = 1.0 - exp(-t * 0.02);
+        fragDepth = floor(fragDepth * 100000.0 + 0.5) / 100000.0;
+        float winBias = 0.0;
+        bool isWater = vMat.w > 1.5;
+        if (!isWater) {
+            float shB = ((gRenderFlags & 2) != 0 && dot(n, kSunDir) > 0.02) ? vShade.w : 1.0;
+            uint mId = uint(vMat.x + 0.5);
+            winBias = (1.0 - shB) * 5e-5 + float(mId) * 3e-6;
+        }
+        fragDepth = max(fragDepth - (5e-5 + winBias), 0.0);
+        gl_FragDepth = fragDepth;
+        return;
+    }
     float alpha;
     if (d2 < coreD2) {
         alpha = 1.0;

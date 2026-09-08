@@ -1002,7 +1002,10 @@ bool App::runSelftest()
         }
     }
 
-    if (geoRatio < 0.03f || !skyOk || geoRatio > 0.97f) {
+    // Coverage bounds match visual_check.py: clear shallow-water coves can
+    // legitimately render up to ~98% non-sky pixels (water/bed count as
+    // geometry); a buried camera still fails via ~100% + sky probe.
+    if (geoRatio < 0.03f || !skyOk || geoRatio > 0.985f) {
         spdlog::error("selftest FAILED");
         return false;
     }

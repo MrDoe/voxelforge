@@ -44,14 +44,14 @@ shots at 480×270 via `--shot`:
 
 Assertions per shot (timeout 300 s each):
 
-- geometry coverage (non-sky pixels) within **3–97 %**;
+- geometry coverage (non-sky pixels) within **3–98.5 %**;
 - near-black pixels (lum < 30) inside the silhouette **< 5 %** — this is the
   check that catches hollow-voxel regressions;
 - sky probe: top eighth of the frame >50 % blue-dominant (`b ≥ r`).
 
 ## Selftest (`--selftest`)
 
-GPU-side acceptance at frame 30: same coverage bounds (3–97 %), sky probe
+GPU-side acceptance at frame 30: same coverage bounds (3–98.5 %), sky probe
 pixel at (15W/16, H/8) must be blue-ish, plus a 3×3 grid of average colors on
 stderr for quick diagnosis.
 

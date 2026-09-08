@@ -41,7 +41,7 @@ bool SplatPass::init(const Context& ctx)
     m_ctx = &ctx;
     VkDevice dev = ctx.device();
 
-    VkDescriptorSetLayoutBinding b[8] = {};
+    VkDescriptorSetLayoutBinding b[13] = {};
     b[0] = { 0, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1,
              VK_SHADER_STAGE_VERTEX_BIT, nullptr };
     b[1] = { 1, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 1,
@@ -60,8 +60,18 @@ bool SplatPass::init(const Context& ctx)
              VK_SHADER_STAGE_COMPUTE_BIT, nullptr }; // draw command stream
     b[7] = { 7, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, 1,
              VK_SHADER_STAGE_COMPUTE_BIT, nullptr }; // frustum planes
+    b[8] = { 8, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 1,
+             VK_SHADER_STAGE_COMPUTE_BIT, nullptr }; // uHizWrite (Hi-Z build)
+    b[9] = { 9, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 1,
+             VK_SHADER_STAGE_COMPUTE_BIT, nullptr }; // uHizRead (Hi-Z build)
+    b[10] = { 10, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1,
+              VK_SHADER_STAGE_COMPUTE_BIT, nullptr }; // uHizSampled (cull)
+    b[11] = { 11, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, 1,
+              VK_SHADER_STAGE_COMPUTE_BIT, nullptr }; // OcclParams
+    b[12] = { 12, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1,
+              VK_SHADER_STAGE_COMPUTE_BIT, nullptr }; // uDepth (Hi-Z mip0)
     VkDescriptorSetLayoutCreateInfo li { VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO };
-    li.bindingCount = 8;
+    li.bindingCount = 13;
     li.pBindings = b;
     if (vkCreateDescriptorSetLayout(dev, &li, nullptr, &m_setLayout) != VK_SUCCESS)
         return false;
@@ -81,12 +91,13 @@ bool SplatPass::init(const Context& ctx)
     if (!createPipelines(VK_FORMAT_R16G16B16A16_SFLOAT))
         return false;
 
-    VkDescriptorPoolSize sizes[3] = { { VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1 },
-                                      { VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 2 },
-                                      { VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, 1 } };
+    VkDescriptorPoolSize sizes[4] = { { VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 4 },
+                                          { VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 4 },
+                                          { VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, 3 },
+                                          { VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 2 } };
     VkDescriptorPoolCreateInfo pi { VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO };
     pi.maxSets = 1;
-    pi.poolSizeCount = 3;
+    pi.poolSizeCount = 4;
     pi.pPoolSizes = sizes;
     if (vkCreateDescriptorPool(dev, &pi, nullptr, &m_pool) != VK_SUCCESS)
         return false;
@@ -111,6 +122,20 @@ bool SplatPass::init(const Context& ctx)
     VkWriteDescriptorSet w { VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, nullptr, m_set, 3, 0, 1,
                              VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, nullptr, &pi3, nullptr };
     vkUpdateDescriptorSets(dev, 1, &w, 0, nullptr);
+    // occlusion parameters (occlEnabled + hizNumMips)
+    m_occlBuf = makeBuffer(ctx, 2 * sizeof(int),
+                              VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT,
+                              VMA_MEMORY_USAGE_AUTO_PREFER_HOST, true);
+    if (!m_occlBuf.buf || !m_occlBuf.mapped)
+        return false;
+    {
+        int oc[2] = { 0, 0 }; // occlEnabled=0, hizNumMips=0
+        memcpy(m_occlBuf.mapped, oc, sizeof(oc));
+    }
+    VkDescriptorBufferInfo ocInfo { m_occlBuf.buf, 0, VK_WHOLE_SIZE };
+    VkWriteDescriptorSet woc { VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, nullptr, m_set, 11, 0, 1,
+                              VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, nullptr, &ocInfo, nullptr };
+    vkUpdateDescriptorSets(dev, 1, &woc, 0, nullptr);
     // per-frame indirect draw command buffers (one vkCmdDraw per visible
     // chunk would be ~12k API calls/frame; indirect collapses each opaque
     // pass to a single call)
@@ -415,10 +440,10 @@ bool SplatPass::createPipelines(VkFormat hdrFormat)
     dy.dynamicStateCount = 2;
     dy.pDynamicStates = dyn;
 
-    // No depth prepass: the main pass writes gl_FragDepth (exact plane
-    // depth), which disables early-z, so a prepass cannot reduce fragment
-    // cost - it only ever changed rim blending. Per-fragment marches were
-    // the real cost driver; those are baked on the CPU instead.
+    // Depth prepass (PASS_MODE=3): writes the same depth as the core
+    // pass so the Hi-Z pyramid sees identical depths. No shading, no
+    // colour output (colourWriteMask=0). The core pass then re-writes
+    // depth, but the prepass culls invisible surfels before that.
     auto makePipe = [&](int skyMode, int passMode, bool depthTest,
                         bool depthWrite, VkCompareOp depthOp, bool blend,
                         VkBlendOp blendOp, bool stencilTest, VkCompareOp stencilOp,
@@ -501,8 +526,8 @@ bool SplatPass::createPipelines(VkFormat hdrFormat)
 
     // Core pass settles opaque depth+color and marks stencil (any order:
     // all fragments opaque); rim pass splits by stencil: interior rims
-    // lighten-only (MAX, never darken settled surface), silhouette rims
-    // alpha-blend over sky. Water stays a single full-disk pass.
+    // lighten-only (MAX: soft edges that can never darken settled surface), silhouette rims
+    // alpha-blended over sky. Water stays a single full-disk pass.
     // Rim depth test is strict LESS against the (slightly toward-camera
     // biased) core depth: same-surface overlap rims can never pass it, so
     // they can't flicker on an LEQUAL coin-flip; true silhouettes clear it
@@ -519,7 +544,10 @@ bool SplatPass::createPipelines(VkFormat hdrFormat)
         makePipe(0, 2, true, false, VK_COMPARE_OP_LESS, true, VK_BLEND_OP_ADD,
                  true, VK_COMPARE_OP_EQUAL, 0, false, kDepthFmt, &m_rimOutPipe) &&
         makePipe(0, 0, true, false, VK_COMPARE_OP_LESS, true, VK_BLEND_OP_ADD,
-                 false, VK_COMPARE_OP_ALWAYS, 0, false, kDepthFmt, &m_waterPipe);
+                 false, VK_COMPARE_OP_ALWAYS, 0, false, kDepthFmt, &m_waterPipe) &&
+        // Depth-only prepass (PASS_MODE=3): depth test+write, no colour.
+        makePipe(0, 3, true, true, VK_COMPARE_OP_LESS, false, VK_BLEND_OP_ADD,
+                 false, VK_COMPARE_OP_ALWAYS, 0, false, kDepthFmt, &m_prepassPipe);
     vkDestroyShaderModule(dev, vsm, nullptr);
     vkDestroyShaderModule(dev, fsm, nullptr);
     if (!ok)
@@ -610,30 +638,22 @@ void SplatPass::setSurfels(const void* data, size_t bytes, size_t count,
                               VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, nullptr, &ci0, nullptr };
     vkUpdateDescriptorSets(m_ctx->device(), 1, &wc, 0, nullptr);
     // cull-only bindings: selection entries (slot 5, set at record time),
-    // command stream (slot 6 = the indirect buffers), frustum planes (slot 7)
+    // command stream (slot 6 = the indirect buffers), frustum planes (slot 7),
+    // occlusion parameters (slot 11)
     VkDescriptorBufferInfo selInfo { m_selBufs[0].buf, 0, VK_WHOLE_SIZE };
     VkDescriptorBufferInfo cmdInfo { m_drawCmds[0].buf, 0, VK_WHOLE_SIZE };
     VkDescriptorBufferInfo plInfo { m_planesBuf.buf, 0, VK_WHOLE_SIZE };
-    VkWriteDescriptorSet wcc[3] = {};
-    wcc[0].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
-    wcc[0].dstSet = m_set;
-    wcc[0].dstBinding = 5;
-    wcc[0].descriptorCount = 1;
-    wcc[0].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
-    wcc[0].pBufferInfo = &selInfo;
-    wcc[1].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
-    wcc[1].dstSet = m_set;
-    wcc[1].dstBinding = 6;
-    wcc[1].descriptorCount = 1;
-    wcc[1].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
-    wcc[1].pBufferInfo = &cmdInfo;
-    wcc[2].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
-    wcc[2].dstSet = m_set;
-    wcc[2].dstBinding = 7;
-    wcc[2].descriptorCount = 1;
-    wcc[2].descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
-    wcc[2].pBufferInfo = &plInfo;
-    vkUpdateDescriptorSets(m_ctx->device(), 3, wcc, 0, nullptr);
+    VkDescriptorBufferInfo ocInfo { m_occlBuf.buf, 0, VK_WHOLE_SIZE };
+    VkWriteDescriptorSet wcc[4] = {};
+    wcc[0] = { VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, nullptr, m_set, 5, 0, 1,
+                 VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, nullptr, &selInfo, nullptr };
+    wcc[1] = { VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, nullptr, m_set, 6, 0, 1,
+                 VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, nullptr, &cmdInfo, nullptr };
+    wcc[2] = { VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, nullptr, m_set, 7, 0, 1,
+                 VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, nullptr, &plInfo, nullptr };
+    wcc[3] = { VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, nullptr, m_set, 11, 0, 1,
+                 VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, nullptr, &ocInfo, nullptr };
+    vkUpdateDescriptorSets(m_ctx->device(), 4, wcc, 0, nullptr);
     m_count = (data && bytes) ? count : 0;
     m_waterStart = (data && bytes) ? waterStart : 0;
     m_chunkRange = chunkRange;
@@ -915,20 +935,88 @@ void SplatPass::recordTile(VkCommandBuffer cmd, const RaymarchPush& push,
     m_cmdSlot = (m_cmdSlot + 1) % 3;
 }
 
-bool SplatPass::recreateDepth(uint32_t w, uint32_t h)
+bool SplatPass::createDepthResources(uint32_t w, uint32_t h)
 {
+    // Hi-Z pyramid (R32F, all mips)
+    uint32_t nm = 1; { uint32_t pw=w,ph=h; while(pw>1||ph>1){pw=(pw+1)/2;ph=(ph+1)/2;++nm;} }
+    destroyImage3D(*m_ctx, m_hiz);
+    for (int i = 0; i < nm && i < kMaxHiZMips; ++i)
+        m_hizViews[i] = VK_NULL_HANDLE;
+    m_hizSampledView = VK_NULL_HANDLE;
+    m_hizSampler = VK_NULL_HANDLE;
+    m_hizNumMips = nm;
+    VkImageCreateInfo ii { VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO };
+    ii.imageType = VK_IMAGE_TYPE_2D;
+    ii.format = VK_FORMAT_R32_SFLOAT;
+    ii.extent = {w, h, 1};
+    ii.mipLevels = nm;
+    ii.arrayLayers = 1;
+    ii.samples = VK_SAMPLE_COUNT_1_BIT;
+    ii.tiling = VK_IMAGE_TILING_OPTIMAL;
+    ii.usage = VK_IMAGE_USAGE_TRANSFER_DST_BIT |
+               VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_SAMPLED_BIT;
+    ii.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+    VmaAllocationCreateInfo ai {};
+    ai.usage = VMA_MEMORY_USAGE_AUTO_PREFER_DEVICE;
+    if (vmaCreateImage(m_ctx->allocator(), &ii, &ai, &m_hiz.img, &m_hiz.alloc, nullptr) != VK_SUCCESS)
+        return false;
+    VkImageViewCreateInfo vi { VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO };
+    vi.image = m_hiz.img;
+    vi.viewType = VK_IMAGE_VIEW_TYPE_2D;
+    vi.format = VK_FORMAT_R32_SFLOAT;
+    vi.subresourceRange = { VK_IMAGE_ASPECT_COLOR_BIT, 0, nm, 0, 1 };
+    if (vkCreateImageView(m_ctx->device(), &vi, nullptr, &m_hiz.view) != VK_SUCCESS)
+        return false;
+    m_hiz.format = VK_FORMAT_R32_SFLOAT;
+    m_hiz.extent = {w, h, 1};
+    // per-mip storage views
+    for (uint32_t i = 0; i < nm; ++i) {
+        VkImageViewCreateInfo vii { VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO };
+        vii.image = m_hiz.img; vii.viewType = VK_IMAGE_VIEW_TYPE_2D;
+        vii.format = VK_FORMAT_R32_SFLOAT;
+        vii.subresourceRange = { VK_IMAGE_ASPECT_COLOR_BIT, i, 1, 0, 1 };
+        if (vkCreateImageView(m_ctx->device(), &vii, nullptr, &m_hizViews[i]) != VK_SUCCESS)
+            return false;
+    }
+    // sampled view covering all mips
+    if (vkCreateImageView(m_ctx->device(), &vi, nullptr, &m_hizSampledView) != VK_SUCCESS)
+        return false;
+    VkSamplerCreateInfo sci { VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO };
+    sci.magFilter = VK_FILTER_NEAREST;
+    sci.minFilter = VK_FILTER_NEAREST;
+    sci.mipmapMode = VK_SAMPLER_MIPMAP_MODE_NEAREST;
+    sci.addressModeU = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
+    sci.addressModeV = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
+    sci.addressModeW = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
+    sci.maxLod = float(nm);
+    if (vkCreateSampler(m_ctx->device(), &sci, nullptr, &m_hizSampler) != VK_SUCCESS)
+        return false;
+    // depth sampler for the Hi-Z mip0 source
+    if (m_depthSampler) {
+        vkDestroySampler(m_ctx->device(), m_depthSampler, nullptr);
+        m_depthSampler = VK_NULL_HANDLE;
+    }
+    VkSamplerCreateInfo dsci { VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO };
+    dsci.magFilter = VK_FILTER_NEAREST;
+    dsci.minFilter = VK_FILTER_NEAREST;
+    dsci.mipmapMode = VK_SAMPLER_MIPMAP_MODE_NEAREST;
+    dsci.addressModeU = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
+    dsci.addressModeV = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
+    dsci.addressModeW = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
+    dsci.compareEnable = VK_FALSE;
+    dsci.maxLod = 0.0f;
+    if (vkCreateSampler(m_ctx->device(), &dsci, nullptr, &m_depthSampler) != VK_SUCCESS)
+        return false;
+    // depth image: add SAMPLED usage for the Hi-Z mip0 source
     destroyImage3D(*m_ctx, m_depth);
-    // D24+S8: depth for plane ordering, stencil to tell interior rims
-    // (lighten-only blend) apart from silhouette rims (alpha blend)
     m_depth = makeImage2D(*m_ctx, w, h, VK_FORMAT_D24_UNORM_S8_UINT,
-                          VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT,
+                          VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT |
+                              VK_IMAGE_USAGE_SAMPLED_BIT,
                           VkImageAspectFlags(VK_IMAGE_ASPECT_DEPTH_BIT |
                                              VK_IMAGE_ASPECT_STENCIL_BIT));
     if (m_depth.img == VK_NULL_HANDLE)
         return false;
-    // (tile x entry) counts matrix for the tile path: sized by the current
-    // resolution (nTiles up to kMaxTiles, entry axis at kMaxChunkDraws);
-    // recreated only when the byte size changes, then rebound to binding 5
+    // (tile x entry) counts matrix for the tile path
     const uint32_t nTiles = ((w + kTilePx - 1) / kTilePx) *
                             ((h + kTilePx - 1) / kTilePx);
     const VkDeviceSize bytes = VkDeviceSize(nTiles) * kMaxChunkDraws * 4;
@@ -950,6 +1038,22 @@ bool SplatPass::recreateDepth(uint32_t w, uint32_t h)
         vkUpdateDescriptorSets(m_ctx->device(), 1, &w, 0, nullptr);
     }
     return true;
+}
+
+bool SplatPass::recreateDepth(uint32_t w, uint32_t h)
+{
+    destroyImage3D(*m_ctx, m_depth);
+    // D24+S8: depth for plane ordering, stencil to tell interior rims
+    // (lighten-only blend) apart from silhouette rims (alpha blend)
+    // NOTE: also VK_IMAGE_USAGE_SAMPLED_BIT for the Hi-Z mip0 source
+    m_depth = makeImage2D(*m_ctx, w, h, VK_FORMAT_D24_UNORM_S8_UINT,
+                          VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT |
+                              VK_IMAGE_USAGE_SAMPLED_BIT,
+                          VkImageAspectFlags(VK_IMAGE_ASPECT_DEPTH_BIT |
+                                             VK_IMAGE_ASPECT_STENCIL_BIT));
+    if (m_depth.img == VK_NULL_HANDLE)
+        return false;
+    return createDepthResources(w, h);
 }
 
 void SplatPass::updateDescriptors(VkImageView hdrView, VkImageView gposView,
@@ -1277,7 +1381,7 @@ void SplatPass::record(VkCommandBuffer cmd, const RaymarchPush& push, VkExtent2D
         spdlog::info("splat pre-cull: {} quads in {} draws (rim from {}), water {}",
                      nTotal, nDraws, m_rimStart, m_waterDraws);
     }
-    const bool direct = getenv("VF_SPLAT_DIRECT") != nullptr; // legacy A/B path
+    const bool direct = getenv("VF_SPLAT_DIRECT") != nullptr;
     const bool gpuCull =
         !direct && !getenv("VF_NO_GPU_CULL") && nDraws > 0 && m_cullPipe &&
         m_compactBuf.buf && m_selBufs[0].buf && m_planesBuf.buf;
@@ -1304,6 +1408,150 @@ void SplatPass::record(VkCommandBuffer cmd, const RaymarchPush& push, VkExtent2D
         recordTile(cmd, push, extent, nDraws);
         return;
     }
+    constexpr VkDeviceSize stride = sizeof(VkDrawIndirectCommand);
+    // ---- occlusion prepass + Hi-Z build ----
+    const bool doOccl = nDraws > 0 && m_prepassPipe && m_hiz.img != VK_NULL_HANDLE
+                        && m_occlBuf.buf && m_depth.img != VK_NULL_HANDLE;
+    if (doOccl) {
+        // depth is DEPTH_ATTACHMENT_OPTIMAL (set by main.cpp)
+        // transition Hi-Z to GENERAL for storage writes
+        vf::transitionImage(cmd, m_hiz.img, VK_IMAGE_ASPECT_COLOR_BIT,
+                             VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_GENERAL,
+                             VK_PIPELINE_STAGE_2_NONE, VK_ACCESS_2_NONE,
+                             VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
+                             VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT);
+        // === PREPASS: depth-only, replicates core pass depth exactly ===
+        {
+            VkRenderingAttachmentInfo colrs[2] = {};
+            colrs[0].sType = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO;
+            colrs[0].imageView = m_hdrView;
+            colrs[0].imageLayout = VK_IMAGE_LAYOUT_GENERAL;
+            colrs[0].loadOp = VK_ATTACHMENT_LOAD_OP_LOAD;
+            colrs[0].storeOp = VK_ATTACHMENT_STORE_OP_STORE;
+            colrs[1].sType = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO;
+            colrs[1].imageView = m_gposView;
+            colrs[1].imageLayout = VK_IMAGE_LAYOUT_GENERAL;
+            colrs[1].loadOp = VK_ATTACHMENT_LOAD_OP_LOAD;
+            colrs[1].storeOp = VK_ATTACHMENT_STORE_OP_STORE;
+            VkRenderingAttachmentInfo dp { VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO };
+            dp.imageView = m_depth.view;
+            dp.imageLayout = VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL;
+            dp.loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;
+            dp.storeOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
+            dp.clearValue.depthStencil = { 1.0f, 0 };
+            VkRenderingInfo ri { VK_STRUCTURE_TYPE_RENDERING_INFO };
+            ri.renderArea = { { 0, 0 }, extent };
+            ri.layerCount = 1;
+            ri.colorAttachmentCount = 2;
+            ri.pColorAttachments = colrs;
+            ri.pDepthAttachment = &dp;
+            ri.pStencilAttachment = &dp;
+            vkCmdBeginRendering(cmd, &ri);
+            VkViewport vp { 0.0f, 0.0f, float(extent.width), float(extent.height), 0.0f, 1.0f };
+            VkRect2D sc { { 0, 0 }, extent };
+            vkCmdSetViewport(cmd, 0, 1, &vp);
+            vkCmdSetScissor(cmd, 0, 1, &sc);
+            vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, m_layout, 0, 1,
+                                    &m_set, 0, nullptr);
+            vkCmdPushConstants(cmd, m_layout,
+                               VkShaderStageFlags(VK_SHADER_STAGE_VERTEX_BIT |
+                                                  VK_SHADER_STAGE_FRAGMENT_BIT),
+                               0, sizeof(push), &push);
+            vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, m_prepassPipe);
+            if (direct) {
+                for (uint32_t i = 0; i < nDraws; ++i) {
+                    const auto& d = m_cpuDraws[i];
+                    vkCmdDraw(cmd, d.vertexCount, d.instanceCount, d.firstVertex, d.firstInstance);
+                }
+            } else {
+                vkCmdDrawIndirect(cmd, m_drawCmds[m_cmdSlot].buf, 0, nDraws, stride);
+            }
+            vkCmdEndRendering(cmd);
+        }
+        // === Hi-Z build ===
+        // depth: DEPTH_ATTACHMENT_OPTIMAL -> SHADER_READ_ONLY_OPTIMAL
+        vf::transitionImage(cmd, m_depth.img,
+                             VkImageAspectFlags(VK_IMAGE_ASPECT_DEPTH_BIT |
+                                                VK_IMAGE_ASPECT_STENCIL_BIT),
+                             VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL,
+                             VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+                             VK_PIPELINE_STAGE_2_EARLY_FRAGMENT_TESTS_BIT,
+                             VK_ACCESS_2_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT,
+                             VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT,
+                             VK_ACCESS_2_SHADER_READ_BIT);
+        // barrier: prepass depth write -> Hi-Z read
+        VkMemoryBarrier2 mb0 { VK_STRUCTURE_TYPE_MEMORY_BARRIER_2 };
+        mb0.srcStageMask = VK_PIPELINE_STAGE_2_EARLY_FRAGMENT_TESTS_BIT;
+        mb0.srcAccessMask = VK_ACCESS_2_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT;
+        mb0.dstStageMask = VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT;
+        mb0.dstAccessMask = VK_ACCESS_2_SHADER_READ_BIT;
+        { VkDependencyInfo di { VK_STRUCTURE_TYPE_DEPENDENCY_INFO };
+          di.memoryBarrierCount = 1; di.pMemoryBarriers = &mb0;
+          vkCmdPipelineBarrier2(cmd, &di); }
+        auto cbar = [&](VkAccessFlags2 srcA, VkAccessFlags2 dstA,
+                         VkPipelineStageFlags2 srcS = VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
+                         VkPipelineStageFlags2 dstS = VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT) {
+            VkMemoryBarrier2 mb { VK_STRUCTURE_TYPE_MEMORY_BARRIER_2 };
+            mb.srcStageMask = srcS; mb.srcAccessMask = srcA;
+            mb.dstStageMask = dstS; mb.dstAccessMask = dstA;
+            VkDependencyInfo di { VK_STRUCTURE_TYPE_DEPENDENCY_INFO };
+            di.memoryBarrierCount = 1; di.pMemoryBarriers = &mb;
+            vkCmdPipelineBarrier2(cmd, &di);
+        };
+        // bind uDepth (binding 12) once: depth sampler
+        VkDescriptorImageInfo depthDi { VkSampler(), m_depth.view,
+                                         VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL };
+        VkWriteDescriptorSet wDepth { VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, nullptr, m_set, 12, 0, 1,
+                                         VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, &depthDi, nullptr };
+        for (uint32_t mi = 0; mi < uint32_t(m_hizNumMips); ++mi) {
+            VkDescriptorImageInfo prevDi, curDi;
+            if (mi == 0) {
+                // uDepth is bound at binding 12; binding 9 (uHizRead) unused for mip0
+            } else {
+                prevDi = { VkSampler(), m_hizViews[mi - 1], VK_IMAGE_LAYOUT_GENERAL };
+            }
+            curDi = { VkSampler(), m_hizViews[mi], VK_IMAGE_LAYOUT_GENERAL };
+            VkWriteDescriptorSet w8 { VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, nullptr, m_set, 8, 0, 1,
+                                         VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, &curDi, nullptr };
+            VkWriteDescriptorSet w9 {};
+            if (mi > 0) {
+                w9 = { VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, nullptr, m_set, 9, 0, 1,
+                          VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, &prevDi, nullptr };
+            }
+            if (mi == 0) {
+                vkUpdateDescriptorSets(m_ctx->device(), 1, &wDepth, 0, nullptr);
+                vkUpdateDescriptorSets(m_ctx->device(), 1, &w8, 0, nullptr);
+            } else {
+                vkUpdateDescriptorSets(m_ctx->device(), 1, &w8, 0, nullptr);
+                VkWriteDescriptorSet w9c { VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, nullptr, m_set, 9, 0, 1,
+                                          VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, &prevDi, nullptr };
+                vkUpdateDescriptorSets(m_ctx->device(), 1, &w9c, 0, nullptr);
+            }
+            vkCmdDispatch(cmd, (uint32_t(m_hiz.extent.width) + 7) / 8,
+                          (uint32_t(m_hiz.extent.height) + 7) / 8, 1);
+            if (mi + 1 < uint32_t(m_hizNumMips))
+                cbar(VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT,
+                     VK_ACCESS_2_SHADER_STORAGE_READ_BIT);
+        }
+        // depth: SHADER_READ_ONLY_OPTIMAL -> DEPTH_ATTACHMENT_OPTIMAL
+        vf::transitionImage(cmd, m_depth.img,
+                             VkImageAspectFlags(VK_IMAGE_ASPECT_DEPTH_BIT |
+                                                VK_IMAGE_ASPECT_STENCIL_BIT),
+                             VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+                             VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL,
+                             VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT,
+                             VK_ACCESS_2_SHADER_READ_BIT,
+                             VK_PIPELINE_STAGE_2_EARLY_FRAGMENT_TESTS_BIT,
+                             VK_ACCESS_2_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT);
+        // Hi-Z GENERAL -> SHADER_READ_ONLY for the cull
+        vf::transitionImage(cmd, m_hiz.img, VK_IMAGE_ASPECT_COLOR_BIT,
+                             VK_IMAGE_LAYOUT_GENERAL, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+                             VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
+                             VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT,
+                             VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
+                             VK_ACCESS_2_SHADER_READ_BIT);
+    }
+
     if (gpuCull) {
         // active triple-buffer slot into the descriptor set
         VkDescriptorBufferInfo selInfo { m_selBufs[m_cmdSlot].buf, 0, VK_WHOLE_SIZE };
@@ -1409,7 +1657,7 @@ void SplatPass::record(VkCommandBuffer cmd, const RaymarchPush& push, VkExtent2D
     // the watertight surface and marks stencil), then rims split by stencil:
     // interior rims lighten-only (MAX: soft edges that can never darken
     // settled surface), silhouette rims alpha-blended over sky.
-    constexpr VkDeviceSize stride = sizeof(VkDrawIndirectCommand);
+    // stride defined above
     // drawOpaque draws [from, nDraws); the core pipe uses 0 (all chunks),
     // the rim pipes start at m_rimStart (far chunks are core-only: their
     // rim fragments would all discard beyond the 40 m coreD2 ramp).

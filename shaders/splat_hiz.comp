@@ -1,0 +1,33 @@
+#version 460
+// Voxelforge Gaussian-surfel rasterizer (Hi-Z depth pyramid builder).
+// Mip 0 samples the depth image; each subsequent mip is the
+// component-wise maximum of the 2x2 block from the previous mip.
+
+layout(set = 0, binding = 0) uniform sampler2D uDepth;
+layout(set = 0, binding = 8, r32f) uniform readonly image2D uRead;
+layout(set = 0, binding = 9, r32f) uniform readonly image2D uWrite;
+
+layout(push_constant) uniform PC {
+    vec2 size;
+    int mipLevel;
+} pc;
+
+layout(local_size_x = 8, local_size_y = 8) in;
+
+void main()
+{
+    const ivec2 p = ivec2(gl_GlobalInvocationID.xy);
+    if (p.x >= int(pc.size.x) || p.y >= int(pc.size.y))
+        return;
+    float d;
+    if (pc.mipLevel == 0) {
+        d = texelFetch(uDepth, p, 0).r;
+    } else {
+        const ivec2 p2 = p * 2;
+        d = max(imageLoad(uRead, p2).r,
+                max(imageLoad(uRead, p2 + ivec2(1, 0)).r,
+                    max(imageLoad(uRead, p2 + ivec2(0, 1)).r,
+                        imageLoad(uRead, p2 + ivec2(1, 1)).r)));
+    }
+    imageStore(uWrite, p, vec4(d, 0.0, 0.0, 1.0));
+}

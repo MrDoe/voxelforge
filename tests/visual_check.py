@@ -104,7 +104,12 @@ def main():
                 f"black-in-silhouette {m['black_in_obj']*100:.2f}%  "
                 f"sky-probe {'ok' if m['sky_probe_ok'] else 'BAD'}"
             )
-            if not (0.03 <= m["obj_frac"] <= 0.97):
+            # Coverage bounds: a healthy frame shows mostly world with some sky.
+            # The upper bound is 98.5% (not 97%): the water close-up frames a
+            # clear shallow cove where water/bed/pebbles/rapids legitimately
+            # fill the frame (they count as non-sky pixels). A buried camera
+            # still fails via ~100% coverage together with black-in-silhouette.
+            if not (0.03 <= m["obj_frac"] <= 0.985):
                 failures.append(f"{name}: coverage {m['obj_frac']:.3f} out of range")
             if m["black_in_obj"] > 0.05:
                 failures.append(

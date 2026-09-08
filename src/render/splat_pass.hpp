@@ -75,6 +75,7 @@ private:
     bool createCullPipeline();
     bool initTileResources(const Context& ctx);
     bool createBlackEnv(const Context& ctx);
+    bool createDepthResources(uint32_t w, uint32_t h);
     void recordTile(VkCommandBuffer cmd, const RaymarchPush& push, VkExtent2D extent,
                     uint32_t nDraws);
     void frustumPlanes(const RaymarchPush& push, glm::vec4 planes[6]) const;
@@ -99,6 +100,7 @@ private:
     VkDescriptorPool m_pool = VK_NULL_HANDLE;
     VkDescriptorSet m_set = VK_NULL_HANDLE;
     VkPipeline m_skyPipe = VK_NULL_HANDLE;
+    VkPipeline m_prepassPipe = VK_NULL_HANDLE;
     VkPipeline m_corePipe = VK_NULL_HANDLE;
     VkPipeline m_rimInPipe = VK_NULL_HANDLE;
     VkPipeline m_rimOutPipe = VK_NULL_HANDLE;
@@ -155,6 +157,15 @@ private:
     VmaAllocation m_surfelAlloc = VK_NULL_HANDLE;
     Image3D m_depth {};
     Buffer m_paramsBuf {}; // persistently mapped 2xvec4 kernel-tuning UBO
+    // ---- occlusion culling (Hi-Z depth pyramid) ----
+    static constexpr uint32_t kMaxHiZMips = 16;
+    Image3D m_hiz {};
+    VkImageView m_hizViews[kMaxHiZMips] = {};   // per-mip storage views
+    VkImageView m_hizSampledView = VK_NULL_HANDLE;
+    VkSampler m_hizSampler = VK_NULL_HANDLE;
+    int m_hizNumMips = 0;
+    Buffer m_occlBuf {}; // OcclParams {occlEnabled, hizNumMips}
+    // ---- end occlusion culling ----
     // Triple-buffered indirect draw commands (host-visible, CPU-filled per
     // frame; cycled in lockstep with the frame slots so the GPU never reads
     // a buffer the CPU is currently writing).

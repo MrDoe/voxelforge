@@ -53,8 +53,8 @@ float terrainHeightAt(float x, float z)
 {
     float t = std::fabs(z - riverZ(x)) / riverW(x);
 
-    // broad rolling landform: a large-scale swell so the hills read as a
-    // continuous range rather than uniform noise, plus ridged detail.
+    // Fresh valley landform (rewritten): rolling foothill swell + ridged
+    // fells + far mountain rampart, all flanking a clear carved channel.
     float landSwell = fbm2(x * 0.0085f + 11.3f, z * 0.0085f - 4.1f) * 6.0f;
     float bankRamp = smoothstepf(0.55f, 3.0f, t);
     float farRamp = smoothstepf(4.0f, 15.0f, t);
@@ -68,7 +68,42 @@ float terrainHeightAt(float x, float z)
     // consistent and the river carves a clear valley.
     float bowl = 1.f - smoothstepf(0.34f, 1.05f, t);
     float bed = WATER_LEVEL - 2.7f + fbm2(x * 0.23f, z * 0.23f) * 0.14f;
+    // riffle steps upstream (reference whitewater): three transverse gravel
+    // bars raise the bed toward the surface where mid-stream boulders sit.
+    {
+        float riffle = 0.f;
+        riffle += std::exp(-std::pow((x + 6.0f) / 1.6f, 2.0f));
+        riffle += 0.8f * std::exp(-std::pow((x + 11.0f) / 1.9f, 2.0f));
+        riffle += 0.7f * std::exp(-std::pow((x + 16.5f) / 2.1f, 2.0f));
+        float inChannel = 1.f - smoothstepf(0.15f, 0.75f, t);
+        bed += riffle * inChannel * 1.15f;
+    }
     float h = glm::mix(floorH, bed, bowl);
+
+    // distant mountain rampart (reference backdrop): radial rise with sharp
+    // ridged peaks, kept out of the river corridor so the valley drains.
+    {
+        float r = std::sqrt(x * x + z * z);
+        float mtnMask = smoothstepf(26.0f, 48.0f, r);
+        if (mtnMask > 0.001f) {
+            float mr = 1.f - std::fabs(fbm2(x * 0.016f + 3.7f, z * 0.016f - 1.2f));
+            mr *= mr;
+            float mtnH = (8.0f + 9.0f * mr + 3.0f * fbm2(x * 0.05f, z * 0.05f)) * mtnMask;
+            mtnH *= smoothstepf(0.8f, 3.5f, t); // valley stays open
+            float mtnTop = WATER_LEVEL + 0.65f + mtnH;
+            h = glm::max(h, glm::mix(h, mtnTop, mtnMask));
+        }
+    }
+
+    // micro relief: hummocks + tussocks on land only (never in the channel).
+    {
+        float landMask = smoothstepf(0.6f, 1.5f, t) * (1.f - bowl);
+        if (landMask > 0.001f) {
+            h += (fbm2(x * 0.85f, z * 0.85f) * 0.10f +
+                  fbm2(x * 2.3f + 7.0f, z * 2.3f - 3.0f) * 0.04f) *
+                 landMask;
+        }
+    }
 
     // building pad: flatten ground under the riverside house (covers the
     // cabin + porch + woodpile, ~5 m; feather to 7.2 m). Trees & rocks hug
