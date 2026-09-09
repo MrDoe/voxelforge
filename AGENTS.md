@@ -65,7 +65,10 @@
   core only, exact because coreD2 hits 1.0 at 40 m), `VF_MICRO_DIST`
   (default 20 m micro cull), `VF_NO_GPU_CULL=1` disables the GPU per-surfel
   cull pre-pass (compute compaction + GPU-written indirect counts;
-  bit-exact), `VF_SPLAT_DIRECT`/`VF_NO_INDIRECT_BARRIER` legacy A/B paths.
+  bit-exact), `VF_NO_OCCL=1` disables the Hi-Z occlusion prepass
+  (depth prepass + pyramid build + GPU cull; ~3 ms overhead at 720p;
+  saves fragments when objects occlude the background),
+  `VF_SPLAT_DIRECT`/`VF_NO_INDIRECT_BARRIER` legacy A/B paths.
 - Tile splat path (WIP, `VF_TILE=1`): compute-only pipeline
   `splat_tile_{bin,scan,base,render}.comp` — project+bin surfels into 16×16
   tiles via a (tile × entry) counts matrix, scan per-tile ranges

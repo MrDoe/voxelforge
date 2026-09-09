@@ -1007,15 +1007,69 @@ bool SplatPass::createDepthResources(uint32_t w, uint32_t h)
     dsci.maxLod = 0.0f;
     if (vkCreateSampler(m_ctx->device(), &dsci, nullptr, &m_depthSampler) != VK_SUCCESS)
         return false;
-    // depth image: add SAMPLED usage for the Hi-Z mip0 source
-    destroyImage3D(*m_ctx, m_depth);
-    m_depth = makeImage2D(*m_ctx, w, h, VK_FORMAT_D24_UNORM_S8_UINT,
-                          VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT |
-                              VK_IMAGE_USAGE_SAMPLED_BIT,
-                          VkImageAspectFlags(VK_IMAGE_ASPECT_DEPTH_BIT |
-                                             VK_IMAGE_ASPECT_STENCIL_BIT));
-    if (m_depth.img == VK_NULL_HANDLE)
-        return false;
+    // ---- Hi-Z build pipeline (own layout/set — splat_hiz.comp has different
+    //      bindings and push constants than the main splat descriptor set) ----
+    {
+        VkDevice dev = m_ctx->device();
+        // destroy old if recreateDepth is called again
+        if (m_hizPipe) { vkDestroyPipeline(dev, m_hizPipe, nullptr); m_hizPipe = VK_NULL_HANDLE; }
+        if (m_hizLayout) { vkDestroyPipelineLayout(dev, m_hizLayout, nullptr); m_hizLayout = VK_NULL_HANDLE; }
+        if (m_hizSet) { m_hizSet = VK_NULL_HANDLE; } // pool reset below
+        if (m_hizPool) { vkDestroyDescriptorPool(dev, m_hizPool, nullptr); m_hizPool = VK_NULL_HANDLE; }
+        if (m_hizSetLayout) { vkDestroyDescriptorSetLayout(dev, m_hizSetLayout, nullptr); m_hizSetLayout = VK_NULL_HANDLE; }
+        // descriptor set layout: binding 0 = sampler2D (depth), 8 = writeonly image2D, 9 = readonly image2D
+        VkDescriptorSetLayoutBinding hb[3] = {};
+        hb[0] = { 0, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1, VK_SHADER_STAGE_COMPUTE_BIT, nullptr };
+        hb[1] = { 8, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 1, VK_SHADER_STAGE_COMPUTE_BIT, nullptr };
+        hb[2] = { 9, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 1, VK_SHADER_STAGE_COMPUTE_BIT, nullptr };
+        VkDescriptorSetLayoutCreateInfo hli { VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO };
+        hli.bindingCount = 3; hli.pBindings = hb;
+        if (vkCreateDescriptorSetLayout(dev, &hli, nullptr, &m_hizSetLayout) != VK_SUCCESS)
+            return false;
+        // pipeline layout: just the small Hi-Z push constants ({vec2 size, int mipLevel})
+        struct HiZPC { glm::vec2 size; int32_t mipLevel; };
+        VkPushConstantRange hpc { VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(HiZPC) };
+        VkPipelineLayoutCreateInfo hpli { VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO };
+        hpli.setLayoutCount = 1; hpli.pSetLayouts = &m_hizSetLayout;
+        hpli.pushConstantRangeCount = 1; hpli.pPushConstantRanges = &hpc;
+        if (vkCreatePipelineLayout(dev, &hpli, nullptr, &m_hizLayout) != VK_SUCCESS)
+            return false;
+        // descriptor pool + set
+        VkDescriptorPoolSize hps[] = { { VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1 },
+                                       { VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 2 } };
+        VkDescriptorPoolCreateInfo hpi { VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO };
+        hpi.maxSets = 1; hpi.poolSizeCount = 2; hpi.pPoolSizes = hps;
+        if (vkCreateDescriptorPool(dev, &hpi, nullptr, &m_hizPool) != VK_SUCCESS)
+            return false;
+        VkDescriptorSetAllocateInfo hai { VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO };
+        hai.descriptorPool = m_hizPool; hai.descriptorSetCount = 1; hai.pSetLayouts = &m_hizSetLayout;
+        if (vkAllocateDescriptorSets(dev, &hai, &m_hizSet) != VK_SUCCESS)
+            return false;
+        // initial descriptor write: binding 0 = depth sampler, binding 8 = mip0 storage
+        VkDescriptorImageInfo hDepthDi { m_depthSampler, m_depth.view,
+                                          VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL };
+        VkDescriptorImageInfo hMip0Di { VkSampler(), m_hizViews[0], VK_IMAGE_LAYOUT_GENERAL };
+        VkWriteDescriptorSet hw[2] = {};
+        hw[0] = { VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, nullptr, m_hizSet, 0, 0, 1,
+                   VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, &hDepthDi, nullptr };
+        hw[1] = { VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, nullptr, m_hizSet, 8, 0, 1,
+                   VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, &hMip0Di, nullptr };
+        vkUpdateDescriptorSets(dev, 2, hw, 0, nullptr);
+        // compute pipeline
+        auto spirv = loadSpirv(std::string(VOXELFORGE_SHADER_DIR) + "/splat_hiz.comp.spv");
+        if (spirv.empty()) return false;
+        VkShaderModule mod = makeModule(dev, spirv);
+        if (!mod) return false;
+        VkComputePipelineCreateInfo cpi { VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO };
+        cpi.layout = m_hizLayout;
+        cpi.stage = { VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO };
+        cpi.stage.stage = VK_SHADER_STAGE_COMPUTE_BIT;
+        cpi.stage.module = mod;
+        cpi.stage.pName = "main";
+        VkResult r = vkCreateComputePipelines(dev, VK_NULL_HANDLE, 1, &cpi, nullptr, &m_hizPipe);
+        vkDestroyShaderModule(dev, mod, nullptr);
+        if (r != VK_SUCCESS) { spdlog::critical("splat: hiz pipeline failed"); return false; }
+    }
     // (tile x entry) counts matrix for the tile path
     const uint32_t nTiles = ((w + kTilePx - 1) / kTilePx) *
                             ((h + kTilePx - 1) / kTilePx);
@@ -1409,9 +1463,37 @@ void SplatPass::record(VkCommandBuffer cmd, const RaymarchPush& push, VkExtent2D
         return;
     }
     constexpr VkDeviceSize stride = sizeof(VkDrawIndirectCommand);
+    // ---- populate indirect draw commands before the prepass ----
+    // The prepass (and the main passes) read from m_drawCmds. In the
+    // non-gpuCull path the memcpy normally happens later; for the
+    // prepass we need the commands available earlier.
+    if (!direct && nDraws > 0) {
+        auto* dst = static_cast<VkDrawIndirectCommand*>(m_drawCmds[m_cmdSlot].mapped);
+        if (dst && m_cpuDraws.size() <= kMaxChunkDraws)
+            memcpy(dst, m_cpuDraws.data(), m_cpuDraws.size() * stride);
+    }
+    if (!direct && m_waterDraws > 0) {
+        auto* wdst = static_cast<VkDrawIndirectCommand*>(m_waterCmds[m_cmdSlot].mapped);
+        if (wdst && m_cpuWaterDraws.size() <= kMaxChunkDraws)
+            memcpy(wdst, m_cpuWaterDraws.data(), m_cpuWaterDraws.size() * stride);
+    }
+    // host-written draw commands -> indirect-command read
+    if (!direct && (nDraws > 0 || m_waterDraws > 0) && !getenv("VF_NO_INDIRECT_BARRIER")) {
+        VkMemoryBarrier2 mb { VK_STRUCTURE_TYPE_MEMORY_BARRIER_2 };
+        mb.srcStageMask = VK_PIPELINE_STAGE_2_HOST_BIT;
+        mb.srcAccessMask = VK_ACCESS_2_HOST_WRITE_BIT;
+        mb.dstStageMask = VK_PIPELINE_STAGE_2_DRAW_INDIRECT_BIT;
+        mb.dstAccessMask = VK_ACCESS_2_INDIRECT_COMMAND_READ_BIT;
+        VkDependencyInfo di { VK_STRUCTURE_TYPE_DEPENDENCY_INFO };
+        di.memoryBarrierCount = 1;
+        di.pMemoryBarriers = &mb;
+        vkCmdPipelineBarrier2(cmd, &di);
+    }
     // ---- occlusion prepass + Hi-Z build ----
-    const bool doOccl = nDraws > 0 && m_prepassPipe && m_hiz.img != VK_NULL_HANDLE
-                        && m_occlBuf.buf && m_depth.img != VK_NULL_HANDLE;
+    const bool occlOn = !getenv("VF_NO_OCCL");
+    const bool doOccl = occlOn && nDraws > 0 && m_prepassPipe && m_hiz.img != VK_NULL_HANDLE
+                        && m_occlBuf.buf && m_depth.img != VK_NULL_HANDLE
+                        && m_depthSampler != VK_NULL_HANDLE && m_hizSampler != VK_NULL_HANDLE;
     if (doOccl) {
         // depth is DEPTH_ATTACHMENT_OPTIMAL (set by main.cpp)
         // transition Hi-Z to GENERAL for storage writes
@@ -1477,13 +1559,13 @@ void SplatPass::record(VkCommandBuffer cmd, const RaymarchPush& push, VkExtent2D
                              VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
                              VK_PIPELINE_STAGE_2_EARLY_FRAGMENT_TESTS_BIT,
                              VK_ACCESS_2_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT,
-                             VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT,
+                             VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
                              VK_ACCESS_2_SHADER_READ_BIT);
         // barrier: prepass depth write -> Hi-Z read
         VkMemoryBarrier2 mb0 { VK_STRUCTURE_TYPE_MEMORY_BARRIER_2 };
         mb0.srcStageMask = VK_PIPELINE_STAGE_2_EARLY_FRAGMENT_TESTS_BIT;
         mb0.srcAccessMask = VK_ACCESS_2_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT;
-        mb0.dstStageMask = VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT;
+        mb0.dstStageMask = VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT;
         mb0.dstAccessMask = VK_ACCESS_2_SHADER_READ_BIT;
         { VkDependencyInfo di { VK_STRUCTURE_TYPE_DEPENDENCY_INFO };
           di.memoryBarrierCount = 1; di.pMemoryBarriers = &mb0;
@@ -1498,37 +1580,25 @@ void SplatPass::record(VkCommandBuffer cmd, const RaymarchPush& push, VkExtent2D
             di.memoryBarrierCount = 1; di.pMemoryBarriers = &mb;
             vkCmdPipelineBarrier2(cmd, &di);
         };
-        // bind uDepth (binding 12) once: depth sampler
-        VkDescriptorImageInfo depthDi { VkSampler(), m_depth.view,
-                                         VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL };
-        VkWriteDescriptorSet wDepth { VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, nullptr, m_set, 12, 0, 1,
-                                         VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, &depthDi, nullptr };
+        // bind Hi-Z build pipeline + descriptor set
+        vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, m_hizPipe);
+        vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, m_hizLayout, 0, 1,
+                                &m_hizSet, 0, nullptr);
         for (uint32_t mi = 0; mi < uint32_t(m_hizNumMips); ++mi) {
-            VkDescriptorImageInfo prevDi, curDi;
-            if (mi == 0) {
-                // uDepth is bound at binding 12; binding 9 (uHizRead) unused for mip0
-            } else {
-                prevDi = { VkSampler(), m_hizViews[mi - 1], VK_IMAGE_LAYOUT_GENERAL };
-            }
-            curDi = { VkSampler(), m_hizViews[mi], VK_IMAGE_LAYOUT_GENERAL };
-            VkWriteDescriptorSet w8 { VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, nullptr, m_set, 8, 0, 1,
-                                         VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, &curDi, nullptr };
-            VkWriteDescriptorSet w9 {};
+            // update binding 9 (prev mip read) for mi > 0
             if (mi > 0) {
-                w9 = { VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, nullptr, m_set, 9, 0, 1,
-                          VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, &prevDi, nullptr };
+                VkDescriptorImageInfo prevDi { VkSampler(), m_hizViews[mi - 1], VK_IMAGE_LAYOUT_GENERAL };
+                VkWriteDescriptorSet w9 { VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, nullptr, m_hizSet, 9, 0, 1,
+                                           VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, &prevDi, nullptr };
+                vkUpdateDescriptorSets(m_ctx->device(), 1, &w9, 0, nullptr);
             }
-            if (mi == 0) {
-                vkUpdateDescriptorSets(m_ctx->device(), 1, &wDepth, 0, nullptr);
-                vkUpdateDescriptorSets(m_ctx->device(), 1, &w8, 0, nullptr);
-            } else {
-                vkUpdateDescriptorSets(m_ctx->device(), 1, &w8, 0, nullptr);
-                VkWriteDescriptorSet w9c { VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, nullptr, m_set, 9, 0, 1,
-                                          VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, &prevDi, nullptr };
-                vkUpdateDescriptorSets(m_ctx->device(), 1, &w9c, 0, nullptr);
-            }
-            vkCmdDispatch(cmd, (uint32_t(m_hiz.extent.width) + 7) / 8,
-                          (uint32_t(m_hiz.extent.height) + 7) / 8, 1);
+            struct { glm::vec2 size; int32_t mipLevel; } hpc {
+                { float(m_hiz.extent.width >> mi), float(m_hiz.extent.height >> mi) },
+                int32_t(mi)
+            };
+            vkCmdPushConstants(cmd, m_hizLayout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(hpc), &hpc);
+            vkCmdDispatch(cmd, (uint32_t(m_hiz.extent.width >> mi) + 7) / 8,
+                          (uint32_t(m_hiz.extent.height >> mi) + 7) / 8, 1);
             if (mi + 1 < uint32_t(m_hizNumMips))
                 cbar(VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT,
                      VK_ACCESS_2_SHADER_STORAGE_READ_BIT);
@@ -1539,7 +1609,7 @@ void SplatPass::record(VkCommandBuffer cmd, const RaymarchPush& push, VkExtent2D
                                                 VK_IMAGE_ASPECT_STENCIL_BIT),
                              VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
                              VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL,
-                             VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT,
+                             VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
                              VK_ACCESS_2_SHADER_READ_BIT,
                              VK_PIPELINE_STAGE_2_EARLY_FRAGMENT_TESTS_BIT,
                              VK_ACCESS_2_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT);
@@ -1575,7 +1645,12 @@ void SplatPass::record(VkCommandBuffer cmd, const RaymarchPush& push, VkExtent2D
         frustumPlanes(push, planes);
         if (m_planesBuf.mapped)
             memcpy(m_planesBuf.mapped, planes, sizeof(planes));
-        // host-written selection/planes -> compute reads
+        // OcclParams (must be before the host->compute barrier below)
+        if (m_occlBuf.mapped) {
+            int oc[2] = { (occlOn && m_hiz.img != VK_NULL_HANDLE) ? 1 : 0, m_hizNumMips };
+            memcpy(m_occlBuf.mapped, oc, sizeof(oc));
+        }
+        // host-written selection/planes/OcclParams -> compute reads
         VkMemoryBarrier2 hb { VK_STRUCTURE_TYPE_MEMORY_BARRIER_2 };
         hb.srcStageMask = VK_PIPELINE_STAGE_2_HOST_BIT;
         hb.srcAccessMask = VK_ACCESS_2_HOST_WRITE_BIT;
@@ -1586,6 +1661,14 @@ void SplatPass::record(VkCommandBuffer cmd, const RaymarchPush& push, VkExtent2D
         hdi.memoryBarrierCount = 1;
         hdi.pMemoryBarriers = &hb;
         vkCmdPipelineBarrier2(cmd, &hdi);
+        // bind Hi-Z sampled (binding 10)
+        if (m_hizSampledView && m_hizSampler) {
+            VkDescriptorImageInfo hizDi { m_hizSampler, m_hizSampledView,
+                                          VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL };
+            VkWriteDescriptorSet wHiz { VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, nullptr, m_set, 10, 0, 1,
+                                        VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, &hizDi, nullptr };
+            vkUpdateDescriptorSets(m_ctx->device(), 1, &wHiz, 0, nullptr);
+        }
         vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, m_cullPipe);
         vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, m_layout, 0, 1,
                                 &m_set, 0, nullptr);
@@ -1679,7 +1762,9 @@ void SplatPass::record(VkCommandBuffer cmd, const RaymarchPush& push, VkExtent2D
     };
     if (!direct && !gpuCull && (nDraws > 0 || m_waterDraws > 0) &&
         !getenv("VF_NO_INDIRECT_BARRIER")) {
-        // host-written commands -> indirect-command read
+        // host-written commands -> indirect-command read (barrier only;
+        // memcpy already happened above for the prepass; gpuCull overwrites
+        // with compacted counts later if active)
         VkMemoryBarrier2 mb { VK_STRUCTURE_TYPE_MEMORY_BARRIER_2 };
         mb.srcStageMask = VK_PIPELINE_STAGE_2_HOST_BIT;
         mb.srcAccessMask = VK_ACCESS_2_HOST_WRITE_BIT;
@@ -1689,14 +1774,6 @@ void SplatPass::record(VkCommandBuffer cmd, const RaymarchPush& push, VkExtent2D
         di.memoryBarrierCount = 1;
         di.pMemoryBarriers = &mb;
         vkCmdPipelineBarrier2(cmd, &di);
-        auto* dst =
-            static_cast<VkDrawIndirectCommand*>(m_drawCmds[m_cmdSlot].mapped);
-        auto* wdst =
-            static_cast<VkDrawIndirectCommand*>(m_waterCmds[m_cmdSlot].mapped);
-        if (dst && m_cpuDraws.size() <= kMaxChunkDraws)
-            memcpy(dst, m_cpuDraws.data(), m_cpuDraws.size() * stride);
-        if (wdst && m_cpuWaterDraws.size() <= kMaxChunkDraws)
-            memcpy(wdst, m_cpuWaterDraws.data(), m_cpuWaterDraws.size() * stride);
     } else if (gpuCull && m_waterDraws > 0) {
         // cull mode: opaque command stream is GPU-written; water stream
         // stays CPU-written and still needs its own host->indirect barrier
@@ -1776,6 +1853,8 @@ void SplatPass::destroy()
         vkDestroyPipeline(dev, m_waterPipe, nullptr);
     if (m_cullPipe)
         vkDestroyPipeline(dev, m_cullPipe, nullptr);
+    if (m_prepassPipe)
+        vkDestroyPipeline(dev, m_prepassPipe, nullptr);
     if (m_compactBuf.buf)
         destroyBuffer(*m_ctx, m_compactBuf);
     for (auto& c : m_selBufs)
@@ -1783,6 +1862,24 @@ void SplatPass::destroy()
             destroyBuffer(*m_ctx, c);
     if (m_planesBuf.buf)
         destroyBuffer(*m_ctx, m_planesBuf);
+    if (m_occlBuf.buf)
+        destroyBuffer(*m_ctx, m_occlBuf);
+    // occlusion culling (Hi-Z depth pyramid)
+    for (uint32_t i = 0; i < kMaxHiZMips; ++i)
+        if (m_hizViews[i])
+            vkDestroyImageView(dev, m_hizViews[i], nullptr);
+    if (m_hizSampledView)
+        vkDestroyImageView(dev, m_hizSampledView, nullptr);
+    if (m_hizSampler)
+        vkDestroySampler(dev, m_hizSampler, nullptr);
+    if (m_depthSampler)
+        vkDestroySampler(dev, m_depthSampler, nullptr);
+    destroyImage3D(*m_ctx, m_hiz);
+    // Hi-Z build pipeline
+    if (m_hizPipe) vkDestroyPipeline(dev, m_hizPipe, nullptr);
+    if (m_hizLayout) vkDestroyPipelineLayout(dev, m_hizLayout, nullptr);
+    if (m_hizPool) vkDestroyDescriptorPool(dev, m_hizPool, nullptr);
+    if (m_hizSetLayout) vkDestroyDescriptorSetLayout(dev, m_hizSetLayout, nullptr);
     // tile path resources
     if (m_tileBinCountPipe)
         vkDestroyPipeline(dev, m_tileBinCountPipe, nullptr);

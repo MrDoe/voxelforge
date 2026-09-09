@@ -163,8 +163,15 @@ private:
     VkImageView m_hizViews[kMaxHiZMips] = {};   // per-mip storage views
     VkImageView m_hizSampledView = VK_NULL_HANDLE;
     VkSampler m_hizSampler = VK_NULL_HANDLE;
+    VkSampler m_depthSampler = VK_NULL_HANDLE;
     int m_hizNumMips = 0;
     Buffer m_occlBuf {}; // OcclParams {occlEnabled, hizNumMips}
+    // Hi-Z build pipeline (own layout/set — splat_hiz.comp has different bindings)
+    VkDescriptorSetLayout m_hizSetLayout = VK_NULL_HANDLE;
+    VkDescriptorPool m_hizPool = VK_NULL_HANDLE;
+    VkDescriptorSet m_hizSet = VK_NULL_HANDLE;
+    VkPipelineLayout m_hizLayout = VK_NULL_HANDLE;
+    VkPipeline m_hizPipe = VK_NULL_HANDLE;
     // ---- end occlusion culling ----
     // Triple-buffered indirect draw commands (host-visible, CPU-filled per
     // frame; cycled in lockstep with the frame slots so the GPU never reads

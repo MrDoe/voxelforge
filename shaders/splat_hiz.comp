@@ -4,8 +4,8 @@
 // component-wise maximum of the 2x2 block from the previous mip.
 
 layout(set = 0, binding = 0) uniform sampler2D uDepth;
-layout(set = 0, binding = 8, r32f) uniform readonly image2D uRead;
-layout(set = 0, binding = 9, r32f) uniform readonly image2D uWrite;
+layout(set = 0, binding = 8, r32f) uniform writeonly image2D uWrite;
+layout(set = 0, binding = 9, r32f) uniform readonly image2D uRead;
 
 layout(push_constant) uniform PC {
     vec2 size;

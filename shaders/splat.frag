@@ -291,7 +291,8 @@ void main()
     fragDepth = floor(fragDepth * 100000.0 + 0.5) / 100000.0;
     if (PASS_MODE == 1)
         fragDepth = max(fragDepth - (5e-5 + winBias), 0.0);
-    gl_FragDepth = fragDepth;
+    if (PASS_MODE == 1 || PASS_MODE == 3)
+        gl_FragDepth = fragDepth;
     // rim passes (PASS_MODE 2, MAX blend) output straight color: MAX takes
     // the brighter of src/dst, so premultiplying would dim rims into dark
     // fringes. Core/water keep premultiplied (their alpha is 1 / absorptive).

@@ -184,13 +184,18 @@ unchanged. Four pipelines sharing one layout (surfel SSBO + `uHeight` +
 4. water surfels (blended, depth-tested, no depth write, `hitType 2`).
 Chunks draw back-to-front (per-frame distance sort, ~100 us for 4096);
 within-chunk order errors are bounded by the 6.4 m chunk size and hidden
-by the depth test for opaque cores. (No depth prepass: the main pass
-writes `gl_FragDepth`, which disables early-z, so a prepass only ever
-changed rim blending — measured neutral to negative.)
+by the depth test for opaque cores. A **depth prepass** replicates the
+core pass depth into a Hi-Z depth pyramid before the main rendering; the
+prepass writes `gl_FragDepth` (early-Z disabled there), but the main core
+pass benefits from the prepass depth for Hi-Z occlusion culling of the
+background. Rim/water pipes skip the depth write — early-Z uses the exact
+interpolated planar z instead, killing interior rim fragments before
+shading.
 
 **Fragment**: exact ray/disk-plane intersect → per-fragment *plane* depth
-(`gl_FragDepth`, monotonic `1−exp(−t·0.02)` mapping; only relative order
-matters since nothing else reads depth) → kernel with opaque core
+(`gl_FragDepth` for core/prepass only; rim/water use the exact interpolated
+planar z for early-Z, written as `1−exp(−t·0.02)` monotonic mapping) →
+kernel with opaque core
 (`d2 < coreD2`, default 0.55) + **true Gaussian rim**
 (`exp(−4·rn²)` matched to 1 at the core boundary) for soft blurred
 silhouette edges → `shadeSurfel` (twin of `shadeTerrain` with baked
