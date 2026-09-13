@@ -64,7 +64,7 @@ offline baker (`tools/heightmap_gen.cpp`), which writes:
 |---|---|
 | `assets/heightmap.png` | baker-side terrain source (2048², 5 cm/texel) |
 | `assets/landscape.vxw` | terrain shell records (per lattice column) |
-| `assets/house|tree1..6|rock1..3|bushes|alpaca|fence1.vxw` | authored objects |
+| `assets/house` |tree1..6|rock1..3|bushes|alpaca|fence1.vxw` | authored objects |
 | `assets/world.json` | layer manifest — order = dedupe priority, first wins a cell |
 | `assets/ai_edits.vxw` | highest-priority live layer for chat/MCP edits |
 
