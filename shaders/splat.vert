@@ -39,8 +39,8 @@ layout(push_constant) uniform PC {
 
 // quad extent mirror of the fragment UBO (z lane); flushed per record.
 layout(std140, set = 0, binding = 3) uniform SplatUBO {
-    vec4 uSplat;  // x=buried, y=coreD2, z=quad extent, w=debug mode
-    vec4 uSplat2; // x=radius scale (hotkeys [/]), yzw=spare
+    vec4 uSplat;  // x=buried, y=sigma2 (fragment), z=quad extent, w=debug mode
+    vec4 uSplat2; // x=radius scale (hotkeys [/]), y=opacity, z/w=spare
 } sp;
 
 layout(location = 0) out vec3 vCenter;

@@ -7,9 +7,10 @@
 // post pass (bloom/AgX/outline), TAA and the headless --shot path work
 // unchanged for both renderers.
 //
-// Frame: sky fullscreen triangle (no depth) -> one instanced quad draw per
-// visible chunk (opaque, depth test+write, alpha blend for the AA annulus)
-// -> water surfels (blended, depth test, no write).
+// Frame: sky fullscreen triangle -> depth-only prepass (full disks) ->
+// opaque base (nearest fragment, opaque replace, EQUAL vs the prepass) ->
+// opaque Gaussian band (source-over, LESS within the depth tolerance) ->
+// water surfels (depth-tested against the prepass depth, blended, no write).
 #include "rhi/context.hpp"
 #include "rhi/resources.hpp"
 #include "render/svo_pass.hpp" // RaymarchPush (shared push layout)
@@ -41,16 +42,18 @@ public:
                     const std::vector<uint32_t>& microStart = {},
                     const std::vector<uint32_t>& lod1Range = {},
                     const std::vector<uint32_t>& lod2Range = {});
-    // Depth target follows the offscreen extent (D32_SFLOAT).
+    // Depth target follows the offscreen extent (D24_UNORM_S8_UINT; the
+    // stencil aspect is unused, kept from the removed core/stencil pipes).
     bool recreateDepth(uint32_t w, uint32_t h);
     void updateDescriptors(VkImageView hdrView, VkImageView gposView,
                            VkImageView heightView, VkImageView objVolView);
 
-    // Kernel tuning: y = opaque-core threshold, z = quad half-size.
-    // x = buried flag, managed via setBuried (not setParams).
-    void setParams(float core, float extent)
+    // Kernel tuning: y = Gaussian variance sigma2 (normalized disk units),
+    // z = quad half-size. x = buried flag, managed via setBuried (not
+    // setParams); the global opacity lives in uSplat2.y (VF_SPLAT_OPACITY).
+    void setParams(float sigma2, float extent)
     {
-        m_params.y = core;
+        m_params.y = sigma2;
         m_params.z = extent;
     }
     // Runtime disk-radius multiplier, hotkeys [/] (0.5..2.0, default 1.0):
@@ -84,14 +87,8 @@ private:
     // prepass and the shading pass)
     // Computes the frustum-culled, back-to-front sorted opaque chunk draws
     // plus the culled water-chunk draws into m_cpuDraws/m_cpuWaterDraws.
-    // Chunks whose AABB nearest point lies beyond the rim fade distance
-    // (m_rimDist, default 42 m) emit core-only commands: splat.frag ramps
-    // coreD2 -> 1.0 by 40 m, so those rim fragments would all discard.
-    // record() executes the core pipe over all draws and the two rim pipes
-    // over the contiguous near tail [m_rimStart, end) (sort order is
-    // far->near, so the near tail is one contiguous indirect range).
-    // record() then executes them either as 3 indirect draws (default) or,
-    // with VF_SPLAT_DIRECT=1, as one vkCmdDraw per chunk (A/B benchmark).
+    // The far->near order matters for the translucent single-pass Gaussian
+    // blend (source-over over the previous chunks).
     void computeDraws(const RaymarchPush& push);
 
     const Context* m_ctx = nullptr;
@@ -101,9 +98,8 @@ private:
     VkDescriptorSet m_set = VK_NULL_HANDLE;
     VkPipeline m_skyPipe = VK_NULL_HANDLE;
     VkPipeline m_prepassPipe = VK_NULL_HANDLE;
-    VkPipeline m_corePipe = VK_NULL_HANDLE;
-    VkPipeline m_rimInPipe = VK_NULL_HANDLE;
-    VkPipeline m_rimOutPipe = VK_NULL_HANDLE;
+    VkPipeline m_opaqueBasePipe = VK_NULL_HANDLE;
+    VkPipeline m_opaquePipe = VK_NULL_HANDLE;
     VkPipeline m_waterPipe = VK_NULL_HANDLE;
     // GPU-driven cull pre-pass (splat_cull.comp): compacts each draw
     // entry's surfels to fragment-producing ones and rewrites the entry's
@@ -187,16 +183,7 @@ private:
     // copied into the indirect buffers above).
     std::vector<VkDrawIndirectCommand> m_cpuDraws;
     std::vector<VkDrawIndirectCommand> m_cpuWaterDraws;
-    // First index in m_cpuDraws whose chunk still carries rim geometry
-    // (nearest-point distance <= m_rimDist). The far->near sort keeps all
-    // core-only chunks in the contiguous prefix; rim passes draw
-    // [m_rimStart, nDraws) only. == m_cpuDraws.size() when nothing has rim.
-    uint32_t m_rimStart = 0;
-    // Rim fade distance (m): chunks whose AABB is entirely beyond it draw
-    // core only. 42 m > the 40 m coreD2->1.0 ramp end in splat.frag, so the
-    // skip is exact. 0 disables the split (legacy: all chunks keep rims).
-    float m_rimDist = 42.0f;
-    glm::vec4 m_params { 0.0f, 0.55f, 1.02f, 0.0f };
+    glm::vec4 m_params { 0.0f, 0.5f, 1.02f, 0.0f };
     float m_radiusScale = 1.0f;
     bool m_buried = false;
 

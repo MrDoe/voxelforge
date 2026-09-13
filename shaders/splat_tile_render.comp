@@ -3,31 +3,29 @@
 #define SPLAT_BACKEND 1
 // Voxelforge tile splat renderer (unified compute pass).
 //
-// Replaces the three forward raster passes (opaque core, interior rim MAX,
-// silhouette rim ADD, water) with a single per-pixel loop over the tile's
-// dup list. The dup stream is built by the (tile, entry) counting scheme:
-// base[tile][entry] + localIdx places entry e's local surfel i at a unique
-// slot, so within-tile order = (entry asc, local asc) = the forward
-// submission order EXACTLY (far->near opaque, then water; instance order
-// within a draw), and the per-layer math below mirrors splat.frag's
-// main() branch-for-branch:
+// Replaces the two forward raster passes (opaque Gaussian-alpha + water)
+// with a single per-pixel loop over the tile's dup list. The dup stream is
+// built by the (tile, entry) counting scheme: base[tile][entry] + localIdx
+// places entry e's local surfel i at a unique slot, so within-tile order =
+// (entry asc, local asc) = the forward submission order EXACTLY (far->near
+// opaque, then water; instance order within a draw). The per-layer math
+// below mirrors splat.frag's main() branch-for-branch:
 //
-//  - per-pixel state (hdr, gpos, depth=1.0, coreFlag=false) replaces the
-//    HDR/G-buffer/depth/stencil attachments; blending happens in registers
-//    (no framebuffer read-modify-write stalls, no stencil round-trip)
-//  - depth state is core-only (rims and water never store, like the
-//    forward pipes); core tests use the biased written value, rims the
-//    strict-LESS unbiased test, water the opqaue-pipe test
-//  - rimIn vs rimOut is decided by the core flag (== stencil 1/0), with
-//    the same MAX vs over blends; alpha-channel rules match the forward
-//    blend factors exactly (core->1, rim/water standard accumulate)
+//  - per-pixel state (hdr, gpos, depth=1.0) replaces the HDR/G-buffer/depth
+//    attachments; blending happens in registers (no framebuffer read-modify-
+//    write stalls)
+//  - a first loop replicates the PASS_MODE 3 prepass: the nearest full-disk
+//    opaque plane depth. The second loop applies the same depth resolve as
+//    the opaque pipe (fragment depth biased by -tol, LESS against the
+//    prepass): only the front surface band blends, so far surfaces inside a
+//    chunk cannot source-over in draw order (dark-speckle free)
+//  - every surviving opaque surfel contributes a pure Gaussian alpha
+//    (opacity*exp(-0.5*d2/sigma2)), straight-colour source-over, exactly the
+//    opaque pipe blend
+//  - water surfels ride in the same dup stream (pass bit 1, after opaque),
+//    depth-tested against the tracked prepass depth, blended premultiplied
+//    like the water pipe (col*a^2 + dst*(1-a))
 //  - gpos is written by every surviving layer (no blend on att1, like HW)
-//  - an alpha==1 core annihilates prior blends, so the unified single
-//    evaluation order (core+rim per surfel, in submission order) equals the
-//    forward multi-pass sequence pixel-for-pixel
-//
-// Water surfels ride in the same dup stream (pass bit 1, after opaque),
-// depth-tested in software against the same core-only depth state.
 
 struct Surfel {
     vec4 pos_rU;
@@ -43,8 +41,8 @@ layout(set = 0, binding = 14, rgba16f) uniform highp image2D uHdr;
 layout(set = 0, binding = 15, rgba16f) uniform highp image2D uGPos;
 
 layout(std140, set = 0, binding = 3) uniform SplatUBO {
-    vec4 uSplat;
-    vec4 uSplat2;
+    vec4 uSplat;  // x=buried, y=sigma2, z=quad extent, w=debug mode
+    vec4 uSplat2; // x=radius scale, y=opacity, z/w=spare
 } sp;
 
 layout(set = 0, binding = 6) readonly buffer TileOffsets { uint uTileOffsets[]; };
@@ -75,6 +73,43 @@ const float kWaterLevel = -0.9;
 
 layout(local_size_x = 16, local_size_y = 16) in;
 
+struct DiskHit {
+    float t;
+    float d2;
+    vec3 n; // possibly flipped for two-sided shells
+};
+
+// exact ray/disk intersection, identical to the FS + bin pass rules
+bool diskHit(Surfel s, vec3 ro, vec3 rd, bool noCollapse, float extent,
+             float rScale, out DiskHit h)
+{
+    const vec3 c = s.pos_rU.xyz;
+    h.n = normalize(s.normal_rV.xyz);
+    const float facing = dot(h.n, ro - c);
+    const float rU = max(s.pos_rU.w, 1e-4) * rScale;
+    const float rV = max(s.normal_rV.w, 1e-4) * rScale;
+    const float matf = s.mat_ao.x;
+    const bool thinShell = abs(matf - 8.0) < 0.5 || abs(matf - 7.0) < 0.5;
+    if (facing < 0.0 && !noCollapse && !thinShell)
+        return false;
+    if (facing < 0.0 && thinShell)
+        h.n = -h.n;
+    const vec3 upRef = abs(h.n.y) < 0.99 ? vec3(0.0, 1.0, 0.0) : vec3(1.0, 0.0, 0.0);
+    const vec3 tT = normalize(cross(h.n, upRef));
+    const vec3 tB = normalize(cross(h.n, tT));
+    const float denom = dot(rd, h.n);
+    if (abs(denom) < 1e-6)
+        return false;
+    h.t = dot(c - ro, h.n) / denom;
+    if (h.t <= 0.0)
+        return false;
+    const vec3 q = ro + rd * h.t;
+    const float u = dot(q - c, tT) / max(rU, 1e-5);
+    const float v = dot(q - c, tB) / max(rV, 1e-5);
+    h.d2 = u * u + v * v;
+    return h.d2 <= extent * extent;
+}
+
 void main()
 {
     const ivec2 pix = ivec2(gl_GlobalInvocationID.xy);
@@ -102,12 +137,9 @@ void main()
     const vec3 rd = normalize(pc.camFwd.xyz + ndcPx.x * pc.a.x * pc.a.y * pc.camRight.xyz
                                                - ndcPx.y * pc.a.x * pc.camUp.xyz);
 
-
-    // per-pixel compositing state (== HDR/G-buffer/depth/stencil targets)
+    // per-pixel compositing state (== HDR/G-buffer/depth targets)
     vec4 hdr = imageLoad(uHdr, pix);
     vec4 gpos = imageLoad(uGPos, pix);
-    float depth = 1.0;
-    bool coreFlag = false;
 
     const int tilesX = int(fr.uTileInfo.x + 0.5);
     const uint tile = uint((pix.y / 16) * tilesX + (pix.x / 16));
@@ -118,83 +150,66 @@ void main()
         return;
     const float extent = max(sp.uSplat.z, 1.0);
     const float rScale = clamp(sp.uSplat2.x, 0.5, 2.0);
+    const float sigma2 = max(sp.uSplat.y, 1e-3);
+    const float depthTol = max(sp.uSplat2.z, 0.0);
     const bool noCollapse = sp.uSplat.x > 0.5; // buried (debug excluded above)
 
-    // Two passes over the tile's dup list, mirroring the forward pipes:
-    // pass 0 settles all cores (opaque replace, order-free min-reduction),
-    // pass 1 blends rims (MAX when a core settled, OVER otherwise) then
-    // water. A single interleaved loop would let a later core annihilate
-    // an earlier rim via replace, while the forward MAXes nearer rims
-    // over the settled core — the composites differ.
-    for (int tpass = 0; tpass < 2; ++tpass) {
+    // Pass 1: prepass mirror — nearest full-disk opaque plane depth over the
+    // whole tile list (no alpha gate, water excluded), like PASS_MODE 3.
+    float depth = 1.0;
     for (uint b = b0; b < b1; ++b) {
         Surfel s = uSurfels[uDupVals[b]];
-        const vec3 c = s.pos_rU.xyz;
-        vec3 n = normalize(s.normal_rV.xyz);
-        const float facing = dot(n, ro - c);
-        const float rU = max(s.pos_rU.w, 1e-4) * rScale;
-        const float rV = max(s.normal_rV.w, 1e-4) * rScale;
-        const float matf = s.mat_ao.x;
-        const bool thinShell = abs(matf - 8.0) < 0.5 || abs(matf - 7.0) < 0.5;
-        // VS collapse rule: culled quads never reach the FS; the binning
-        // pass already dropped them, but two-sided shells and buried mode
-        // keep both sides exactly like the FS's vFace rule below
-        if (facing < 0.0 && !noCollapse && !thinShell)
+        if (s.mat_ao.w > 1.5)
+            continue; // water has its own path, never seeds depth
+        DiskHit h;
+        if (!diskHit(s, ro, rd, noCollapse, extent, rScale, h))
             continue;
-        if (facing < 0.0 && thinShell)
-            n = -n;
-        // tangent frame mirrors splat.vert
-        const vec3 upRef = abs(n.y) < 0.99 ? vec3(0.0, 1.0, 0.0) : vec3(1.0, 0.0, 0.0);
-        const vec3 tT = normalize(cross(n, upRef));
-        const vec3 tB = normalize(cross(n, tT));
+        const float fd = floor((1.0 - exp(-h.t * 0.02)) * 100000.0 + 0.5) / 100000.0;
+        depth = min(depth, fd);
+    }
 
-        const float denom = dot(rd, n);
-        if (abs(denom) < 1e-6)
+    // Pass 2: blend in forward submission order (far->near opaque, then
+    // water). The opaque resolve mirrors the hardware test exactly: bias the
+    // fragment depth by -tol and require it strictly LESS than the prepass
+    // depth, so only the front surface band accumulates.
+    for (uint b = b0; b < b1; ++b) {
+        Surfel s = uSurfels[uDupVals[b]];
+        DiskHit h;
+        if (!diskHit(s, ro, rd, noCollapse, extent, rScale, h))
             continue;
-        float t = dot(c - ro, n) / denom;
-        if (t <= 0.0)
-            continue;
+        const vec3 n = h.n;
+        const float d2 = h.d2;
+        float t = h.t;
         vec3 q = ro + rd * t;
-
-        float u = dot(q - c, tT) / max(rU, 1e-5);
-        float v = dot(q - c, tB) / max(rV, 1e-5);
-        float d2 = u * u + v * v;
-        if (d2 > extent * extent)
-            continue;
-
-        const float coreD2 = mix(sp.uSplat.y, 1.0, smoothstep(10.0, 40.0, t));
-        const bool isCore = d2 <= coreD2;
-        float alpha;
-        if (d2 < coreD2) {
-            alpha = 1.0;
-        } else {
-            const float rn = (d2 - coreD2) / max(1.0 - coreD2, 1e-3);
-            alpha = exp(-4.0 * rn * rn);
-        }
-        if (alpha < 0.004)
-            continue;
 
         const vec4 vMat = s.mat_ao;
         const bool isWater = vMat.w > 1.5;
-        if (tpass == 0) {
-            // core pipe: opaque cores only (water has its own pipe, last)
-            if (isWater || !isCore)
+
+        // pure Gaussian alpha (mirrors splat.frag PASS_MODE 1); the discard
+        // threshold also frees pixels from far sub-threshold ghosts.
+        float alpha = 0.0;
+        float fragDepthQ = 0.0;
+        if (!isWater) {
+            fragDepthQ =
+                floor((1.0 - exp(-t * 0.02)) * 100000.0 + 0.5) / 100000.0;
+            if (!(fragDepthQ - depthTol < depth))
                 continue;
-        } else {
-            // rim + water pipes: non-core opaque dups, then water dups
-            // (water entries ride last in the stream, like the water pipe)
-            if (!isWater && isCore)
+            alpha = sp.uSplat2.y * exp(-0.5 * d2 / sigma2);
+            if (alpha < 0.004)
                 continue;
         }
+
         const float aoBaked = vMat.w - (isWater ? 2.0 : 0.0);
         vec3 col;
         float hitType = 1.0;
-        float winBias = 0.0;
-        const uint mIdA = uint(vMat.x + 0.5);
         if (isWater) {
             // PLANAR water: identical to the FS water branch
             const float tW = (kWaterLevel - ro.y) / rd.y;
             if (!(tW > 0.0))
+                continue;
+            const float fragDepthQ =
+                floor((1.0 - exp(-tW * 0.02)) * 100000.0 + 0.5) / 100000.0;
+            if (!(fragDepthQ < depth))
                 continue;
             const vec3 pw = ro + rd * tW;
             float wa = 1.0;
@@ -210,7 +225,6 @@ void main()
             const float shB = ((gRenderFlags & 2) != 0 && dot(n, kSunDir) > 0.02)
                                   ? s.bent_sh.w
                                   : 1.0;
-            winBias = (1.0 - shB) * 5e-5 + float(mId) * 3e-6;
             const float aoB = ((gRenderFlags & 1) != 0) ? clamp(aoBaked, 0.0, 1.0) : 1.0;
             const vec3 bentB = normalize(s.bent_sh.xyz);
             col = shadeSurfel(q, rd, alb, rr, ro, n, bentB, shB, aoB, mId);
@@ -226,45 +240,31 @@ void main()
             col = mix(col, vec3(0.05, 0.14, 0.13), clamp(t * 0.8, 0.0, 0.85));
         }
 
-        const float fragDepthQ = floor((1.0 - exp(-t * 0.02)) * 100000.0 + 0.5) / 100000.0;
-        // quantized like the FS (see splat.frag): near-tie cores resolve
-        // identically so settled depths and rim tests agree bit-for-bit
-        const float fragDepth = fragDepthQ;
         if (isWater) {
-            // water pipe: depth-tested, blended, no depth write, no stencil.
-            // The FS outputs premultiplied (col*alpha) and the pipe blends
-            // with (SRC_ALPHA, ONE_MINUS_SRC_ALPHA), so the net is
+            // water pipe: depth-tested against the prepass depth (nearest
+            // opaque full-disk plane), blended, no depth write. The FS
+            // outputs premultiplied (col*alpha) and the pipe blends with
+            // (SRC_ALPHA, ONE_MINUS_SRC_ALPHA), so the net is
             // col*a^2 + dst*(1-a) — mirrored exactly here.
-            if (!(fragDepth < depth))
-                continue;
             hdr.rgb = hdr.rgb * (1.0 - alpha) + col * alpha * alpha;
             hdr.a = hdr.a * (1.0 - alpha) + alpha;
             gpos = vec4(q, hitType);
-        } else if (isCore) {
-            // core pipe: biased depth settle, opaque replace, marks core
-            const float biased = max(fragDepth - (5e-5 + winBias), 0.0);
-            if (!(biased < depth))
-                continue;
-            depth = biased;
-            coreFlag = true;
+        } else if (fragDepthQ == depth) {
+            // opaque base (PASS_MODE 4 mirror): the exact nearest fragment
+            // writes opaque colour so the sky can never bleed through the
+            // band's low-alpha rims. Encountered last in the far->near walk,
+            // so it replaces any earlier band blend — the forward base pass
+            // is drawn first and the band over it; with the base nearest the
+            // two orders agree to first order.
             hdr = vec4(col, 1.0);
             gpos = vec4(q, hitType);
-        } else if (coreFlag) {
-            // interior rim: strict-LESS, lighten-only MAX (incl. alpha lane)
-            if (!(fragDepth < depth))
-                continue;
-            hdr.rgb = max(hdr.rgb, col);
-            hdr.a = max(hdr.a, alpha);
-            gpos = vec4(q, hitType);
         } else {
-            // silhouette rim: strict-LESS, over-blend
-            if (!(fragDepth < depth))
-                continue;
+            // opaque band: straight colour source-over in back-to-front
+            // draw order (the depth resolve above is the HW test mirror).
             hdr.rgb = hdr.rgb * (1.0 - alpha) + col * alpha;
             hdr.a = hdr.a * (1.0 - alpha) + alpha;
             gpos = vec4(q, hitType);
         }
-    }
     }
 
     imageStore(uHdr, pix, hdr);

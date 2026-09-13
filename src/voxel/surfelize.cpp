@@ -494,12 +494,9 @@ SurfelSet buildSurfels(const VoxelField& field, const SurfelParams& params) {
     // base surfels: position/normal/bent/shadow/AO are area-weighted means
     // (cells are equal), material is the majority. The merged radius covers
     // the union of member footprints (half of the member-centre AABB
-    // diagonal + mean member radius) and keeps splat.frag's wedge-gap
-    // invariant ((blockHalfDiag/r)^2 < coreD2; baked against the smallest
-    // coreD2 any LOD1 band can see, 0.55 => cover base 0.20 m). LOD2 chunks
-    // are far enough that coreD2 = 1.0, so only footprint coverage applies.
-    // Deterministic: members accumulate in base-array order, blocks emit in
-    // sorted block-key order.
+    // diagonal + mean member radius, with a per-ring coverage floor) so the
+    // Gaussian disks keep overlapping after merging. Deterministic: members
+    // accumulate in base-array order, blocks emit in sorted block-key order.
     std::vector<std::vector<Surfel>> lod1ByChunk, lod2ByChunk;
     if (params.lodRings && n > 0) {
         auto buildRing = [&](int shift, std::vector<std::vector<Surfel>>& byChunk) {

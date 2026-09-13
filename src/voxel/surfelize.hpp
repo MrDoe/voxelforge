@@ -17,12 +17,13 @@
 namespace vf::voxel {
 
 struct SurfelParams {
-    // In-plane radius (m). Must satisfy (halfDiagonal / baseRadius)^2 < coreD2
-    // (splat core threshold, default 0.55): with 0.1 m cells the corner sits at
-    // 0.0707 m, so baseRadius 0.14 puts the corner at d2 = 0.26, well inside
-    // the opaque core, with margin for tilted-neighbour wedge gaps and for
-    // voxel-silhouette coverage (a disk covers less of its voxel than the
-    // voxel's projected square). Larger also helps; cost is overdraw.
+    // In-plane radius (m). Sets the Gaussian kernel footprint: baseRadius
+    // 0.14 (1.4 cells) makes the cell corner (0.0707 m off-centre) sit at
+    // d2 = 0.26, deep inside the Gaussian peak, so neighbouring disks
+    // overlap generously and the renderer's source-over accumulation fills
+    // the surface with no gaps (voxel-silhouette coverage: a disk covers
+    // less of its voxel than the voxel's projected square). Larger also
+    // helps; cost is overdraw.
     float baseRadius = 1.4f * VOXEL;
     float heightfieldBlend = 0.55f;   // blend terrain-top cells toward the analytic
                                        // two-scale heightfield normal (parity with the

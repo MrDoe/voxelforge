@@ -169,46 +169,50 @@ in `App::rebuildSurfels`, ~0.6 s for ~1.3 M surfels):
 **Surfel layout** (64 B, 4×vec4, std430): `pos_rU`, `normal_rV`,
 `bent_sh` (bent normal + baked shadow), `mat_ao`
 (mat/refl/rough/AO + 2 for water). Footprints are isotropic (`rU == rV =
-1.1·VOXEL`), so the vertex shader rebuilds the tangent frame from the normal.
+1.4·VOXEL`), so the vertex shader rebuilds the tangent frame from the normal.
 
 **GPU** (`src/render/splat_pass.{hpp,cpp}`, `shaders/splat.{vert,frag}`):
-dynamic rendering into the same `m_hdr`/`m_gpos`
-targets (plus a `D32_SFLOAT` depth image), so post/TAA/`--shot` work
-unchanged. Four pipelines sharing one layout (surfel SSBO + `uHeight` +
-`uObjVol` + 16 B params UBO):
+dynamic rendering into the same `m_hdr`/`m_gpos` targets (plus a
+`D24_UNORM_S8_UINT` depth image), so post/TAA/`--shot` work unchanged.
+Four pipelines sharing one layout (surfel SSBO + `uHeight` + `uObjVol` +
+16 B params UBO):
 1. sky fullscreen triangle (no depth) → `skyColor` + hitType 0;
-2. opaque cores (`PASS_MODE 1`), one `vkCmdDraw(4, n, 0, first)` per
-   visible chunk: depth test + write with per-fragment plane depth;
-3. Gaussian rims (`PASS_MODE 2`) over the settled cores: depth-tested,
-   no depth write, blended back-to-front;
-4. water surfels (blended, depth-tested, no depth write, `hitType 2`).
-Chunks draw back-to-front (per-frame distance sort, ~100 us for 4096);
-within-chunk order errors are bounded by the 6.4 m chunk size and hidden
-by the depth test for opaque cores. A **depth prepass** replicates the
-core pass depth into a Hi-Z depth pyramid before the main rendering; the
-prepass writes `gl_FragDepth` (early-Z disabled there), but the main core
-pass benefits from the prepass depth for Hi-Z occlusion culling of the
-background. Rim/water pipes skip the depth write — early-Z uses the exact
-interpolated planar z instead, killing interior rim fragments before
-shading.
+2. depth-only prepass (`PASS_MODE 3`), one `vkCmdDraw(4, n, 0, first)` per
+   visible chunk: full disks write the nearest plane depth (a Hi-Z pyramid
+   is built from it when occlusion culling is on);
+3. opaque base (`PASS_MODE 4`): one draw over all chunks, depth test EQUAL
+   against the prepass depth (unbiased `gl_FragDepth`), no blend — the
+   exact nearest fragment at every covered pixel writes opaque colour, so
+   the sky can never bleed through the band's low-alpha disk rims;
+4. opaque band (`PASS_MODE 1`): same draws, depth-tested with a
+   `-VF_SPLAT_DEPTH_TOL` shader bias (LESS), no depth write, blended —
+   the front surface's Gaussian coverage source-overs the base;
+5. water surfels (blended, depth-tested against the prepass, no depth
+   write, `hitType 2`).
+The resolve band keeps only fragments within `[nearest, nearest + tol]` of
+the prepass depth, so the front surface band accumulates while far surfaces
+inside the same chunk can no longer overdraw it in draw order (the old
+dark-speckle failure mode). Chunks still draw back-to-front (per-frame
+distance sort, ~100 us for 4096); within-chunk order among the resolved
+band is harmless because those surfels sit on the same surface, and the
+opaque base removes the residual rim translucency.
 
-**Fragment**: exact ray/disk-plane intersect → per-fragment *plane* depth
-(`gl_FragDepth` for core/prepass only; rim/water use the exact interpolated
-planar z for early-Z, written as `1−exp(−t·0.02)` monotonic mapping) →
-kernel with opaque core
-(`d2 < coreD2`, default 0.55) + **true Gaussian rim**
-(`exp(−4·rn²)` matched to 1 at the core boundary) for soft blurred
-silhouette edges → `shadeSurfel` (twin of `shadeTerrain` with baked
-sh/AO/bent + shared `applyFlora`) → fog → HDR + G-buffer out. The
-interior stays watertight through the cores (cell corner at d2 = 0.41 <
-0.55); the rim only ever blends over settled surface or sky, so no
-background leaks through. Far away the core expands to the full disk
-(sub-pixel disks would otherwise wash out).
+**Fragment**: exact ray/disk-plane intersect → per-fragment plane depth
+(quantized to 1e-5, written as `gl_FragDepth` by the prepass and the opaque
+resolve) → pure 2D Gaussian kernel
+(`alpha = opacity·exp(−d2/(2σ²))`, defaults σ²=0.5, opacity=0.9; no opaque
+core, no rim step) for soft filled silhouettes → `shadeSurfel` (twin of
+`shadeTerrain` with baked sh/AO/bent + shared `applyFlora`) → fog → HDR +
+G-buffer out. Overlapping disks on the same surface sum to a solid coverage
+via source-over; the interior stays watertight through kernel overlap
+(disk radius 1.4 cells, so every pixel sits well inside at least one
+neighbour's peak).
 
 **Cost drivers** (1080p hero, RTX 4090 Laptop): full per-fragment shadow/AO
-marches measured ~13 ms — hence the CPU bake. After baking, core+rim
-split: ~11.6 ms/frame vs ~11.7 ms SVO (parity; the second draw doubles
-vertex/raster work for the blurred-edge look).
+marches measured ~13 ms — hence the CPU bake. Since the alpha rework the
+opaque path is a depth prepass plus two passes over the same quads (opaque
+base + Gaussian band), replacing the old core/rim split; both backends
+remain within noise of each other.
 
 **Camera handling**: the vertex shader projects with honest `w = vz` (no
 near-plane clamp — clamping smears behind-camera corners across the
@@ -221,13 +225,16 @@ per-frame CPU probe finds the camera embedded inside solid
 (`sampleWorld(camPos).d < 0` → `setBuried`, `uSplat.x`), in which case
 shells render two-sided instead of flashing sky.
 
-**Tuning/debug**: `VF_SPLAT_CORE`
-(coreD2), `VF_SPLAT_EXTENT`, `VF_SPLAT_RADIUS` (disk multiplier, also live
-via hotkeys `[`/`]` which drive the same uniform; 0.5–2.0, default 1.0),
-`VF_SPLAT_NOCULL`/`NOWATER`/`NORIM`/`NOCORE`,
+**Tuning/debug**: `VF_SPLAT_SIGMA` (Gaussian variance, default 0.5),
+`VF_SPLAT_OPACITY` (centre alpha, default 0.9), `VF_SPLAT_DEPTH_TOL`
+(resolve band, default 0.002 ≈ 10 cm), `VF_SPLAT_EXTENT`,
+`VF_SPLAT_RADIUS` (disk multiplier, also live via hotkeys `[`/`]` which
+drive the same uniform; 0.5–2.0, default 1.0),
+`VF_SPLAT_NOCULL`/`NOWATER`,
 `VF_SPLAT_DEBUG` (1 flat / 2 normal / 3 depth / 4 no-collapse shading /
 5 facing / 6 albedo / 7 rough / 8 baked-shadow / 9 baked-AO / 10 hf-shadow /
-11 objDist / 12 height-residual / 13 march origin), `VF_RENDER_FLAGS`, `VF_SURFEL_SMOOTH`
+11 objDist / 12 height-residual / 13 march origin / 14 Gaussian kernel mask),
+`VF_RENDER_FLAGS`, `VF_SURFEL_SMOOTH`
 /`VF_SURFEL_HFBLEND` (bake variants), `VF_MICRO` (micro-surfel detail),
 `VF_VOLFOG` / `VF_MOTIONBLUR` / `VF_DOF` (headless overrides for the J/K/L toggles).
 

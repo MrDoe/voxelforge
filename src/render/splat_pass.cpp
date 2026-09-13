@@ -440,14 +440,17 @@ bool SplatPass::createPipelines(VkFormat hdrFormat)
     dy.dynamicStateCount = 2;
     dy.pDynamicStates = dyn;
 
-    // Depth prepass (PASS_MODE=3): writes the same depth as the core
-    // pass so the Hi-Z pyramid sees identical depths. No shading, no
-    // colour output (colourWriteMask=0). The core pass then re-writes
-    // depth, but the prepass culls invisible surfels before that.
+    // Pass split: the opaque base (EQUAL vs the prepass depth, opaque
+    // replace) seals the nearest surface; the opaque band blends the
+    // front-surface Gaussian coverage over it (LESS with a shader-side
+    // tolerance bias); the depth-only prepass (PASS_MODE=3) writes the
+    // nearest full-disk plane depth for both the resolve tests and the Hi-Z
+    // pyramid. `blend` selects SRC_ALPHA / ONE_MINUS_SRC_ALPHA colour
+    // blending (alpha lane ONE / ONE_MINUS_SRC_ALPHA) for the band AND
+    // water pipes; the shader emits premultiplied only on the water path,
+    // preserving its historical col*a^2 accumulation.
     auto makePipe = [&](int skyMode, int passMode, bool depthTest,
                         bool depthWrite, VkCompareOp depthOp, bool blend,
-                        VkBlendOp blendOp, bool stencilTest, VkCompareOp stencilOp,
-                        uint32_t stencilRef, bool stencilWrite,
                         VkFormat depthFmt, VkPipeline* out) {
         VkSpecializationMapEntry entries[2] = { { 0, 0, sizeof(int32_t) },
                                                 { 1, sizeof(int32_t), sizeof(int32_t) } };
@@ -463,37 +466,19 @@ bool SplatPass::createPipelines(VkFormat hdrFormat)
         ds.depthTestEnable = depthTest ? VK_TRUE : VK_FALSE;
         ds.depthWriteEnable = depthWrite ? VK_TRUE : VK_FALSE;
         ds.depthCompareOp = depthOp;
-        // Stencil marks core-covered pixels (core pipe) so the two rim
-        // blends can tell surface-interior apart from true silhouette.
-        ds.stencilTestEnable = stencilTest ? VK_TRUE : VK_FALSE;
-        VkStencilOpState stencilState {};
-        stencilState.failOp = VK_STENCIL_OP_KEEP;
-        stencilState.passOp = stencilWrite ? VK_STENCIL_OP_REPLACE
-                                           : VK_STENCIL_OP_KEEP;
-        stencilState.depthFailOp = VK_STENCIL_OP_KEEP;
-        stencilState.compareOp = stencilOp;
-        stencilState.compareMask = 0xFF;
-        stencilState.writeMask = stencilWrite ? 0xFF : 0x00;
-        stencilState.reference = stencilRef;
-        ds.front = stencilState;
-        ds.back = stencilState;
+        ds.stencilTestEnable = VK_FALSE;
 
         VkPipelineColorBlendAttachmentState cba[2] = {};
         cba[0].colorWriteMask =
             VK_COLOR_COMPONENT_R_BIT | VK_COLOR_COMPONENT_G_BIT |
             VK_COLOR_COMPONENT_B_BIT | VK_COLOR_COMPONENT_A_BIT;
         cba[1].colorWriteMask = cba[0].colorWriteMask;
-        // att0 (HDR): alpha blend for rims/water, lighten-only MAX for
-        // interior rims (never darken settled surface); att1 (G-buffer
-        // world pos) must never blend. (MAX ignores factors per spec, but
-        // ONE/ONE is set anyway so both interpretations agree.)
-        const bool useMax = (blendOp == VK_BLEND_OP_MAX);
+        // att0 (HDR): source-over for the translucent Gaussian/water paths.
+        // att1 (G-buffer world pos) must never blend.
         cba[0].blendEnable = blend ? VK_TRUE : VK_FALSE;
-        cba[0].srcColorBlendFactor =
-            useMax ? VK_BLEND_FACTOR_ONE : VK_BLEND_FACTOR_SRC_ALPHA;
-        cba[0].dstColorBlendFactor =
-            useMax ? VK_BLEND_FACTOR_ONE : VK_BLEND_FACTOR_ONE_MINUS_SRC_ALPHA;
-        cba[0].colorBlendOp = blendOp;
+        cba[0].srcColorBlendFactor = VK_BLEND_FACTOR_SRC_ALPHA;
+        cba[0].dstColorBlendFactor = VK_BLEND_FACTOR_ONE_MINUS_SRC_ALPHA;
+        cba[0].colorBlendOp = VK_BLEND_OP_ADD;
         cba[0].srcAlphaBlendFactor = VK_BLEND_FACTOR_ONE;
         cba[0].dstAlphaBlendFactor = VK_BLEND_FACTOR_ONE_MINUS_SRC_ALPHA;
         cba[0].alphaBlendOp = VK_BLEND_OP_ADD;
@@ -524,30 +509,25 @@ bool SplatPass::createPipelines(VkFormat hdrFormat)
                VK_SUCCESS;
     };
 
-    // Core pass settles opaque depth+color and marks stencil (any order:
-    // all fragments opaque); rim pass splits by stencil: interior rims
-    // lighten-only (MAX: soft edges that can never darken settled surface), silhouette rims
-    // alpha-blended over sky. Water stays a single full-disk pass.
-    // Rim depth test is strict LESS against the (slightly toward-camera
-    // biased) core depth: same-surface overlap rims can never pass it, so
-    // they can't flicker on an LEQUAL coin-flip; true silhouettes clear it
-    // by centimetres and are unaffected.
     const VkFormat kDepthFmt = VK_FORMAT_D24_UNORM_S8_UINT;
     bool ok =
-        makePipe(1, 0, false, false, VK_COMPARE_OP_LESS, false, VK_BLEND_OP_ADD,
-                 false, VK_COMPARE_OP_ALWAYS, 0, false, VK_FORMAT_UNDEFINED,
-                 &m_skyPipe) &&
-        makePipe(0, 1, true, true, VK_COMPARE_OP_LESS, true, VK_BLEND_OP_ADD,
-                 true, VK_COMPARE_OP_ALWAYS, 1, true, kDepthFmt, &m_corePipe) &&
-        makePipe(0, 2, true, false, VK_COMPARE_OP_LESS, true, VK_BLEND_OP_MAX,
-                 true, VK_COMPARE_OP_EQUAL, 1, false, kDepthFmt, &m_rimInPipe) &&
-        makePipe(0, 2, true, false, VK_COMPARE_OP_LESS, true, VK_BLEND_OP_ADD,
-                 true, VK_COMPARE_OP_EQUAL, 0, false, kDepthFmt, &m_rimOutPipe) &&
-        makePipe(0, 0, true, false, VK_COMPARE_OP_LESS, true, VK_BLEND_OP_ADD,
-                 false, VK_COMPARE_OP_ALWAYS, 0, false, kDepthFmt, &m_waterPipe) &&
-        // Depth-only prepass (PASS_MODE=3): depth test+write, no colour.
-        makePipe(0, 3, true, true, VK_COMPARE_OP_LESS, false, VK_BLEND_OP_ADD,
-                 false, VK_COMPARE_OP_ALWAYS, 0, false, kDepthFmt, &m_prepassPipe);
+        makePipe(1, 0, false, false, VK_COMPARE_OP_LESS, false,
+                 VK_FORMAT_UNDEFINED, &m_skyPipe) &&
+        // Opaque base: exactly the nearest fragment (EQUAL against the
+        // prepass depth), opaque replace, no blend — seals the surface so
+        // the sky can never bleed through the Gaussian band's low-alpha rims.
+        makePipe(0, 4, true, false, VK_COMPARE_OP_EQUAL, false,
+                 kDepthFmt, &m_opaqueBasePipe) &&
+        // Opaque band: pure Gaussian alpha, source-over; depth-tested against
+        // the prepass depth with a shader-side tolerance bias, no write.
+        makePipe(0, 1, true, false, VK_COMPARE_OP_LESS, true,
+                 kDepthFmt, &m_opaquePipe) &&
+        // Water: depth-tested against the prepass depth, no depth write.
+        makePipe(0, 0, true, false, VK_COMPARE_OP_LESS, true,
+                 kDepthFmt, &m_waterPipe) &&
+        // Depth-only prepass (PASS_MODE=3): full-disk nearest plane depth.
+        makePipe(0, 3, true, true, VK_COMPARE_OP_LESS, false,
+                 kDepthFmt, &m_prepassPipe);
     vkDestroyShaderModule(dev, vsm, nullptr);
     vkDestroyShaderModule(dev, fsm, nullptr);
     if (!ok)
@@ -1227,28 +1207,18 @@ void SplatPass::computeDraws(const RaymarchPush& push)
     }
     glm::vec4 planes[6];
     frustumPlanes(push, planes);
-    // back-to-front chunk order: with translucent Gaussian rims, far
-    // must blend first so near geometry (and the sky behind silhouettes)
-    // composites correctly. 4096 distance evaluations + sort per frame
-    // is ~100 us; within-chunk order errors are bounded by the 6.4 m
-    // chunk size and resolved by the depth test for opaque cores.
+    // back-to-front chunk order: the single opaque pipe blends translucent
+    // Gaussian disks source-over with no depth write, so far must composite
+    // before near. 4096 distance evaluations + sort per frame is ~100 us;
+    // within-chunk order errors are bounded by the 6.4 m chunk size.
     struct Draw {
         float dist2;
         uint32_t first, count;
-        bool rim; // chunk still carries rim geometry (near-field AA band)
     };
     std::vector<Draw> draws;
     draws.reserve(1024);
     const glm::vec3 camPos = glm::vec3(push.camPos);
     const bool cull = !getenv("VF_SPLAT_NOCULL");
-    // Rim fade: splat.frag ramps coreD2 -> 1.0 by 40 m, so rim fragments of
-    // chunks entirely beyond that distance all discard. Compare the chunk
-    // AABB's nearest point to the camera (conservative: keeps rims whenever
-    // any surfel could still be inside the ramp).
-    float rimDist2 = m_rimDist * m_rimDist;
-    if (const char* e = getenv("VF_RIM_DIST"))
-        rimDist2 = float(atof(e)) * float(atof(e));
-    const bool hasRimSplit = rimDist2 > 0.0f;
     // LOD ring selection: chunks past VF_LOD1 (default 20 m) draw their
     // merged-terrain LOD1 run instead of base+micro; past VF_LOD2 (60 m)
     // the LOD2 run. Object-only chunks (empty merged runs) fall back to
@@ -1287,17 +1257,16 @@ void SplatPass::computeDraws(const RaymarchPush& push)
                             -51.2f + (float(cz) + 0.5f) * 6.4f);
         const glm::vec3 d = ctr - camPos;
         const float dist2 = glm::dot(d, d);
-        // nearest point of the chunk AABB: conservative rim eligibility and
-        // LOD ring selection (slightly aggressive for LOD: surfel distances
-        // can only be larger than the AABB nearest point)
+        // nearest point of the chunk AABB for LOD ring selection (slightly
+        // aggressive for LOD: surfel distances can only be larger than the
+        // AABB nearest point)
         glm::vec3 ncp = camPos;
-        if (hasRimSplit || hasLod1 || hasLod2) {
+        if (hasLod1 || hasLod2) {
             const glm::vec3 mn(-51.2f + float(cx) * cs, -51.2f + float(cy) * cs,
                                -51.2f + float(cz) * cs);
             ncp = glm::clamp(camPos, mn, mn + glm::vec3(cs));
         }
         const float nearDist = std::sqrt(glm::dot(ncp - camPos, ncp - camPos));
-        bool rim = !hasRimSplit || glm::dot(ncp - camPos, ncp - camPos) <= rimDist2;
         uint32_t split = last;
         if (hasMicroSplit)
             split = std::min(m_microStart[c], last);
@@ -1310,47 +1279,37 @@ void SplatPass::computeDraws(const RaymarchPush& push)
         if (hasLod2 && nearDist >= lod2Dist &&
             m_lod2Range[c + 1] > m_lod2Range[c]) {
             draws.push_back({ dist2, m_lod2Range[c],
-                              m_lod2Range[c + 1] - m_lod2Range[c], rim });
+                              m_lod2Range[c + 1] - m_lod2Range[c] });
             if (hasMicroSplit && (microDist2 <= 0.0f || dist2 < microDist2)) {
                 const uint32_t mf = std::min(m_microStart[c], opaqueEnd);
                 const uint32_t ml = std::min(m_chunkRange[c + 1], opaqueEnd);
                 if (ml > mf)
-                    draws.push_back({ dist2, mf, ml - mf, rim });
+                    draws.push_back({ dist2, mf, ml - mf });
             }
             continue;
         }
         if (hasLod1 && nearDist >= lod1Dist &&
             m_lod1Range[c + 1] > m_lod1Range[c]) {
             draws.push_back({ dist2, m_lod1Range[c],
-                              m_lod1Range[c + 1] - m_lod1Range[c], rim });
+                              m_lod1Range[c + 1] - m_lod1Range[c] });
             if (hasMicroSplit && (microDist2 <= 0.0f || dist2 < microDist2)) {
                 const uint32_t mf = std::min(m_microStart[c], opaqueEnd);
                 const uint32_t ml = std::min(m_chunkRange[c + 1], opaqueEnd);
                 if (ml > mf)
-                    draws.push_back({ dist2, mf, ml - mf, rim });
+                    draws.push_back({ dist2, mf, ml - mf });
             }
             continue;
         }
-        draws.push_back({ dist2, first, split > first ? split - first : 0, rim });
+        draws.push_back({ dist2, first, split > first ? split - first : 0 });
         // near chunks also draw their micro tail (same sort key: stable
         // sort below keeps base-then-micro order within the chunk)
         if (last > split && (microDist2 <= 0.0f || dist2 < microDist2))
-            draws.push_back({ dist2, split, last - split, rim });
+            draws.push_back({ dist2, split, last - split });
     }
     // stable: equal keys (base + micro of one chunk) keep insertion order
     std::stable_sort(draws.begin(), draws.end(),
                      [](const Draw& a, const Draw& b) { return a.dist2 > b.dist2; });
     m_cpuDraws.reserve(draws.size());
-    // far->near order: core-only (rim=false) chunks form the contiguous
-    // prefix, rim-carrying chunks the tail. First rim entry = rim passes'
-    // indirect start (base + micro of one near chunk are adjacent entries).
-    m_rimStart = uint32_t(draws.size());
-    for (uint32_t i = 0; i < draws.size(); ++i) {
-        if (draws[i].rim) {
-            m_rimStart = i;
-            break;
-        }
-    }
     for (const Draw& dr : draws) {
         if (dr.count == 0)
             continue;
@@ -1358,20 +1317,16 @@ void SplatPass::computeDraws(const RaymarchPush& push)
     }
     if (getenv("VF_TRACE") && int(push.b.w) % 60 == 0) {
         double b[4] = {}; // <10, 10-20, 20-40, >40 m: quads per band
-        uint32_t rimBase = 0;
         for (const Draw& dr : draws) {
             if (dr.count == 0)
                 continue;
             const float d = std::sqrt(dr.dist2);
             double& acc = d < 10 ? b[0] : d < 20 ? b[1] : d < 40 ? b[2] : b[3];
             acc += dr.count;
-            if (dr.rim)
-                rimBase += dr.count;
         }
         spdlog::info(
-            "splat bands: <10 {:.0f} | 10-20 {:.0f} | 20-40 {:.0f} | >40 {:.0f}"
-            " | rim-eligible {:.0f}",
-            b[0], b[1], b[2], b[3], double(rimBase));
+            "splat bands: <10 {:.0f} | 10-20 {:.0f} | 20-40 {:.0f} | >40 {:.0f}",
+            b[0], b[1], b[2], b[3]);
     }
     // water chunks: same frustum cull, no sorting needed (single
     // blended pass, depth-tested). Off-screen lake chunks emit no
@@ -1404,7 +1359,7 @@ void SplatPass::record(VkCommandBuffer cmd, const RaymarchPush& push, VkExtent2D
 {
     glm::vec4 params = m_params;
     params.x = m_buried ? 1.0f : 0.0f;
-    if (const char* e = getenv("VF_SPLAT_CORE"))
+    if (const char* e = getenv("VF_SPLAT_SIGMA"))
         params.y = float(atof(e));
     if (const char* e = getenv("VF_SPLAT_EXTENT"))
         params.z = float(atof(e));
@@ -1414,9 +1369,18 @@ void SplatPass::record(VkCommandBuffer cmd, const RaymarchPush& push, VkExtent2D
         params.w = float(atof(e));
     if (const char* e = getenv("VF_SPLAT_RADIUS"))
         m_radiusScale = glm::clamp(float(atof(e)), 0.5f, 2.0f);
+    float opacity = 0.9f;
+    if (const char* e = getenv("VF_SPLAT_OPACITY"))
+        opacity = glm::clamp(float(atof(e)), 0.0f, 1.0f);
+    // depth-resolve tolerance (quantized depth units, 1e-5 = ~0.5 mm in t at
+    // close range): the opaque pass keeps [nearest, nearest + tol], so only
+    // the front surface band accumulates. ~0.002 = ~10 cm.
+    float depthTol = 0.002f;
+    if (const char* e = getenv("VF_SPLAT_DEPTH_TOL"))
+        depthTol = glm::clamp(float(atof(e)), 0.0f, 0.05f);
     if (m_paramsBuf.mapped) {
         glm::vec4 words[2] = { params,
-                               glm::vec4(m_radiusScale, 0.0f, 0.0f, 0.0f) };
+                               glm::vec4(m_radiusScale, opacity, depthTol, 0.0f) };
         memcpy(m_paramsBuf.mapped, words, sizeof(words));
     }
 
@@ -1432,15 +1396,15 @@ void SplatPass::record(VkCommandBuffer cmd, const RaymarchPush& push, VkExtent2D
         uint32_t nTotal = 0;
         for (const auto& d : m_cpuDraws)
             nTotal += d.instanceCount;
-        spdlog::info("splat pre-cull: {} quads in {} draws (rim from {}), water {}",
-                     nTotal, nDraws, m_rimStart, m_waterDraws);
+        spdlog::info("splat pre-cull: {} quads in {} draws, water {}",
+                     nTotal, nDraws, m_waterDraws);
     }
     const bool direct = getenv("VF_SPLAT_DIRECT") != nullptr;
     const bool gpuCull =
         !direct && !getenv("VF_NO_GPU_CULL") && nDraws > 0 && m_cullPipe &&
         m_compactBuf.buf && m_selBufs[0].buf && m_planesBuf.buf;
     // Tile path (VF_TILE=1): bin + sort + register-blend instead of the
-    // three forward raster passes. Debug views (VF_SPLAT_DEBUG) stay on the
+    // two forward raster passes. Debug views (VF_SPLAT_DEBUG) stay on the
     // forward path; oversized extents fall back (tile table is fixed-size).
     bool tile = m_tileReady && !m_tileDisabled && !direct;
     if (const char* e = getenv("VF_TILE"))
@@ -1489,20 +1453,30 @@ void SplatPass::record(VkCommandBuffer cmd, const RaymarchPush& push, VkExtent2D
         di.pMemoryBarriers = &mb;
         vkCmdPipelineBarrier2(cmd, &di);
     }
-    // ---- occlusion prepass + Hi-Z build ----
+    // ---- depth prepass (+ Hi-Z build) ----
+    // The prepass seeds the depth buffer with the nearest full-disk plane
+    // depth: it is the opaque pipe's depth-resolve reference (tolerance
+    // test), the water pipe's depth test reference and, when occlusion
+    // culling is on, the Hi-Z pyramid source. Always runs when there are
+    // opaque draws; VF_NO_OCCL=1 only skips the pyramid + cull.
     const bool occlOn = !getenv("VF_NO_OCCL");
-    const bool doOccl = occlOn && nDraws > 0 && m_prepassPipe && m_hiz.img != VK_NULL_HANDLE
-                        && m_occlBuf.buf && m_depth.img != VK_NULL_HANDLE
-                        && m_depthSampler != VK_NULL_HANDLE && m_hizSampler != VK_NULL_HANDLE;
-    if (doOccl) {
-        // depth is DEPTH_ATTACHMENT_OPTIMAL (set by main.cpp)
-        // transition Hi-Z to GENERAL for storage writes
-        vf::transitionImage(cmd, m_hiz.img, VK_IMAGE_ASPECT_COLOR_BIT,
-                             VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_GENERAL,
-                             VK_PIPELINE_STAGE_2_NONE, VK_ACCESS_2_NONE,
-                             VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
-                             VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT);
-        // === PREPASS: depth-only, replicates core pass depth exactly ===
+    const bool prepassOk =
+        nDraws > 0 && m_prepassPipe && m_depth.img != VK_NULL_HANDLE;
+    const bool doOccl = occlOn && prepassOk && m_hiz.img != VK_NULL_HANDLE &&
+                        m_occlBuf.buf && m_depthSampler != VK_NULL_HANDLE &&
+                        m_hizSampler != VK_NULL_HANDLE;
+    const bool needPrepass = prepassOk;
+    if (needPrepass) {
+        if (doOccl) {
+            // depth is DEPTH_ATTACHMENT_OPTIMAL (set by main.cpp)
+            // transition Hi-Z to GENERAL for storage writes
+            vf::transitionImage(cmd, m_hiz.img, VK_IMAGE_ASPECT_COLOR_BIT,
+                                 VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_GENERAL,
+                                 VK_PIPELINE_STAGE_2_NONE, VK_ACCESS_2_NONE,
+                                 VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
+                                 VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT);
+        }
+        // === PREPASS: depth-only full disks ===
         {
             VkRenderingAttachmentInfo colrs[2] = {};
             colrs[0].sType = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO;
@@ -1519,7 +1493,9 @@ void SplatPass::record(VkCommandBuffer cmd, const RaymarchPush& push, VkExtent2D
             dp.imageView = m_depth.view;
             dp.imageLayout = VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL;
             dp.loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;
-            dp.storeOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
+            // STORE: the opaque/water passes LOAD this depth for the resolve
+            // test, so the prepass result must survive the render scope.
+            dp.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
             dp.clearValue.depthStencil = { 1.0f, 0 };
             VkRenderingInfo ri { VK_STRUCTURE_TYPE_RENDERING_INFO };
             ri.renderArea = { { 0, 0 }, extent };
@@ -1550,6 +1526,7 @@ void SplatPass::record(VkCommandBuffer cmd, const RaymarchPush& push, VkExtent2D
             }
             vkCmdEndRendering(cmd);
         }
+        if (doOccl) {
         // === Hi-Z build ===
         // depth: DEPTH_ATTACHMENT_OPTIMAL -> SHADER_READ_ONLY_OPTIMAL
         vf::transitionImage(cmd, m_depth.img,
@@ -1620,7 +1597,8 @@ void SplatPass::record(VkCommandBuffer cmd, const RaymarchPush& push, VkExtent2D
                              VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT,
                              VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
                              VK_ACCESS_2_SHADER_READ_BIT);
-    }
+        } // if (doOccl)
+    } // if (needPrepass)
 
     if (gpuCull) {
         // active triple-buffer slot into the descriptor set
@@ -1706,7 +1684,10 @@ void SplatPass::record(VkCommandBuffer cmd, const RaymarchPush& push, VkExtent2D
     VkRenderingAttachmentInfo depth { VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO };
     depth.imageView = m_depth.view;
     depth.imageLayout = VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL;
-    depth.loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;
+    // LOAD the prepass depth when it ran (water depth test reference);
+    // otherwise the buffer is unused this frame (no pipe writes it).
+    depth.loadOp = needPrepass ? VK_ATTACHMENT_LOAD_OP_LOAD
+                               : VK_ATTACHMENT_LOAD_OP_CLEAR;
     depth.storeOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
     depth.clearValue.depthStencil = { 1.0f, 0 };
 
@@ -1716,8 +1697,6 @@ void SplatPass::record(VkCommandBuffer cmd, const RaymarchPush& push, VkExtent2D
     ri.colorAttachmentCount = 2;
     ri.pColorAttachments = colors;
     ri.pDepthAttachment = &depth;
-    // stencil shares the depth image: same view/layout, cleared together
-    // (loadOp CLEAR above zeroes it; DONT_CARE store)
     ri.pStencilAttachment = &depth;
     vkCmdBeginRendering(cmd, &ri);
 
@@ -1736,14 +1715,10 @@ void SplatPass::record(VkCommandBuffer cmd, const RaymarchPush& push, VkExtent2D
     vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, m_skyPipe);
     vkCmdDraw(cmd, 3, 1, 0, 0);
 
-    // opaque cores first (any order: every fragment opaque, depth settles
-    // the watertight surface and marks stencil), then rims split by stencil:
-    // interior rims lighten-only (MAX: soft edges that can never darken
-    // settled surface), silhouette rims alpha-blended over sky.
-    // stride defined above
-    // drawOpaque draws [from, nDraws); the core pipe uses 0 (all chunks),
-    // the rim pipes start at m_rimStart (far chunks are core-only: their
-    // rim fragments would all discard beyond the 40 m coreD2 ramp).
+    // Opaque surface: first the exact nearest fragment (base pass, EQUAL
+    // against the prepass depth, opaque replace) so rims can never show the
+    // sky, then the Gaussian band (bias LESS) blends the front surface's
+    // soft coverage over it.
     // With the GPU cull pre-pass active the command stream is GPU-written
     // (instanceCount per entry = compacted count), so plain indirect draws
     // consume the compacted instance counts directly.
@@ -1792,15 +1767,8 @@ void SplatPass::record(VkCommandBuffer cmd, const RaymarchPush& push, VkExtent2D
             memcpy(wdst, m_cpuWaterDraws.data(), m_cpuWaterDraws.size() * stride);
     }
     if (nDraws > 0) {
-        if (!getenv("VF_SPLAT_NORIM"))
-            drawOpaque(m_corePipe, 0);
-        // Rim passes draw only the near tail (rim-carrying chunks). The
-        // env names are swapped vs the pipes they skip (historical quirk):
-        // VF_SPLAT_NOCORE skips the rim pipes, VF_SPLAT_NORIM the core pipe.
-        if (!getenv("VF_SPLAT_NOCORE") && m_rimStart < nDraws) {
-            drawOpaque(m_rimInPipe, m_rimStart);
-            drawOpaque(m_rimOutPipe, m_rimStart);
-        }
+        drawOpaque(m_opaqueBasePipe, 0);
+        drawOpaque(m_opaquePipe, 0);
     }
     // water surfels: blended over, depth-tested, no depth write.
     // Culled per chunk like opaque (off-screen lake chunks emit nothing).
@@ -1843,12 +1811,10 @@ void SplatPass::destroy()
         vkDestroyPipelineLayout(dev, m_layout, nullptr);
     if (m_skyPipe)
         vkDestroyPipeline(dev, m_skyPipe, nullptr);
-    if (m_corePipe)
-        vkDestroyPipeline(dev, m_corePipe, nullptr);
-    if (m_rimInPipe)
-        vkDestroyPipeline(dev, m_rimInPipe, nullptr);
-    if (m_rimOutPipe)
-        vkDestroyPipeline(dev, m_rimOutPipe, nullptr);
+    if (m_opaqueBasePipe)
+        vkDestroyPipeline(dev, m_opaqueBasePipe, nullptr);
+    if (m_opaquePipe)
+        vkDestroyPipeline(dev, m_opaquePipe, nullptr);
     if (m_waterPipe)
         vkDestroyPipeline(dev, m_waterPipe, nullptr);
     if (m_cullPipe)
@@ -1912,7 +1878,7 @@ void SplatPass::destroy()
     m_pool = VK_NULL_HANDLE;
     m_setLayout = VK_NULL_HANDLE;
     m_layout = VK_NULL_HANDLE;
-    m_skyPipe = m_corePipe = m_rimInPipe = m_rimOutPipe = m_waterPipe = VK_NULL_HANDLE;
+    m_skyPipe = m_opaqueBasePipe = m_opaquePipe = m_waterPipe = VK_NULL_HANDLE;
 }
 
 } // namespace vf

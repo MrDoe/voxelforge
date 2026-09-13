@@ -3,9 +3,12 @@
 #define SPLAT_BACKEND 1
 // Voxelforge Gaussian-surfel rasterizer (fragment stage).
 // Exact ray/disk intersection gives per-fragment plane depth (no centroid
-// z-fighting); a compact smooth kernel with an opaque core reads as a solid
-// surface, with analytic alpha only in a ~1px annulus for AA. Shading is
-// shadeSurfel() from common_splat.glsl - shadeTerrain's twin.
+// z-fighting); each surfel contributes a single pure 2D Gaussian kernel
+// (alpha = opacity * exp(-0.5*d2/sigma2)) whose peak sits at the disk centre.
+// Back-to-front order + source-over blending accumulates overlapping disks
+// into a solid, filled surface with soft 3DGS-style silhouette edges - no
+// hard opaque core, no hollow rims. Shading is shadeSurfel() from
+// common_splat.glsl - shadeTerrain's twin.
 
 layout(set = 0, binding = 1, rg32f) uniform readonly highp image2D uHeight;
 layout(set = 0, binding = 2, r8_snorm) uniform readonly highp image3D uObjVol;
@@ -21,12 +24,12 @@ layout(push_constant) uniform PC {
     vec4 misc; // x=renderFlags, y=animTime, z=tonemapLook, w=exposure
 } pc;
 
-// per-frame kernel tuning (HUD): x=kernel (0 compact / 1 gaussian),
-// y=core threshold, z=quad extent, w=spare. Persistently mapped UBO,
-// flushed by SplatPass::record like the SVO highlight feeds.
+// per-frame kernel tuning (HUD): y = Gaussian variance sigma2, z = quad
+// extent, w = debug mode. Persistently mapped UBO, flushed by
+// SplatPass::record like the SVO highlight feeds.
 layout(std140, set = 0, binding = 3) uniform SplatUBO {
-    vec4 uSplat;  // x=buried, y=coreD2, z=quad extent, w=debug mode
-    vec4 uSplat2; // x=radius scale (hotkeys [/]), yzw=spare
+    vec4 uSplat;  // x=buried, y=sigma2, z=quad extent, w=debug mode
+    vec4 uSplat2; // x=radius scale (hotkeys [/]), y=opacity, z=depth tol, w=spare
 } sp;
 
 layout(location = 0) in vec3 vCenter;
@@ -43,11 +46,11 @@ layout(location = 0) out vec4 oHdr;
 layout(location = 1) out vec4 oGPos;
 
 layout(constant_id = 0) const int SKY_MODE = 0;
-// Pass split for correct translucent compositing (opaque cores must settle
-// depth/color before rims blend, so they are separate draws):
-//   0 = full disk (water path, single pass),
-//   1 = core only  (d2 <= coreD2; writes depth),
-//   2 = rim only   (d2 > coreD2; depth-tested, no depth write, blends over).
+// Pass split for the depth-resolved composite:
+//   0 = water path (full disk, planar water shading, uniform alpha),
+//   1 = opaque Gaussian band (full disk; straight colour + alpha),
+//   3 = depth-only prepass (nearest full-disk plane depth, no shading),
+//   4 = opaque base (exact nearest fragment, straight colour, alpha 1).
 layout(constant_id = 1) const int PASS_MODE = 0;
 
 const float kWaterLevel = -0.9;
@@ -106,62 +109,40 @@ void main()
     if (d2 > extent * extent)
         discard;
 
-    // kernel: opaque core + true Gaussian rim. The core (d2 < coreD2)
-    // keeps the surface watertight - with 0.1 m cells and r = 0.11 the
-    // corner sits at d2 = 0.41, so it is always inside the core and no
-    // background can leak through the surface interior. Outside the core
-    // the falloff is Gaussian (matched to 1 at the boundary), giving the
-    // soft blurred silhouette edges; back-to-front chunk order makes the
-    // rim blend against the surface/sky correctly. Far away the core
-    // expands to the full disk (sub-pixel disks would otherwise wash out).
-    float coreD2 = mix(sp.uSplat.y, 1.0, smoothstep(10.0, 40.0, t));
-    if (PASS_MODE == 1 && d2 > coreD2)
-        discard;
-    if (PASS_MODE == 2 && d2 <= coreD2)
-        discard;
+    // Pure Gaussian alpha (3DGS-style): a single continuous kernel peaking at
+    // the disk centre, clipped at the quad extent. With back-to-front source-
+    // over blending, overlapping disks (r = 1.4 cells on a 1-cell grid) sum to
+    // a filled, watertight-looking surface without any opaque core - the old
+    // step-function core + Gaussian rim left hollow centres wherever a binary
+    // core missed the fixed pixel grid. sigma2 sharpens/softens the kernel,
+    // opacity caps the centre alpha so neighbours can still accumulate over it.
+    const float sigma2 = max(sp.uSplat.y, 1e-3);
+    float alpha = sp.uSplat2.y * exp(-0.5 * d2 / sigma2);
     if (PASS_MODE == 3) {
-        if (d2 > coreD2) discard;
-        // depth-only prepass: replicate the core pass depth exactly
-        // so the Hi-Z pyramid sees the same depth the core pass writes.
-        // No shading, no colour output.
+        // depth-only prepass: the nearest full-disk plane depth (no core
+        // threshold) seeds both the Hi-Z occlusion pyramid and the water
+        // depth test. Same quantized depth the opaque pass would settle.
         float fragDepth = 1.0 - exp(-t * 0.02);
         fragDepth = floor(fragDepth * 100000.0 + 0.5) / 100000.0;
-        float winBias = 0.0;
-        bool isWater = vMat.w > 1.5;
-        if (!isWater) {
-            float shB = ((gRenderFlags & 2) != 0 && dot(n, kSunDir) > 0.02) ? vShade.w : 1.0;
-            uint mId = uint(vMat.x + 0.5);
-            winBias = (1.0 - shB) * 5e-5 + float(mId) * 3e-6;
-        }
-        fragDepth = max(fragDepth - (5e-5 + winBias), 0.0);
         gl_FragDepth = fragDepth;
         return;
     }
-    float alpha;
-    if (d2 < coreD2) {
-        alpha = 1.0;
-    } else {
-        float rn = (d2 - coreD2) / max(1.0 - coreD2, 1e-3);
-        alpha = exp(-4.0 * rn * rn);
-    }
-    if (alpha < 0.004)
+    // Debug views override alpha to 1.0 below, so skip the alpha discard
+    // there (full-coverage flat views).
+    if (PASS_MODE == 1 && sp.uSplat.w < 0.5 && alpha < 0.004)
         discard;
 
     bool isWater = vMat.w > 1.5;
     float aoBaked = vMat.w - (isWater ? 2.0 : 0.0);
     vec3 col;
     float hitType = 1.0;
-    // depth-tie preference for the shadowed side (set in the opaque branch):
-    // at same-surface overlaps the shadowed disk deterministically wins core
-    // ties, so borders can't shimmer between lit/dark winners with the view.
-    float winBias = 0.0;
     float dbg = sp.uSplat.w;
     if (dbg > 0.5) {
         // debug views (flat, no lighting)
         if (dbg > 13.5) {
-            // rim mask: white = rim fragment (d2 > core), grey = core.
-            // Shows the boundary web directly.
-            col = (d2 > coreD2) ? vec3(1.0) : vec3(0.35);
+            // kernel mask: white = outside one sigma (soft edge region),
+            // grey = inside. Shows the Gaussian boundary web directly.
+            col = (d2 > sigma2) ? vec3(1.0) : vec3(0.35);
             alpha = 1.0;
         } else if (dbg > 12.5) {
             vec3 roDbg = q + normalize(vN) * 0.35;
@@ -251,12 +232,6 @@ void main()
         // baked sun shadow + bent AO (built from the exact oracle); the
         // render-flag gates stay live so keys 1/2 keep working
         float shB = ((gRenderFlags & 2) != 0 && dot(n, kSunDir) > 0.02) ? vShade.w : 1.0;
-        // Deterministic overlap winner: shadowed side first, then higher
-        // material id — same pair always resolves the same way regardless of
-        // viewpoint, so adjacent surfels of different shadow/color can't
-        // shimmer between winners. Steps (5e-5 / 3e-6) dwarf float jitter
-        // (~1e-7) but stay mm-scale in t, far below real occlusions.
-        winBias = (1.0 - shB) * 5e-5 + float(mId) * 3e-6;
         float aoB = ((gRenderFlags & 1) != 0) ? clamp(aoBaked, 0.0, 1.0) : 1.0;
         vec3 bentB = normalize(vShade.xyz);
         col = shadeSurfel(q, rd, alb, rr, ro, n, bentB, shB, aoB, mId);
@@ -274,28 +249,33 @@ void main()
         col = mix(col, vec3(0.05, 0.14, 0.13), clamp(t * 0.8, 0.0, 0.85));
     }
 
-    // Core depth bias: cores settle slightly toward the camera so same-surface
-    // overlap rims — whose plane depths equal the settled depth up to float
-    // jitter — deterministically FAIL the rim strict-LESS test instead of
-    // flickering on an LEQUAL coin-flip with subpixel camera moves. 5e-5 depth
-    // units is mm-scale in t (far below real silhouette gaps, far above
-    // jitter); water writes no depth so only cores are biased. winBias adds
-    // a shadow-side-first, higher-material-id-first preference so core ties
-    // between different shadow/color neighbours also resolve deterministically.
-    float fragDepth = 1.0 - exp(-t * 0.02);
-    // quantize depth to 1e-5 units (≈0.5 mm in t): near-tie cores
-    // (same-mat neighbours agreeing to fp jitter) resolve identically in
-    // every backend (same quantum -> first-in-order wins), so settled
-    // depths — and hence rim depth tests — agree bit-for-bit. The quantum
-    // dwarfs jitter (~1e-7) but is far below visible relief.
-    fragDepth = floor(fragDepth * 100000.0 + 0.5) / 100000.0;
+    // Depth resolve: the PASS_MODE 3 prepass holds the nearest full-disk
+    // plane depth at this pixel. Bias this fragment toward the camera by the
+    // tolerance and test LESS against it, so only fragments within
+    // [nearest, nearest + tol] pass - the front surface band. Fragments
+    // farther behind (a second surface within a chunk, the shadowed side)
+    // are rejected instead of source-over-ing in draw order, which caused
+    // view-dependent dark speckle. No depth write: the prepass depth stays
+    // for the water test.
+    //
+    // The Gaussian band alone can leave accumulated alpha < 1 at disk rims
+    // and grazing surfaces, letting the sky (the initial colour target)
+    // bleed through as pale fringes. The PASS_MODE 4 base pass fixes that:
+    // it LESS-tests EXACT EQUALity against the prepass depth (unbiased
+    // fragDepthQ), so exactly the nearest fragment at every covered pixel
+    // writes an OPAQUE (alpha 1, no blend) surface colour. The band then
+    // softens that base; the sky can never show through a resolved surface.
+    float fragDepthQ = floor((1.0 - exp(-t * 0.02)) * 100000.0 + 0.5) / 100000.0;
     if (PASS_MODE == 1)
-        fragDepth = max(fragDepth - (5e-5 + winBias), 0.0);
-    if (PASS_MODE == 1 || PASS_MODE == 3)
-        gl_FragDepth = fragDepth;
-    // rim passes (PASS_MODE 2, MAX blend) output straight color: MAX takes
-    // the brighter of src/dst, so premultiplying would dim rims into dark
-    // fringes. Core/water keep premultiplied (their alpha is 1 / absorptive).
-    oHdr = (PASS_MODE == 2) ? vec4(col, alpha) : vec4(col * alpha, alpha);
+        gl_FragDepth = clamp(fragDepthQ - sp.uSplat2.z, 0.0, 1.0);
+    else if (PASS_MODE == 4)
+        gl_FragDepth = fragDepthQ;
+    // Band fragments contribute straight (non-premultiplied) Gaussian
+    // colour + alpha (SRC_ALPHA / ONE_MINUS_SRC_ALPHA source-over); the base
+    // fragment writes opaque colour; water stays premultiplied.
+    if (PASS_MODE == 4)
+        oHdr = vec4(col, 1.0);
+    else
+        oHdr = (PASS_MODE == 1) ? vec4(col, alpha) : vec4(col * alpha, alpha);
     oGPos = vec4(q, hitType);
 }

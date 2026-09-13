@@ -39,8 +39,8 @@ layout(set = 0, binding = 5) buffer Counts { uint uCounts[]; };
 layout(set = 0, binding = 10) buffer DupVals { uint uDupVals[]; };
 
 layout(std140, set = 0, binding = 3) uniform SplatUBO {
-    vec4 uSplat;  // x=buried, y=coreD2, z=quad extent, w=debug mode
-    vec4 uSplat2; // x=radius scale
+    vec4 uSplat;  // x=buried, y=sigma2, z=quad extent, w=debug mode
+    vec4 uSplat2; // x=radius scale, y=opacity
 } sp;
 
 layout(std140, set = 0, binding = 8) uniform Frame {
