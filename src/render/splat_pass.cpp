@@ -435,22 +435,26 @@ bool SplatPass::createPipelines(VkFormat hdrFormat)
     prc.colorAttachmentCount = 2;
     prc.pColorAttachmentFormats = colorFmts;
 
-    VkDynamicState dyn[] = { VK_DYNAMIC_STATE_VIEWPORT, VK_DYNAMIC_STATE_SCISSOR };
+    VkDynamicState dyn[] = { VK_DYNAMIC_STATE_VIEWPORT, VK_DYNAMIC_STATE_SCISSOR,
+                             VK_DYNAMIC_STATE_DEPTH_BIAS };
     VkPipelineDynamicStateCreateInfo dy { VK_STRUCTURE_TYPE_PIPELINE_DYNAMIC_STATE_CREATE_INFO };
-    dy.dynamicStateCount = 2;
+    dy.dynamicStateCount = 3;
     dy.pDynamicStates = dyn;
 
     // Pass split: the opaque base (EQUAL vs the prepass depth, opaque
     // replace) seals the nearest surface; the opaque band blends the
-    // front-surface Gaussian coverage over it (LESS with a shader-side
-    // tolerance bias); the depth-only prepass (PASS_MODE=3) writes the
-    // nearest full-disk plane depth for both the resolve tests and the Hi-Z
-    // pyramid. `blend` selects SRC_ALPHA / ONE_MINUS_SRC_ALPHA colour
-    // blending (alpha lane ONE / ONE_MINUS_SRC_ALPHA) for the band AND
-    // water pipes; the shader emits premultiplied only on the water path,
-    // preserving its historical col*a^2 accumulation.
+    // front-surface Gaussian coverage over it (LESS with a rasterizer depth
+    // bias supplied per frame via vkCmdSetDepthBias); the depth-only prepass
+    // (PASS_MODE=3) writes the nearest full-disk plane depth for both the
+    // resolve tests and the Hi-Z pyramid. No pass writes gl_FragDepth, so
+    // early-Z rejects occluded fragments before shading. `blend` selects
+    // SRC_ALPHA / ONE_MINUS_SRC_ALPHA colour blending for the band AND water
+    // pipes; the shader emits premultiplied only on the water path,
+    // preserving its historical col*a^2 accumulation. `colorWrite=false`
+    // keeps the prepass from writing its undefined colour outputs.
     auto makePipe = [&](int skyMode, int passMode, bool depthTest,
                         bool depthWrite, VkCompareOp depthOp, bool blend,
+                        bool depthBias, bool colorWrite,
                         VkFormat depthFmt, VkPipeline* out) {
         VkSpecializationMapEntry entries[2] = { { 0, 0, sizeof(int32_t) },
                                                 { 1, sizeof(int32_t), sizeof(int32_t) } };
@@ -469,10 +473,12 @@ bool SplatPass::createPipelines(VkFormat hdrFormat)
         ds.stencilTestEnable = VK_FALSE;
 
         VkPipelineColorBlendAttachmentState cba[2] = {};
-        cba[0].colorWriteMask =
-            VK_COLOR_COMPONENT_R_BIT | VK_COLOR_COMPONENT_G_BIT |
-            VK_COLOR_COMPONENT_B_BIT | VK_COLOR_COMPONENT_A_BIT;
-        cba[1].colorWriteMask = cba[0].colorWriteMask;
+        const VkColorComponentFlags mask =
+            colorWrite ? (VK_COLOR_COMPONENT_R_BIT | VK_COLOR_COMPONENT_G_BIT |
+                          VK_COLOR_COMPONENT_B_BIT | VK_COLOR_COMPONENT_A_BIT)
+                       : 0u;
+        cba[0].colorWriteMask = mask;
+        cba[1].colorWriteMask = mask;
         // att0 (HDR): source-over for the translucent Gaussian/water paths.
         // att1 (G-buffer world pos) must never blend.
         cba[0].blendEnable = blend ? VK_TRUE : VK_FALSE;
@@ -491,6 +497,9 @@ bool SplatPass::createPipelines(VkFormat hdrFormat)
         VkPipelineRenderingCreateInfo lprc = prc;
         lprc.depthAttachmentFormat = depthFmt;
 
+        VkPipelineRasterizationStateCreateInfo rp = rs;
+        rp.depthBiasEnable = depthBias ? VK_TRUE : VK_FALSE;
+
         VkGraphicsPipelineCreateInfo gpi { VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO };
         gpi.pNext = &lprc;
         gpi.stageCount = 2;
@@ -498,7 +507,7 @@ bool SplatPass::createPipelines(VkFormat hdrFormat)
         gpi.pVertexInputState = &vi;
         gpi.pInputAssemblyState = &ia;
         gpi.pViewportState = &vp;
-        gpi.pRasterizationState = &rs;
+        gpi.pRasterizationState = &rp;
         gpi.pMultisampleState = &ms;
         gpi.pDepthStencilState = &ds;
         gpi.pColorBlendState = &cb;
@@ -512,22 +521,26 @@ bool SplatPass::createPipelines(VkFormat hdrFormat)
     const VkFormat kDepthFmt = VK_FORMAT_D24_UNORM_S8_UINT;
     bool ok =
         makePipe(1, 0, false, false, VK_COMPARE_OP_LESS, false,
-                 VK_FORMAT_UNDEFINED, &m_skyPipe) &&
+                 false, true, VK_FORMAT_UNDEFINED, &m_skyPipe) &&
         // Opaque base: exactly the nearest fragment (EQUAL against the
         // prepass depth), opaque replace, no blend — seals the surface so
         // the sky can never bleed through the Gaussian band's low-alpha rims.
+        // Early-Z drops every non-nearest fragment before shading.
         makePipe(0, 4, true, false, VK_COMPARE_OP_EQUAL, false,
-                 kDepthFmt, &m_opaqueBasePipe) &&
+                 false, true, kDepthFmt, &m_opaqueBasePipe) &&
         // Opaque band: pure Gaussian alpha, source-over; depth-tested against
-        // the prepass depth with a shader-side tolerance bias, no write.
+        // the prepass depth with a dynamic negative depth bias
+        // (vkCmdSetDepthBias), no write. Early-Z drops fragments farther
+        // behind than the resolve tolerance before shading.
         makePipe(0, 1, true, false, VK_COMPARE_OP_LESS, true,
-                 kDepthFmt, &m_opaquePipe) &&
+                 true, true, kDepthFmt, &m_opaquePipe) &&
         // Water: depth-tested against the prepass depth, no depth write.
         makePipe(0, 0, true, false, VK_COMPARE_OP_LESS, true,
-                 kDepthFmt, &m_waterPipe) &&
-        // Depth-only prepass (PASS_MODE=3): full-disk nearest plane depth.
+                 false, true, kDepthFmt, &m_waterPipe) &&
+        // Depth-only prepass (PASS_MODE=3): full-disk nearest plane depth
+        // (fixed-function depth, no colour outputs).
         makePipe(0, 3, true, true, VK_COMPARE_OP_LESS, false,
-                 kDepthFmt, &m_prepassPipe);
+                 false, false, kDepthFmt, &m_prepassPipe);
     vkDestroyShaderModule(dev, vsm, nullptr);
     vkDestroyShaderModule(dev, fsm, nullptr);
     if (!ok)
@@ -1372,9 +1385,12 @@ void SplatPass::record(VkCommandBuffer cmd, const RaymarchPush& push, VkExtent2D
     float opacity = 0.9f;
     if (const char* e = getenv("VF_SPLAT_OPACITY"))
         opacity = glm::clamp(float(atof(e)), 0.0f, 1.0f);
-    // depth-resolve tolerance (quantized depth units, 1e-5 = ~0.5 mm in t at
-    // close range): the opaque pass keeps [nearest, nearest + tol], so only
-    // the front surface band accumulates. ~0.002 = ~10 cm.
+    // depth-resolve tolerance in NDC depth units (the same 1-exp(-0.02t)
+    // metric gl_Position.z carries): the opaque band keeps
+    // [nearest, nearest + tol], so only the front surface band accumulates.
+    // ~0.002 = ~10 cm. Applied per frame as a rasterizer depth bias (see
+    // vkCmdSetDepthBias before the band draw); uSplat2.z is kept in the UBO
+    // for the tile path's software resolve.
     float depthTol = 0.002f;
     if (const char* e = getenv("VF_SPLAT_DEPTH_TOL"))
         depthTol = glm::clamp(float(atof(e)), 0.0f, 0.05f);
@@ -1768,6 +1784,13 @@ void SplatPass::record(VkCommandBuffer cmd, const RaymarchPush& push, VkExtent2D
     }
     if (nDraws > 0) {
         drawOpaque(m_opaqueBasePipe, 0);
+        // Front-surface depth band: pull the band fragments toward the camera
+        // by depthTol via the dynamic rasterizer depth bias. The shader no
+        // longer writes gl_FragDepth, so early-Z rejects everything farther
+        // behind than the tolerance BEFORE shading. Window depth is
+        // 0.5*(ndc+1), so the ndc-space tolerance maps to tol/2 buffer
+        // units; D24_UNORM's r = 2^-24 -> constant = -tol * 2^23.
+        vkCmdSetDepthBias(cmd, -depthTol * float(1 << 23), 0.0f, 0.0f);
         drawOpaque(m_opaquePipe, 0);
     }
     // water surfels: blended over, depth-tested, no depth write.

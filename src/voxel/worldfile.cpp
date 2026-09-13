@@ -190,13 +190,13 @@ bool read(const std::string& path, WorldFileData& out)
 
     auto vec = [&](std::vector<uint32_t>& v) {
         uint64_t count = 0;
-        if (!r.pod(count))
+        if (!r.pod(count) || count > uint64_t(r.n - r.off) / 4)
             return false;
         v.resize(size_t(count));
         return r.get(v.data(), size_t(count) * 4);
     };
     uint64_t gridCount = 0;
-    if (!r.pod(gridCount)) {
+    if (!r.pod(gridCount) || gridCount > uint64_t(r.n - r.off) / 4) {
         return false;
     }
     out.chunkGrid.resize(size_t(gridCount));
@@ -205,7 +205,7 @@ bool read(const std::string& path, WorldFileData& out)
     if (!(vec(out.childBase) && vec(out.payload) && vec(out.handles) && vec(out.bricks)))
         return false;
     uint64_t voxCount = 0;
-    if (!r.pod(voxCount))
+    if (!r.pod(voxCount) || voxCount > uint64_t(r.n - r.off) / sizeof(VoxelRecord))
         return false;
     out.voxels.resize(size_t(voxCount));
     for (VoxelRecord& v : out.voxels) {

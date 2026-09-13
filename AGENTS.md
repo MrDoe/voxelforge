@@ -64,14 +64,16 @@
   never vanish), `VF_MICRO_DIST`
   (default 20 m micro cull), `VF_NO_GPU_CULL=1` disables the GPU per-surfel
   cull pre-pass (compute compaction + GPU-written indirect counts;
-  bit-exact), `VF_NO_OCCL=1` disables the Hi-Z occlusion prepass
-  (depth prepass + pyramid build + GPU cull; ~3 ms overhead at 720p;
-  saves fragments when objects occlude the background),
-  `VF_SPLAT_DIRECT`/`VF_NO_INDIRECT_BARRIER` legacy A/B paths.
+  bit-exact), `VF_NO_OCCL=1` disables the Hi-Z occlusion pyramid + GPU
+  occlusion cull (~3 ms overhead at 720p; saves fragments when objects
+  occlude the background). The depth prepass itself always runs: it is the
+  opaque/water depth-resolve reference the base and band passes test
+  against. `VF_SPLAT_DIRECT`/`VF_NO_INDIRECT_BARRIER` legacy A/B paths.
 - Splat kernel knobs: `VF_SPLAT_SIGMA` (Gaussian variance in normalized
   disk units, default 0.5), `VF_SPLAT_OPACITY` (centre alpha, default 0.9),
-  `VF_SPLAT_DEPTH_TOL` (depth-resolve band in quantized depth units,
-  default 0.002 ≈ 10 cm), `VF_SPLAT_EXTENT` (quad half-size), `VF_SPLAT_RADIUS`.
+  `VF_SPLAT_DEPTH_TOL` (depth-resolve band in NDC depth units, default
+  0.002 ≈ 10 cm; applied per frame as a dynamic rasterizer depth bias),
+  `VF_SPLAT_EXTENT` (quad half-size), `VF_SPLAT_RADIUS`.
 - Tile splat path (WIP, `VF_TILE=1`): compute-only pipeline
   `splat_tile_{bin,scan,base,render}.comp` — project+bin surfels into 16×16
   tiles via a (tile × entry) counts matrix, scan per-tile ranges
@@ -86,9 +88,9 @@
   chain. Perf NOT yet a win: 143 ms vs 57 ms forward geo at 720p hero
   (bin/fill 65 ms incl. two projection passes + contended atomics, render
   78 ms from full-tile per-pixel loops) — forward remains the default until
-  parity is proven per scene (hero/corner/overview/house/water). Fragments
-  quantize depth to 1e-5 units (both backends) so near-tie bands resolve
-  identically.
+  parity is proven per scene (hero/corner/overview/house/water). The tile
+  path quantizes depth to 1e-5 units internally; the forward resolve now
+  uses the fixed-function gl_Position depth (no gl_FragDepth writes).
 - GPU timestamp profiler: HUD "GPU ms" line + `VF_TRACE` log (`geo/post/fx/
   taa/tail`), 6 marks × 3 frame slots, readback after each slot's fence wait.
 - Chat backend: Ollama defaults or any OpenAI-compatible server via
@@ -160,11 +162,14 @@
   as instanced quads drawn back-to-front per chunk; fragment does ray/disk
   intersect + one pure 2D Gaussian kernel (`alpha = opacity·exp(-0.5·d2/σ²)`,
   centres fill via source-over accumulation — no opaque core, no rim step).
-  A depth-only prepass writes the nearest full-disk plane depth. An opaque
-  **base** draw (depth-compare EQUAL, no blend) then writes the nearest
-  fragment's colour with alpha 1 at every covered pixel, so the sky can
-  never bleed through low-alpha disk rims; a blended **band** draw biases
-  each fragment depth by `-VF_SPLAT_DEPTH_TOL` and LESS-tests against the
+  A depth-only prepass writes the nearest full-disk plane depth with the
+  fixed-function gl_Position depth (no `gl_FragDepth` writes anywhere, so
+  all passes keep early-Z and only front fragments shade — this is what
+  keeps close-up overdraw bounded). An opaque **base** draw (depth-compare
+  EQUAL, no blend) then writes the nearest fragment's colour with alpha 1
+  at every covered pixel, so the sky can never bleed through low-alpha disk
+  rims; a blended **band** draw applies `-VF_SPLAT_DEPTH_TOL` as a dynamic
+  rasterizer depth bias (`vkCmdSetDepthBias`) and LESS-tests against the
   prepass, blending only the front surface's Gaussian coverage over the
   base (same-chunk far surfaces can't source-over in draw order). Water
   tests the prepass depth directly. VS projects with honest `w = vz` (never

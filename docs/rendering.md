@@ -174,32 +174,40 @@ in `App::rebuildSurfels`, ~0.6 s for ~1.3 M surfels):
 **GPU** (`src/render/splat_pass.{hpp,cpp}`, `shaders/splat.{vert,frag}`):
 dynamic rendering into the same `m_hdr`/`m_gpos` targets (plus a
 `D24_UNORM_S8_UINT` depth image), so post/TAA/`--shot` work unchanged.
-Four pipelines sharing one layout (surfel SSBO + `uHeight` + `uObjVol` +
+Five pipelines sharing one layout (surfel SSBO + `uHeight` + `uObjVol` +
 16 B params UBO):
 1. sky fullscreen triangle (no depth) → `skyColor` + hitType 0;
 2. depth-only prepass (`PASS_MODE 3`), one `vkCmdDraw(4, n, 0, first)` per
    visible chunk: full disks write the nearest plane depth (a Hi-Z pyramid
    is built from it when occlusion culling is on);
 3. opaque base (`PASS_MODE 4`): one draw over all chunks, depth test EQUAL
-   against the prepass depth (unbiased `gl_FragDepth`), no blend — the
-   exact nearest fragment at every covered pixel writes opaque colour, so
-   the sky can never bleed through the band's low-alpha disk rims;
-4. opaque band (`PASS_MODE 1`): same draws, depth-tested with a
-   `-VF_SPLAT_DEPTH_TOL` shader bias (LESS), no depth write, blended —
-   the front surface's Gaussian coverage source-overs the base;
+   against the prepass depth (bit-exact fixed-function depth, no shader
+   write), no blend — the exact nearest fragment at every covered pixel
+   writes opaque colour, so the sky can never bleed through the band's
+   low-alpha disk rims. Early-Z drops every non-nearest fragment before
+   shading;
+4. opaque band (`PASS_MODE 1`): same draws, depth-tested with a dynamic
+   `-VF_SPLAT_DEPTH_TOL` rasterizer depth bias (`vkCmdSetDepthBias`, LESS),
+   no depth write, blended — the front surface's Gaussian coverage
+   source-overs the base. Early-Z drops fragments deeper than the tolerance
+   before shading;
 5. water surfels (blended, depth-tested against the prepass, no depth
    write, `hitType 2`).
 The resolve band keeps only fragments within `[nearest, nearest + tol]` of
 the prepass depth, so the front surface band accumulates while far surfaces
 inside the same chunk can no longer overdraw it in draw order (the old
-dark-speckle failure mode). Chunks still draw back-to-front (per-frame
-distance sort, ~100 us for 4096); within-chunk order among the resolved
-band is harmless because those surfels sit on the same surface, and the
-opaque base removes the residual rim translucency.
+dark-speckle failure mode). Because no pass writes `gl_FragDepth`, the
+hardware still early-Z-rejects fragments behind the front surface, so
+close-up overdraw stays bounded by the front band instead of every
+overlapping disk (measured 55 → 5.9 ms `geo` at a near-tree 640×360 view).
+Chunks still draw back-to-front (per-frame distance sort, ~100 us for
+4096); within-chunk order among the resolved band is harmless because those
+surfels sit on the same surface, and the opaque base removes the residual
+rim translucency.
 
-**Fragment**: exact ray/disk-plane intersect → per-fragment plane depth
-(quantized to 1e-5, written as `gl_FragDepth` by the prepass and the opaque
-resolve) → pure 2D Gaussian kernel
+**Fragment**: exact ray/disk-plane intersect → fixed-function per-fragment
+plane depth (from `gl_Position`, matching the prepass exactly; no
+`gl_FragDepth` anywhere) → pure 2D Gaussian kernel
 (`alpha = opacity·exp(−d2/(2σ²))`, defaults σ²=0.5, opacity=0.9; no opaque
 core, no rim step) for soft filled silhouettes → `shadeSurfel` (twin of
 `shadeTerrain` with baked sh/AO/bent + shared `applyFlora`) → fog → HDR +
@@ -211,8 +219,12 @@ neighbour's peak).
 **Cost drivers** (1080p hero, RTX 4090 Laptop): full per-fragment shadow/AO
 marches measured ~13 ms — hence the CPU bake. Since the alpha rework the
 opaque path is a depth prepass plus two passes over the same quads (opaque
-base + Gaussian band), replacing the old core/rim split; both backends
-remain within noise of each other.
+base + Gaussian band), replacing the old core/rim split; because neither
+pass writes `gl_FragDepth`, early-Z bounds the shaded fragments to the
+nearest surface + resolve band, so moving close to geometry no longer pays
+full overdraw for every overlapping disk twice (near-tree 640×360: `geo`
+55 → 5.9 ms; 1280×720: 113 → 10 ms). Both backends remain within noise of
+each other.
 
 **Camera handling**: the vertex shader projects with honest `w = vz` (no
 near-plane clamp — clamping smears behind-camera corners across the
@@ -227,7 +239,8 @@ shells render two-sided instead of flashing sky.
 
 **Tuning/debug**: `VF_SPLAT_SIGMA` (Gaussian variance, default 0.5),
 `VF_SPLAT_OPACITY` (centre alpha, default 0.9), `VF_SPLAT_DEPTH_TOL`
-(resolve band, default 0.002 ≈ 10 cm), `VF_SPLAT_EXTENT`,
+(resolve band, default 0.002 ≈ 10 cm; applied as a dynamic rasterizer depth
+bias), `VF_SPLAT_EXTENT`,
 `VF_SPLAT_RADIUS` (disk multiplier, also live via hotkeys `[`/`]` which
 drive the same uniform; 0.5–2.0, default 1.0),
 `VF_SPLAT_NOCULL`/`NOWATER`,

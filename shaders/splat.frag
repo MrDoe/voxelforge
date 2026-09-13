@@ -121,10 +121,11 @@ void main()
     if (PASS_MODE == 3) {
         // depth-only prepass: the nearest full-disk plane depth (no core
         // threshold) seeds both the Hi-Z occlusion pyramid and the water
-        // depth test. Same quantized depth the opaque pass would settle.
-        float fragDepth = 1.0 - exp(-t * 0.02);
-        fragDepth = floor(fragDepth * 100000.0 + 0.5) / 100000.0;
-        gl_FragDepth = fragDepth;
+        // depth test. The fixed-function depth from gl_Position is the
+        // surfel-plane depth at this pixel; both are written by the same
+        // hardware interpolation, so the base pass's EQUAL test stays
+        // bit-exact while early-Z rejects occluded fragments (no
+        // gl_FragDepth write).
         return;
     }
     // Debug views override alpha to 1.0 below, so skip the alpha discard
@@ -250,26 +251,26 @@ void main()
     }
 
     // Depth resolve: the PASS_MODE 3 prepass holds the nearest full-disk
-    // plane depth at this pixel. Bias this fragment toward the camera by the
-    // tolerance and test LESS against it, so only fragments within
-    // [nearest, nearest + tol] pass - the front surface band. Fragments
-    // farther behind (a second surface within a chunk, the shadowed side)
-    // are rejected instead of source-over-ing in draw order, which caused
-    // view-dependent dark speckle. No depth write: the prepass depth stays
-    // for the water test.
+    // plane depth at this pixel (fixed-function gl_Position depth, no
+    // shader write). The opaque band's LESS test uses a negative rasterizer
+    // depth bias (-VF_SPLAT_DEPTH_TOL, applied via vkCmdSetDepthBias), so
+    // only fragments within [nearest, nearest + tol] pass - the front
+    // surface band. Fragments farther behind (a second surface within a
+    // chunk, the shadowed side) are rejected by early-Z before shading
+    // instead of source-over-ing in draw order, which caused view-dependent
+    // dark speckle. No depth write: the prepass depth stays for the water
+    // test.
     //
     // The Gaussian band alone can leave accumulated alpha < 1 at disk rims
     // and grazing surfaces, letting the sky (the initial colour target)
     // bleed through as pale fringes. The PASS_MODE 4 base pass fixes that:
-    // it LESS-tests EXACT EQUALity against the prepass depth (unbiased
-    // fragDepthQ), so exactly the nearest fragment at every covered pixel
+    // it EQUAL-tests against the prepass depth (same hardware interpolation,
+    // bit-exact), so exactly the nearest fragment at every covered pixel
     // writes an OPAQUE (alpha 1, no blend) surface colour. The band then
     // softens that base; the sky can never show through a resolved surface.
-    float fragDepthQ = floor((1.0 - exp(-t * 0.02)) * 100000.0 + 0.5) / 100000.0;
-    if (PASS_MODE == 1)
-        gl_FragDepth = clamp(fragDepthQ - sp.uSplat2.z, 0.0, 1.0);
-    else if (PASS_MODE == 4)
-        gl_FragDepth = fragDepthQ;
+    // Neither pass writes gl_FragDepth, so both keep early-Z: only the
+    // nearest fragment (base) and the front surface band (band) shade
+    // instead of every overlapping disk fragment.
     // Band fragments contribute straight (non-premultiplied) Gaussian
     // colour + alpha (SRC_ALPHA / ONE_MINUS_SRC_ALPHA source-over); the base
     // fragment writes opaque colour; water stays premultiplied.
