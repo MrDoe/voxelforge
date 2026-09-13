@@ -1,9 +1,11 @@
 # Voxelforge documentation
 
-Voxelforge is a real-time dynamic voxel world rendered by a chunked sparse-voxel-octree
-(SVO) sphere tracer, where a local LLM edits the world at runtime through chat or MCP
-tool calls. Every piece of geometry lives in plain `.vxw` voxel-record files that are
-merged, signed-distance-transformed and synthesized into GPU octrees on the fly.
+Voxelforge is a real-time dynamic voxel world rendered primarily with Gaussian
+surfels rasterized from `.vxw` records, with a chunked sparse-voxel-octree (SVO)
+sphere tracer kept as the pixel reference (`--mode svo`). A local LLM edits the
+world at runtime through chat or MCP tool calls. Every piece of geometry lives in
+plain `.vxw` voxel-record files that are merged, signed-distance-transformed and
+synthesized into GPU octrees + surfels on the fly.
 
 ## Reading paths
 
@@ -14,6 +16,11 @@ merged, signed-distance-transformed and synthesized into GPU octrees on the fly.
 **I want to drive the world with AI**
 
 1. [AI editing](ai-editing.md) — chat backend config, MCP server protocol and tool reference
+
+**I want to see the renderers compared**
+
+1. [Renderer comparison](rendering-comparison.md) — surfels vs SVO side by side,
+   with screenshots, zooms and measured timings
 
 **I want to change the code**
 
@@ -31,6 +38,7 @@ merged, signed-distance-transformed and synthesized into GPU octrees on the fly.
 | [`architecture.md`](architecture.md) | contributors | data flow, per-module responsibilities, synthesis pipeline, hot-reload model, frame loop |
 | [`world-format.md`](world-format.md) | contributors | VXW v1 binary spec, `VoxelRecord`, manifest schema, layer merge semantics, `worldfile` API |
 | [`rendering.md`](rendering.md) | contributors | descriptor/bindings, `GpuWorld` handle encoding, brick packing, push block, textures, shading overview |
+| [`rendering-comparison.md`](rendering-comparison.md) | users, contributors | Gaussian surfels vs SVO: screenshot gallery, pixel zooms, measured timings, when to use which |
 | [`ai-editing.md`](ai-editing.md) | users, contributors | chat env vars, tool normalization, `EditableWorld` API, `vf_mcp` JSON-RPC reference |
 | [`tooling.md`](tooling.md) | users, contributors | full CLI/env reference (`voxelforge`, `vf_mcp`, `vf_slice`, `heightmap_gen`), `start.sh` |
 | [`testing.md`](testing.md) | contributors | test gates in order, suite breakdown, `visual_check` internals, debugging workflows |

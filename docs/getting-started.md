@@ -58,6 +58,9 @@ It also refuses to run without baked assets.
 | `RMB` + mouse | look |
 | wheel | movement speed (`Shift` boost / `Ctrl` slow) |
 | `Ctrl+LMB` | pick a voxel → becomes the bottom-center anchor for AI builds |
+| `F` | toggle the renderer: Gaussian surfels (default) ↔ SVO reference |
+| `N` | toggle TAA |
+| `[` / `]` | shrink / grow splat disks |
 | `ESC` | quit |
 
 Default camera spawns at `-16, 6.5, -14` looking at the riverside cabin;

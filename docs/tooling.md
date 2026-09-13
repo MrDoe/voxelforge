@@ -13,6 +13,7 @@ sun elevation 34° / azimuth 238°, animtime 0.
 | `--cam X Y Z TX TY TZ` | camera position + look-at target (all 6 required) |
 | `--sun ELEV AZIM` | sun direction in degrees (elevation, azimuth) |
 | `--animtime S` | fix the water/grass animation clock for reproducible shots |
+| `--mode splat\|svo` | render backend: Gaussian surfels (default) or the SVO reference raymarcher; `F` toggles it live |
 | `--probe X Y Z` | print field signed distance + material at a point and **exit before Vulkan init** — works without a GPU/window; reads the live layered world incl. ai_edits |
 | `--width N` / `--height N` | resolution for headless modes (offscreen render target) |
 | `--llm-url URL` / `--ollama-url URL` | chat backend override |

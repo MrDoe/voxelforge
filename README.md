@@ -13,9 +13,13 @@ them while running.
 
 ## Features
 
-- **Single render path**: compute-shader sphere tracing over a 16³ chunk grid
-  of per-chunk octrees with 8³ bricks (2 × uint32 per voxel: RGB + SDF,
-  alpha/refl/rough/material).
+- **Two render backends, one world**: primary Gaussian-surfel rasterization
+  (`--mode splat`, default) with the chunked sparse-voxel-octree sphere tracer
+  kept as the pixel reference (`--mode svo`; `F` toggles live). Records are
+  baked into 16³ chunks of per-chunk octrees with 8³ bricks (2 × uint32 per
+  voxel: RGB + SDF, alpha/refl/rough/material) and into 64 B surfels sharing
+  the same shading model — see the
+  [renderer comparison](docs/rendering-comparison.md).
 - **Records-only geometry** (`src/voxel/voxel_field.*`): terrain comes from
   per-column landscape records, objects from connected components flood-filled
   to solid volumes with a signed distance transform. No analytic scene code in
@@ -181,6 +185,7 @@ Full developer documentation lives in **[`docs/`](docs/index.md)**:
 | [`docs/architecture.md`](docs/architecture.md) | data flow, module tour, synthesis & hot-reload model |
 | [`docs/world-format.md`](docs/world-format.md) | VXW v1 binary spec, manifest schema, layer merge rules |
 | [`docs/rendering.md`](docs/rendering.md) | GPU contract: handles, brick packing, push block, textures |
+| [`docs/rendering-comparison.md`](docs/rendering-comparison.md) | surfels vs SVO side by side: screenshots, zooms, timings |
 | [`docs/ai-editing.md`](docs/ai-editing.md) | chat backend, tool normalization, MCP protocol reference |
 | [`docs/tooling.md`](docs/tooling.md) | full CLI/env reference, `vf_slice`, baker, `start.sh` |
 | [`docs/testing.md`](docs/testing.md) | test gates, suite breakdown, debug workflows |
