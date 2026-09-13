@@ -7,6 +7,14 @@ world at runtime through chat or MCP tool calls. Every piece of geometry lives i
 plain `.vxw` voxel-record files that are merged, signed-distance-transformed and
 synthesized into GPU octrees + surfels on the fly.
 
+| Gaussian surfels (`--mode splat`, default) | SVO raymarcher (`--mode svo`) |
+|---|---|
+| ![Gaussian-surfel rendering](images/spo.png) | ![SVO voxel rendering](images/voxel.png) |
+
+*Same world, same camera — `F` toggles the backend live. The
+[renderer comparison](rendering-comparison.md) has the full screenshot set,
+pixel-level zooms and measured timings.*
+
 ## Reading paths
 
 **I just want to run it**

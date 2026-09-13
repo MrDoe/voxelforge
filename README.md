@@ -1,25 +1,40 @@
 # Voxelforge
 
-A real-time **dynamic voxel world** rendered with a chunked sparse-voxel octree
-(SVO) sphere tracer — where a local AI can add, remove and shape voxel objects
-at runtime through chat or MCP tool calls, **without ever touching source code**.
+A real-time **dynamic voxel world** with two interchangeable render backends —
+primary Gaussian-surfel rasterization and a chunked sparse-voxel octree (SVO)
+sphere tracer kept as the pixel reference — where a local AI can add, remove
+and shape voxel objects at runtime through chat or MCP tool calls, **without
+ever touching source code**.
 
 Every piece of geometry — rolling terrain, the river, the log cabin, trees,
 rocks, fences, anything the AI builds — lives in plain `.vxw` voxel-record
-files. The renderer bakes those records into an SVO on the fly and hot-reloads
-them while running.
+files. The renderer bakes those records into GPU octrees and surfels on the fly
+and hot-reloads them while running.
 
-![image](docs/1788035427945.png)
+| Gaussian surfels (`--mode splat`, default) | SVO raymarcher (`--mode svo`, reference) |
+|---|---|
+| ![Gaussian-surfel rendering of the riverside cabin](docs/images/spo.png) | ![SVO voxel rendering of the same cabin](docs/images/voxel.png) |
+
+*Same world, same camera — only the geometry backend differs; `F` toggles it
+live. See the full [renderer comparison](docs/rendering-comparison.md) for
+side-by-side views, pixel-level zooms and measured timings.*
 
 ## Features
 
-- **Two render backends, one world**: primary Gaussian-surfel rasterization
-  (`--mode splat`, default) with the chunked sparse-voxel-octree sphere tracer
-  kept as the pixel reference (`--mode svo`; `F` toggles live). Records are
-  baked into 16³ chunks of per-chunk octrees with 8³ bricks (2 × uint32 per
-  voxel: RGB + SDF, alpha/refl/rough/material) and into 64 B surfels sharing
-  the same shading model — see the
-  [renderer comparison](docs/rendering-comparison.md).
+- **Gaussian-surfel rendering (primary backend, `--mode splat`, default)**: the
+  CPU bake (`src/voxel/surfelize.*`) extracts one 64 B 2D Gaussian disk per
+  outer surface cell — position, normal, baked sun shadow, bent-normal AO,
+  material — plus deterministic micro-detail children that turn texture texels
+  into real geometry. Instanced quads rasterize through a depth prepass +
+  opaque base + Gaussian band, so surfaces stay watertight while silhouettes
+  are soft and anti-aliased; frustum culling, GPU compaction, a Hi-Z occlusion
+  pyramid and baked terrain LOD rings keep object-heavy and close-up views
+  fast (`[`/`]` tunes disk size live). Same shading model as the reference —
+  see the [renderer comparison](docs/rendering-comparison.md).
+- **SVO raymarcher (pixel reference, `--mode svo`)**: chunked sparse-voxel
+  octree sphere tracing (16³ chunks, 8³ bricks, 2 × uint32 per voxel:
+  RGB + SDF, alpha/refl/rough/material) with exact per-pixel shadows and AO.
+  Used to validate shading and A/B every change; `F` toggles backends live.
 - **Records-only geometry** (`src/voxel/voxel_field.*`): terrain comes from
   per-column landscape records, objects from connected components flood-filled
   to solid volumes with a signed distance transform. No analytic scene code in
@@ -168,6 +183,8 @@ src/
 tools/heightmap_gen.cpp         offline asset baker (terrain + authored layers)
 tools/scene_slice.cpp           ASCII cross-sections of the baked field
 ```
+
+![Architecture: the LLM writes ai_edits.vxw / world.json, LayeredWorld + VoxelField load them and synthesize the GPU world](docs/1788035427945.png)
 
 Shader truth lives in `shaders/svo_raymarch.comp`: terrain is sampled from a
 records-derived `rg32f` height texture (top Y + material), objects from bricks;

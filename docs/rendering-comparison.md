@@ -9,13 +9,13 @@ directly comparable frame for frame.
 
 This page shows what actually differs on screen and explains why.
 
-<p align="center">
-  <img src="images/comparison/hero_splat.png" width="49%" alt="Gaussian-surfel rendering of the riverside valley">
-  <img src="images/comparison/hero_svo.png" width="49%" alt="SVO raymarched rendering of the same valley">
-</p>
+| Gaussian surfels (`--mode splat`, default) | SVO raymarcher (`--mode svo`, reference) |
+|---|---|
+| ![Gaussian-surfel rendering of the riverside cabin, app HUD visible](images/spo.png) | ![SVO voxel rendering of the same cabin, app HUD visible](images/voxel.png) |
 
-*Left: Gaussian surfels (`--mode splat`). Right: SVO raymarcher (`--mode svo`).
-Same camera, sun and world layers — only the geometry pass differs.*
+*Interactive captures (1600×932, HUD visible), same world and camera — only the
+render backend differs; `F` toggles it live. The headless 960×540 gallery
+below isolates the same difference in five reproducible views.*
 
 ## At a glance
 
