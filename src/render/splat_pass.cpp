@@ -1,4 +1,5 @@
 #include "render/splat_pass.hpp"
+#include "voxel/chunk_index.hpp"
 #include <core/log.hpp>
 #include <algorithm>
 #include <cstdio>
@@ -41,7 +42,7 @@ bool SplatPass::init(const Context& ctx)
     m_ctx = &ctx;
     VkDevice dev = ctx.device();
 
-    VkDescriptorSetLayoutBinding b[13] = {};
+    VkDescriptorSetLayoutBinding b[14] = {};
     b[0] = { 0, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1,
              VK_SHADER_STAGE_VERTEX_BIT, nullptr };
     b[1] = { 1, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 1,
@@ -70,8 +71,10 @@ bool SplatPass::init(const Context& ctx)
               VK_SHADER_STAGE_COMPUTE_BIT, nullptr }; // OcclParams
     b[12] = { 12, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1,
               VK_SHADER_STAGE_COMPUTE_BIT, nullptr }; // uDepth (Hi-Z mip0)
+    b[13] = { 13, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, 1,
+              VK_SHADER_STAGE_FRAGMENT_BIT, nullptr }; // brush hover preview
     VkDescriptorSetLayoutCreateInfo li { VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO };
-    li.bindingCount = 13;
+    li.bindingCount = 14;
     li.pBindings = b;
     if (vkCreateDescriptorSetLayout(dev, &li, nullptr, &m_setLayout) != VK_SUCCESS)
         return false;
@@ -93,7 +96,7 @@ bool SplatPass::init(const Context& ctx)
 
     VkDescriptorPoolSize sizes[4] = { { VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 4 },
                                           { VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 4 },
-                                          { VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, 3 },
+                                          { VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, 4 },
                                           { VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 2 } };
     VkDescriptorPoolCreateInfo pi { VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO };
     pi.maxSets = 1;
@@ -122,6 +125,16 @@ bool SplatPass::init(const Context& ctx)
     VkWriteDescriptorSet w { VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, nullptr, m_set, 3, 0, 1,
                              VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, nullptr, &pi3, nullptr };
     vkUpdateDescriptorSets(dev, 1, &w, 0, nullptr);
+    // brush hover preview UBO (fragment tint of the affected splats)
+    m_brushBuf = makeBuffer(ctx, sizeof(m_brush), VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT,
+                            VMA_MEMORY_USAGE_AUTO_PREFER_HOST, true);
+    if (!m_brushBuf.buf || !m_brushBuf.mapped)
+        return false;
+    memcpy(m_brushBuf.mapped, m_brush, sizeof(m_brush));
+    VkDescriptorBufferInfo brushInfo { m_brushBuf.buf, 0, VK_WHOLE_SIZE };
+    VkWriteDescriptorSet wb { VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, nullptr, m_set, 13, 0, 1,
+                              VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, nullptr, &brushInfo, nullptr };
+    vkUpdateDescriptorSets(dev, 1, &wb, 0, nullptr);
     // occlusion parameters (occlEnabled + hizNumMips)
     m_occlBuf = makeBuffer(ctx, 2 * sizeof(int),
                               VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT,
@@ -548,6 +561,22 @@ bool SplatPass::createPipelines(VkFormat hdrFormat)
     return ok;
 }
 
+void SplatPass::bindSurfelBuffer()
+{
+    VkDescriptorBufferInfo bi0 { m_surfelBuf, 0, VK_WHOLE_SIZE };
+    VkWriteDescriptorSet w { VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, nullptr, m_set, 0, 0, 1,
+                             VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, nullptr, &bi0, nullptr };
+    vkUpdateDescriptorSets(m_ctx->device(), 1, &w, 0, nullptr);
+    if (m_tileReady) {
+        VkDescriptorBufferInfo tbi { m_surfelBuf, 0, VK_WHOLE_SIZE };
+        VkWriteDescriptorSet tw { VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, nullptr,
+                                  m_tileSet, 0, 0, 1,
+                                  VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, nullptr, &tbi,
+                                  nullptr };
+        vkUpdateDescriptorSets(m_ctx->device(), 1, &tw, 0, nullptr);
+    }
+}
+
 void SplatPass::setSurfels(const void* data, size_t bytes, size_t count,
                            const std::vector<uint32_t>& chunkRange, uint32_t waterStart,
                            const std::vector<uint32_t>& waterChunkRange,
@@ -562,10 +591,111 @@ void SplatPass::setSurfels(const void* data, size_t bytes, size_t count,
     }
     m_count = 0;
     m_waterStart = 0;
-    m_chunkRange.clear();
+    m_chunkStart.clear();
+    m_chunkCount.clear();
+    m_chunkCap.clear();
+    m_microStart.clear();
+    m_waterChunkRange.clear();
+    m_lod1Range.clear();
+    m_lod2Range.clear();
+    m_lod1Valid.clear();
+    m_lod2Valid.clear();
+    m_opaqueCap = 0;
+    m_opaqueHigh = 0;
+    m_bufSlots = 0;
     static const uint32_t dummy = 0;
-    const void* src = (data && bytes) ? data : &dummy;
-    size_t up = (data && bytes) ? bytes : sizeof(dummy);
+    const bool haveData = data && bytes;
+    const uint32_t kChunks = 16 * 16 * 16;
+    const size_t kSurfelBytes = 64; // Surfel = 4 x vec4 (must match surfelize.hpp)
+    const void* src = haveData ? data : &dummy;
+    size_t up = haveData ? bytes : sizeof(dummy);
+    std::vector<uint8_t> repack;
+
+    if (haveData && chunkRange.size() == kChunks + 1) {
+        // --- paged repack: per-chunk slots with reserved capacity ----------
+        const uint32_t baseMicroTotal =
+            std::min<uint32_t>(chunkRange[kChunks], uint32_t(count));
+        const uint32_t waterStartC = std::min<uint32_t>(waterStart, uint32_t(count));
+        // VF_SPLAT_NOPAD=1 lays chunks out contiguously (A/B for the paged
+        // patch path): same draws, no reserved capacity.
+        const bool pad = getenv("VF_SPLAT_NOPAD") == nullptr;
+        m_chunkStart.assign(kChunks, 0);
+        m_chunkCount.assign(kChunks, 0);
+        m_chunkCap.assign(kChunks, 0);
+        uint32_t cursor = 0;
+        for (uint32_t c = 0; c < kChunks; ++c) {
+            const uint32_t cnt = chunkRange[c + 1] >= chunkRange[c]
+                                     ? chunkRange[c + 1] - chunkRange[c]
+                                     : 0;
+            const uint32_t cap = cnt + (pad ? std::max<uint32_t>(64, cnt / 8) : 0);
+            m_chunkStart[c] = cursor;
+            m_chunkCount[c] = cnt;
+            m_chunkCap[c] = cap;
+            cursor += cap;
+        }
+        m_opaqueCap = cursor + (pad ? std::max<uint32_t>(65536u, uint32_t(count) / 16) : 0);
+        m_opaqueHigh = cursor;
+        const uint32_t delta = m_opaqueCap - baseMicroTotal;
+        const size_t slots = size_t(count) + delta;
+        repack.resize(slots * kSurfelBytes);
+        std::memset(repack.data(), 0, repack.size());
+        const uint8_t* srcBytes = static_cast<const uint8_t*>(src);
+        for (uint32_t c = 0; c < kChunks; ++c) {
+            const uint32_t cnt = m_chunkCount[c];
+            if (!cnt)
+                continue;
+            std::memcpy(repack.data() + size_t(m_chunkStart[c]) * kSurfelBytes,
+                        srcBytes + size_t(chunkRange[c]) * kSurfelBytes,
+                        size_t(cnt) * kSurfelBytes);
+        }
+        // LOD ring + water tail moves by `delta` (it stays contiguous after
+        // the padded opaque region)
+        if (count > baseMicroTotal)
+            std::memcpy(repack.data() + (size_t(baseMicroTotal) + delta) * kSurfelBytes,
+                        srcBytes + size_t(baseMicroTotal) * kSurfelBytes,
+                        size_t(count - baseMicroTotal) * kSurfelBytes);
+        src = repack.data();
+        up = repack.size();
+        m_bufSlots = uint32_t(slots);
+        m_count = slots;
+        m_waterStart = waterStartC + delta;
+        if (microStart.size() == kChunks + 1) {
+            m_microStart.resize(kChunks + 1);
+            for (uint32_t c = 0; c < kChunks; ++c) {
+                const uint32_t baseCnt =
+                    microStart[c] > chunkRange[c] ? microStart[c] - chunkRange[c] : 0;
+                m_microStart[c] = m_chunkStart[c] + std::min(baseCnt, m_chunkCount[c]);
+            }
+            m_microStart[kChunks] = uint32_t(slots);
+        }
+        auto shiftRange = [&](const std::vector<uint32_t>& in,
+                              std::vector<uint32_t>& out) {
+            if (in.size() != kChunks + 1) {
+                out.clear();
+                return;
+            }
+            out.resize(kChunks + 1);
+            for (size_t i = 0; i <= kChunks; ++i)
+                out[i] = in[i] + delta;
+        };
+        shiftRange(waterChunkRange, m_waterChunkRange);
+        shiftRange(lod1Range, m_lod1Range);
+        shiftRange(lod2Range, m_lod2Range);
+        m_lod1Valid.assign(m_lod1Range.empty() ? 0 : kChunks, 1);
+        m_lod2Valid.assign(m_lod2Range.empty() ? 0 : kChunks, 1);
+    } else if (haveData) {
+        // legacy: no chunking info, keep the flat stream as-is
+        m_waterStart = waterStart;
+        m_count = count;
+        m_bufSlots = uint32_t(up / kSurfelBytes);
+        m_microStart = microStart;
+        m_waterChunkRange = waterChunkRange;
+        m_lod1Range = lod1Range;
+        m_lod2Range = lod2Range;
+        m_lod1Valid.assign(lod1Range.size() == kChunks + 1 ? kChunks : 0, 1);
+        m_lod2Valid.assign(lod2Range.size() == kChunks + 1 ? kChunks : 0, 1);
+    }
+
     Buffer staging = makeBuffer(*m_ctx, up, VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
                                 VMA_MEMORY_USAGE_AUTO_PREFER_HOST, true);
     if (!staging.buf || !src)
@@ -587,18 +717,7 @@ void SplatPass::setSurfels(const void* data, size_t bytes, size_t count,
     destroyBuffer(*m_ctx, staging);
     if (!ok)
         return;
-    VkDescriptorBufferInfo bi0 { m_surfelBuf, 0, VK_WHOLE_SIZE };
-    VkWriteDescriptorSet w { VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, nullptr, m_set, 0, 0, 1,
-                             VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, nullptr, &bi0, nullptr };
-    vkUpdateDescriptorSets(m_ctx->device(), 1, &w, 0, nullptr);
-    if (m_tileReady) {
-        VkDescriptorBufferInfo tbi { m_surfelBuf, 0, VK_WHOLE_SIZE };
-        VkWriteDescriptorSet tw { VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, nullptr,
-                                  m_tileSet, 0, 0, 1,
-                                  VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, nullptr, &tbi,
-                                  nullptr };
-        vkUpdateDescriptorSets(m_ctx->device(), 1, &tw, 0, nullptr);
-    }
+    bindSurfelBuffer();
     // compaction indirection: identity (slot == surfel index). The GPU cull
     // pre-pass rewrites each entry's range per frame; with culling disabled
     // the identity keeps the VS path equivalent to the direct index.
@@ -647,21 +766,156 @@ void SplatPass::setSurfels(const void* data, size_t bytes, size_t count,
     wcc[3] = { VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, nullptr, m_set, 11, 0, 1,
                  VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, nullptr, &ocInfo, nullptr };
     vkUpdateDescriptorSets(m_ctx->device(), 4, wcc, 0, nullptr);
-    m_count = (data && bytes) ? count : 0;
-    m_waterStart = (data && bytes) ? waterStart : 0;
-    m_chunkRange = chunkRange;
-    m_waterChunkRange = ((data && bytes) && waterChunkRange.size() == 16 * 16 * 16 + 1)
-                            ? waterChunkRange
-                            : std::vector<uint32_t>();
-    m_microStart = ((data && bytes) && microStart.size() == 16 * 16 * 16 + 1)
-                       ? microStart
-                       : std::vector<uint32_t>();
-    m_lod1Range = ((data && bytes) && lod1Range.size() == 16 * 16 * 16 + 1)
-                      ? lod1Range
-                      : std::vector<uint32_t>();
-    m_lod2Range = ((data && bytes) && lod2Range.size() == 16 * 16 * 16 + 1)
-                      ? lod2Range
-                      : std::vector<uint32_t>();
+}
+
+uint32_t SplatPass::readChunkSurfels(uint32_t chunk, std::vector<uint8_t>& out)
+{
+    constexpr size_t kSurfelBytes = 64; // Surfel = 4 x vec4
+    out.clear();
+    if (!m_surfelBuf || chunk >= m_chunkStart.size() || m_count == 0)
+        return 0;
+    uint32_t start = m_chunkStart[chunk];
+    uint32_t end = start + m_chunkCount[chunk];
+    if (m_microStart.size() == 16 * 16 * 16 + 1)
+        end = std::min(end, m_microStart[chunk]); // base run only
+    if (end <= start)
+        return 0;
+    const size_t bytes = size_t(end - start) * kSurfelBytes;
+    vkDeviceWaitIdle(m_ctx->device());
+    Buffer staging = makeBuffer(*m_ctx, bytes,
+                                VK_BUFFER_USAGE_TRANSFER_DST_BIT,
+                                VMA_MEMORY_USAGE_AUTO_PREFER_HOST, true);
+    if (!staging.buf || !staging.mapped)
+        return 0;
+    const bool ok = m_ctx->immediateSubmit([&](VkCommandBuffer cmd) {
+        VkBufferCopy c { size_t(start) * kSurfelBytes, 0, bytes };
+        vkCmdCopyBuffer(cmd, m_surfelBuf, staging.buf, 1, &c);
+    });
+    if (ok) {
+        out.resize(bytes);
+        memcpy(out.data(), staging.mapped, bytes);
+    }
+    destroyBuffer(*m_ctx, staging);
+    return ok ? end - start : 0;
+}
+
+bool SplatPass::growOpaque(uint32_t minExtra){
+    if (!m_surfelBuf)
+        return false;
+    const size_t kSurfelBytes = 64; // Surfel = 4 x vec4
+    const uint32_t extra =
+        std::max<uint32_t>(std::max<uint32_t>(m_opaqueCap / 2, 4096u), minExtra);
+    const uint32_t tailSlots = m_bufSlots - m_opaqueCap;
+    const size_t newBytes = size_t(m_bufSlots + extra) * kSurfelBytes;
+    VkBufferCreateInfo bi { VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO };
+    bi.size = newBytes;
+    bi.usage = VK_BUFFER_USAGE_TRANSFER_DST_BIT | VK_BUFFER_USAGE_TRANSFER_SRC_BIT |
+               VK_BUFFER_USAGE_STORAGE_BUFFER_BIT;
+    VmaAllocationCreateInfo ai {};
+    ai.usage = VMA_MEMORY_USAGE_AUTO_PREFER_DEVICE;
+    VkBuffer nb = VK_NULL_HANDLE;
+    VmaAllocation na = VK_NULL_HANDLE;
+    if (vmaCreateBuffer(m_ctx->allocator(), &bi, &ai, &nb, &na, nullptr) != VK_SUCCESS)
+        return false;
+    const VkBuffer old = m_surfelBuf;
+    const VmaAllocation oa = m_surfelAlloc;
+    const bool ok = m_ctx->immediateSubmit([&](VkCommandBuffer cmd) {
+        VkBufferCopy head { 0, 0, size_t(m_opaqueCap) * kSurfelBytes };
+        vkCmdCopyBuffer(cmd, old, nb, 1, &head);
+        if (tailSlots) {
+            VkBufferCopy tail { size_t(m_opaqueCap) * kSurfelBytes,
+                                size_t(m_opaqueCap + extra) * kSurfelBytes,
+                                size_t(tailSlots) * kSurfelBytes };
+            vkCmdCopyBuffer(cmd, old, nb, 1, &tail);
+        }
+    });
+    if (!ok) {
+        vmaDestroyBuffer(m_ctx->allocator(), nb, na);
+        return false;
+    }
+    vmaDestroyBuffer(m_ctx->allocator(), old, oa);
+    m_surfelBuf = nb;
+    m_surfelAlloc = na;
+    // the tail moved by `extra`; the opaque free space grew in between
+    auto shift = [&](std::vector<uint32_t>& v) {
+        for (uint32_t& x : v)
+            x += extra;
+    };
+    shift(m_waterChunkRange);
+    shift(m_lod1Range);
+    shift(m_lod2Range);
+    m_waterStart += extra;
+    m_opaqueCap += extra;
+    m_bufSlots += extra;
+    m_count += extra;
+    bindSurfelBuffer();
+    return true;
+}
+
+void SplatPass::patchChunkSurfels(uint32_t chunk, const void* data, size_t bytes,
+                                  size_t count)
+{
+    const size_t kSurfelBytes = 64;
+    if (!m_surfelBuf || !data || bytes != count * kSurfelBytes ||
+        chunk >= m_chunkStart.size())
+        return;
+    vkDeviceWaitIdle(m_ctx->device()); // no in-flight frame may read the buffer
+    uint32_t base = m_chunkStart[chunk];
+    uint32_t cap = m_chunkCap[chunk];
+    const bool relocate = count > cap;
+    if (relocate) {
+        const uint32_t newCap = count + std::max<uint32_t>(64, count / 8);
+        if (m_opaqueHigh + newCap > m_opaqueCap) {
+            if (!growOpaque(m_opaqueHigh + newCap - m_opaqueCap))
+                return;
+        }
+        base = m_opaqueHigh;
+        m_opaqueHigh += newCap;
+        cap = newCap;
+        m_chunkStart[chunk] = base;
+        m_chunkCap[chunk] = newCap;
+    }
+    if (getenv("VF_TRACE"))
+        spdlog::info("splat patch chunk {}: {} surfels cap {} base {} {} (slots {} "
+                     "compact {})",
+                     chunk, count, cap, base, relocate ? "(relocated)" : "",
+                     m_bufSlots, m_compactBytes / 4);
+    Buffer staging = makeBuffer(*m_ctx, bytes, VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
+                                VMA_MEMORY_USAGE_AUTO_PREFER_HOST, true);
+    if (!staging.buf || !staging.mapped)
+        return;
+    memcpy(staging.mapped, data, bytes);
+    const bool ok = m_ctx->immediateSubmit([&](VkCommandBuffer cmd) {
+        VkBufferCopy c { 0, size_t(base) * kSurfelBytes, bytes };
+        vkCmdCopyBuffer(cmd, staging.buf, m_surfelBuf, 1, &c);
+    });
+    destroyBuffer(*m_ctx, staging);
+    if (!ok)
+        return;
+    // keep the identity compaction entries fresh for the patched slots (the
+    // per-frame cull pass rewrites them for drawn ranges anyway)
+    Buffer ids = makeBuffer(*m_ctx, count * sizeof(uint32_t),
+                            VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
+                            VMA_MEMORY_USAGE_AUTO_PREFER_HOST, true);
+    if (ids.buf && ids.mapped) {
+        auto* p = static_cast<uint32_t*>(ids.mapped);
+        for (uint32_t i = 0; i < count; ++i)
+            p[i] = base + i;
+        m_ctx->immediateSubmit([&](VkCommandBuffer cmd) {
+            VkBufferCopy c { 0, size_t(base) * sizeof(uint32_t),
+                             count * sizeof(uint32_t) };
+            vkCmdCopyBuffer(cmd, ids.buf, m_compactBuf.buf, 1, &c);
+        });
+    }
+    destroyBuffer(*m_ctx, ids);
+    m_chunkCount[chunk] = uint32_t(count);
+    // a live-patched chunk has no regenerated micro tail or LOD ring yet
+    if (m_microStart.size() == 16 * 16 * 16 + 1)
+        m_microStart[chunk] = base + uint32_t(count);
+    if (m_lod1Valid.size() == 16 * 16 * 16)
+        m_lod1Valid[chunk] = 0;
+    if (m_lod2Valid.size() == 16 * 16 * 16)
+        m_lod2Valid[chunk] = 0;
 }
 
 bool SplatPass::createCullPipeline()
@@ -1184,8 +1438,9 @@ void SplatPass::frustumPlanes(const RaymarchPush& push, glm::vec4 planes[6]) con
 
 bool SplatPass::chunkVisible(const glm::vec4 planes[6], uint32_t chunk) const
 {
-    // chunk grid: 16^3 over [-51.2, +51.2], index (cx*16+cy)*16+cz
-    const uint32_t cx = chunk / 256, cy = (chunk / 16) % 16, cz = chunk % 16;
+    // chunk grid: 16^3 over [-51.2, +51.2], z-major (see chunk_index.hpp)
+    int cx, cy, cz;
+    vf::voxel::chunkCoordsOf(int(chunk), cx, cy, cz);
     const float cs = 102.4f / 16.0f;
     const glm::vec3 mn(-51.2f + cx * cs, -51.2f + cy * cs, -51.2f + cz * cs);
     const glm::vec3 mx = mn + glm::vec3(cs);
@@ -1213,7 +1468,7 @@ void SplatPass::computeDraws(const RaymarchPush& push)
         m_waterStart > 0 ? std::min(m_waterStart, uint32_t(m_count)) : uint32_t(m_count);
     if (opaqueEnd == 0)
         return;
-    if (m_chunkRange.size() != 16 * 16 * 16 + 1) {
+    if (m_chunkStart.size() != 16 * 16 * 16) {
         // no chunking info (should not happen): draw everything opaque
         m_cpuDraws.push_back({ 4, opaqueEnd, 0, 0 });
         return;
@@ -1241,10 +1496,10 @@ void SplatPass::computeDraws(const RaymarchPush& push)
         lod1Dist = float(atof(e));
     if (const char* e = getenv("VF_LOD2"))
         lod2Dist = float(atof(e));
-    const bool hasLod1 =
-        m_lod1Range.size() == 16 * 16 * 16 + 1 && lod1Dist > 0.0f;
-    const bool hasLod2 =
-        m_lod2Range.size() == 16 * 16 * 16 + 1 && lod2Dist > 0.0f;
+    const bool hasLod1 = m_lod1Range.size() == 16 * 16 * 16 + 1 &&
+                         m_lod1Valid.size() == 16 * 16 * 16 && lod1Dist > 0.0f;
+    const bool hasLod2 = m_lod2Range.size() == 16 * 16 * 16 + 1 &&
+                         m_lod2Valid.size() == 16 * 16 * 16 && lod2Dist > 0.0f;
     // Micro-detail cull distance: micro disks (0.04-0.09 m) are sub-pixel
     // beyond ~20 m (1-2 px at 720p) and hide inside their base footprint, so
     // distant chunks draw base only. Measured cost of 20-40 m micros:
@@ -1256,15 +1511,17 @@ void SplatPass::computeDraws(const RaymarchPush& push)
     const bool hasMicroSplit = m_microStart.size() == 16 * 16 * 16 + 1;
     const float cs = 102.4f / 16.0f;
     for (uint32_t c = 0; c < 16 * 16 * 16; ++c) {
-        uint32_t first = m_chunkRange[c];
-        uint32_t last = m_chunkRange[c + 1];
+        const uint32_t first = m_chunkStart[c];
+        uint32_t last = first + m_chunkCount[c];
         if (last > opaqueEnd)
             last = opaqueEnd;
         if (last <= first)
             continue;
         if (cull && !chunkVisible(planes, c))
             continue;
-        const uint32_t cx = c / 256, cy = (c / 16) % 16, cz = c % 16;
+        int ccx, ccy, ccz;
+        vf::voxel::chunkCoordsOf(int(c), ccx, ccy, ccz);
+        const uint32_t cx = uint32_t(ccx), cy = uint32_t(ccy), cz = uint32_t(ccz);
         const glm::vec3 ctr(-51.2f + (float(cx) + 0.5f) * 6.4f,
                             -51.2f + (float(cy) + 0.5f) * 6.4f,
                             -51.2f + (float(cz) + 0.5f) * 6.4f);
@@ -1289,27 +1546,25 @@ void SplatPass::computeDraws(const RaymarchPush& push)
         // surfels ride along unmerged inside the ring (trees must never
         // vanish). The chunk's micro tail still applies on top, gated by
         // the same micro distance as base chunks.
-        if (hasLod2 && nearDist >= lod2Dist &&
+        if (hasLod2 && m_lod2Valid[c] && nearDist >= lod2Dist &&
             m_lod2Range[c + 1] > m_lod2Range[c]) {
             draws.push_back({ dist2, m_lod2Range[c],
                               m_lod2Range[c + 1] - m_lod2Range[c] });
             if (hasMicroSplit && (microDist2 <= 0.0f || dist2 < microDist2)) {
-                const uint32_t mf = std::min(m_microStart[c], opaqueEnd);
-                const uint32_t ml = std::min(m_chunkRange[c + 1], opaqueEnd);
-                if (ml > mf)
-                    draws.push_back({ dist2, mf, ml - mf });
+                const uint32_t mf = std::min(m_microStart[c], last);
+                if (last > mf)
+                    draws.push_back({ dist2, mf, last - mf });
             }
             continue;
         }
-        if (hasLod1 && nearDist >= lod1Dist &&
+        if (hasLod1 && m_lod1Valid[c] && nearDist >= lod1Dist &&
             m_lod1Range[c + 1] > m_lod1Range[c]) {
             draws.push_back({ dist2, m_lod1Range[c],
                               m_lod1Range[c + 1] - m_lod1Range[c] });
             if (hasMicroSplit && (microDist2 <= 0.0f || dist2 < microDist2)) {
-                const uint32_t mf = std::min(m_microStart[c], opaqueEnd);
-                const uint32_t ml = std::min(m_chunkRange[c + 1], opaqueEnd);
-                if (ml > mf)
-                    draws.push_back({ dist2, mf, ml - mf });
+                const uint32_t mf = std::min(m_microStart[c], last);
+                if (last > mf)
+                    draws.push_back({ dist2, mf, last - mf });
             }
             continue;
         }
@@ -1399,6 +1654,10 @@ void SplatPass::record(VkCommandBuffer cmd, const RaymarchPush& push, VkExtent2D
                                glm::vec4(m_radiusScale, opacity, depthTol, 0.0f) };
         memcpy(m_paramsBuf.mapped, words, sizeof(words));
     }
+    // brush hover preview feed (fragment tint of the splats the edit brush
+    // would affect; strength 0 keeps it off)
+    if (m_brushBuf.mapped)
+        memcpy(m_brushBuf.mapped, m_brush, sizeof(m_brush));
 
     // GPU-driven cull pre-pass (before rendering scope: compute may not run
     // inside vkCmdBeginRendering). Compacts every entry to its
@@ -1819,6 +2078,8 @@ void SplatPass::destroy()
         vmaDestroyBuffer(m_ctx->allocator(), m_surfelBuf, m_surfelAlloc);
     if (m_paramsBuf.buf)
         destroyBuffer(*m_ctx, m_paramsBuf);
+    if (m_brushBuf.buf)
+        destroyBuffer(*m_ctx, m_brushBuf);
     for (auto& c : m_drawCmds)
         if (c.buf)
             destroyBuffer(*m_ctx, c);

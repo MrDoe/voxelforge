@@ -479,4 +479,38 @@ std::vector<VoxelRecord> EditableWorld::makeDome(glm::ivec3 anchor, glm::vec3 ax
     return res;
 }
 
+std::vector<VoxelRecord> EditableWorld::makeSphere(glm::ivec3 anchor, float radiusM,
+                                                   uint8_t mat) const
+{
+    radiusM = std::max(radiusM, VOXEL * 0.5f);
+    const glm::vec3 c = voxelCenter(anchor);
+    const int N = int(WORLD / VOXEL);
+    auto toCell = [&](float w) { return int(std::floor((w + 0.5f * WORLD) / VOXEL)); };
+    const int x0 = std::max(0, toCell(c.x - radiusM)), x1 = std::min(N - 1, toCell(c.x + radiusM));
+    const int y0 = std::max(0, toCell(c.y - radiusM)), y1 = std::min(N - 1, toCell(c.y + radiusM));
+    const int z0 = std::max(0, toCell(c.z - radiusM)), z1 = std::min(N - 1, toCell(c.z + radiusM));
+
+    std::vector<VoxelRecord> res;
+    const float r2 = radiusM * radiusM;
+    for (int z = z0; z <= z1; ++z)
+        for (int y = y0; y <= y1; ++y)
+            for (int x = x0; x <= x1; ++x) {
+                const glm::vec3 p = voxelCenter(glm::ivec3(x, y, z));
+                const glm::vec3 d = p - c;
+                if (glm::dot(d, d) > r2)
+                    continue;
+                VoxelRecord rec;
+                rec.x = uint16_t(x); rec.y = uint16_t(y); rec.z = uint16_t(z);
+                const glm::vec3& col = kPalette[std::min(int(mat), 16)];
+                const glm::vec2& rr = kMaterialReflection[std::min(int(mat), 16)];
+                rec.r = uint8_t(col.r * 255.f); rec.g = uint8_t(col.g * 255.f); rec.b = uint8_t(col.b * 255.f);
+                rec.a = 255;
+                rec.reflectivity = uint8_t(rr.x);
+                rec.roughness = uint8_t(rr.y);
+                rec.materialId = mat;
+                res.push_back(rec);
+            }
+    return res;
+}
+
 }

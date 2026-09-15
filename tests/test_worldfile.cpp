@@ -76,6 +76,56 @@ TEST_CASE("worldfile roundtrip preserves all data")
     std::remove(path.c_str());
 }
 
+TEST_CASE("worldfile v2 sections: store overlay round trip + opaque preservation")
+{
+    WorldFileData src = sampleData();
+    // one overlay section with arbitrary opaque bytes
+    Section overlay;
+    overlay.type = worldfile::kSectionStoreChunks;
+    for (uint8_t i = 0; i < 64; ++i)
+        overlay.data.push_back(uint8_t(i * 7 + 3));
+    src.sections.push_back(overlay);
+
+    std::string path = tmpPath();
+    REQUIRE(worldfile::write(path, src));
+
+    // v2 header round trip: records + legacy arrays + the opaque section
+    WorldFileData out;
+    REQUIRE(worldfile::read(path, out));
+    CHECK(out.chunkGrid == src.chunkGrid);
+    CHECK(out.handles == src.handles);
+    CHECK(out.bricks == src.bricks);
+    REQUIRE(out.voxels.size() == src.voxels.size());
+    CHECK(out.voxels[1].materialId == 1);
+    REQUIRE(out.sections.size() == 1);
+    CHECK(out.sections[0].type == worldfile::kSectionStoreChunks);
+    CHECK(out.sections[0].data == overlay.data);
+
+    // a read-modify-write preserves the opaque section (forward compat)
+    WorldFileData again = out;
+    REQUIRE(worldfile::write(path, again));
+    WorldFileData out2;
+    REQUIRE(worldfile::read(path, out2));
+    REQUIRE(out2.sections.size() == 1);
+    CHECK(out2.sections[0].data == overlay.data);
+
+    // CRC still guards v2 payloads
+    {
+        std::FILE* f = std::fopen(path.c_str(), "r+b");
+        REQUIRE(f);
+        std::fseek(f, 0, SEEK_END);
+        long n = std::ftell(f);
+        std::fseek(f, n - 1, SEEK_SET);
+        int c = std::fgetc(f);
+        std::fseek(f, n - 1, SEEK_SET);
+        std::fputc(c ^ 0x5A, f);
+        std::fclose(f);
+        WorldFileData bad;
+        CHECK_FALSE(worldfile::read(path, bad));
+    }
+    std::remove(path.c_str());
+}
+
 TEST_CASE("worldfile rejects corrupted payloads")
 {
     WorldFileData src = sampleData();

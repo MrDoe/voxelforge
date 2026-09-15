@@ -10,6 +10,7 @@
 //   SurfelSet set = buildSurfels(field, params);
 //   // set.surfels + set.chunkRange -> upload to an SSBO, draw per chunk.
 #include "voxel/common.hpp"
+#include "voxel/chunk_store.hpp"
 #include "voxel/voxel_field.hpp"
 #include <cstdint>
 #include <vector>
@@ -90,6 +91,31 @@ struct SurfelSet {
 // field. Uses only the public VoxelField API (colTops + objectBlockMask
 // + sample).
 SurfelSet buildSurfels(const VoxelField& field, const SurfelParams& params = {});
+
+// Live-edit path: build the surfels of ONE chunk from the runtime store.
+// The store is the merged base world + runtime edits, so the output reflects
+// terrain and object edits alike. Normals come from the store's SDF gradient;
+// sun shadow + AO reuse the same bakes as buildSurfels. Deterministic order
+// (packed cell key). Returns empty for an empty/nonexistent chunk.
+std::vector<Surfel> buildChunkSurfels(const ChunkStore& store, int chunk,
+                                      const SurfelParams& params = {});
+
+// Region variant for the live editor: only cells inside the lattice AABB
+// [lo, hi) are considered (clamped to the chunk). `keys` are the packed
+// lattice cells parallel to `surfels`, sorted ascending.
+struct SurfelRange {
+    std::vector<uint64_t> keys;
+    std::vector<Surfel> surfels;
+};
+SurfelRange buildChunkSurfelsRange(const ChunkStore& store, int chunk, glm::ivec3 lo,
+                                   glm::ivec3 hi, const SurfelParams& params = {});
+
+// Parallel convenience wrapper: build the requested chunks concurrently.
+// Output order follows the input chunk list; every chunk's surfels are
+// deterministic and independent (read-only store access).
+std::vector<std::vector<Surfel>> buildChunksSurfels(
+    const ChunkStore& store, const std::vector<int>& chunks,
+    const SurfelParams& params = {});
 
 // Water surface surfels on a regular grid (spacing m) wherever the terrain
 // top sits below WATER_LEVEL. Normal +Y, mat id 0, mat_ao.w = 3 (ao 1 +

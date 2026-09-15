@@ -49,12 +49,16 @@ std::string allLayersManifest()
     }
     return path;
 }
-const VoxelField& testField()
+LayeredWorld& testLayeredWorld()
 {
     static LayeredWorld lw;
     static bool ok = lw.load(allLayersManifest());
     REQUIRE(ok);
-    return lw.field();
+    return lw;
+}
+const VoxelField& testField()
+{
+    return testLayeredWorld().field();
 }
 
 TEST_CASE("authoring primitives: capsule")

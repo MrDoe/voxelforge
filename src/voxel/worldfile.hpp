@@ -48,19 +48,33 @@ struct VoxelRecord {
     }
 };
 
+// VXW v2 adds a tagged-section payload for extra streams (currently the
+// ChunkStore live-edit overlay). v1 files stay readable and record-only v1
+// writes keep the old layout; `write` emits v2 only when `sections` is set.
+struct Section {
+    uint32_t type = 0;
+    std::vector<uint8_t> data;
+};
+
 struct WorldFileData {
     WorldFileMeta meta;
     std::vector<int32_t> chunkGrid;
     std::vector<uint32_t> childBase, payload, handles, bricks; // GPU layout
     std::vector<VoxelRecord> voxels;                           // surface records
+    std::vector<Section> sections; // v2 extras; unknown sections are preserved
 };
 
 namespace worldfile {
 inline constexpr char kMagic[4] = { 'V', 'X', 'W', 'F' };
-inline constexpr uint32_t kVersion = 1;
+inline constexpr uint32_t kVersion = 1;  // legacy (implicit payload layout)
+inline constexpr uint32_t kVersion2 = 2; // tagged-section payload
+// Section types (v2). Unknown types are kept verbatim in WorldFileData.
+inline constexpr uint32_t kSectionRecords = 0;     // u64 count + VoxelRecord[n]
+inline constexpr uint32_t kSectionLegacySvo = 1;   // the v1 five-array block
+inline constexpr uint32_t kSectionStoreChunks = 2; // ChunkStore overlay (opaque)
 
 bool write(const std::string& path, const WorldFileData& data);
-bool read(const std::string& path, WorldFileData& out); // validates magic+version+CRC
+bool read(const std::string& path, WorldFileData& out); // v1 + v2, validates CRC
 
 // --- layered worlds ---------------------------------------------------------
 // The static world is described by a set of record-only .vxw layer files plus

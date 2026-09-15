@@ -55,6 +55,7 @@
 - `./build/voxelforge` — reference cam `1.0,2.0,1.5 → 5.3,1.0,11.3` (house.jpeg view), sun `34°/238°`.
 - Keys: `WASD/QE` move, `RMB+mouse` look, wheel speed, `Ctrl+LMB` pick anchor,
   `F` toggles splats/SVO renderer, `N` toggles TAA, `[`/`]` shrink/grow splat disks, `ESC` quit.
+  `C` toggles the edit tool (Carve/Add/Delete/Paint radios in its panel).
 - Headless: `--selftest`, `--smoke N`, `--shot out.ppm --cam …`,
   `--probe X Y Z`, `--sun <elev> <azim>`, `--animtime <s>`, `--width/--height`,
   `--mode splat|svo` (default `splat`; SVO is the pixel reference).
@@ -74,6 +75,44 @@
   `VF_SPLAT_DEPTH_TOL` (depth-resolve band in NDC depth units, default
   0.002 ≈ 10 cm; applied per frame as a dynamic rasterizer depth bias),
   `VF_SPLAT_EXTENT` (quad half-size), `VF_SPLAT_RADIUS`.
+- Live edit (M1–M3): the edit panel (`C`, window "Carve / Add") has four brush
+  modes — **Carve** (depth-limited cylinder scoop along the surface normal),
+  **Add** (dome), **Delete** (clear every cell in the brush ball) and **Paint**
+  (recolour the brush ball with the panel's Material combo) — plus the
+  **"Live patch (no bake)"** checkbox and a per-mode/size/perf readout.
+  Delete/Paint are `ChunkStore` `Clear`/`Paint` operations and always take the
+  live path (they have no record-layer form); Carve/Add follow the checkbox
+  (record layers + bake, or live store patch). In the splat backend, hovering
+  with the tool active **tints the affected splats** (the exact brush volume:
+  the carve cylinder or the delete/paint ball) so the LMB result is visible
+  first — bind 13 `BrushUBO` (`SplatPass::setBrush`), tested against the surfel
+  *centre* (per-splat, matching the CPU rasterizer's cell set) plus a 0.06 m
+  skin; debug view `VF_SPLAT_DEBUG=15` shows the volume directly. With
+  "Live patch" on, LMB **paints**: holding the button keeps stamping along
+  the cursor (spacing = ¼ brush diameter) and the result appears in the same
+  frame. Each stamp applies cells to the runtime `ChunkStore`, rebuilds only
+  the edited block region, refreshes per-chunk surfel caches (`LiveEditor`)
+  and patches the GPU buffers (`SplatPass::patchChunkSurfels`,
+  `SvoPass::patchChunk`) — no `.vxw` write, no world reload, and hover/anchors
+  use `rayPickStore`. Steady-state stamp latency is ~5–25 ms (brush-sized,
+  see `VF_TEST_STROKE`): a chunk's surfel cache is seeded from the GPU's
+  current run (`SplatPass::readChunkSurfels`) instead of re-baking the whole
+  chunk — the freshly seeded run is the *pre-edit* GPU state, so `stamp()`
+  must refresh the edited AABB ±3 on top of it or the first stamp in a chunk
+  patches the old surface back and looks like a no-op. On mouse release the
+  stroke is **saved asynchronously** to `assets/runtime_edits.vxw` (VXW v2
+  store section, schema 2 = per-chunk edit AABB) and restored at the next
+  startup / world reload (GPU-seed + refresh the saved AABB, so the restored
+  frame matches the session). Patched chunks drop their micro tail + LOD ring
+  until the next full reload; water and `uHeight` stay stale in the edited
+  region. Headless hooks: `VF_TEST_EDIT="x,y,z,carve|add|delete|paint"` (one
+  stamp), `VF_TEST_BRUSH="x,y,z,carve|delete|paint"` (activates the tool and
+  renders only the hover preview, no edit), `VF_TEST_STROKE="x,y,z,steps[,mode]"`
+  + `VF_TEST_STROKE_SAVE=1` (drag simulation + persistence),
+  `VF_EDIT_DIAM`/`VF_EDIT_DEPTH` (brush size), `VF_LIVE_NOSPLAT=1` /
+  `VF_LIVE_NOSVO=1` (skip one backend), `VF_NO_OVERLAY=1` (ignore
+  `runtime_edits.vxw`; the test scripts set it so a session's painting cannot
+  pollute the reference shots).
 - Tile splat path (WIP, `VF_TILE=1`): compute-only pipeline
   `splat_tile_{bin,scan,base,render}.comp` — project+bin surfels into 16×16
   tiles via a (tile × entry) counts matrix, scan per-tile ranges
@@ -102,20 +141,49 @@
 
 ## Tests & verification — run in order
 - `ninja -C build && ctest --test-dir build` runs `unit_tests` (doctest) +
-  `visual_check` (headless PPM). Must pass before any shader/world change is done.
+  `visual_check` + `live_edit_check` (headless PPM). Must pass before any
+  shader/world change is done.
 - `./build/vf_tests --test-case="*world*"` for a single suite.
+- `./build/vf_tests --test-case="chunk*"` — ChunkStore foundation suite
+  (`tests/test_store.cpp`): adoption vs `VoxelField`, cell edits + rebuild,
+  store-based per-chunk surfels following edits.
 - `python3 tests/visual_check.py build/voxelforge` — hero/house/water shots;
   coverage 3–98.5 %, black-in-silhouette <5 %, blue sky probe.
+- `python3 tests/live_edit_check.py build/voxelforge` — renders the hero view
+  untouched and with `VF_TEST_EDIT` (live store patch) in **both backends**
+  (splat + `--mode svo`) for Add, plus the splat-only Delete/Paint store modes
+  (micro detail off so the diff is geometry, not the dropped micro tail) and
+  the carve-brush hover tint; asserts a visible but bounded pixel diff and sane
+  edited-frame probes.
 - `./build/voxelforge --selftest --width 640 --height 360` — sky probe +
   coverage acceptance.
 - `--probe X Y Z` reflects the live layered field (loads `world.json`).
 
 ## Architecture
-- `src/voxel/voxel_field.{hpp,cpp}` — **the geometry oracle**, built from merged
-  records: terrain columns (top Y + material), object components flood-filled
-  to solids with two-pass Dijkstra signed distance grids stored in a sparse
-  hash; emits the GPU height texture (rg32f topY+mat), an object presence block
-  mask, and the coarse r8_snorm object volume for shadows.
+- `src/voxel/voxel_field.{hpp,cpp}` — **the load-time geometry oracle**, built
+  from merged records: terrain columns (top Y + material), object components
+  flood-filled to solids with two-pass Dijkstra signed distance grids stored in
+  a sparse hash; emits the GPU height texture (rg32f topY+mat), an object
+  presence block mask, and the coarse r8_snorm object volume for shadows.
+- `src/voxel/chunk_store.{hpp,cpp}` — **the runtime-explicit sparse voxel
+  store** (M0–M3 of live editing): per-chunk cells with packed appearance +
+  response, `Empty | Solid | Explicit` chunk states, sparse 8³ bricks plus
+  solid boxes, cell-level `apply()` edits, chamfer SDF-band recompute and
+  octree pool regeneration (`rebuildDirty`). **Rebuilds are region-limited**:
+  the region is the edit AABB ± `kLiveBand` (12 cells), snapped to 8³ blocks,
+  so a stamp re-materialises/re-derives only the affected blocks and copies
+  untouched blocks verbatim (unit test pins localized == full rebuild).
+  Adopted lazily from the resident pools by `LayeredWorld::store()`. Touched
+  chunks are flagged `edited` and serialized by `OverlayWriter` into the VXW
+  v2 store section (`assets/runtime_edits.vxw`, temp+rename, debounced, not
+  listed in world.json — the app loads it explicitly at startup/reload).
+- `src/voxel/live_editor.{hpp,cpp}` — instant-feedback brush driver: applies
+  edits, refreshes per-chunk surfel caches (`buildChunkSurfelsRange`, only
+  the ±3-cell region is re-enumerated/re-shaded) and returns the updated runs
+  for GPU patching. First touch of a chunk seeds its full run once.
+- `src/voxel/chunk_index.hpp` — canonical z-major chunk indexing
+  (`chunkIndexOf/…`), shared by the SVO, surfel and store paths (the surfel
+  path used to be x-major; do not reintroduce a second convention).
 - `src/voxel/layered_world.{hpp,cpp}` — manifest load/poll/priority merge,
   per-chunk SVO synthesis with resident `ChunkPool`s for incremental rebuilds,
   water-volume marking below `WATER_LEVEL=-0.9`.
@@ -126,13 +194,24 @@
   analytic shapes** (`houseAt/treesAt/…`, used by `heightmap_gen` sweeps and
   tests as authoring truth — NOT linked into the renderer path).
 - `src/render/svo_pass.{hpp,cpp}` — SVO reference compute pipeline;
-  `RaymarchPush` (128 B) lives here. `splat_pass.{hpp,cpp}` — primary
-  Gaussian-surfel raster backend (sky/opaque/water pipelines, chunk draws,
-  frustum culling). `taa_pass.*` resolve. `src/rhi/*` Vulkan 1.3 + VMA.
+  `RaymarchPush` (128 B) lives here. The world SSBOs use **chunk-local
+  handles**: `GpuWorld::chunkInfo` (uvec4 per chunk = nodeBase/childBase/
+  brickBase, binding 11) is uploaded with the five world buffers, and
+  `patchChunk()` re-uploads one chunk's rebuilt pool into reserved per-chunk
+  regions (relocating/growing as needed) without touching other chunks.
+  `splat_pass.{hpp,cpp}` — primary Gaussian-surfel raster backend (sky/opaque/
+  water pipelines, chunk draws, frustum culling). The surfel buffer is
+  **paged**: each chunk owns a slot run with reserved capacity
+  (`m_chunkStart/Count/Cap`, LOD+water in a trailing region) so
+  `patchChunkSurfels()` can update one chunk without touching the rest; a
+  chunk that outgrows its slot relocates to the opaque free area (growing the
+  buffer if needed). `taa_pass.*` resolve. `src/rhi/*` Vulkan + VMA.
 - `src/voxel/surfelize.{hpp,cpp}` — CPU surfel extraction from the live
   `VoxelField` (one anisotropic 2D Gaussian per outer surface cell, mean
   face normal + smoothing, baked CPU sun-shadow/AO/bent normal, chunk
   bucketing + water grid); rebuilt on every world reload (`rebuildSurfels`).
+  The store path adds `buildChunkSurfels`/`buildChunksSurfels` (SDF-gradient
+  normals, parallel shading) for live edits.
 - `src/voxel/heightmap.{hpp,cpp}` — terrain source of truth: 16-bit grayscale
   PNG (`kHmSize=2048`, meters `[-8,24]`); bilinear `sample()` + `gradient()`.
 - `src/voxel/worldfile.{hpp,cpp}` — VXW v1 binary reader/writer (header + SVO
@@ -219,6 +298,40 @@
   position every frame; delete `imgui.ini` to reset all panels.
 - `VoxelField::sample` returns quantised (int8) object distances; the shadow
   volume is coarser still (0.4 m texels) — don't use it for shading normals.
+- `ChunkPool::root`/handles: `-1` (0xFFFFFFFF) = empty, **`-2` (0xFFFFFFFE) =
+  solid terminal**. They are both negative as `int32_t`; a bare `root < 0`
+  test wrongly treats solid chunks as empty (the bake's promotion loop relies
+  on this ordering — see `ChunkStore::adopt`). `-2` is why promoted solid
+  chunks are excluded from `Stats::activeChunks`.
+- Baked brick SDFs quantise with `int(d/VOXEL)` (truncation), so cells within
+  one voxel of a surface can store `raw == 0`; the SVO DDA treats `sdf <= 0`
+  as solid. **Everything that tests brick signs uses `raw <= 0` = solid**
+  (`ChunkStore::decodeCell`, rebuild materialisation, `buildPoolOnly`,
+  `buildChunkSurfels`); a `< 0` test erodes those cells on every rebuild.
+  Store/field sign comparisons must tolerate `±2·VOXEL` at surfaces.
+- SVO handles are **chunk-local**: every access adds the owning chunk's base
+  from `uChunkInfo` (`common_svo.glsl` `Bases`/`chunkBases`). Never
+  offset-adjust handles during the merge (`layered_world.cpp`) or reuse a
+  node/brick index across chunks. `SvoPass::patchChunk` writes into reserved
+  per-chunk regions: payload and childBase share the node-index space (both
+  must be grown together), and bricks are counted in `BRICK_WORDS` (the SSBO
+  size is ×4096 bytes, not ×4).
+- Live edits (M1–M3): `assets/runtime_edits.vxw` holds the persisted edited
+  chunks (VXW v2 store section); it is **not** in `world.json`, so the layer
+  poll ignores it — the app loads it explicitly at startup / after every world
+  reload (`App::loadStoreOverlay`) and patches the chunks. Patched chunks lose
+  micro/LOD rings until the next full reload; `uHeight`/water stay stale in
+  the edited region; both patches stall the device (`vkDeviceWaitIdle`), so
+  painting is click/drag-scale, not a free-running sculpt loop. Rebuild-region
+  gotcha: `Chunk::lo/hi` store **global lattice coords** (the region math
+  converts to chunk-local), and solid boxes that straddle the region boundary
+  are kept (`bricks win over boxes` in `cellAt` makes the overlap harmless).
+  `Solid`/`Empty` chunks have **no `slotOf` table** — guard it (`hasSlots`) in
+  any rebuild path and skip `Solid` chunks entirely (a dirty Solid neighbour
+  used to segfault `rebuildChunk`).
+- `Chunk::edited` (set by `apply`) drives the overlay serialization. Clearing
+  it or dropping chunks silently loses persistence; `serializeEdited` only
+  walks flagged chunks.
 - Docs: `README.md` (product), `AGENTS.md` (this file), `docs/` (full dev
   documentation, start at `docs/index.md`),
   `docs/history/` (`rework.md` architecture plan, `ImplementationPlan.md`

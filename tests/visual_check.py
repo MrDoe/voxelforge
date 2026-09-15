@@ -94,7 +94,11 @@ def main():
                 "--width", str(W), "--height", str(H),
                 "--cam", *cam,
             ]
-            r = subprocess.run(cmd, capture_output=True, text=True, timeout=300)
+            # hermetic: a saved live-edit overlay (assets/runtime_edits.vxw)
+            # would restore whatever was painted in an interactive session and
+            # change every reference shot
+            env = dict(os.environ, VF_NO_OVERLAY="1")
+            r = subprocess.run(cmd, capture_output=True, text=True, timeout=300, env=env)
             if r.returncode != 0 or not os.path.exists(out):
                 failures.append(f"{name}: render failed rc={r.returncode}")
                 continue

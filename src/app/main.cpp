@@ -14,6 +14,7 @@
 #include "render/dof_pass.hpp"
 #include "render/environment_pass.hpp"
 #include "voxel/surfelize.hpp"
+#include "voxel/chunk_index.hpp"
 #include "voxel/worldfile.hpp"
 #include <algorithm>
 
@@ -29,6 +30,7 @@
 #include "voxel/picking.hpp"
 #include "voxel/editable_world.hpp"
 #include "voxel/layered_world.hpp"
+#include "voxel/live_editor.hpp"
 
 #include <chrono>
 #include <cmath>
@@ -118,6 +120,44 @@ struct FrameSync {
 // kMaxFramesInFlight frames ago is then complete) and reset inside the next
 // recording of the same slot.
 constexpr uint32_t kProfMarks = 6;
+
+// Edit-tool brush modes. Carve/Add stamp analytic volumes (depth along the
+// surface normal); Delete clears the brush ball and Paint recolours it with
+// m_editMat. Carve/Add can go through the record layers (bake) when Live patch
+// is off; Delete/Paint are ChunkStore operations (Clear/Paint) and always
+// patch the live store.
+enum class EditBrush : uint8_t { Carve, Add, Delete, Paint };
+
+const char* brushName(EditBrush b)
+{
+    switch (b) {
+    case EditBrush::Carve:  return "carve";
+    case EditBrush::Add:    return "add";
+    case EditBrush::Delete: return "delete";
+    case EditBrush::Paint:  return "paint";
+    }
+    return "carve";
+}
+
+// "carve" | "add" | "delete" | "paint" (anything else = carve); shared by the
+// HUD and the headless test hooks.
+EditBrush brushFromName(const char* name)
+{
+    if (!name)
+        return EditBrush::Carve;
+    if (strcmp(name, "add") == 0 || strcmp(name, "raise") == 0) return EditBrush::Add;
+    if (strcmp(name, "delete") == 0) return EditBrush::Delete;
+    if (strcmp(name, "paint") == 0) return EditBrush::Paint;
+    return EditBrush::Carve;
+}
+
+// kPalette names (src/voxel/common.hpp) for the material combo.
+const char* kMatNames[17] = {
+    "0 grass dark", "1 grass light", "2 soil", "3 sand", "4 rock",
+    "5 light rock", "6 wood", "7 roof", "8 foliage", "9 lava", "10 ember",
+    "11 glow cyan", "12 glow green", "13 glow purple", "14 glow blue",
+    "15 white-hot", "16 snow",
+};
 
 class App {
 public:
@@ -262,16 +302,42 @@ private:
     bool m_ctrlWasDown = false;
     bool m_chatInitialized = false;
 
-    // carve / add edit tool: stamps an oriented cylinder (carve = subtractive,
-    // add = solid) of m_editDiameter at the hovered surface point, along its
-    // normal. Diameter/depth adjustable via +/-; mode toggled with [C].
+    // carve / add / delete / paint edit tool: stamps a brush volume at the
+    // hovered surface point along its normal (Carve = depth-limited cylinder
+    // scoop, Add = dome, Delete = clear the ball, Paint = recolour the ball).
+    // Diameter/depth adjustable via +/-; mode toggled with [C]; brush kind via
+    // the panel radios.
     bool m_editActive = false;
-    bool m_editCarve = true;
-    float m_editDiameter = 2.0f; // meters
+    EditBrush m_editBrush = EditBrush::Carve;
+    float m_editDiameter = 2.0f; // meters (brush ball/cylinder diameter)
     float m_editDepth = 1.5f;    // meters (carve depth / add length)
-    uint8_t m_editMat = 6;       // wood/rock-ish palette id for the add mode
+    uint8_t m_editMat = 6;       // palette id for Add and Paint
+    // M1/M2 live edits: stamp into the runtime ChunkStore and patch the GPU
+    // buffers per dirty chunk (no bake, no full rebuild). Not persisted yet.
+    bool m_liveEdit = false;
+    float m_lastEditMs = 0.0f;
+    size_t m_lastEditSurfels = 0;
+    vf::voxel::LiveEditor m_liveEditor;
+    vf::voxel::OverlayWriter m_overlayWriter;
+    bool m_overlayLoaded = false;
+    bool m_hasStamp = false;
+    bool m_dragging = false;
+    glm::ivec3 m_lastStampVoxel { 0 };
 
     void applyEdit();
+    void applyEditLive();
+    // Delete/Paint have no record-layer form: they always patch the live store
+    // (and the stroke is persisted to runtime_edits.vxw) no matter what the
+    // "Live patch (no bake)" checkbox says.
+    bool brushLive() const
+    {
+        return m_liveEdit || m_editBrush == EditBrush::Delete ||
+               m_editBrush == EditBrush::Paint;
+    }
+    void loadStoreOverlay();
+    // Store-gradient surface normal at a lattice cell (test hooks / injected
+    // hovers); falls back to +Y when the field around the cell is flat.
+    glm::vec3 storeNormalAt(const glm::ivec3& v);
 public:
     void requestWorldReload() { m_pendingWorldReload = true; }
     };
@@ -393,7 +459,7 @@ bool App::initVulkan()
             if (!m_svoPass.init(m_ctx))
                 return false;
             const auto& g = m_layers.gpu();
-            m_svoPass.setWorld(g.chunkGrid, g.childBase, g.payload, g.handles, g.bricks);
+            m_svoPass.setWorld(g);
             // every layer (incl. MCP-added ai_edits) is listed in the GUI
             syncWorldLayerList();
             rescanWorldLayers();
@@ -429,6 +495,20 @@ bool App::initVulkan()
     if (m_args.mode != "splat" && m_args.mode != "svo")
         spdlog::warn("--mode '{}' unknown (use splat|svo), defaulting to splat", m_args.mode);
     rebuildSurfels();
+
+    // LiveEditor first-touch seeding: splice from the GPU's current chunk run
+    // (base surfels) instead of re-baking the whole chunk, so painting starts
+    // instantly even in chunks the stroke enters for the first time.
+    m_liveEditor.setSeedSource([this](int ci) {
+        std::vector<uint8_t> bytes;
+        const uint32_t n = m_splatPass.readChunkSurfels(uint32_t(ci), bytes);
+        std::vector<vf::voxel::Surfel> out(n);
+        if (n)
+            std::memcpy(out.data(), bytes.data(),
+                        size_t(n) * sizeof(vf::voxel::Surfel));
+        return out;
+    });
+    loadStoreOverlay(); // restore the async-saved live-edit overlay, if any
 
     // frame sync ---------------------------------------------------------
     VkCommandPoolCreateInfo pci { VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO };
@@ -561,12 +641,70 @@ void App::applyWorldReload()
     // swap the freshly synthesized SVO buffers under an idle device
     vkDeviceWaitIdle(m_ctx.device());
     const auto& g = m_layers.gpu();
-    m_svoPass.setWorld(g.chunkGrid, g.childBase, g.payload, g.handles, g.bricks);
+    m_svoPass.setWorld(g);
     uploadTerrainTexture(); // layer toggles can change materials too
     uploadObjVolTexture();  // keep AI/object shadows in sync with the SVO
     rebuildSurfels();       // splat backend follows the same live field
+    // the reload re-adopted the store: re-apply the persisted live overlay
+    m_liveEditor.clear();
+    m_overlayLoaded = false;
+    loadStoreOverlay();
     syncWorldLayerList();
     rescanWorldLayers(); // layers dropped into assets/ while running show up too
+}
+
+void App::loadStoreOverlay()
+{
+    if (m_overlayLoaded)
+        return;
+    m_overlayLoaded = true;
+    // Test/debug switch: ignore a saved live-edit overlay so gates run against
+    // the baked world (a session's painted edits would otherwise change every
+    // shot). The app still saves new strokes normally.
+    if (getenv("VF_NO_OVERLAY")) {
+        spdlog::info("live overlay: skipped (VF_NO_OVERLAY)");
+        return;
+    }
+    const std::string path = std::string(VOXELFORGE_ASSET_DIR) + "/runtime_edits.vxw";
+    std::error_code ec;
+    if (!std::filesystem::exists(path, ec))
+        return;
+    auto& store = m_layers.store();
+    if (!store.loadOverlay(path)) {
+        spdlog::warn("live overlay '{}' could not be applied", path);
+        return;
+    }
+    if (!m_liveEditor.attached())
+        m_liveEditor.attach(&store);
+    vf::voxel::SurfelParams sp;
+    sp.sunDir = glm::vec3(m_sunDir);
+    sp.microDetail = false;
+    sp.lodRings = false;
+    const std::vector<int> chunks = store.editedChunks();
+    size_t n = 0;
+    for (int ci : chunks) {
+        // Start from what the GPU already renders (base surfels), then refresh
+        // exactly the region the edit touched — the same splice a live stamp
+        // would have produced, so the restored frame matches the session.
+        m_liveEditor.chunkSurfels(ci, sp); // seeds (GPU source or store fallback)
+        int lo[3], hi[3];
+        if (store.chunkEditBounds(ci, lo, hi))
+            m_liveEditor.refreshRegion(
+                ci, glm::ivec3(lo[0] - 3, lo[1] - 3, lo[2] - 3),
+                glm::ivec3(hi[0] + 4, hi[1] + 4, hi[2] + 4), sp);
+        else
+            m_liveEditor.seedFromStore(ci, sp);
+        const std::vector<vf::voxel::Surfel>& surfels = m_liveEditor.chunkSurfels(ci, sp);
+        n += surfels.size();
+        m_splatPass.patchChunkSurfels(uint32_t(ci), surfels.data(),
+                                      surfels.size() * sizeof(vf::voxel::Surfel),
+                                      surfels.size());
+        const auto& pool = store.pool(ci);
+        if (pool)
+            m_svoPass.patchChunk(uint32_t(ci), *pool);
+    }
+    spdlog::info("live overlay: restored {} chunks ({} run surfels) from {}", chunks.size(),
+                 n, path);
 }
 
 void App::recordPhotorealism(VkCommandBuffer cmd, const vf::RaymarchPush& push)
@@ -645,7 +783,7 @@ void App::rebuildSurfels()
             const auto ax = std::clamp(int(std::floor((px + 51.2f) / 6.4f)), 0, 15);
             const auto ay = std::clamp(int(std::floor((py + 51.2f) / 6.4f)), 0, 15);
             const auto az = std::clamp(int(std::floor((pz + 51.2f) / 6.4f)), 0, 15);
-            return uint32_t((ax * 16 + ay) * 16 + az);
+            return uint32_t(vf::voxel::chunkIndexOf(ax, ay, az));
         };
         std::vector<uint32_t> order(water.size());
         std::iota(order.begin(), order.end(), 0u);
@@ -686,6 +824,14 @@ void App::rebuildSurfels()
 
 void App::applyEdit()
 {
+    // Delete/Paint are ChunkStore operations (Clear / Paint): they have no
+    // record-layer equivalent, so they always take the live path. Carve/Add
+    // follow the Live patch checkbox (records + bake, or live store patch).
+    if (m_liveEdit || m_editBrush == EditBrush::Delete ||
+        m_editBrush == EditBrush::Paint) {
+        applyEditLive();
+        return;
+    }
     if (!m_hoverHit.hit)
         return;
     glm::vec3 n = m_hoverHit.normal;
@@ -695,7 +841,7 @@ void App::applyEdit()
     const float radius = m_editDiameter * 0.5f;
     const float length = m_editDepth;
 
-    if (m_editCarve) {
+    if (m_editBrush == EditBrush::Carve) {
         // carve volume goes INTO the surface (along -normal) to cut a depression
         std::vector<vf::voxel::VoxelRecord> recs =
             m_carve.makeOrientedCylinder(m_hoverHit.voxel, -n, radius, length, m_editMat, /*carve=*/true);
@@ -721,9 +867,129 @@ void App::applyEdit()
     requestWorldReload();
 }
 
-void App::persistWorldLayers()
+// M1 live edit: rasterize the brush (reusing the layer rasterizers), apply the
+// cells to the runtime store, rebuild only the dirty chunks, then regenerate
+// their surfels and patch them into the GPU buffer. No world reload, no bake.
+// Delete/Paint always take this path (Clear/Paint are store-only modes).
+void App::applyEditLive()
 {
-    std::vector<vf::voxel::worldfile::WorldLayer> out;
+    if (!m_hoverHit.hit)
+        return;
+    glm::vec3 n = m_hoverHit.normal;
+    if (glm::length(n) < 1e-3f)
+        n = glm::vec3(0.f, 1.f, 0.f);
+    n = glm::normalize(n);
+    const float radius = m_editDiameter * 0.5f;
+    const float length = m_editDepth;
+
+    std::vector<vf::voxel::VoxelRecord> recs;
+    switch (m_editBrush) {
+    case EditBrush::Carve:
+        recs = m_carve.makeOrientedCylinder(m_hoverHit.voxel, -n, radius, length,
+                                            m_editMat, /*carve=*/true);
+        break;
+    case EditBrush::Add:
+        recs = m_add.makeDome(m_hoverHit.voxel, n, radius, length, m_editMat);
+        break;
+    case EditBrush::Delete:
+    case EditBrush::Paint:
+        // brush ball centred on the hit cell: delete clears it, paint recolours
+        recs = m_carve.makeSphere(m_hoverHit.voxel, radius, m_editMat);
+        break;
+    }
+    if (recs.empty())
+        return;
+
+    std::vector<vf::voxel::StoreEdit> edits;
+    edits.reserve(recs.size());
+    for (const vf::voxel::VoxelRecord& r : recs) {
+        vf::voxel::StoreEdit e;
+        e.x = r.x;
+        e.y = r.y;
+        e.z = r.z;
+        e.mode = (m_editBrush == EditBrush::Carve || m_editBrush == EditBrush::Delete)
+                     ? vf::voxel::StoreEdit::Mode::Clear
+                 : (m_editBrush == EditBrush::Paint)
+                     ? vf::voxel::StoreEdit::Mode::Paint
+                     : vf::voxel::StoreEdit::Mode::Set;
+        e.mat = r.materialId;
+        e.hasColor = true;
+        e.r = r.r; e.g = r.g; e.b = r.b;
+        e.reflectivity = r.reflectivity;
+        e.roughness = r.roughness;
+        edits.push_back(e);
+    }
+
+    const auto t0 = std::chrono::steady_clock::now();
+    auto& store = m_layers.store();
+    if (!m_liveEditor.attached())
+        m_liveEditor.attach(&store);
+
+    // Paint must not create geometry: the brush ball covers air cells too, so
+    // keep only cells that are already solid in the store (Clear is a no-op on
+    // air and needs no filter).
+    if (m_editBrush == EditBrush::Paint) {
+        std::vector<vf::voxel::StoreEdit> solid;
+        solid.reserve(edits.size());
+        for (vf::voxel::StoreEdit& e : edits)
+            if (store.cellAt(e.x, e.y, e.z).solid)
+                solid.push_back(e);
+        edits.swap(solid);
+        if (edits.empty())
+            return; // nothing solid in the ball
+    }
+
+    vf::voxel::SurfelParams sp;
+    sp.sunDir = glm::vec3(m_sunDir);
+    sp.microDetail = false; // live patch has no micro tail yet
+    sp.lodRings = false;
+    std::vector<int> changed = m_liveEditor.stamp(edits, sp);
+    const auto t1 = std::chrono::steady_clock::now();
+
+    size_t nRunSurfels = 0;
+    for (int ci : changed) {
+        const std::vector<vf::voxel::Surfel>& surfels = m_liveEditor.chunkSurfels(ci, sp);
+        nRunSurfels += surfels.size();
+        if (!getenv("VF_LIVE_NOSPLAT"))
+            m_splatPass.patchChunkSurfels(uint32_t(ci), surfels.data(),
+                                          surfels.size() * sizeof(vf::voxel::Surfel),
+                                          surfels.size());
+        // SVO reference backend follows the same edit (chunk-local pool patch)
+        const auto& pool = store.pool(ci);
+        if (pool && !getenv("VF_LIVE_NOSVO"))
+            m_svoPass.patchChunk(uint32_t(ci), *pool);
+    }
+    m_taaFirstFrame = true; // no history across a geometry change
+    const auto t2 = std::chrono::steady_clock::now();
+    auto ms = [](auto a, auto b) {
+        return std::chrono::duration<double, std::milli>(b - a).count();
+    };
+    m_lastEditMs = float(ms(t0, t2));
+    m_lastEditSurfels = nRunSurfels;
+    if (!m_dragging || getenv("VF_TRACE"))
+        spdlog::info("live edit: {} cells, {} chunks, {} run surfels, {:.1f} ms "
+                     "(stamp {:.1f}, gpu {:.1f})",
+                     edits.size(), changed.size(), nRunSurfels, m_lastEditMs,
+                     ms(t0, t1), ms(t1, t2));
+}
+
+glm::vec3 App::storeNormalAt(const glm::ivec3& v)
+{
+    auto& store = m_layers.store();
+    const glm::vec3 p = vf::voxel::voxelCenter(v);
+    const float e = 0.15f;
+    glm::vec3 n(
+        store.sampleWorld(p + glm::vec3(e, 0, 0)).d -
+            store.sampleWorld(p - glm::vec3(e, 0, 0)).d,
+        store.sampleWorld(p + glm::vec3(0, e, 0)).d -
+            store.sampleWorld(p - glm::vec3(0, e, 0)).d,
+        store.sampleWorld(p + glm::vec3(0, 0, e)).d -
+            store.sampleWorld(p - glm::vec3(0, 0, e)).d);
+    return glm::length(n) > 1e-6f ? glm::normalize(n) : glm::vec3(0.f, 1.f, 0.f);
+}
+
+void App::persistWorldLayers()
+{    std::vector<vf::voxel::worldfile::WorldLayer> out;
     out.reserve(m_worldLayers.size());
     for (const auto& l : m_worldLayers)
         if (l.listed &&
@@ -831,7 +1097,7 @@ void App::drawHud()
         ImGui::BulletText("RMB hold: look");
         ImGui::BulletText("Wheel: speed, Shift/Ctrl boost/slow");
         ImGui::BulletText("ESC: quit");
-        ImGui::BulletText("C: carve/add tool (LMB to stamp, +/- size)");
+        ImGui::BulletText("C: edit tool - carve/add/delete/paint (LMB stamp)");
     }
 
     if (ImGui::CollapsingHeader("World layers", ImGuiTreeNodeFlags_DefaultOpen)) {
@@ -898,23 +1164,68 @@ void App::drawHud()
         ImGui::SetNextWindowPos(ImVec2(io.DisplaySize.x - 234.f, 12.f), ImGuiCond_FirstUseEver);
         ImGui::SetNextWindowSize(ImVec2(220, 0), ImGuiCond_FirstUseEver);
         if (ImGui::Begin("Carve / Add", nullptr, ImGuiWindowFlags_AlwaysAutoResize)) {
-            ImGui::Text("Carve / Add tool  ([C] to toggle)");
-            if (ImGui::RadioButton("Carve", m_editCarve))
-                m_editCarve = true;
+            ImGui::Text("Edit tool  ([C] to toggle)");
+            if (ImGui::RadioButton("Carve", m_editBrush == EditBrush::Carve))
+                m_editBrush = EditBrush::Carve;
             ImGui::SameLine();
-            if (ImGui::RadioButton("Add", !m_editCarve))
-                m_editCarve = false;
+            if (ImGui::RadioButton("Add", m_editBrush == EditBrush::Add))
+                m_editBrush = EditBrush::Add;
+            if (ImGui::RadioButton("Delete", m_editBrush == EditBrush::Delete))
+                m_editBrush = EditBrush::Delete;
+            ImGui::SameLine();
+            if (ImGui::RadioButton("Paint", m_editBrush == EditBrush::Paint))
+                m_editBrush = EditBrush::Paint;
             ImGui::Separator();
             ImGui::SliderFloat("Diameter (m)", &m_editDiameter, 0.2f, 12.0f, "%.1f");
             if (ImGui::Button("-##diam")) m_editDiameter = std::max(0.2f, m_editDiameter - 0.2f);
             ImGui::SameLine();
             if (ImGui::Button("+##diam")) m_editDiameter = std::min(12.0f, m_editDiameter + 0.2f);
+            const bool depthUsed = m_editBrush == EditBrush::Carve ||
+                                   m_editBrush == EditBrush::Add;
+            if (!depthUsed)
+                ImGui::BeginDisabled(true);
             ImGui::SliderFloat("Depth (m)", &m_editDepth, 0.2f, 12.0f, "%.1f");
             if (ImGui::Button("-##depth")) m_editDepth = std::max(0.2f, m_editDepth - 0.2f);
             ImGui::SameLine();
             if (ImGui::Button("+##depth")) m_editDepth = std::min(12.0f, m_editDepth + 0.2f);
+            if (!depthUsed) {
+                ImGui::EndDisabled();
+                if (ImGui::IsItemHovered())
+                    ImGui::SetTooltip("depth applies to Carve / Add");
+            }
             ImGui::Separator();
-            ImGui::Text("LMB on terrain to %s", m_editCarve ? "carve a hole" : "raise a dome");
+            {
+                int mat = int(m_editMat);
+                ImGui::SetNextItemWidth(130.0f);
+                if (ImGui::BeginCombo("Material", kMatNames[std::min(mat, 16)])) {
+                    for (int i = 0; i < 17; ++i)
+                        if (ImGui::Selectable(kMatNames[i], mat == i))
+                            m_editMat = uint8_t(i);
+                    ImGui::EndCombo();
+                }
+                const glm::vec3 c = vf::voxel::kPalette[std::min(int(m_editMat), 16)];
+                ImGui::SameLine();
+                ImGui::ColorButton("##matswatch", ImVec4(c.r, c.g, c.b, 1.f),
+                                   ImGuiColorEditFlags_NoTooltip |
+                                       ImGuiColorEditFlags_NoDragDrop,
+                                   ImVec2(18, 18));
+            }
+            ImGui::Checkbox("Live patch (no bake)", &m_liveEdit);
+            if (m_liveEdit)
+                ImGui::TextDisabled("last: %.1f ms, %zu surfels", m_lastEditMs,
+                                    m_lastEditSurfels);
+            ImGui::Separator();
+            if (m_editBrush == EditBrush::Carve)
+                ImGui::Text("LMB: scoop a hole (depth along surface normal)");
+            else if (m_editBrush == EditBrush::Add)
+                ImGui::Text("LMB: raise a dome (height along surface normal)");
+            else if (m_editBrush == EditBrush::Delete)
+                ImGui::Text("LMB: delete every voxel in the brush ball");
+            else
+                ImGui::Text("LMB: paint the brush ball with Material");
+            if (m_editBrush == EditBrush::Delete || m_editBrush == EditBrush::Paint)
+                ImGui::TextDisabled("always patches the live store (no bake)");
+            ImGui::TextDisabled("hover tints the affected splats (splat backend)");
             ImGui::TextDisabled("Shift + / - adjust depth");
             ImGui::TextDisabled("Ctrl+LMB: set import anchor");
             if (ImGui::Button("Clear carve edits")) {
@@ -1066,6 +1377,85 @@ int App::run(const Args& args)
         spdlog::critical("vulkan init failed");
         destroy();
         return 1;
+    }
+
+    // VF_TEST_EDIT="x,y,z,carve|add|delete|paint": apply one live store edit
+    // right after load so headless shots can verify the patch path
+    // deterministically. VF_EDIT_DIAM / VF_EDIT_DEPTH override the brush size.
+    if (const char* te = getenv("VF_TEST_EDIT"); te && *te) {
+        glm::ivec3 v(0);
+        char mode[16] = {};
+        if (sscanf(te, "%d,%d,%d,%15s", &v.x, &v.y, &v.z, mode) == 4) {
+            m_editActive = true;
+            m_liveEdit = true;
+            m_editBrush = brushFromName(mode);
+            if (const char* d = getenv("VF_EDIT_DIAM"))
+                m_editDiameter = float(atof(d));
+            if (const char* d = getenv("VF_EDIT_DEPTH"))
+                m_editDepth = float(atof(d));
+            m_hoverHit = {};
+            m_hoverHit.hit = true;
+            m_hoverHit.voxel = v;
+            m_hoverHit.normal = storeNormalAt(v);
+            applyEditLive();
+            spdlog::info("VF_TEST_EDIT {} {} {} {}", v.x, v.y, v.z,
+                         brushName(m_editBrush));
+        }
+    }
+
+    // VF_TEST_STROKE="x,y,z,steps[,carve|add|delete|paint]": simulate
+    // drag-painting by stamping `steps` times along +X with the same spacing
+    // the interactive stroke uses; logs per-stamp latency (instant-feedback
+    // gate).
+    if (const char* ts = getenv("VF_TEST_STROKE"); ts && *ts) {
+        glm::ivec3 v(0);
+        int steps = 8;
+        char mode[16] = {};
+        const int nf = sscanf(ts, "%d,%d,%d,%d,%15s", &v.x, &v.y, &v.z, &steps, mode);
+        if (nf >= 4) {
+            m_editActive = true;
+            m_liveEdit = true;
+            m_editBrush = nf >= 5 ? brushFromName(mode) : EditBrush::Add;
+            if (const char* d = getenv("VF_EDIT_DIAM"))
+                m_editDiameter = float(atof(d));
+            if (const char* d = getenv("VF_EDIT_DEPTH"))
+                m_editDepth = float(atof(d));
+            const int spacing = std::max(1, int(m_editDiameter * 0.25f / vf::voxel::VOXEL));
+            std::vector<float> ms;
+            ms.reserve(size_t(steps));
+            for (int i = 0; i < steps; ++i) {
+                glm::ivec3 p = v + glm::ivec3(i * spacing, 0, 0);
+                m_hoverHit = {};
+                m_hoverHit.hit = true;
+                m_hoverHit.voxel = p;
+                m_hoverHit.normal = storeNormalAt(p);
+                const auto t0 = std::chrono::steady_clock::now();
+                m_dragging = true;
+                applyEditLive();
+                ms.push_back(float(std::chrono::duration<double, std::milli>(
+                                       std::chrono::steady_clock::now() - t0)
+                                       .count()));
+            }
+            m_dragging = false;
+            std::vector<float> sorted = ms;
+            std::sort(sorted.begin(), sorted.end());
+            double sum = 0;
+            for (float t : ms)
+                sum += t;
+            spdlog::info("stroke: {} stamps, avg {:.1f} ms, p50 {:.1f}, max {:.1f} "
+                         "(spacing {} cells)",
+                         steps, sum / std::max<size_t>(1, ms.size()),
+                         sorted.empty() ? 0.f : sorted[sorted.size() / 2],
+                         sorted.empty() ? 0.f : sorted.back(), spacing);
+            if (getenv("VF_TEST_STROKE_SAVE")) {
+                // simulate the stroke-end async persistence and wait for it
+                m_overlayWriter.queue(m_layers.store(),
+                                      std::string(VOXELFORGE_ASSET_DIR) +
+                                          "/runtime_edits.vxw");
+                m_overlayWriter.flush();
+                spdlog::info("stroke: saved live overlay");
+            }
+        }
     }
 
     // ImGui ---------------------------------------------------------------
@@ -1253,7 +1643,10 @@ int App::run(const Args& args)
                 float aspect = float(fb.x)/float(fb.y);
                 glm::vec3 rd = vf::voxel::screenRayDir(mx,my,fb.x,fb.y,tanHalf,aspect,
                                                        m_camera.forward(), m_camera.right(), m_camera.up());
-                m_hoverHit = vf::voxel::rayPick(m_layers.field(), m_camera.pos, rd);
+                m_hoverHit = brushLive()
+                                 ? vf::voxel::rayPickStore(m_layers.store(),
+                                                          m_camera.pos, rd)
+                                 : vf::voxel::rayPick(m_layers.field(), m_camera.pos, rd);
             } else {
                 m_hoverHit.hit = false;
             }
@@ -1272,21 +1665,114 @@ int App::run(const Args& args)
                 spdlog::info("pick selected {} {} {} world {:.2f} {:.2f} {:.2f} mat {}",
                     m_selectedHit.voxel.x, m_selectedHit.voxel.y, m_selectedHit.voxel.z, w.x,w.y,w.z, int(m_selectedHit.mat));
             }
-            // edit tool: plain LMB click (no Ctrl) stamps a carve/add at the hover point
-            bool justPressedApply = lmbEdge && !ctrl && !wantMouse && m_editActive;
-            if (justPressedApply)
+            // Edit tool: plain LMB stamps at the hover point. With "Live patch"
+            // on, holding LMB keeps painting (stamp spacing = a quarter brush
+            // diameter) so the result appears while drawing; the stroke is
+            // saved asynchronously on release.
+            const bool editLmb = lmb && !ctrl && !wantMouse && m_editActive;
+            bool doStamp = lmbEdge && editLmb;
+            if (editLmb && brushLive() && m_hoverHit.hit) {
+                const float spacing = std::max(0.08f, m_editDiameter * 0.25f);
+                if (!m_hasStamp ||
+                    glm::distance(vf::voxel::voxelCenter(m_hoverHit.voxel),
+                                  vf::voxel::voxelCenter(m_lastStampVoxel)) >= spacing)
+                    doStamp = true;
+            }
+            if (doStamp && m_hoverHit.hit) {
+                m_lastStampVoxel = m_hoverHit.voxel;
+                m_hasStamp = true;
+                m_dragging = editLmb && brushLive();
                 applyEdit();
+            }
+            if (!lmb) {
+                if (m_hasStamp && brushLive() && m_liveEditor.attached())
+                    m_overlayWriter.queue(m_layers.store(),
+                                          std::string(VOXELFORGE_ASSET_DIR) +
+                                              "/runtime_edits.vxw");
+                m_hasStamp = false;
+                m_dragging = false;
+            }
         }
 
+        // deterministic hover injection for headless shots: VF_TEST_HOVER
+        // pins the hover point; VF_TEST_BRUSH additionally activates the edit
+        // tool with a brush mode (diameter/depth via VF_EDIT_DIAM/DEPTH) so
+        // the affected-splat preview renders without any input.
         static const char* testHov = getenv("VF_TEST_HOVER");
-        if (testHov && *testHov && !m_hoverHit.hit && m_layers.loaded()) {
-            glm::ivec3 v;
-            if (sscanf(testHov, "%d,%d,%d", &v.x, &v.y, &v.z) == 3) {
+        static const char* testBrush = getenv("VF_TEST_BRUSH");
+        {
+            glm::ivec3 v(0);
+            bool have = false;
+            if (testBrush && *testBrush) {
+                char mode[16] = {};
+                if (sscanf(testBrush, "%d,%d,%d,%15s", &v.x, &v.y, &v.z, mode) == 4) {
+                    m_editActive = true;
+                    m_editBrush = brushFromName(mode);
+                    if (const char* d = getenv("VF_EDIT_DIAM"))
+                        m_editDiameter = float(atof(d));
+                    if (const char* d = getenv("VF_EDIT_DEPTH"))
+                        m_editDepth = float(atof(d));
+                    have = true;
+                    static bool logged = false;
+                    if (!logged) {
+                        logged = true;
+                        spdlog::info("VF_TEST_BRUSH {} {} {} {} d={:.1f} depth={:.1f}",
+                                     v.x, v.y, v.z, brushName(m_editBrush),
+                                     m_editDiameter, m_editDepth);
+                    }
+                }
+            } else if (testHov && *testHov && !m_hoverHit.hit) {
+                if (sscanf(testHov, "%d,%d,%d", &v.x, &v.y, &v.z) == 3) {
+                    have = true;
+                    spdlog::info("VF_TEST_HOVER {} {} {}", v.x, v.y, v.z);
+                }
+            }
+            if (have && m_layers.loaded()) {
                 m_hoverHit = {};
                 m_hoverHit.hit = true;
                 m_hoverHit.voxel = v;
-                spdlog::info("VF_TEST_HOVER {} {} {}", v.x, v.y, v.z);
+                if (m_editActive)
+                    m_hoverHit.normal = storeNormalAt(v);
             }
+        }
+
+        // Brush hover preview -> splat backend: tint the splats whose centre
+        // lies inside the volume the next stamp would affect - the carve
+        // cylinder or the delete/paint ball. Add creates new geometry, so it
+        // has no affected splats and stays off.
+        {
+            glm::vec4 vol(0.f), axis(0.f), tint(0.f);
+            // skin: surfels sit at cell centre + 0.05 m along their normal, so
+            // grow the volume a little past the cell centres the CPU
+            // rasterizer selects (see App::applyEditLive).
+            constexpr float kBrushSkin = 0.06f;
+            if (m_editActive && m_hoverHit.hit && m_editBrush != EditBrush::Add) {
+                const glm::vec3 c = vf::voxel::voxelCenter(m_hoverHit.voxel);
+                glm::vec3 n = m_hoverHit.normal;
+                if (glm::length(n) < 1e-3f)
+                    n = glm::vec3(0.f, 1.f, 0.f);
+                n = glm::normalize(n);
+                const float r = m_editDiameter * 0.5f + kBrushSkin;
+                if (m_editBrush == EditBrush::Carve) {
+                    // the exact volume makeOrientedCylinder emits: a cylinder
+                    // based at the hit cell, `depth` long along -normal
+                    const glm::vec3 a = -n;
+                    const float half = m_editDepth * 0.5f + kBrushSkin;
+                    vol = glm::vec4(c + a * (m_editDepth * 0.5f), r);
+                    axis = glm::vec4(a, half);
+                    tint = glm::vec4(1.00f, 0.45f, 0.10f, 0.45f); // warm = cut
+                } else if (m_editBrush == EditBrush::Delete) {
+                    vol = glm::vec4(c, r);
+                    axis = glm::vec4(0.f, 1.f, 0.f, 0.f); // ball
+                    tint = glm::vec4(1.00f, 0.12f, 0.10f, 0.55f); // red = remove
+                } else { // Paint: preview the chosen material colour
+                    vol = glm::vec4(c, r);
+                    axis = glm::vec4(0.f, 1.f, 0.f, 0.f); // ball
+                    const glm::vec3 pc = vf::voxel::kPalette[std::min<int>(m_editMat, 16)];
+                    tint = glm::vec4(pc, 0.55f);
+                }
+            }
+            m_splatPass.setBrush(vol, axis, tint);
         }
 
         // highlight feeds: selected (strong) + hover (faint) -> shader UBO

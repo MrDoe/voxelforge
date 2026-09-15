@@ -48,6 +48,43 @@ Record-only layers (everything the runtime consumes today) write zero counts
 for all five SVO arrays. The merged-SVO "packed" role is legacy — loaders skip
 such entries.
 
+### VXW v2 (tagged sections)
+
+Version 2 keeps the same 64 B header (with `version = 2`) and a section table
+instead of the implicit payload, so extra streams can travel with a layer:
+
+```
+u32 sectionCount
+per section:
+  u32 type
+  u64 byteLength
+  u8  bytes[byteLength]
+```
+
+Known section types (`worldfile::kSection*`):
+
+| type | name | contents |
+|---|---|---|
+| 0 | `RECORDS` | `u64 count` + `VoxelRecord[count]` (same 16 B records as v1) |
+| 1 | `LEGACY_SVO` | the v1 five-array block |
+| 2 | `STORE_CHUNKS` | opaque ChunkStore overlay (see below) |
+
+Unknown section types are preserved verbatim in `WorldFileData::sections`, so
+a read-modify-write round trip never drops data. v1 files stay readable;
+`write()` emits v2 only when `WorldFileData::sections` is non-empty (record
+layers keep the compact v1 layout).
+
+The `STORE_CHUNKS` overlay is owned by `ChunkStore` and carries a schema
+version (`u32 schema = 2`): `u32 chunkCount` followed by per-chunk
+`{ u32 index, u8 state, u8 pad[3], i32 editAABB[6] (global lattice lo/hi),
+u32 boxCount, u32 brickCount, boxes[boxCount] { i16 x,y,z,side; u8 mat;
+u8 terrain }, bricks[brickCount] { u32 blockKey; u32 words[1024] } }`. The
+edit AABB lets a reload re-refresh exactly the region the session touched
+(GPU-seeded surfels + that region) instead of re-shading whole chunks. The app writes the live-edit overlay to
+`assets/runtime_edits.vxw` (atomic temp+rename, asynchronously) and loads it
+explicitly at startup / after every world reload; it is intentionally **not**
+listed in `world.json`, so the layer poll does not reload it.
+
 ### VoxelRecord (16 B)
 
 | offset | type | field |

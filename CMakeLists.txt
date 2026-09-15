@@ -89,6 +89,8 @@ target_link_libraries(vf_platform PUBLIC glfw Vulkan::Vulkan vf_glm spdlog::spdl
 
 add_library(vf_core STATIC src/core/camera.cpp
                           src/voxel/layered_world.cpp src/voxel/voxel_field.cpp
+                          src/voxel/chunk_store.cpp
+                          src/voxel/live_editor.cpp
                           src/voxel/surfelize.cpp
                           src/voxel/heightmap.cpp src/voxel/worldfile.cpp
                           src/voxel/picking.cpp src/voxel/editable_world.cpp
@@ -192,7 +194,7 @@ add_executable(vf_tests tests/main.cpp tests/test_camera.cpp
                         tests/test_world.cpp tests/test_worldfile.cpp
                         tests/test_authoring.cpp tests/test_chat_tools.cpp
                         tests/test_picking.cpp tests/test_editable.cpp
-                        tests/test_surfelize.cpp
+                        tests/test_surfelize.cpp tests/test_store.cpp
                         src/ai/ollama_client.cpp)
 target_link_libraries(vf_tests PRIVATE vf_core vf_doctest)
 target_compile_definitions(vf_tests PRIVATE DOCTEST_CONFIG_NO_MULTITHREADING)
@@ -201,4 +203,7 @@ add_test(NAME unit_tests COMMAND vf_tests)
 find_package(Python3 COMPONENTS Interpreter REQUIRED)
 add_test(NAME visual_check
     COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/tests/visual_check.py
+            $<TARGET_FILE:voxelforge>)
+add_test(NAME live_edit_check
+    COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/tests/live_edit_check.py
             $<TARGET_FILE:voxelforge>)

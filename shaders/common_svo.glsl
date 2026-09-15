@@ -4,33 +4,49 @@ float sdBox(vec3 p, vec3 bmin, vec3 bmax)
     return length(max(q, vec3(0.0))) + min(max(q.x, max(q.y, q.z)), 0.0);
 }
 
+// Chunk-local handle bases (uChunkInfo[ci]): x = nodeBase (payload and
+// childBase), y = childBase (handles), z = brickBase (bricks in BRICK_WORDS
+// units). Every handle stored in the pools is relative to its owning chunk,
+// so a chunk can be relocated/patched without rewriting other chunks.
+struct Bases {
+    uint node;
+    uint child;
+    uint brick;
+};
 
-float brickVoxelSdf(uint bi, ivec3 c)
+Bases chunkBases(int ci)
+{
+    uvec4 v = uChunkInfo[ci];
+    return Bases(v.x, v.y, v.z);
+}
+
+float brickVoxelSdf(uint bi, uint brickBase, ivec3 c)
 {
     c = clamp(c, ivec3(0), ivec3(BRICK_N - 1));
-    uint v = uBricks[bi * BRICK_WORDS + (uint(c.z) * BRICK_N * BRICK_N +
-                                         uint(c.y) * BRICK_N + uint(c.x)) *
-                                            2];
+    uint v = uBricks[(brickBase + bi) * BRICK_WORDS +
+                     (uint(c.z) * BRICK_N * BRICK_N + uint(c.y) * BRICK_N +
+                      uint(c.x)) *
+                         2];
     int raw = int((v >> 24) & 255u); // int8 sdf, encoded as sdf / VOXEL
     if (raw >= 128)
         raw -= 256;
     return float(raw) * pc.b.y; // decode: meters = (sdf / VOXEL) * VOXEL
 }
 
-float brickSample(uint bi, vec3 p, vec3 mn, vec3 sz)
+float brickSample(uint bi, uint brickBase, vec3 p, vec3 mn, vec3 sz)
 {
     float cellSz = sz.x / float(BRICK_N);
     vec3 g = clamp((p - mn) / cellSz - 0.5, vec3(0.0), vec3(float(BRICK_N) - 1.001));
     ivec3 i0 = ivec3(g);
     vec3 f = g - vec3(i0);
-    float s000 = brickVoxelSdf(bi, i0 + ivec3(0, 0, 0));
-    float s100 = brickVoxelSdf(bi, i0 + ivec3(1, 0, 0));
-    float s010 = brickVoxelSdf(bi, i0 + ivec3(0, 1, 0));
-    float s110 = brickVoxelSdf(bi, i0 + ivec3(1, 1, 0));
-    float s001 = brickVoxelSdf(bi, i0 + ivec3(0, 0, 1));
-    float s101 = brickVoxelSdf(bi, i0 + ivec3(1, 0, 1));
-    float s011 = brickVoxelSdf(bi, i0 + ivec3(0, 1, 1));
-    float s111 = brickVoxelSdf(bi, i0 + ivec3(1, 1, 1));
+    float s000 = brickVoxelSdf(bi, brickBase, i0 + ivec3(0, 0, 0));
+    float s100 = brickVoxelSdf(bi, brickBase, i0 + ivec3(1, 0, 0));
+    float s010 = brickVoxelSdf(bi, brickBase, i0 + ivec3(0, 1, 0));
+    float s110 = brickVoxelSdf(bi, brickBase, i0 + ivec3(1, 1, 0));
+    float s001 = brickVoxelSdf(bi, brickBase, i0 + ivec3(0, 0, 1));
+    float s101 = brickVoxelSdf(bi, brickBase, i0 + ivec3(1, 0, 1));
+    float s011 = brickVoxelSdf(bi, brickBase, i0 + ivec3(0, 1, 1));
+    float s111 = brickVoxelSdf(bi, brickBase, i0 + ivec3(1, 1, 1));
     float c00 = mix(s000, s100, f.x), c10 = mix(s010, s110, f.x);
     float c01 = mix(s001, s101, f.x), c11 = mix(s011, s111, f.x);
     return mix(mix(c00, c10, f.y), mix(c01, c11, f.y), f.z) - 0.025;
@@ -45,19 +61,21 @@ float map(vec3 p)
         return 6.0;
     float chunkM = span / pc.b.z;
     ivec3 cc = ivec3(floor(rp / chunkM));
-    int root = uGrid[(cc.z * int(pc.b.z) + cc.y) * int(pc.b.z) + cc.x];
+    int ci = (cc.z * int(pc.b.z) + cc.y) * int(pc.b.z) + cc.x;
+    int root = uGrid[ci];
     if (root < 0) {
         vec3 cmin = wmin + vec3(cc) * chunkM;
         float d = sdBox(p, cmin, cmin + vec3(chunkM));
         return max(-d, pc.b.y * 0.5);
     }
+    Bases bs = chunkBases(ci);
     vec3 mn = wmin + vec3(cc) * chunkM;
     vec3 sz = vec3(chunkM);
     uint h = uint(root);
     for (int guard = 0; guard < 16; ++guard) {
         uint ty = h & 3u;
         if (ty == 1u) {               // brick -> sampled SDF
-            return brickSample(h >> 2u, p, mn, sz);
+            return brickSample(h >> 2u, bs.brick, p, mn, sz);
         }
         if (ty == 2u)                 // 0xFFFFFFFE solid terminal
             return -pc.b.y;
@@ -67,14 +85,14 @@ float map(vec3 p)
         }
         // node
         uint ni = h >> 2u;
-        uint pl = uPayload[ni];
+        uint pl = uPayload[bs.node + ni];
         vec3 halfS = sz * 0.5;
         vec3 r2 = p - mn;
         int oct = (r2.x >= halfS.x ? 1 : 0) | (r2.y >= halfS.y ? 2 : 0) |
                   (r2.z >= halfS.z ? 4 : 0);
         if (((pl >> (8u + uint(oct))) & 1u) != 0u)
             return -pc.b.y;           // fully-solid child octant
-        uint ch = uHandles[uChildBase[ni] + uint(oct)];
+        uint ch = uHandles[bs.child + uChildBase[bs.node + ni] + uint(oct)];
         if (ch == 0xFFFFFFFFu) {
             vec3 cmin = mn + vec3(oct & 1, (oct >> 1) & 1, (oct >> 2) & 1) * halfS;
             float d = sdBox(p, cmin, cmin + halfS);
@@ -99,9 +117,11 @@ uint brickMatByte(vec3 p)
     float chunkM = pc.b.x / pc.b.z;
     ivec3 cc = ivec3(floor(rel / chunkM));
     cc = clamp(cc, ivec3(0), ivec3(int(pc.b.z) - 1));
-    int root = uGrid[(cc.z * int(pc.b.z) + cc.y) * int(pc.b.z) + cc.x];
+    int ci = (cc.z * int(pc.b.z) + cc.y) * int(pc.b.z) + cc.x;
+    int root = uGrid[ci];
     if (root == -1)
         return 0xFFu;
+    Bases bs = chunkBases(ci);
     uint h = uint(root);
     vec3 mn = wmin + vec3(cc) * chunkM;
     vec3 sz = vec3(chunkM);
@@ -111,9 +131,10 @@ uint brickMatByte(vec3 p)
             float cellSz = sz.x / float(BRICK_N);
             vec3 g = clamp((p - mn) / cellSz - 0.5, vec3(0.0), vec3(BRICK_N - 1.001));
             ivec3 i0 = ivec3(g);
-            uint vi = bi * BRICK_WORDS + (uint(i0.z) * BRICK_N * BRICK_N +
-                                          uint(i0.y) * BRICK_N + uint(i0.x)) *
-                                             2 + 1;
+            uint vi = (bs.brick + bi) * BRICK_WORDS +
+                      (uint(i0.z) * BRICK_N * BRICK_N + uint(i0.y) * BRICK_N +
+                       uint(i0.x)) *
+                          2 + 1;
             return (uBricks[vi] >> 24) & 255u;
         }
         if ((h & 3u) != 0u)
@@ -123,7 +144,7 @@ uint brickMatByte(vec3 p)
         vec3 r2 = p - mn;
         int oct = (r2.x >= halfS.x ? 1 : 0) | (r2.y >= halfS.y ? 2 : 0) |
                   (r2.z >= halfS.z ? 4 : 0);
-        h = uHandles[uChildBase[ni] + oct];
+        h = uHandles[bs.child + uChildBase[bs.node + ni] + oct];
         mn += vec3(oct & 1, (oct >> 1) & 1, (oct >> 2) & 1) * halfS;
         sz = halfS;
     }
@@ -201,7 +222,7 @@ void boxTSlab(vec3 ro, vec3 rd, vec3 bmin, vec3 bmax, out float tEnter, out floa
     tExit  = min(min(t1.x, t1.y), t1.z);
 }
 
-bool brickDDAB(vec3 ro, vec3 rd, vec3 rdi, uint bi, vec3 bmin, float bsz,
+bool brickDDAB(vec3 ro, vec3 rd, vec3 rdi, uint bi, uint brickBase, vec3 bmin, float bsz,
                float tA, float tB, out float tHit)
 {
     float vsz = bsz / float(BRICK_N);
@@ -218,7 +239,7 @@ bool brickDDAB(vec3 ro, vec3 rd, vec3 rdi, uint bi, vec3 bmin, float bsz,
     for (int i = 0; i < BRICK_N * BRICK_N * BRICK_N + 16; ++i) {
         if (t > tB) return false;
         ivec3 vc = ivec3(clamp(vcell, vec3(0.0), vec3(float(BRICK_N) - 1.0)));
-        float sdf = brickVoxelSdf(bi, vc);   // signed metres, < 0 inside solid
+        float sdf = brickVoxelSdf(bi, brickBase, vc); // signed metres, < 0 inside solid
         if (sdf <= 0.0) { tHit = t; return true; }
         if (tMax.x < tMax.y) {
             if (tMax.x < tMax.z) { t = tMax.x; tMax.x += tDelta.x; vcell.x += stp.x; }
@@ -231,7 +252,7 @@ bool brickDDAB(vec3 ro, vec3 rd, vec3 rdi, uint bi, vec3 bmin, float bsz,
     return false;
 }
 
-void traverseSVONode(vec3 ro, vec3 rd, vec3 rdi, uint h, vec3 nmin, float sz,
+void traverseSVONode(vec3 ro, vec3 rd, vec3 rdi, uint h, Bases bs, vec3 nmin, float sz,
                      float tEnter, float tExit, inout float bestT, inout bool found)
 {
     const int MAXS = 256;
@@ -257,17 +278,17 @@ void traverseSVONode(vec3 ro, vec3 rd, vec3 rdi, uint h, vec3 nmin, float sz,
         }
         if (ty == 1u) {                          // brick -> per-voxel DDA
             float th;
-            if (brickDDAB(ro, rd, rdi, hh >> 2u, curMin, curSz, curEn, curEx, th)) {
+            if (brickDDAB(ro, rd, rdi, hh >> 2u, bs.brick, curMin, curSz, curEn, curEx, th)) {
                 if (th < bestT) { bestT = th; found = true; }
             }
             continue;
         }
         // node
         uint ni = hh >> 2u;
-        uint pl = uPayload[ni];
+        uint pl = uPayload[bs.node + ni];
         uint validMask = pl & 0xFFu;
         uint solidMask = (pl >> 8) & 0xFFu;
-        uint cbase = uChildBase[ni];
+        uint cbase = uChildBase[bs.node + ni];
         // distance LOD: a node that projects to <= ~1px can be collapsed to its
         // solid content with no visible change. This is octree LOD in the
         // raymarch - distant solid subtrees stop descending, so far geometry
@@ -298,7 +319,7 @@ void traverseSVONode(vec3 ro, vec3 rd, vec3 rdi, uint h, vec3 nmin, float sz,
             uint chh;
             if (solid) chh = 0xFFFFFFFEu;
             else {
-                uint ch = uHandles[cbase + uint(o)];
+                uint ch = uHandles[bs.child + cbase + uint(o)];
                 if (ch == 0xFFFFFFFFu) continue;
                 chh = (ch == 0xFFFFFFFEu) ? 0xFFFFFFFEu : ch;
             }
@@ -356,7 +377,8 @@ bool exactSVOHit(vec3 ro, vec3 rd, float tStart, float tEnd, out float tHit)
                 float tEn = max(t, tce);
                 float tEx = min(tEnd, tcx);
                 if (tEn <= tEx)
-                    traverseSVONode(ro, rd, rdi, uint(root), cmin, chunkM, tEn, tEx, bestT, found);
+                    traverseSVONode(ro, rd, rdi, uint(root), chunkBases(idx), cmin, chunkM,
+                                    tEn, tEx, bestT, found);
             }
         }
         if (tMax.x < tMax.y) {
@@ -401,9 +423,11 @@ vec3 brickAlbedo(vec3 p)
     float chunkM = pc.b.x / pc.b.z;
     ivec3 cc = ivec3(floor(rel / chunkM));
     cc = clamp(cc, ivec3(0), ivec3(int(pc.b.z) - 1));
-    int root = uGrid[(cc.z * int(pc.b.z) + cc.y) * int(pc.b.z) + cc.x];
+    int ci = (cc.z * int(pc.b.z) + cc.y) * int(pc.b.z) + cc.x;
+    int root = uGrid[ci];
     if (root == -1)
         return vec3(0.5);
+    Bases bs = chunkBases(ci);
     uint h = uint(root);
     vec3 mn = wmin + vec3(cc) * chunkM;
     vec3 sz = vec3(chunkM);
@@ -413,9 +437,10 @@ vec3 brickAlbedo(vec3 p)
             float cellSz = sz.x / float(BRICK_N);
             vec3 g = clamp((p - mn) / cellSz - 0.5, vec3(0.0), vec3(BRICK_N - 1.001));
             ivec3 i0 = ivec3(g);
-            uint vi = bi * BRICK_WORDS + (uint(i0.z) * BRICK_N * BRICK_N +
-                                           uint(i0.y) * BRICK_N + uint(i0.x)) *
-                                              2;
+            uint vi = (bs.brick + bi) * BRICK_WORDS +
+                      (uint(i0.z) * BRICK_N * BRICK_N + uint(i0.y) * BRICK_N +
+                       uint(i0.x)) *
+                          2;
             uint v = uBricks[vi];
             return vec3(float(v & 255u), float((v >> 8) & 255u), float((v >> 16) & 255u)) / 255.0;
         }
@@ -426,7 +451,7 @@ vec3 brickAlbedo(vec3 p)
         vec3 r2 = p - mn;
         int oct = (r2.x >= halfS.x ? 1 : 0) | (r2.y >= halfS.y ? 2 : 0) |
                   (r2.z >= halfS.z ? 4 : 0);
-        h = uHandles[uChildBase[ni] + oct];
+        h = uHandles[bs.child + uChildBase[bs.node + ni] + oct];
         mn += vec3(oct & 1, (oct >> 1) & 1, (oct >> 2) & 1) * halfS;
         sz = halfS;
     }
@@ -440,9 +465,11 @@ vec2 brickReflectivity(vec3 p)
     float chunkM = pc.b.x / pc.b.z;
     ivec3 cc = ivec3(floor(rel / chunkM));
     cc = clamp(cc, ivec3(0), ivec3(int(pc.b.z) - 1));
-    int root = uGrid[(cc.z * int(pc.b.z) + cc.y) * int(pc.b.z) + cc.x];
+    int ci = (cc.z * int(pc.b.z) + cc.y) * int(pc.b.z) + cc.x;
+    int root = uGrid[ci];
     if (root == -1)
         return vec2(0.15, 0.9);
+    Bases bs = chunkBases(ci);
     uint h = uint(root);
     vec3 mn = wmin + vec3(cc) * chunkM;
     vec3 sz = vec3(chunkM);
@@ -452,9 +479,10 @@ vec2 brickReflectivity(vec3 p)
             float cellSz = sz.x / float(BRICK_N);
             vec3 g = clamp((p - mn) / cellSz - 0.5, vec3(0.0), vec3(BRICK_N - 1.001));
             ivec3 i0 = ivec3(g);
-            uint vi = bi * BRICK_WORDS + (uint(i0.z) * BRICK_N * BRICK_N +
-                                           uint(i0.y) * BRICK_N + uint(i0.x)) *
-                                              2 + 1;
+            uint vi = (bs.brick + bi) * BRICK_WORDS +
+                      (uint(i0.z) * BRICK_N * BRICK_N + uint(i0.y) * BRICK_N +
+                       uint(i0.x)) *
+                          2 + 1;
             uint v = uBricks[vi];
             float refl = float((v >> 8) & 255u) / 255.0;
             float rough = float((v >> 16) & 255u) / 255.0;
@@ -467,7 +495,7 @@ vec2 brickReflectivity(vec3 p)
         vec3 r2 = p - mn;
         int oct = (r2.x >= halfS.x ? 1 : 0) | (r2.y >= halfS.y ? 2 : 0) |
                   (r2.z >= halfS.z ? 4 : 0);
-        h = uHandles[uChildBase[ni] + oct];
+        h = uHandles[bs.child + uChildBase[bs.node + ni] + oct];
         mn += vec3(oct & 1, (oct >> 1) & 1, (oct >> 2) & 1) * halfS;
         sz = halfS;
     }

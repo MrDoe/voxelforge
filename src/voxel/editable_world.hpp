@@ -58,6 +58,10 @@ struct EditableWorld {
     std::vector<VoxelRecord> makeDome(glm::ivec3 anchor, glm::vec3 axisDir,
                                       float radiusM, float heightM, uint8_t mat) const;
 
+    // Full solid ball centred on `anchor` (radiusM in meters): every cell whose
+    // centre lies inside. The brush volume of the Delete (clear) and Paint
+    // (recolour) edit modes, and what the hover preview tints.
+    std::vector<VoxelRecord> makeSphere(glm::ivec3 anchor, float radiusM, uint8_t mat) const;
     // Import a foreign .vxw layer file: translates its records so the object's
     // bottom-center lands on `anchor` and appends the copy to ai_edits.vxw.
     // This is the only runtime placement path — layer files store absolute

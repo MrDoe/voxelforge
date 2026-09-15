@@ -246,7 +246,9 @@ drive the same uniform; 0.5–2.0, default 1.0),
 `VF_SPLAT_NOCULL`/`NOWATER`,
 `VF_SPLAT_DEBUG` (1 flat / 2 normal / 3 depth / 4 no-collapse shading /
 5 facing / 6 albedo / 7 rough / 8 baked-shadow / 9 baked-AO / 10 hf-shadow /
-11 objDist / 12 height-residual / 13 march origin / 14 Gaussian kernel mask),
+11 objDist / 12 height-residual / 13 march origin / 14 Gaussian kernel mask /
+15 edit-brush volume: magenta marks surfels whose centre lies inside the
+active brush),
 `VF_RENDER_FLAGS`, `VF_SURFEL_SMOOTH`
 /`VF_SURFEL_HFBLEND` (bake variants), `VF_MICRO` (micro-surfel detail),
 `VF_VOLFOG` / `VF_MOTIONBLUR` / `VF_DOF` (headless overrides for the J/K/L toggles).
@@ -295,3 +297,29 @@ The app writes selected (strong warm) and hovered (faint) voxel centers into
 the binding-8 UBO every frame; the shader edge-highlights those cells. Test
 hooks `VF_TEST_SELECT=x,y,z` / `VF_TEST_HOVER=x,y,z` inject deterministic
 picks for headless screenshot checks.
+
+## Edit-brush hover preview (splat backend)
+
+The edit tool (`C`) previews what the next LMB stamp would affect: while the
+tool is active and a surface is hovered, every splat whose **centre** lies
+inside the brush volume is tinted flat in the fragment shader (bind 13
+`BrushUBO`: volume centre + radius, axis + half length, tint rgb + strength;
+all-zero strength disables).
+
+- volume = the exact cell set the CPU rasterizer will touch: **Carve** = the
+  oriented cylinder based at the hit cell, `depth` long along the surface
+  normal; **Delete/Paint** = the ball of `diameter/2` about the hit cell.
+  The volume is grown by a 0.06 m skin so the surfels' `+0.05 m` emitter
+  offset (pos = cell centre + n·0.05) stays inside; **Add** has no affected
+  splats and shows nothing.
+- tint: warm orange (carve), red (delete), the selected palette colour
+  (paint, Material combo in the panel) at ~0.45–0.55 mix strength.
+- testing a splat's *centre* (not the fragment position) keeps the highlight
+  per-splat and matches the rasterizer's per-cell decision; the whole disk
+  tints, boundary splats do not clip. Debug view `VF_SPLAT_DEBUG=15` shows
+  the volume/mask directly.
+- `VF_TEST_BRUSH="x,y,z,carve|delete|paint"` (+`VF_EDIT_DIAM`/`VF_EDIT_DEPTH`)
+  activates the tool headlessly and renders just the preview, so the
+  highlight is screenshot-testable (`tests/live_edit_check.py`). The SVO
+  backend has no equivalent per-surfel tint; the tile path (`VF_TILE=1`)
+  does not implement it yet.

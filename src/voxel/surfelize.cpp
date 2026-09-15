@@ -1,4 +1,5 @@
 #include "surfelize.hpp"
+#include "voxel/chunk_index.hpp"
 #include <numeric>
 #include <core/log.hpp>
 #include <algorithm>
@@ -47,8 +48,7 @@ inline void unpackKey(uint64_t k, int& x, int& y, int& z) {
 }
 
 inline int chunkIndex(int x, int y, int z) {
-    const int cx = x / kChunkSize, cy = y / kChunkSize, cz = z / kChunkSize;
-    return (cx * kSurfGridN + cy) * kSurfGridN + cz;
+    return chunkIndexOf(x / kChunkSize, y / kChunkSize, z / kChunkSize);
 }
 
 bool terrainSurface(const VoxelField& field, int x, int y, int z) {
@@ -105,7 +105,8 @@ glm::vec3 heightfieldNormal(const VoxelField& field, glm::vec3 p) {
     return safeNormalize(glm::mix(nFine, nWide, 0.55f));
 }
 
-glm::vec3 meanNormal(const VoxelField& field, int x, int y, int z) {    const int latN = field.latN();
+template <typename FieldT>
+glm::vec3 meanNormal(const FieldT& field, int x, int y, int z) {    const int latN = field.latN();
     glm::vec3 n(0.0f);
     const int dirs[6][3] = {{1,0,0},{-1,0,0},{0,1,0},{0,-1,0},{0,0,1},{0,0,-1}};
     for (auto &d : dirs) {
@@ -124,8 +125,10 @@ glm::vec3 meanNormal(const VoxelField& field, int x, int y, int z) {    const in
 // Binary sun-occlusion march over field.sample: exact Amanatides DDA over
 // lattice cells for the first 3 m (visits every cell like the SVO
 // reference, so thin eaves/logs are never tunnelled), then sphere-tracing
-// with tight clamps to 60 m. 0 = occluded, 1 = clear.
-float shadowMarch(const VoxelField& f, glm::vec3 ro, glm::vec3 rd)
+// with tight clamps to 60 m. 0 = occluded, 1 = clear. Templated on the query
+// so it serves both the base VoxelField and the runtime ChunkStore.
+template <typename FieldT>
+float shadowMarch(const FieldT& f, glm::vec3 ro, glm::vec3 rd)
 {
     // Phase 1: cell-exact DDA to 3 m. sampleWorld floors to the cell, so
     // testing every visited cell matches the voxel truth (SVO parity).
@@ -174,7 +177,8 @@ float shadowMarch(const VoxelField& f, glm::vec3 ro, glm::vec3 rd)
 }
 
 // Few-tap bent-normal AO over the exact oracle (mirrors splatAO's rings).
-void aoBake(const VoxelField& f, glm::vec3 p, glm::vec3 n, float& ao, glm::vec3& bent)
+template <typename FieldT>
+void aoBake(const FieldT& f, glm::vec3 p, glm::vec3 n, float& ao, glm::vec3& bent)
 {
     const float rad[2] = { 0.18f, 0.60f };
     glm::vec3 tv = glm::cross(n, glm::vec3(0.0001f, 1.0f, 0.0001f));
@@ -789,6 +793,196 @@ SurfelSet buildSurfels(const VoxelField& field, const SurfelParams& params) {
                  set.lod1Count, set.lod2Count, set.buildMs, ms(t0, tEnum),
                  ms(tEnum, t1));
     return set;
+}
+
+namespace {
+
+// Candidate surface cell for the store-based live surfelizer.
+struct SurfelCand {
+    uint64_t key;
+    glm::vec3 pos;
+    glm::vec3 n;
+    StoreCell cell;
+};
+
+std::vector<SurfelCand> collectChunkCandidates(const ChunkStore& store, int chunk,
+                                               glm::ivec3 lo, glm::ivec3 hi)
+{
+    std::vector<SurfelCand> cands;
+    if (chunk < 0 || chunk >= kChunkCount)
+        return cands;
+    int ccx, ccy, ccz;
+    chunkCoordsOf(chunk, ccx, ccy, ccz);
+    const int x0 = std::max(ccx * CHUNK_N, lo.x), x1 = std::min(ccx * CHUNK_N + CHUNK_N, hi.x);
+    const int y0 = std::max(ccy * CHUNK_N, lo.y), y1 = std::min(ccy * CHUNK_N + CHUNK_N, hi.y);
+    const int z0 = std::max(ccz * CHUNK_N, lo.z), z1 = std::min(ccz * CHUNK_N + CHUNK_N, hi.z);
+    const int dirs[6][3] = { { 1, 0, 0 },  { -1, 0, 0 }, { 0, 1, 0 },
+                             { 0, -1, 0 }, { 0, 0, 1 },  { 0, 0, -1 } };
+    for (int z = z0; z < z1; ++z)
+        for (int y = y0; y < y1; ++y)
+            for (int x = x0; x < x1; ++x) {
+                const StoreCell c = store.cellAt(x, y, z);
+                // raw == 0 counts as solid here: the SVO DDA tests `sdf <= 0`
+                if (c.sdfRaw > 0)
+                    continue;
+                bool surface = false;
+                for (const auto& d : dirs) {
+                    const StoreCell nb = store.cellAt(x + d[0], y + d[1], z + d[2]);
+                    if (nb.sdfRaw > 0) {
+                        surface = true;
+                        break;
+                    }
+                }
+                if (!surface)
+                    continue;
+                // SDF-gradient normal (store distances are locally smooth)
+                const glm::vec3 wp(-51.2f + (x + 0.5f) * VOXEL,
+                                   -51.2f + (y + 0.5f) * VOXEL,
+                                   -51.2f + (z + 0.5f) * VOXEL);
+                const float e = 0.15f;
+                glm::vec3 n(
+                    store.sampleWorld(wp + glm::vec3(e, 0, 0)).d -
+                        store.sampleWorld(wp - glm::vec3(e, 0, 0)).d,
+                    store.sampleWorld(wp + glm::vec3(0, e, 0)).d -
+                        store.sampleWorld(wp - glm::vec3(0, e, 0)).d,
+                    store.sampleWorld(wp + glm::vec3(0, 0, e)).d -
+                        store.sampleWorld(wp - glm::vec3(0, 0, e)).d);
+                if (glm::dot(n, n) < 1e-8f)
+                    n = glm::vec3(0.0f, 1.0f, 0.0f);
+                else
+                    n = glm::normalize(n);
+                cands.push_back({ packKey(x, y, z), wp, n, c });
+            }
+    std::sort(cands.begin(), cands.end(),
+              [](const SurfelCand& a, const SurfelCand& b) { return a.key < b.key; });
+    return cands;
+}
+
+void shadeCandidates(const ChunkStore& store, const std::vector<SurfelCand>& cands,
+                     const SurfelParams& params, std::vector<Surfel>& out,
+                     size_t begin, size_t end)
+{
+    const glm::vec3 sunDir = glm::normalize(params.sunDir);
+    const float baseR = params.baseRadius;
+    for (size_t i = begin; i < end; ++i) {
+        const SurfelCand& cd = cands[i];
+        const glm::vec3 pos = cd.pos + cd.n * (0.5f * VOXEL);
+        float shadow = 1.0f;
+        if (glm::dot(cd.n, sunDir) > 0.02f)
+            shadow = shadowMarch(store, pos + cd.n * 0.3f, sunDir);
+        float ao = 1.0f;
+        glm::vec3 bent = cd.n;
+        aoBake(store, pos + cd.n * 0.02f, cd.n, ao, bent);
+
+        const uint8_t mat = cd.cell.mat;
+        const float refl = kMaterialReflection[std::min(int(mat), 16)].x;
+        const float rough = kMaterialReflection[std::min(int(mat), 16)].y;
+        const float r = baseR * (mat == 8 ? 2.0f : 1.0f);
+        Surfel sl;
+        sl.pos_rU = glm::vec4(pos, r);
+        sl.normal_rV = glm::vec4(cd.n, r);
+        sl.bent_sh = glm::vec4(bent, shadow);
+        sl.mat_ao = glm::vec4(float(mat), refl, rough, ao);
+        out[i] = sl;
+    }
+}
+
+} // namespace
+
+namespace {
+inline void chunkBounds(int chunk, glm::ivec3& lo, glm::ivec3& hi)
+{
+    int cx, cy, cz;
+    chunkCoordsOf(chunk, cx, cy, cz);
+    lo = glm::ivec3(cx * CHUNK_N, cy * CHUNK_N, cz * CHUNK_N);
+    hi = lo + glm::ivec3(CHUNK_N);
+}
+} // namespace
+
+SurfelRange buildChunkSurfelsRange(const ChunkStore& store, int chunk, glm::ivec3 lo,
+                                   glm::ivec3 hi, const SurfelParams& params)
+{
+    SurfelRange out;
+    std::vector<SurfelCand> cands = collectChunkCandidates(store, chunk, lo, hi);
+    out.keys.reserve(cands.size());
+    for (const SurfelCand& c : cands)
+        out.keys.push_back(c.key);
+    out.surfels.resize(cands.size());
+    shadeCandidates(store, cands, params, out.surfels, 0, cands.size());
+    return out;
+}
+
+std::vector<Surfel> buildChunkSurfels(const ChunkStore& store, int chunk,
+                                      const SurfelParams& params)
+{
+    glm::ivec3 lo, hi;
+    chunkBounds(chunk, lo, hi);
+    return buildChunkSurfelsRange(store, chunk, lo, hi, params).surfels;
+}
+
+std::vector<std::vector<Surfel>> buildChunksSurfels(
+    const ChunkStore& store, const std::vector<int>& chunks,
+    const SurfelParams& params)
+{
+    std::vector<std::vector<Surfel>> out(chunks.size());
+    if (chunks.empty())
+        return out;
+
+    // Phase 1: enumerate candidates (read-only store) in parallel per chunk.
+    std::vector<std::vector<SurfelCand>> cands(chunks.size());
+    {
+        std::atomic<size_t> next{ 0 };
+        unsigned hc = std::max(1u, std::thread::hardware_concurrency());
+        hc = std::min<unsigned>(hc, unsigned(chunks.size()));
+        std::vector<std::thread> threads;
+        threads.reserve(hc);
+        for (unsigned t = 0; t < hc; ++t)
+            threads.emplace_back([&] {
+                for (;;) {
+                    const size_t i = next.fetch_add(1);
+                    if (i >= chunks.size())
+                        return;
+                    glm::ivec3 lo, hi;
+                    chunkBounds(chunks[i], lo, hi);
+                    cands[i] = collectChunkCandidates(store, chunks[i], lo, hi);
+                    out[i].resize(cands[i].size());
+                }
+            });
+        for (auto& th : threads)
+            th.join();
+    }
+
+    // Phase 2: shade a flat (chunk, slice) task list: no nested pools, every
+    // index writes exactly one output element (deterministic per chunk).
+    struct Task {
+        uint32_t chunk;
+        uint32_t begin, end;
+    };
+    std::vector<Task> tasks;
+    constexpr size_t kSlice = 256;
+    for (uint32_t c = 0; c < chunks.size(); ++c)
+        for (size_t b = 0; b < cands[c].size(); b += kSlice)
+            tasks.push_back({ c, uint32_t(b),
+                              uint32_t(std::min(cands[c].size(), b + kSlice)) });
+    std::atomic<size_t> next{ 0 };
+    unsigned hc = std::max(1u, std::thread::hardware_concurrency());
+    hc = std::min<unsigned>(hc, unsigned(tasks.size()));
+    std::vector<std::thread> threads;
+    threads.reserve(hc);
+    for (unsigned t = 0; t < hc; ++t)
+        threads.emplace_back([&] {
+            for (;;) {
+                const size_t i = next.fetch_add(1);
+                if (i >= tasks.size())
+                    return;
+                const Task& tk = tasks[i];
+                shadeCandidates(store, cands[tk.chunk], params, out[tk.chunk],
+                                tk.begin, tk.end);
+            }
+        });
+    for (auto& th : threads)
+        th.join();
+    return out;
 }
 
 std::vector<Surfel> buildWaterSurfels(const VoxelField& field, float spacing)

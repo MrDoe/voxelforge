@@ -22,6 +22,7 @@
 // them changed on disk - this is how MCP edits and GUI checkboxes reach a
 // running instance without an external repack step.
 #include "voxel/world.hpp"
+#include "voxel/chunk_store.hpp"
 #include "voxel/worldfile.hpp"
 #include "voxel/voxel_field.hpp"
 #include <atomic>
@@ -35,26 +36,6 @@
 #include <glm/glm.hpp>
 
 namespace vf::voxel {
-
-// Per-chunk SVO octree pool. Kept resident across reloads so that only the
-// chunks touched by a changed layer need to be rebuilt (incremental update).
-struct ChunkPool {
-    std::vector<uint32_t> childBase, payload, handles, bricks;
-    int32_t root = -1; // chunk root handle (-1 = empty)
-
-    uint32_t allocNode()
-    {
-        payload.push_back(0);
-        childBase.push_back(uint32_t(handles.size()));
-        handles.resize(handles.size() + 8, kEmptyHandle);
-        return uint32_t((payload.size() - 1) << 2);
-    }
-    uint32_t emitBrick(const uint32_t* data)
-    {
-        bricks.insert(bricks.end(), data, data + BRICK_WORDS);
-        return uint32_t(((bricks.size() / BRICK_WORDS) - 1) << 2 | 1);
-    }
-};
 
 // World-space AABB of a layer's records, used to derive dirty chunks.
 struct WorldAABB {
@@ -97,6 +78,18 @@ public:
     const std::vector<worldfile::WorldLayer>& layers() const { return m_layersMeta; }
     const Stats& stats() const { return m_stats; }
     const VoxelField& field() const { return m_field; }
+
+    // Runtime-explicit sparse voxel store (M0 foundation). Built lazily from
+    // the resident pools on first access; invalidated by every rebuild. This
+    // is where runtime edits will be applied (see chunk_store.hpp).
+    ChunkStore& store()
+    {
+        if (m_storeStale) {
+            m_store.adopt(m_pools, m_colTop, m_colMat);
+            m_storeStale = false;
+        }
+        return m_store;
+    }
 
     ~LayeredWorld();
 
@@ -152,6 +145,10 @@ private:
     std::vector<uint8_t> m_raiseMats;
     std::vector<uint8_t> m_blockSolid;                     // global presence grid (records+interior)
     VoxelField m_field;                                    // records-derived geometry oracle
+
+    // runtime-explicit sparse voxel store; lazily adopted from m_pools
+    ChunkStore m_store;
+    bool m_storeStale = true;
 
     // cached per-chunk SVO pools (kept across reloads for incremental updates)
     std::vector<std::unique_ptr<ChunkPool>> m_pools;

@@ -32,6 +32,16 @@ layout(std140, set = 0, binding = 3) uniform SplatUBO {
     vec4 uSplat2; // x=radius scale (hotkeys [/]), y=opacity, z=depth tol, w=spare
 } sp;
 
+// Brush hover preview (bind 13): the app fills this with the active edit
+// brush volume so the splats the next stamp would affect can be tinted
+// before the click. The volume is the oriented carve cylinder (w > 0 on the
+// axis) or the delete/paint ball (w == 0). a = 0 disables the preview.
+layout(std140, set = 0, binding = 13) uniform BrushUBO {
+    vec4 bVolume; // xyz = centre (world), w = radius m
+    vec4 bAxis;   // xyz = unit axis, w = half length m (0 = sphere)
+    vec4 bTint;   // rgb = tint colour, a = strength
+} uBrush;
+
 layout(location = 0) in vec3 vCenter;
 layout(location = 1) in vec3 vT;
 layout(location = 2) in vec3 vB;
@@ -54,6 +64,22 @@ layout(constant_id = 0) const int SKY_MODE = 0;
 layout(constant_id = 1) const int PASS_MODE = 0;
 
 const float kWaterLevel = -0.9;
+
+// Brush hover preview volume test (bind 13): is `p` inside the brush volume?
+// w == 0 on the axis => ball, otherwise an oriented cylinder. Used by the
+// hover tint and by debug view 15 (brush mask).
+bool inBrushVolume(vec3 p)
+{
+    if (uBrush.bTint.a <= 0.0)
+        return false;
+    vec3 rel = p - uBrush.bVolume.xyz;
+    const float r2 = uBrush.bVolume.w * uBrush.bVolume.w;
+    if (uBrush.bAxis.w <= 0.0)
+        return dot(rel, rel) <= r2;
+    const float along = dot(rel, uBrush.bAxis.xyz);
+    const vec3 perp = rel - uBrush.bAxis.xyz * along;
+    return abs(along) <= uBrush.bAxis.w && dot(perp, perp) <= r2;
+}
 
 #include "common_base.glsl"
 #include "common_splat.glsl"
@@ -140,7 +166,11 @@ void main()
     float dbg = sp.uSplat.w;
     if (dbg > 0.5) {
         // debug views (flat, no lighting)
-        if (dbg > 13.5) {
+        if (dbg > 14.5) {
+            // brush mask: magenta = splat centre inside the edit-brush volume
+            col = inBrushVolume(vCenter) ? vec3(1.0, 0.0, 1.0) : vec3(0.06);
+            alpha = 1.0;
+        } else if (dbg > 13.5) {
             // kernel mask: white = outside one sigma (soft edge region),
             // grey = inside. Shows the Gaussian boundary web directly.
             col = (d2 > sigma2) ? vec3(1.0) : vec3(0.35);
@@ -249,6 +279,17 @@ void main()
         col *= exp(-t * vec3(0.35, 0.18, 0.12) * 3.0);
         col = mix(col, vec3(0.05, 0.14, 0.13), clamp(t * 0.8, 0.0, 0.85));
     }
+
+    // Brush hover preview: tint the splats whose centre lies inside the
+    // active edit-brush volume (carve cylinder / delete+paint ball) so the set
+    // the LMB stamp would affect is visible before clicking. Testing the
+    // surfel CENTRE (not this fragment) keeps the highlight per-splat and
+    // matches the CPU rasterizer's cell membership; the app grows the volume
+    // by a small skin so the surface cells' emitter offset stays inside.
+    // Applied as a flat overlay after shading/fog so it reads on dark and
+    // bright surfaces alike.
+    if (inBrushVolume(vCenter))
+        col = mix(col, uBrush.bTint.rgb, uBrush.bTint.a);
 
     // Depth resolve: the PASS_MODE 3 prepass holds the nearest full-disk
     // plane depth at this pixel (fixed-function gl_Position depth, no

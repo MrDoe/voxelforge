@@ -504,6 +504,7 @@ bool LayeredWorld::rebuildNow(bool full, const std::vector<int>& dirty, glm::vec
         return false;
     m_pools = std::move(newPools);
     m_stats = s;
+    m_storeStale = true;
     return true;
 }
 
@@ -564,6 +565,7 @@ bool LayeredWorld::consumeRebuild()
     m_pools = std::move(m_pending->pools);
     m_field = std::move(m_pending->field);
     m_stats = m_pending->stats;
+    m_storeStale = true;
     m_pending.reset();
     lk.unlock();
     m_rebuildDone = false;
@@ -729,8 +731,12 @@ bool LayeredWorld::buildInto(bool full, const std::vector<int>& dirty,
         th.join();
 
     // --- deterministic merge across per-chunk pools (non-mutating) ---
+    // Handles stay CHUNK-LOCAL: each chunk records its base offsets into the
+    // merged arrays (GpuChunkInfo), so a single chunk's pool can later be
+    // relocated/patched without touching any other chunk's handles.
     outGpu = GpuWorld{};
     outGpu.chunkGrid.assign(numChunks, -1);
+    outGpu.chunkInfo.assign(numChunks, GpuChunkInfo {});
     size_t nodeOff = 0, hOff = 0, bOff = 0;
     for (size_t ci = 0; ci < numChunks; ++ci) {
         ChunkPool* pp = outPools[ci].get();
@@ -738,30 +744,18 @@ bool LayeredWorld::buildInto(bool full, const std::vector<int>& dirty,
             outGpu.chunkGrid[ci] = -1;
             continue;
         }
-        // copy + offset-adjust handles into outGpu; the pool stays pristine so it
-        // can be reused in a later incremental rebuild.
-        size_t hStart = outGpu.handles.size();
-        outGpu.handles.insert(outGpu.handles.end(), pp->handles.begin(), pp->handles.end());
-        for (size_t k = hStart; k < outGpu.handles.size(); ++k) {
-            uint32_t& h = outGpu.handles[k];
-            if (handleIsNode(h))
-                h += uint32_t(nodeOff << 2);
-            else if (handleIsBrick(h))
-                h += uint32_t(bOff << 2);
-        }
-        uint32_t r = uint32_t(pp->root);
-        if (handleIsNode(r))
-            r += uint32_t(nodeOff << 2);
-        else if (handleIsBrick(r))
-            r += uint32_t(bOff << 2);
-        outGpu.chunkGrid[ci] = r == kEmptyHandle ? -1 : int32_t(r);
-        size_t cStart = outGpu.childBase.size();
+        outGpu.chunkGrid[ci] = int32_t(uint32_t(pp->root)); // chunk-local root
+        outGpu.chunkInfo[ci].nodeBase = uint32_t(nodeOff);
+        outGpu.chunkInfo[ci].childBase = uint32_t(hOff);
+        outGpu.chunkInfo[ci].brickBase = uint32_t(bOff);
+        outGpu.handles.insert(outGpu.handles.end(), pp->handles.begin(),
+                              pp->handles.end());
         outGpu.childBase.insert(outGpu.childBase.end(), pp->childBase.begin(),
                                 pp->childBase.end());
-        for (size_t k = cStart; k < outGpu.childBase.size(); ++k)
-            outGpu.childBase[k] += uint32_t(hOff);
-        outGpu.payload.insert(outGpu.payload.end(), pp->payload.begin(), pp->payload.end());
-        outGpu.bricks.insert(outGpu.bricks.end(), pp->bricks.begin(), pp->bricks.end());
+        outGpu.payload.insert(outGpu.payload.end(), pp->payload.begin(),
+                              pp->payload.end());
+        outGpu.bricks.insert(outGpu.bricks.end(), pp->bricks.begin(),
+                             pp->bricks.end());
         nodeOff += pp->payload.size();
         hOff += pp->handles.size();
         bOff += pp->bricks.size() / BRICK_WORDS;
@@ -778,6 +772,13 @@ bool LayeredWorld::buildInto(bool full, const std::vector<int>& dirty,
         int cls = classifyBox(ctx, nullptr, false, cx * CHUNK_N, cy * CHUNK_N,
                               cz * CHUNK_N, CHUNK_N);
         outGpu.chunkGrid[ci] = cls == 1 ? int32_t(kSolidHandle) : -1;
+        if (cls == 1) {
+            // keep a pool for the promoted chunk too: incremental rebuilds and
+            // the runtime ChunkStore adopt from pools, not from GpuWorld
+            auto solid = std::make_unique<ChunkPool>();
+            solid->root = int32_t(kSolidHandle);
+            outPools[ci] = std::move(solid);
+        }
     }
 
     outStats.records = m_records.size();

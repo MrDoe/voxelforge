@@ -28,8 +28,9 @@ missing. After a clean checkout: `ninja -C build && ninja -C build world`.
 | `test_chat_tools.cpp` | tool-name normalization onto canonical tools, alias defaults, explicit-arg preservation, stamp cell parsing, JSON extractor tolerance, Ollama *and* OpenAI-shaped tool-call parsing, content-embedded calls |
 | `test_editable.cpp` | `importLayer` stamps a foreign layer at the anchor, dedupes, rejects bad meta, clips out-of-bounds |
 | `test_picking.cpp` | rayPick vs terrain from the hero camera, straight-down top-cell match, object-layer picking by material, bottom-center anchor contract |
+| `test_store.cpp` | canonical chunk index round-trip; `ChunkStore` adoption from the synthesized pools vs the `VoxelField` oracle (sign + object flag, tolerating one-voxel SDF quantisation); clear/set/paint edits + local SDF band; localized rebuild == full rebuild (byte-exact) and surface-density preservation; rebuilt octree pool traversal (sign match vs canonical) and store-based chunk surfels; VXW v2 overlay serialize/save/load round trips; deterministic adoption |
 | `test_world.cpp` | layered world SVO synthesis sparsity/determinism, `VoxelField` sign vs analytic probes |
-| `test_worldfile.cpp` | VXW roundtrip, CRC/magic corruption rejection, manifest roundtrip + layered dedupe, record-only layers are valid VXW |
+| `test_worldfile.cpp` | VXW v1 + v2 section round trips (records, legacy arrays, opaque store section preserved on rewrite), CRC/magic corruption rejection, manifest roundtrip + layered dedupe, record-only layers are valid VXW |
 
 ## `visual_check` (`tests/visual_check.py`)
 
@@ -54,6 +55,29 @@ Assertions per shot (timeout 300 s each):
 GPU-side acceptance at frame 30: same coverage bounds (3–98.5 %), sky probe
 pixel at (15W/16, H/8) must be blue-ish, plus a 3×3 grid of average colors on
 stderr for quick diagnosis.
+
+## `live_edit_check` (`tests/live_edit_check.py`)
+
+Live-edit (M1–M3) regression guard. Renders a close view at 480×270 and
+compares pairs — untouched vs one live store edit
+(`VF_TEST_EDIT="432,509,452,<mode>"`, the "Live patch" path): terrain anchor
+near the camera is edited, dirty chunks rebuild, their surfels are regenerated
+from the store and patched into the paged splat buffer, and the same chunks
+are patched into the chunk-local SVO buffers. Checks:
+
+- **raise** (Add) in `--mode splat` and `--mode svo`: the edited run logged
+  `live edit: … surfels …`;
+- **delete** and **paint** (store-only modes, splat): with `VF_MICRO=0` so the
+  diff is the geometry — the new brush-volume modes must be visible, not just
+  the patched chunks' dropped micro tail;
+- **carve hover preview** (`VF_TEST_BRUSH`, no edit applied): the tint over
+  the affected splats must be visible and warm;
+- every edited frame passes the pixel-diff bounds (visible, not frame-wide:
+  > 2 %, < 70 %), coverage (3–98.5 %), black-in-silhouette (<9 %) and
+  sky-probe checks.
+
+All runs set `VF_NO_OVERLAY=1` so a saved `assets/runtime_edits.vxw` from an
+interactive session cannot pollute the comparison.
 
 ## Fast debug workflows
 

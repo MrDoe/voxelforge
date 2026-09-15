@@ -37,7 +37,8 @@ glm::vec3 screenRayDir(double mx, double my, int fbW, int fbH,
 // central-difference normal of the quantised field; the offset must span
 // neighbouring cells (>= 1 cell) or every tap lands in the same cell and the
 // gradient collapses to zero
-glm::vec3 fieldNormal(const VoxelField& field, glm::vec3 p) {
+template <typename FieldT>
+glm::vec3 fieldNormalT(const FieldT& field, glm::vec3 p) {
     const float e = VOXEL * 1.5f;
     glm::vec3 n(field.sampleWorld(p + glm::vec3(e, 0, 0)).d -
                     field.sampleWorld(p - glm::vec3(e, 0, 0)).d,
@@ -48,17 +49,19 @@ glm::vec3 fieldNormal(const VoxelField& field, glm::vec3 p) {
     return glm::length(n) > 1e-6f ? glm::normalize(n) : glm::vec3(0, 1, 0);
 }
 
-PickHit rayPick(const VoxelField& field, glm::vec3 ro, glm::vec3 rd, float tMax,
-                int maxSteps) {
+// Terrain top for the PickHit bookkeeping: highest solid cell in the column.
+float storeTerrainTopY(const ChunkStore& store, int x, int z, int fromY) {
+    for (int y = std::min(store.latN() - 1, fromY + 64); y >= 0; --y)
+        if (store.cellAt(x, y, z).sdfRaw <= 0)
+            return -0.5f * WORLD + (float(y) + 1.0f) * VOXEL;
+    return -1e9f;
+}
+
+template <typename FieldT, typename TopYFn>
+PickHit rayPickT(const FieldT& field, glm::vec3 ro, glm::vec3 rd, float tMax,
+                 int maxSteps, TopYFn&& terrainTopY) {
     PickHit out;
-    if (!field.valid())
-        return out;
     rd = glm::normalize(rd);
-    // The records-derived field is quantised to VOXEL cells and evaluated at
-    // cell centres, so |d| never settles inside a thin hit window: it jumps
-    // straight from positive to negative across a surface. March until the
-    // sign flips, then bisect the crossing between the last outside sample
-    // and the first inside one.
     float prevT = 0.f;
     float lastD = field.sampleWorld(ro).d;
     if (lastD <= 0.f)
@@ -81,7 +84,7 @@ PickHit rayPick(const VoxelField& field, glm::vec3 ro, glm::vec3 rd, float tMax,
             out.hit = true;
             out.pos = hp;
             out.dist = hi;
-            out.normal = fieldNormal(field, hp);
+            out.normal = fieldNormalT(field, hp);
             // snap to the first solid cell along the ray: quantise points
             // nudged further inside until the sampled cell is actually solid
             glm::vec3 probeP = hp;
@@ -93,10 +96,7 @@ PickHit rayPick(const VoxelField& field, glm::vec3 ro, glm::vec3 rd, float tMax,
             }
             out.voxel = v;
             out.mat = field.sampleWorld(hp).mat;
-            int ix = out.voxel.x, iz = out.voxel.z;
-            out.terrainHeight = field.terrainColumn(ix, iz)
-                                    ? field.terrainTopY(ix, iz)
-                                    : -1e9f;
+            out.terrainHeight = terrainTopY(v.x, v.z, v.y);
             return out;
         }
         prevT = t;
@@ -107,11 +107,30 @@ PickHit rayPick(const VoxelField& field, glm::vec3 ro, glm::vec3 rd, float tMax,
         if (std::abs(d) < 3.f * VOXEL)
             step = glm::min(step, VOXEL);
         if (std::abs(d - lastD) < 0.001f)
-            step = glm::max(step, 0.06f); // stalled on a quantised plateau
+            step = std::max(step, 0.06f); // stalled on a quantised plateau
         lastD = d;
         t += step;
     }
     return out;
+}
+
+PickHit rayPick(const VoxelField& field, glm::vec3 ro, glm::vec3 rd, float tMax,
+                int maxSteps) {
+    if (!field.valid())
+        return PickHit {};
+    return rayPickT(field, ro, rd, tMax, maxSteps,
+                    [&](int x, int z, int) {
+                        return field.terrainColumn(x, z) ? field.terrainTopY(x, z)
+                                                         : -1e9f;
+                    });
+}
+
+PickHit rayPickStore(const ChunkStore& store, glm::vec3 ro, glm::vec3 rd, float tMax,
+                     int maxSteps) {
+    if (!store.loaded())
+        return PickHit {};
+    return rayPickT(store, ro, rd, tMax, maxSteps,
+                    [&](int x, int z, int y) { return storeTerrainTopY(store, x, z, y); });
 }
 
 } // namespace vf::voxel

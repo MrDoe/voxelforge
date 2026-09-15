@@ -20,6 +20,9 @@ layout(std430, set = 0, binding = 2) readonly buffer ChildBase { uint uChildBase
 layout(std430, set = 0, binding = 3) readonly buffer Payload { uint uPayload[]; };
 layout(std430, set = 0, binding = 4) readonly buffer Handles { uint uHandles[]; };
 layout(std430, set = 0, binding = 5) readonly buffer Bricks { uint uBricks[]; };
+// per-chunk bases for the chunk-local handle space: x = nodeBase (payload /
+// childBase), y = childBase (handles), z = brickBase (bricks)
+layout(std430, set = 0, binding = 11) readonly buffer ChunkInfo { uvec4 uChunkInfo[]; };
 layout(set = 0, binding = 6, rg32f) uniform readonly highp image2D uHeight;
 layout(set = 0, binding = 7, r8_snorm) uniform readonly highp image3D uObjVol;
 

@@ -42,6 +42,21 @@ public:
                     const std::vector<uint32_t>& microStart = {},
                     const std::vector<uint32_t>& lod1Range = {},
                     const std::vector<uint32_t>& lod2Range = {});
+
+    // Live-edit patch: replace one chunk's surfels (e.g. after a voxel edit).
+    // The paged layout reserves per-chunk capacity, so the common case is an
+    // in-place staging copy; a chunk that outgrows its slot is relocated to
+    // the end of the opaque region (growing the buffer if needed). Patched
+    // chunks drop their micro tail and LOD ring until the next full upload.
+    // Blocking (device idle + immediate submit): call between frames.
+    void patchChunkSurfels(uint32_t chunk, const void* data, size_t bytes,
+                           size_t count);
+
+    // Copy one chunk's current BASE surfels (micro tail excluded) into `out`
+    // as raw 64 B records. Returns the surfel count. Used by the live editor
+    // to seed its per-chunk cache from what the GPU already renders, so the
+    // first stamp in a chunk does not re-bake the whole chunk.
+    uint32_t readChunkSurfels(uint32_t chunk, std::vector<uint8_t>& out);
     // Depth target follows the offscreen extent (D24_UNORM_S8_UINT; the
     // stencil aspect is unused, kept from the removed core/stencil pipes).
     bool recreateDepth(uint32_t w, uint32_t h);
@@ -64,6 +79,21 @@ public:
     // disables backface collapse so the surrounding shell renders instead
     // of flashing sky. Clear otherwise (fast exterior path).
     void setBuried(bool buried) { m_buried = buried; }
+
+    // Brush hover preview (bind 13, fragment): tint every splat fragment whose
+    // surface point falls inside the active edit-brush volume, so the cells
+    // the next stamp would affect are visible before the click.
+    //   volume = (centre xyz, radius m)
+    //   axis   = (unit axis xyz, half length m; 0 = sphere)
+    //   tint   = (rgb, strength; 0 = preview off)
+    // Staged on the CPU and flushed into the mapped UBO by record().
+    void setBrush(const glm::vec4& volume, const glm::vec4& axis,
+                  const glm::vec4& tint)
+    {
+        m_brush[0] = volume;
+        m_brush[1] = axis;
+        m_brush[2] = tint;
+    }
 
     // Record sky + opaque chunks + water. Assumes hdr/gpos already in
     // GENERAL and m_depth in DEPTH_ATTACHMENT_OPTIMAL (App transitions).
@@ -90,6 +120,11 @@ private:
     // The far->near order matters for the translucent single-pass Gaussian
     // blend (source-over over the previous chunks).
     void computeDraws(const RaymarchPush& push);
+    // (Re)bind m_surfelBuf to set 0 binding 0 (both sets) after creation/growth.
+    void bindSurfelBuffer();
+    // Relayout the paged buffer with `minExtra` more opaque slots (copies the
+    // opaque + LOD/water tail regions and remaps every absolute range).
+    bool growOpaque(uint32_t minExtra);
 
     const Context* m_ctx = nullptr;
     VkPipelineLayout m_layout = VK_NULL_HANDLE;
@@ -153,6 +188,10 @@ private:
     VmaAllocation m_surfelAlloc = VK_NULL_HANDLE;
     Image3D m_depth {};
     Buffer m_paramsBuf {}; // persistently mapped 2xvec4 kernel-tuning UBO
+    // Brush hover preview: persistently mapped 3xvec4 UBO (bind 13), flushed
+    // from m_brush in record() like the params above.
+    Buffer m_brushBuf {};
+    glm::vec4 m_brush[3] { glm::vec4(0.f), glm::vec4(0.f), glm::vec4(0.f) };
     // ---- occlusion culling (Hi-Z depth pyramid) ----
     static constexpr uint32_t kMaxHiZMips = 16;
     Image3D m_hiz {};
@@ -189,7 +228,15 @@ private:
 
     size_t m_count = 0;
     uint32_t m_waterStart = 0;
-    std::vector<uint32_t> m_chunkRange;
+    // Paged opaque layout: chunk c owns slots [m_chunkStart[c], +m_chunkCount[c])
+    // inside a capacity of m_chunkCap[c]; [m_opaqueCap, ...) holds the LOD ring
+    // and water tail regions (absolute ranges shifted on relayout). Empty
+    // vectors = no chunking info (legacy single-run draw).
+    std::vector<uint32_t> m_chunkStart, m_chunkCount, m_chunkCap;
+    std::vector<uint8_t> m_lod1Valid, m_lod2Valid; // per-chunk ring freshness
+    uint32_t m_opaqueCap = 0;  // reserved opaque slots before the tail
+    uint32_t m_opaqueHigh = 0; // next free relocation slot
+    uint32_t m_bufSlots = 0;   // total slots in m_surfelBuf
     std::vector<uint32_t> m_waterChunkRange; // GRID_N^3 + 1 absolute offsets, or empty
     std::vector<uint32_t> m_microStart;      // per-chunk base/micro split, or empty
     std::vector<uint32_t> m_lod1Range;       // merged-terrain LOD rings, or empty

@@ -125,3 +125,34 @@ Bugs found on the way: mangled multichar char literal ('""') made the JSON
 string-skipper a no-op (infinite loop in brace matching); find-by-key loops
 required whitespace-skipping after colons (json.dumps formatting). Tests:
 4 new parse cases incl. whitespace-formatted responses; ctest green.
+
+## 2026-09-15 ingest | edit-brush hover preview + Delete/Paint modes
+The edit tool (C) now has four brush modes: Carve (cylinder scoop), Add (dome),
+Delete (clear the brush ball) and Paint (recolour the ball with the new Material
+combo). Delete/Paint are `StoreEdit::Clear`/`Paint` and always patch the live
+store; Carve/Add keep the record-layer path when "Live patch" is off. Hovering
+tints the affected splats before the click: bind 13 `BrushUBO` (centre+radius,
+axis+half length, rgba tint), tested against the surfel CENTRE (per-splat, like
+the CPU rasterizer) plus a 0.06 m skin so the surfers' `+0.05 m` emitter offset
+stays inside; warm orange = carve, red = delete, material colour = paint;
+`VF_SPLAT_DEBUG=15` draws the volume as a magenta mask; `VF_TEST_BRUSH` renders
+the preview headlessly. Along the way: fixed a pre-existing `LiveEditor::stamp`
+bug — a freshly GPU-seeded chunk is the PRE-edit run, so the first stamp in a
+chunk uploaded the old surface back and looked like a no-op (single stamps of
+diameter <= 2 m changed nothing in the splat backend); stamp() now refreshes
+the edited AABB ±3 on top of a fresh seed. Test gaps closed in
+`tests/live_edit_check.py` (delete/paint with `VF_MICRO=0` so the diff is
+geometry, plus a warm-tint preview check); ctest green. New `VF_NO_OVERLAY=1`
+skips restoring `assets/runtime_edits.vxw` (a 36 MB session overlay restored by
+the app had silently broken visual_check/live_edit_check); both test scripts set
+it. Created [[entities/live-edit-brush]].
+
+## 2026-09-15 lint | stale pages after the surfel rework
+`entities/svo-render.md`, `concepts/shading-model.md` and
+`concepts/voxel-object-authoring.md` still describe the pre-rework world
+(`scene()` analytic geometry, `world.vxw` merged cache, "the single render
+path", `--compare` parity runs). Current reality: `.vxw` records only, Gaussian
+surfels primary + SVO reference, agent/edit flows. `entities/svo-render.md` got
+a role banner; the other two need a full rewrite from `AGENTS.md` + `docs/`
+next session. No orphan pages (all linked from `index.md`); the new live-edit
+page links back to [[entities/svo-render]].

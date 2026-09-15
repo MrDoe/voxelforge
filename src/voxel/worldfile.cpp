@@ -69,28 +69,13 @@ struct Reader {
 
 } // namespace
 
-bool write(const std::string& path, const WorldFileData& d)
+namespace {
+
+void putRecords(std::vector<uint8_t>& payload, const std::vector<VoxelRecord>& voxels)
 {
-    std::vector<uint8_t> payload;
-    auto words = [&](const auto& v) {
-        payload.insert(payload.end(), reinterpret_cast<const uint8_t*>(v.data()),
-                       reinterpret_cast<const uint8_t*>(v.data() + v.size()));
-    };
-    // svo buffers in fixed order
-    putU64(payload, d.chunkGrid.size());
-    words(d.chunkGrid);
-    putU64(payload, d.childBase.size());
-    words(d.childBase);
-    putU64(payload, d.payload.size());
-    words(d.payload);
-    putU64(payload, d.handles.size());
-    words(d.handles);
-    putU64(payload, d.bricks.size());
-    words(d.bricks);
-    // explicit voxel records
-    putU64(payload, d.voxels.size());
-    payload.reserve(payload.size() + d.voxels.size() * 16);
-    for (const VoxelRecord& v : d.voxels) {
+    putU64(payload, voxels.size());
+    payload.reserve(payload.size() + voxels.size() * 16);
+    for (const VoxelRecord& v : voxels) {
         payload.push_back(uint8_t(v.x));
         payload.push_back(uint8_t(v.x >> 8));
         payload.push_back(uint8_t(v.y));
@@ -108,6 +93,98 @@ bool write(const std::string& path, const WorldFileData& d)
         payload.push_back(0);
         payload.push_back(0);
     }
+}
+
+void putLegacySvo(std::vector<uint8_t>& payload, const WorldFileData& d)
+{
+    auto words = [&](const auto& v) {
+        payload.insert(payload.end(), reinterpret_cast<const uint8_t*>(v.data()),
+                       reinterpret_cast<const uint8_t*>(v.data() + v.size()));
+    };
+    putU64(payload, d.chunkGrid.size());
+    words(d.chunkGrid);
+    putU64(payload, d.childBase.size());
+    words(d.childBase);
+    putU64(payload, d.payload.size());
+    words(d.payload);
+    putU64(payload, d.handles.size());
+    words(d.handles);
+    putU64(payload, d.bricks.size());
+    words(d.bricks);
+}
+
+bool readRecords(const uint8_t* p, size_t n, std::vector<VoxelRecord>& out)
+{
+    Reader r { p, n };
+    uint64_t count = 0;
+    if (!r.pod(count) || count > n / sizeof(VoxelRecord))
+        return false;
+    out.resize(size_t(count));
+    for (VoxelRecord& v : out) {
+        uint16_t xyz[3];
+        if (!r.get(xyz, 6))
+            return false;
+        v.x = xyz[0];
+        v.y = xyz[1];
+        v.z = xyz[2];
+        if (!r.get(&v.r, 6))
+            return false; // r g b a refl rough
+        uint8_t tail[4];
+        if (!r.get(tail, 4))
+            return false; // mat reserved pad pad
+        v.materialId = tail[0];
+    }
+    return true;
+}
+
+bool readLegacySvo(Reader& r, WorldFileData& out)
+{
+    auto vec = [&](std::vector<uint32_t>& v) {
+        uint64_t count = 0;
+        if (!r.pod(count) || count > uint64_t(r.n - r.off) / 4)
+            return false;
+        v.resize(size_t(count));
+        return r.get(v.data(), size_t(count) * 4);
+    };
+    uint64_t gridCount = 0;
+    if (!r.pod(gridCount) || gridCount > uint64_t(r.n - r.off) / 4)
+        return false;
+    out.chunkGrid.resize(size_t(gridCount));
+    if (!r.get(out.chunkGrid.data(), size_t(gridCount) * 4))
+        return false;
+    return vec(out.childBase) && vec(out.payload) && vec(out.handles) &&
+           vec(out.bricks);
+}
+
+} // namespace
+
+bool write(const std::string& path, const WorldFileData& d)
+{
+    std::vector<uint8_t> payload;
+    const bool v2 = !d.sections.empty();
+    if (!v2) {
+        putLegacySvo(payload, d);
+        putRecords(payload, d.voxels);
+    } else {
+        // tagged sections: legacy SVO + records + caller extras (e.g. the
+        // ChunkStore live-edit overlay)
+        putU32(payload, uint32_t(d.sections.size()) + 2);
+        std::vector<uint8_t> sec;
+        putLegacySvo(sec, d);
+        putU32(payload, worldfile::kSectionLegacySvo);
+        putU64(payload, sec.size());
+        payload.insert(payload.end(), sec.begin(), sec.end());
+        sec.clear();
+        putRecords(sec, d.voxels);
+        putU32(payload, worldfile::kSectionRecords);
+        putU64(payload, sec.size());
+        payload.insert(payload.end(), sec.begin(), sec.end());
+        for (const Section& s : d.sections) {
+            putU32(payload, s.type);
+            putU64(payload, s.data.size());
+            payload.insert(payload.end(), s.data.begin(), s.data.end());
+        }
+    }
 
     std::FILE* f = std::fopen(path.c_str(), "wb");
     if (!f) {
@@ -123,7 +200,7 @@ bool write(const std::string& path, const WorldFileData& d)
         hdr[o + 2] = uint8_t(v >> 16);
         hdr[o + 3] = uint8_t(v >> 24);
     };
-    u32at(4, kVersion);
+    u32at(4, v2 ? worldfile::kVersion2 : worldfile::kVersion);
     float fs[3] = { d.meta.worldSize, d.meta.voxelSize, d.meta.waterLevel };
     for (int i = 0; i < 3; ++i) {
         uint32_t u;
@@ -161,15 +238,15 @@ bool read(const std::string& path, WorldFileData& out)
     if (!rd)
         return false;
 
-    Reader r{ buf.data(), buf.size() };
+    Reader r { buf.data(), buf.size() };
     char magic[4];
     uint32_t version = 0;
     if (!r.get(magic, 4) || std::memcmp(magic, kMagic, 4) != 0 || !r.pod(version) ||
-        version != kVersion) {
-        spdlog::error("worldfile: '{}' is not a VXW v1 file", path);
+        (version != kVersion && version != kVersion2)) {
+        spdlog::error("worldfile: '{}' is not a VXW v1/v2 file", path);
         return false;
     }
-    Reader h{ buf.data(), kHeaderBytes, 8 };
+    Reader h { buf.data(), kHeaderBytes, 8 };
     uint32_t fs[3];
     h.pod(fs[0]);
     h.pod(fs[1]);
@@ -188,39 +265,54 @@ bool read(const std::string& path, WorldFileData& out)
         return false;
     }
 
-    auto vec = [&](std::vector<uint32_t>& v) {
-        uint64_t count = 0;
-        if (!r.pod(count) || count > uint64_t(r.n - r.off) / 4)
+    if (version == kVersion) {
+        if (!readLegacySvo(r, out))
             return false;
-        v.resize(size_t(count));
-        return r.get(v.data(), size_t(count) * 4);
-    };
-    uint64_t gridCount = 0;
-    if (!r.pod(gridCount) || gridCount > uint64_t(r.n - r.off) / 4) {
-        return false;
+        uint64_t voxCount = 0;
+        if (!r.pod(voxCount) || voxCount > uint64_t(r.n - r.off) / sizeof(VoxelRecord))
+            return false;
+        out.voxels.resize(size_t(voxCount));
+        for (VoxelRecord& v : out.voxels) {
+            uint16_t xyz[3];
+            if (!r.get(xyz, 6))
+                return false;
+            v.x = xyz[0];
+            v.y = xyz[1];
+            v.z = xyz[2];
+            if (!r.get(&v.r, 6))
+                return false; // r g b a refl rough
+            uint8_t tail[4];
+            if (!r.get(tail, 4))
+                return false; // mat reserved pad pad
+            v.materialId = tail[0];
+        }
+        return true;
     }
-    out.chunkGrid.resize(size_t(gridCount));
-    if (!r.get(out.chunkGrid.data(), size_t(gridCount) * 4))
+
+    // ---- v2: tagged-section payload --------------------------------------
+    uint32_t sectionCount = 0;
+    if (!r.pod(sectionCount) || sectionCount > 256)
         return false;
-    if (!(vec(out.childBase) && vec(out.payload) && vec(out.handles) && vec(out.bricks)))
-        return false;
-    uint64_t voxCount = 0;
-    if (!r.pod(voxCount) || voxCount > uint64_t(r.n - r.off) / sizeof(VoxelRecord))
-        return false;
-    out.voxels.resize(size_t(voxCount));
-    for (VoxelRecord& v : out.voxels) {
-        uint16_t xyz[3];
-        if (!r.get(xyz, 6))
+    for (uint32_t s = 0; s < sectionCount; ++s) {
+        uint32_t type = 0;
+        uint64_t len = 0;
+        if (!r.pod(type) || !r.pod(len) || len > uint64_t(r.n - r.off))
             return false;
-        v.x = xyz[0];
-        v.y = xyz[1];
-        v.z = xyz[2];
-        if (!r.get(&v.r, 6))
-            return false; // r g b a refl rough
-        uint8_t tail[4];
-        if (!r.get(tail, 4))
-            return false; // mat reserved pad pad
-        v.materialId = tail[0];
+        const uint8_t* base = r.p + r.off;
+        if (type == kSectionRecords) {
+            if (!readRecords(base, size_t(len), out.voxels))
+                return false;
+        } else if (type == kSectionLegacySvo) {
+            Reader sr { base, size_t(len) };
+            if (!readLegacySvo(sr, out))
+                return false;
+        } else {
+            // opaque (e.g. the ChunkStore overlay): keep verbatim so a
+            // read-modify-write round trip preserves it
+            out.sections.push_back(
+                { type, std::vector<uint8_t>(base, base + size_t(len)) });
+        }
+        r.off += size_t(len);
     }
     return true;
 }

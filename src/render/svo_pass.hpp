@@ -1,6 +1,7 @@
 #pragma once
 #include "rhi/context.hpp"
 #include "rhi/resources.hpp"
+#include "voxel/world.hpp"
 #include <cstdint>
 #include <glm/glm.hpp>
 #include <vector>
@@ -26,11 +27,15 @@ public:
     bool init(const Context& ctx);
     void destroy();
 
-    void setWorld(const std::vector<int32_t>& chunkGrid,
-                  const std::vector<uint32_t>& childBase,
-                  const std::vector<uint32_t>& payload,
-                  const std::vector<uint32_t>& handles,
-                  const std::vector<uint32_t>& bricks);
+    // Upload the whole synthesized world (chunk-local handles + uChunkInfo).
+    void setWorld(const voxel::GpuWorld& world);
+
+    // Live-edit patch: replace one chunk's octree with a rebuilt pool. The
+    // chunk's data is appended into reserved per-chunk regions (relocating a
+    // chunk whose pool outgrew its slot, growing the array buffers if needed)
+    // and the chunk's grid root + base table entry are updated in place.
+    // Blocking (device idle + immediate submit): call between frames.
+    void patchChunk(uint32_t chunk, const voxel::ChunkPool& pool);
 
     void updateDescriptors(const Image3D& hdrImage, const Image3D& gposImage);
     void setHeightmapView(VkImageView view);
@@ -46,9 +51,18 @@ private:
     struct Ssbo {
         VkBuffer buf = VK_NULL_HANDLE;
         VmaAllocation alloc = VK_NULL_HANDLE;
+        size_t bytes = 0;
     };
     bool uploadSsbo(Ssbo& s, const void* data, size_t bytes);
     void destroySsbo(Ssbo& s);
+    // Bind the 5 world SSBOs (grid/childBase/payload/handles/bricks) and the
+    // per-chunk base table to set 0 bindings 1-5 and 11.
+    void bindWorldBuffers();
+    // Copy `bytes` into an SSBO at `offset` (staging + immediate submit).
+    bool uploadRange(Ssbo& s, size_t offset, const void* data, size_t bytes);
+    // Grow one SSBO to `minBytes` (device copy of the old contents).
+    bool growSsbo(Ssbo& s, size_t minBytes);
+    uint32_t readChunkRoot(uint32_t chunk) const;
 
     const Context* m_ctx = nullptr;
     VkPipeline m_pipeline = VK_NULL_HANDLE;
@@ -58,6 +72,11 @@ private:
     VkDescriptorSet m_set = VK_NULL_HANDLE;
 
     Ssbo m_grid, m_childBase, m_payload, m_handles, m_bricks;
+    Ssbo m_chunkInfo; // uvec4 per chunk: nodeBase, childBase, brickBase, _
+    // paged patch layout: per-chunk capacity for each array + relocation cursor
+    std::vector<voxel::GpuChunkInfo> m_info; // CPU mirror of m_chunkInfo
+    std::vector<uint32_t> m_capPayload, m_capHandles, m_capBricks; // per chunk
+    uint32_t m_highPayload = 0, m_highHandles = 0, m_highBricks = 0;
     VkImageView m_heightView = VK_NULL_HANDLE;
     VkImageView m_objVolView = VK_NULL_HANDLE;
 

@@ -11,8 +11,11 @@ were removed on the `VoxelsOnly` branch (see
 
 Consequences worth internalizing:
 
-- `VoxelField` (`src/voxel/voxel_field.{hpp,cpp}`) is **the geometry oracle**;
-  picking, probes, SVO synthesis and tests all consume it.
+- `VoxelField` (`src/voxel/voxel_field.{hpp,cpp}`) is **the load-time geometry
+  oracle**; picking, probes, SVO synthesis and tests all consume it. The
+  runtime-explicit `ChunkStore` (`src/voxel/chunk_store.{hpp,cpp}`, M0) is
+  adopted lazily from the synthesized pools and becomes the mutation path for
+  live editing (see [Live editing](#live-editing-m0-chunkstore)).
 - `shaders/svo_raymarch.comp` is the only render shader; it reads baked data
   textures/buffers only.
 - New content = new `.vxw` records (baked by `tools/heightmap_gen.cpp` from
@@ -58,7 +61,9 @@ Consequences worth internalizing:
 | `common.hpp` | Load-bearing constants (`WORLD=102.4`, `VOXEL=0.1`, `CHUNK_N=64`, `GRID_N=16`, `WATER_LEVEL=-0.9`), `kPalette[9]`/`kMaterialReflection[9]`, deterministic noise (`hash2`/`fbm2`), terrain material banding, SDF primitives and **baker-side analytic shapes** (`houseAt/treesAt/rocksAt/bushesAt/fenceAt/alpacaAt`, stamps). NOT linked into any renderer path — consumed by `heightmap_gen` sweeps and tests as authoring truth. |
 | `worldfile.{hpp,cpp}` | VXW v1 container I/O with CRC32 validation; JSON manifest load/write; `readLayered()` priority merge. See [world format](world-format.md). |
 | `layered_world.{hpp,cpp}` | Runtime world owner: manifest load/poll, priority merge into column/object arrays, per-chunk SVO synthesis with resident pools, stats, dirty tracking. See below. |
-| `voxel_field.{hpp,cpp}` | Geometry oracle built from merged records: per-column terrain tops, object components flood-filled to solids with two-pass Dijkstra signed-distance grids stored in a sparse open-addressing hash; emits GPU textures. |
+| `voxel_field.{hpp,cpp}` | Load-time geometry oracle built from merged records: per-column terrain tops, object components flood-filled to solids with two-pass Dijkstra signed-distance grids stored in a sparse open-addressing hash; emits GPU textures. |
+| `chunk_store.{hpp,cpp}` | Runtime-explicit sparse voxel store (M0): per-chunk `Empty/Solid/Explicit` states, 8³ bricks + solid boxes, cell edits, local SDF-band + octree rebuild. Lazily adopted from the resident pools by `LayeredWorld::store()`. |
+| `chunk_index.hpp` | Canonical z-major chunk indexing shared by SVO, surfel and store paths. |
 | `editable_world.{hpp,cpp}` | Persistent `ai_edits.vxw` writer: box/cylinder/ellipsoid/stamp rasterizers, layer import, manifest bookkeeping. See [AI editing](ai-editing.md). |
 | `heightmap.{hpp,cpp}` | 2048² 16-bit PNG loader + bilinear sample/gradient. Baker/test-side only since the rework. |
 | `picking.{hpp,cpp}` | CPU `rayPick()` against `VoxelField`, screen→ray helper, lattice↔world conversions. |
@@ -100,6 +105,85 @@ Consequences worth internalizing:
   layers, writes `world.json` while preserving an existing `ai_edits.vxw`.
 - `scene_slice.cpp` — `vf_slice`: ASCII cross-sections of the live field
   (includes AI edits). Primary authoring feedback loop.
+
+## Live editing (M0 store + M1 splat patch)
+
+The target runtime model is **one virtual voxel space**: terrain and objects
+are the same data (cells with packed appearance, response and material), and
+terrain-vs-object is only metadata plus derived acceleration. The first two
+milestones landed as an explicitly stored, chunk-keyed world with a live GPU
+patch path:
+
+- `src/voxel/chunk_store.*` owns per-chunk voxel data in canonical z-major
+  chunk order (`src/voxel/chunk_index.hpp`). Chunk states are `Empty`,
+  `Solid` (uniform underground fill, material resolved from the base column
+  grid when materialised) and `Explicit` (sparse 8³ bricks + solid boxes in
+  the exact GPU brick layout).
+- `LayeredWorld::store()` adopts the resident `ChunkPool`s lazily: the pool
+  octree is walked once, lifting bricks and solid sub-boxes into canonical
+  data. `VoxelField` remains the bootstrap oracle; the store is the runtime
+  edit path.
+- `ChunkStore::apply()` takes cell-level `Set | Clear | Paint` edits; dirty
+  chunks rebuild their local signed-distance band (two-pass 3-4-5 chamfer
+  transform seeded from sign boundaries + neighbour-chunk face SDFs) and
+  regenerate the octree pool from the sparse cells. Edits never touch the
+  base field.
+- **M1 live patch (splat)**: the edit tool's "Live patch" mode stamps
+  edits into the store (the panel offers four brush modes: **Carve** = a
+  depth-limited cylinder scoop along the surface normal, **Add** = a dome,
+  **Delete** = clear every cell in the brush ball, **Paint** = recolour the
+  ball with the selected material; delete/paint are `Clear`/`Paint` store
+  operations and always take this live path). `ChunkStore::rebuildDirty`
+  re-derives only the edited
+  block region (edit AABB ± 12 cells, snapped to 8³ blocks; untouched blocks
+  are copied verbatim — a unit test pins the localized result byte-equal to a
+  full chunk rebuild). `LiveEditor` keeps per-chunk surfel caches and refreshes
+  only the ±3-cell neighbourhood, then `SplatPass::patchChunkSurfels` writes
+  the updated run into the **paged** surfel buffer: each chunk owns a slot run
+  with reserved capacity (`m_chunkStart/Count/Cap`) so untouched chunks stay
+  put; a chunk that outgrows its slot relocates into the opaque free area, and
+  the buffer grows (tail regions shift) if needed. Patched chunks drop their
+  micro tail + LOD ring until the next full upload. A freshly GPU-seeded chunk
+  is the *pre-edit* run, so `stamp()` always refreshes the edited region on
+  top of the seed (without it the first stamp in a chunk looks like a no-op).
+  The hover **preview** tints the affected splats before the click (bind 13
+  `BrushUBO`, tested against the surfel centre + 0.06 m skin; see
+  [Rendering & GPU contract](rendering.md#edit-brush-hover-preview-splat-backend)).
+- **M2 live patch (SVO)**: SVO handles are chunk-local. `GpuWorld::chunkInfo`
+  (uvec4 per chunk = nodeBase/childBase/brickBase, shader binding 11) travels
+  with the five world SSBOs, and the shader resolves every payload/handle/
+  brick access through its owning chunk's base (`common_svo.glsl`
+  `chunkBases`). `SvoPass::patchChunk` re-uploads a rebuilt pool into reserved
+  per-chunk regions, relocating and growing the arrays as needed, so both
+  backends show the same edit in the same frame.
+- **M3 persistence**: chunks touched by `apply()` are flagged `edited` and
+  serialized (bricks + boxes + state) into a VXW v2 tagged section by the
+  background `OverlayWriter` (temp + rename, debounced; a newer queue()
+  supersedes an unstarted write). The app saves `assets/runtime_edits.vxw` on
+  mouse release and restores it at startup / after every world reload. Because
+  the file is not in `world.json`, the layer poll never reloads it — the app
+  applies it explicitly (`App::loadStoreOverlay`). Hover/anchor picking uses
+  `rayPickStore` so it follows edits. `uHeight`/water stay stale in the edited
+  region until a full reload.
+- **Drag painting**: holding LMB keeps stamping along the cursor (spacing =
+  ¼ brush diameter) and each stamp patches both backends in the same frame.
+  Steady-state stamp cost is ~5–25 ms (region-limited store rebuild + cached
+  surfel refresh + GPU patch). First touch of a chunk seeds its cache from the
+  GPU's current run (`SplatPass::readChunkSurfels`, base surfels only) instead
+  of re-baking the chunk, which removed the multi-hundred-ms first-stamp
+  hitch; the cache keys of GPU-seeded surfels are recovered from their
+  positions. Headless: `VF_TEST_STROKE`.
+- Tests: `tests/test_store.cpp` pins store/field sign + object-flag agreement,
+  edit round-trips, rebuilt pool validity (shader-style traversal),
+  localized==full rebuild equivalence, surface-density preservation, overlay
+  round trips and store-based chunk surfels; `tests/live_edit_check.py`
+  renders a close view of the edit in **both backends** with
+  `VF_TEST_EDIT` and asserts a visible-but-bounded diff plus sane probes.
+
+Next milestones (per the editing plan): store-native load (records → chunks
+without the global field), semantic tags + procedural ops + shading
+unification (M4), performance hardening — streamed/budgeted bakes, chunk
+seeding without hitches (M5).
 
 ## World synthesis pipeline (`LayeredWorld::load`)
 

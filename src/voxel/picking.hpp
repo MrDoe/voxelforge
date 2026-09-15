@@ -1,4 +1,5 @@
 #pragma once
+#include "voxel/chunk_store.hpp"
 #include "voxel/voxel_field.hpp"
 #include <glm/glm.hpp>
 #include <cstdint>
@@ -18,6 +19,10 @@ struct PickHit {
 // Ray march against the records-derived VoxelField. ro = camera pos,
 // rd = normalized dir.
 PickHit rayPick(const VoxelField& field, glm::vec3 ro, glm::vec3 rd, float tMax = 90.f, int maxSteps = 900);
+
+// Same march against the runtime store (base world + live edits), so hover /
+// anchor picking follows edits without a rebuild.
+PickHit rayPickStore(const ChunkStore& store, glm::vec3 ro, glm::vec3 rd, float tMax = 90.f, int maxSteps = 900);
 
 // Screen → ray helper. mx,my in framebuffer px (0..W, 0..H, top-left origin).
 // tanHalfFov = tan(fov*0.5), aspect = W/H

@@ -29,8 +29,9 @@ Persist discoveries: `add_quirk(content)` for build failures, workarounds, env c
 |---|---|---|
 | Constants, palette, SDF primitives + **baker-side** shapes | `src/voxel/common.hpp` | `WORLD=102.4`, `VOXEL=0.1`, `CHUNK_N=64`, `GRID_N=16`, `BRICK_N=8`, `WATER_LEVEL=-0.9`, `kPalette[9]`. NOT linked into the renderer — consumed by the bake and tests only |
 | Bake (offline) | `tools/heightmap_gen.cpp` | sweeps terrain + `houseAt`/`treesAt`/… into `.vxw` layers; run via `ninja -C build world`. There is no runtime `scene()` |
-| World synthesis | `src/voxel/layered_world.{hpp,cpp}` | merges `assets/world.json` layers (first-wins dedupe), builds `VoxelField`, synthesizes `GpuWorld` |
-| Geometry oracle / format | `src/voxel/voxel_field.{hpp,cpp}`, `worldfile.{hpp,cpp}`, `picking.{hpp,cpp}`, `heightmap.{hpp,cpp}` | records-only geometry oracle; EDT flood-fill objects; VXW v1 |
+| World synthesis | `src/voxel/layered_world.{hpp,cpp}` | merges `assets/world.json` layers (first-wins dedupe), builds `VoxelField`, synthesizes `GpuWorld`; `store()` lazily adopts the resident pools into the `ChunkStore` |
+| Runtime voxel store / live editing | `src/voxel/chunk_store.{hpp,cpp}`, `chunk_index.hpp` | M0 foundation: per-chunk `Empty/Solid/Explicit` states, 8³ bricks + solid boxes, `apply()` cell edits, local SDF-band + octree `rebuildDirty()`; canonical z-major chunk index shared by all paths |
+| Geometry oracle / format | `src/voxel/voxel_field.{hpp,cpp}`, `worldfile.{hpp,cpp}`, `picking.{hpp,cpp}`, `heightmap.{hpp,cpp}` | load-time records-derived oracle; EDT flood-fill objects; VXW v1 |
 | Rendering | `src/rhi/*` (Vulkan 1.3+VMA), `src/render/*` (SvoPass/TaaPass), `src/app/main.cpp` | `RaymarchPush` 128 B in `svo_pass.hpp`, see §5 |
 | Platform/window | `src/platform/window.cpp` (GLFW) |  |
 | AI/MCP | `src/ai/*`, `src/app/chat_ui.cpp` | `vf_mcp` (`src/ai/mcp_server.cpp`) stdio, `ai_edits.vxw` highest priority |
@@ -98,9 +99,12 @@ ninja -C build
 ctest --test-dir build                         # unit_tests + visual_check
 # or single suite:
 ./build/vf_tests --test-case="*worldfile*"
+./build/vf_tests --test-case="chunk*"          # ChunkStore foundation (adoption/edits/rebuild)
 ctest -R unit_tests -V
 
 python3 tests/visual_check.py build/voxelforge # 3 canonical shots hero/house/water @480×270: coverage 3-97%, black-in-silhouette <5%, blue sky probe
+
+python3 tests/live_edit_check.py build/voxelforge # hero baseline vs VF_TEST_EDIT live store patch: visible (>2%) but bounded (<60%) pixel diff + sane probes
 
 ./build/voxelforge --selftest --width 640 --height 360   # asserts sky probe + coverage bounds
 
@@ -120,6 +124,14 @@ python3 .opencode/skills/voxel-object/scripts/ascii_view.py /tmp/vf.ppm 96 40
 - `heightmap_gen` PNG writer is hand-rolled stored-deflate; `rowBytes = 1+w*2` (not `(1+w)*2`).
 - `nearObject()` in `tools/heightmap_gen.cpp` decides y-sampling band expansion for tall objects outside existing radii — extend for new tall geometry or their baked records get clipped.
 - New authored objects need no renderer registration: bake them into a layer and the VoxelField/SVO/shadows pick them up.
+- Chunk handles: `-1` (`0xFFFFFFFF`) = empty, **`-2` (`0xFFFFFFFE`) = solid terminal** — both negative as `int32_t`, so never use a bare `root < 0` test (`ChunkStore::adopt` compares against the exact handle values).
+- Baked brick SDF uses `int(d/VOXEL)` truncation, so surface cells can store `raw == 0` (the SVO DDA treats `sdf <= 0` as solid). Sign comparisons between store and `VoxelField` must tolerate `±2·VOXEL` at surfaces.
+- Chunk indexing is **z-major** everywhere (`src/voxel/chunk_index.hpp`); the surfel path used to be x-major — use the helpers, don't re-derive.
+- Live edit (M1–M3): `ChunkStore::apply()` → region-limited `rebuildDirty()` (edit AABB ± `kLiveBand`=12, block-snapped; untouched blocks copied verbatim) → `LiveEditor::stamp()` refreshes per-chunk surfel caches (±3-cell region) → `SplatPass::patchChunkSurfels()` (paged buffer) **and** `SvoPass::patchChunk()` (chunk-local handle arenas). Drag-painting holds LMB (spacing = ¼ diameter); steady-state ~5–15 ms/stamp, first touch of a chunk seeds its full run. Strokes are saved asynchronously to `assets/runtime_edits.vxw` (VXW v2 store section, loaded explicitly at startup/reload — not in world.json). Headless: `VF_TEST_EDIT="x,y,z,raise|carve"`, `VF_TEST_STROKE="x,y,z,steps[,mode]"` (+ `VF_TEST_STROKE_SAVE=1`), `VF_EDIT_DIAM`/`VF_EDIT_DEPTH`, `VF_LIVE_NOSPLAT/NOSVO`, `VF_SPLAT_NOPAD`.
+- Brick sign convention: `raw <= 0` is solid (the bake truncates `int(d/VOXEL)`, so surface cells can be 0 and the SVO DDA hits `sdf <= 0`). A `< 0` test in any store/rebuild path silently erodes surface cells on every rebuild.
+- SVO handles are **chunk-local**: every shader access adds the chunk's base from `uChunkInfo` (`common_svo.glsl` `chunkBases`). Never offset-adjust handles in the merge; `patchChunk` arena growth must treat bricks in `BRICK_WORDS` (×4096 bytes) and grow payload+childBase together.
+- `Chunk::lo/hi` are **global** lattice coords: the localized rebuild converts them to chunk-local before snapping to blocks. Boxes straddling the region boundary must be kept (dropping them uncovers their out-of-region cells); `Chunk::edited` drives overlay persistence. `Solid`/`Empty` chunks have no `slotOf` — guard (`hasSlots`) and skip `Solid` in rebuild paths (a dirty Solid neighbour used to segfault).
+- LiveEditor seeds new chunks from the GPU run (`SplatPass::readChunkSurfels`, base only) and the overlay (schema 2) stores each chunk's edit AABB so a restore re-refreshes just that region; schema-1 overlay files are rejected, delete `assets/runtime_edits.vxw` after a schema change.
 - World bounds ±51.2 m; water `-0.9`. Determinism only: use `hash2`, never wall-clock/RNG state. Baker sweeps are hot (~10 M SDF calls/regen) — add cheap reject (distance²/vertical cull) for scatter objects like `treesAt` does.
 - Interactive keys: WASD/QE move, RMB look, wheel speed, Ctrl+LMB pick anchor, ESC quit.
 - Docs: `README.md`, `AGENTS.md`, `docs/` (start at `docs/index.md`; history in `docs/history/rework.md`).
