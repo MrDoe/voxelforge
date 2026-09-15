@@ -128,12 +128,14 @@ patch path:
   transform seeded from sign boundaries + neighbour-chunk face SDFs) and
   regenerate the octree pool from the sparse cells. Edits never touch the
   base field.
-- **M1 live patch (splat)**: the edit tool's "Live patch" mode stamps
-  edits into the store (the panel offers four brush modes: **Carve** = a
-  depth-limited cylinder scoop along the surface normal, **Add** = a dome,
-  **Delete** = clear every cell in the brush ball, **Paint** = recolour the
-  ball with the selected material; delete/paint are `Clear`/`Paint` store
-  operations and always take this live path). `ChunkStore::rebuildDirty`
+- **M1 live patch (splat)**: every brush stamp patches the store — the panel's
+  four modes are **Carve** = a depth-limited cylinder scoop along the surface
+  normal, **Add** = a dome, **Delete** = clear every cell in the brush ball,
+  **Paint** = recolour the ball with the selected material. There is no
+  bake/record edit path any more (the legacy `carve_edits.vxw` /
+  `raise_edits.vxw` layers are read-only leftovers). Subtractive modes respect
+  the water level: a scoop aimed below the plane is refused and no `Clear` edit
+  ever touches a cell whose centre is below `WATER_LEVEL`. `ChunkStore::rebuildDirty`
   re-derives only the edited
   block region (edit AABB ± 12 cells, snapped to 8³ blocks; untouched blocks
   are copied verbatim — a unit test pins the localized result byte-equal to a
@@ -147,7 +149,8 @@ patch path:
   is the *pre-edit* run, so `stamp()` always refreshes the edited region on
   top of the seed (without it the first stamp in a chunk looks like a no-op).
   The hover **preview** tints the affected splats before the click (bind 13
-  `BrushUBO`, tested against the surfel centre + 0.06 m skin; see
+  `BrushUBO`, tested against the surfel centre + 0.06 m skin, `bFlags.x`
+  clipping subtractive brushes at the water plane; see
   [Rendering & GPU contract](rendering.md#edit-brush-hover-preview-splat-backend)).
 - **M2 live patch (SVO)**: SVO handles are chunk-local. `GpuWorld::chunkInfo`
   (uvec4 per chunk = nodeBase/childBase/brickBase, shader binding 11) travels

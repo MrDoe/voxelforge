@@ -156,3 +156,20 @@ surfels primary + SVO reference, agent/edit flows. `entities/svo-render.md` got
 a role banner; the other two need a full rewrite from `AGENTS.md` + `docs/`
 next session. No orphan pages (all linked from `index.md`); the new live-edit
 page links back to [[entities/svo-render]].
+
+## 2026-09-15 ingest | edits always live + water level respected when carving
+Editing has no bake path any more: the "Live patch (no bake)" checkbox is
+gone, `App::applyEdit()` (record layers `carve_edits.vxw` / `raise_edits.vxw`
++ hot reload) is deleted, and every brush stamp goes through
+`applyEditLive()` → `ChunkStore` → per-chunk GPU patching. The hover/anchors
+always `rayPickStore`, drag painting and the stroke overlay work for all four
+modes, and the panel's legacy clear buttons were replaced by one "Clear live
+edits" button (drops `runtime_edits.vxw`, then reloads). Second change:
+Carve/Delete now respect the water level — a scoop aimed at a cell below
+`WATER_LEVEL` (-0.9) is refused outright, no `Clear` edit touches a cell below
+the plane (`yMinDry`, lattice y >= 503; the log reports the held-back count),
+and the subtractive hover tint clips at the plane via `bFlags.x` in the brush
+UBO (A/B verified: 1792 water-plane pixels tinted without the flag, 0 with it).
+Tests extended in `tests/live_edit_check.py` (deep-scoop log, refused-scoop
+pixel identity, shore-preview water check); gates green. Updated
+[[entities/live-edit-brush]].

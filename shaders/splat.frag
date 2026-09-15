@@ -40,6 +40,7 @@ layout(std140, set = 0, binding = 13) uniform BrushUBO {
     vec4 bVolume; // xyz = centre (world), w = radius m
     vec4 bAxis;   // xyz = unit axis, w = half length m (0 = sphere)
     vec4 bTint;   // rgb = tint colour, a = strength
+    vec4 bFlags;  // x = 1: never tint below the water plane (subtractive brush)
 } uBrush;
 
 layout(location = 0) in vec3 vCenter;
@@ -66,11 +67,14 @@ layout(constant_id = 1) const int PASS_MODE = 0;
 const float kWaterLevel = -0.9;
 
 // Brush hover preview volume test (bind 13): is `p` inside the brush volume?
-// w == 0 on the axis => ball, otherwise an oriented cylinder. Used by the
-// hover tint and by debug view 15 (brush mask).
+// w == 0 on the axis => ball, otherwise an oriented cylinder. Subtractive
+// brushes (bFlags.x) never read below the water plane, matching the app's
+// cell clamp. Used by the hover tint and by debug view 15 (brush mask).
 bool inBrushVolume(vec3 p)
 {
     if (uBrush.bTint.a <= 0.0)
+        return false;
+    if (uBrush.bFlags.x > 0.5 && p.y <= kWaterLevel + 1e-5)
         return false;
     vec3 rel = p - uBrush.bVolume.xyz;
     const float r2 = uBrush.bVolume.w * uBrush.bVolume.w;

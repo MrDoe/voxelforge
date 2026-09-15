@@ -26,6 +26,13 @@ CAM = ["-5.5", "1.2", "-3.5", "-8", "0.4", "-6"]
 # terrain surface cell in front of the hero camera (world ~(-8, -0.15, -6))
 CELL = "432,509,452"
 EDIT = CELL + ",raise"
+# 2.25 m BELOW the water plane (-0.9) inside the same bank: subtractive
+# brushes must refuse it
+SUNKEN_CELL = "432,489,452"
+# dock plank next to open water (y ~ -0.35) + the water camera from
+# visual_check: a big brush here reaches over the water surface
+SHORE_CELL = "562,508,582"
+WATER_CAM = ["8.5", "0.6", "8.2", "4.5", "-1.1", "6.8"]
 
 
 def read_ppm(path):
@@ -98,7 +105,7 @@ def diff_stats(wa, ha, a, wb, hb, b, thresh=10):
     return d / n, warm_r, warm_b
 
 
-def render(binary, out, extra_env=None, mode=None):
+def render(binary, out, extra_env=None, mode=None, cam=None):
     env = dict(os.environ)
     # hermetic: skip restoring a saved live-edit overlay so the comparison
     # isolates this run's VF_TEST_EDIT (a session's painted edits would
@@ -109,11 +116,64 @@ def render(binary, out, extra_env=None, mode=None):
     cmd = [
         binary, "--shot", out,
         "--width", str(W), "--height", str(H),
-        "--cam", *CAM,
+        "--cam", *(cam or CAM),
     ]
     if mode:
         cmd += ["--mode", mode]
     return subprocess.run(cmd, capture_output=True, text=True, timeout=300, env=env)
+
+
+def is_water(r, g, b):
+    return b > r + 12 and g > r + 4 and b > 120
+
+
+def check_water_level(binary, tmp, failures, baseline):
+    """Carving always respects the water level: a scoop aimed below the plane
+    is refused outright, a deep scoop keeps every cell below the plane, and
+    the subtractive hover tint never covers the water surface."""
+    # 1. deep scoop from a dry cell: cells below the plane are held back
+    deep = os.path.join(tmp, "water_deep.ppm")
+    r = render(binary, deep, {"VF_TEST_EDIT": f"{CELL},carve", "VF_EDIT_DIAM": "3.0",
+                              "VF_EDIT_DEPTH": "6.0"}, mode=None)
+    if "held at the water level" not in (r.stdout or "") + (r.stderr or ""):
+        failures.append("water: deep carve did not report cells held at the water level")
+    # 2. a scoop aimed below the plane is refused outright (frame unchanged)
+    sunken = os.path.join(tmp, "water_sunken.ppm")
+    r = render(binary, sunken, {"VF_TEST_EDIT": f"{SUNKEN_CELL},delete",
+                                "VF_EDIT_DIAM": "2.0"}, mode=None)
+    if "below the water level" not in (r.stdout or "") + (r.stderr or ""):
+        failures.append("water: submerged delete was not refused")
+    w, h, a = read_ppm(baseline)
+    _, _, b = read_ppm(sunken)
+    d = diff_stats(w, h, a, w, h, b)[0]
+    print(f"[water] sunkenground delete refused, frame diff {d*100:.3f}%")
+    if d > 0.001:
+        failures.append(f"water: refused edit changed the frame ({d*100:.2f}%)")
+    # 3. subtractive hover tint never covers the water surface: hover a dry
+    #    shore cell whose ball reaches over open water and count tinted
+    #    pixels whose baseline colour is water
+    wbase = os.path.join(tmp, "water_base.ppm")
+    wprev = os.path.join(tmp, "water_prev.ppm")
+    r0 = render(binary, wbase, mode=None, cam=WATER_CAM)
+    r1 = render(binary, wprev,
+                {"VF_TEST_BRUSH": f"{SHORE_CELL},delete", "VF_EDIT_DIAM": "6.0"},
+                mode=None, cam=WATER_CAM)
+    if r1.returncode != 0 or not os.path.exists(wprev):
+        failures.append("water: shore preview render failed")
+        return
+    w, h, a = read_ppm(wbase)
+    _, _, b = read_ppm(wprev)
+    tinted = water = 0
+    for k in range(w * h):
+        if max(abs(a[3 * k + i] - b[3 * k + i]) for i in range(3)) > 12:
+            tinted += 1
+            if is_water(a[3 * k], a[3 * k + 1], a[3 * k + 2]):
+                water += 1
+    print(f"[water] shore preview tinted {tinted} px, water-plane pixels tinted {water}")
+    if tinted == 0:
+        failures.append("water: shore preview tinted nothing")
+    if water:
+        failures.append(f"water: subtractive preview tinted {water} water pixels")
 
 
 def check_preview(binary, tmp, failures):
@@ -217,6 +277,9 @@ def main():
                    base_name="splat_nomicro_base.ppm", extra_env=no_micro)
         # carve-brush hover preview (tint only, no edit)
         check_preview(binary, tmp, failures)
+        # carving always respects the water level
+        check_water_level(binary, tmp, failures,
+                          os.path.join(tmp, "splat_base.ppm"))
 
     if failures:
         for f in failures:

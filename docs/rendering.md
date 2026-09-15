@@ -312,6 +312,10 @@ all-zero strength disables).
   The volume is grown by a 0.06 m skin so the surfels' `+0.05 m` emitter
   offset (pos = cell centre + n·0.05) stays inside; **Add** has no affected
   splats and shows nothing.
+- subtractive brushes (Carve/Delete) set `bFlags.x`: nothing at or below the
+  water plane is tinted, matching the app's rule that `Clear` edits never
+  touch a cell below `WATER_LEVEL` (a scoop aimed at submerged ground is
+  refused outright, with the held-back cell count in the log).
 - tint: warm orange (carve), red (delete), the selected palette colour
   (paint, Material combo in the panel) at ~0.45–0.55 mix strength.
 - testing a splat's *centre* (not the fragment position) keeps the highlight

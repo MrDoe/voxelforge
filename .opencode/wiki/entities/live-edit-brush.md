@@ -8,22 +8,38 @@ lastReviewed: 2026-09-15
 # Live-edit brush
 
 The `C` edit panel ("Carve / Add") stamps one of four brush volumes at the
-hovered surface point. Stamps land in the runtime `ChunkStore` and patch both
-GPU backends in the same frame — no bake, no world reload.
+hovered surface point. **Every** stamp lands in the runtime `ChunkStore` and
+patches both GPU backends in the same frame — there is no bake/record edit
+path any more (the legacy `carve_edits.vxw` / `raise_edits.vxw` layers are
+read-only leftovers); the "Clear live edits" button drops
+`assets/runtime_edits.vxw` and reloads.
 
 ## Brush modes
 
 | mode | volume | store op | notes |
 |---|---|---|---|
-| Carve | oriented cylinder, base at the hit cell, `depth` along **-normal** | `Clear` | depth-limited scoop on terrain |
+| Carve | oriented cylinder, base at the hit cell, `depth` along **-normal** | `Clear` | depth-limited scoop on terrain; stops at the water level |
 | Add | half-ellipsoid dome along **+normal** (`depth` = height) | `Set` | combines with existing geometry |
-| Delete | ball of `diameter/2` about the hit cell | `Clear` | ignores depth; no record-layer form |
+| Delete | ball of `diameter/2` about the hit cell | `Clear` | ignores depth; stops at the water level |
 | Paint | same ball | `Paint` | recolours solid cells with the panel's Material combo; filtered by `store.cellAt().solid` so it never creates geometry |
 
-Carve/Add follow the **"Live patch (no bake)"** checkbox (off = record layers
-`carve_edits.vxw` / `raise_edits.vxw` + hot reload); **Delete/Paint always take
-the live path** (`App::brushLive()`) because `Clear`/`Paint` have no record
-form. Delete/Paint strokes still persist via the store overlay.
+Brush strokes persist through the store overlay (saved on mouse release) and
+the hover ray-picks the store (`rayPickStore`), so the tool always works on
+what is rendered.
+
+## Water level
+
+Subtractive modes (Carve/Delete) **always respect the water level**:
+
+- a scoop whose hovered cell lies below `WATER_LEVEL` (-0.9) is refused
+  outright (log: `edit: carve refused - … below the water level`);
+- no `Clear` edit ever touches a cell whose centre is below the plane
+  (`yMinDry`, i.e. lattice y ≥ 503); the log reports how many cells were held
+  back (`… N cells held at the water level`);
+- the hover tint clips at the plane too (`bFlags.x` in the brush UBO), so the
+  water surface is never shown as affected.
+
+Paint is not clamped (recolouring a submerged cell is not a geometry change).
 
 ## Stamp path
 
@@ -85,7 +101,10 @@ set it so an interactive session's painting cannot change reference shots.
 `tests/live_edit_check.py` (headless PPM, `VF_NO_OVERLAY=1`):
 Add in splat **and** `--mode svo`; Delete/Paint in splat with `VF_MICRO=0` so
 the measured diff is geometry, not the dropped micro tail; carve-hover tint
-must be visible and warm. `tests/test_store.cpp` pins the store semantics
-(adoption, edits, localized==full rebuild, overlay round trip).
+must be visible and warm; water level: a deep scoop reports the held-back
+cells, a submerged scoop is refused pixel-identically, and a subtractive
+preview over open water tints no water-plane pixel. `tests/test_store.cpp`
+pins the store semantics (adoption, edits, localized==full rebuild, overlay
+round trip).
 
 See also [[entities/svo-render]] for the two backends and the shared G-buffer.

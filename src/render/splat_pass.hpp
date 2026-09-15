@@ -86,13 +86,15 @@ public:
     //   volume = (centre xyz, radius m)
     //   axis   = (unit axis xyz, half length m; 0 = sphere)
     //   tint   = (rgb, strength; 0 = preview off)
+    //   flags  = (x: 1 = never tint below the water plane, else 0)
     // Staged on the CPU and flushed into the mapped UBO by record().
     void setBrush(const glm::vec4& volume, const glm::vec4& axis,
-                  const glm::vec4& tint)
+                  const glm::vec4& tint, const glm::vec4& flags = glm::vec4(0.f))
     {
         m_brush[0] = volume;
         m_brush[1] = axis;
         m_brush[2] = tint;
+        m_brush[3] = flags;
     }
 
     // Record sky + opaque chunks + water. Assumes hdr/gpos already in
@@ -188,10 +190,11 @@ private:
     VmaAllocation m_surfelAlloc = VK_NULL_HANDLE;
     Image3D m_depth {};
     Buffer m_paramsBuf {}; // persistently mapped 2xvec4 kernel-tuning UBO
-    // Brush hover preview: persistently mapped 3xvec4 UBO (bind 13), flushed
+    // Brush hover preview: persistently mapped 4xvec4 UBO (bind 13), flushed
     // from m_brush in record() like the params above.
     Buffer m_brushBuf {};
-    glm::vec4 m_brush[3] { glm::vec4(0.f), glm::vec4(0.f), glm::vec4(0.f) };
+    glm::vec4 m_brush[4] { glm::vec4(0.f), glm::vec4(0.f), glm::vec4(0.f),
+                           glm::vec4(0.f) };
     // ---- occlusion culling (Hi-Z depth pyramid) ----
     static constexpr uint32_t kMaxHiZMips = 16;
     Image3D m_hiz {};

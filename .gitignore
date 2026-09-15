@@ -7,3 +7,4 @@ assets/*.vxw
 imgui.ini
 assets/world.json
 opencode-rag.json
+.opencode

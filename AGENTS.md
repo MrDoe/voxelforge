@@ -75,20 +75,25 @@
   `VF_SPLAT_DEPTH_TOL` (depth-resolve band in NDC depth units, default
   0.002 ≈ 10 cm; applied per frame as a dynamic rasterizer depth bias),
   `VF_SPLAT_EXTENT` (quad half-size), `VF_SPLAT_RADIUS`.
-- Live edit (M1–M3): the edit panel (`C`, window "Carve / Add") has four brush
+- Live edit: the edit panel (`C`, window "Carve / Add") has four brush
   modes — **Carve** (depth-limited cylinder scoop along the surface normal),
   **Add** (dome), **Delete** (clear every cell in the brush ball) and **Paint**
-  (recolour the brush ball with the panel's Material combo) — plus the
-  **"Live patch (no bake)"** checkbox and a per-mode/size/perf readout.
-  Delete/Paint are `ChunkStore` `Clear`/`Paint` operations and always take the
-  live path (they have no record-layer form); Carve/Add follow the checkbox
-  (record layers + bake, or live store patch). In the splat backend, hovering
+  (recolour the brush ball with the panel's Material combo) — plus a
+  per-mode/size/perf readout and a "Clear live edits" button (drops
+  `runtime_edits.vxw`). **Every stamp patches the live store** (there is no
+  bake/record path any more; the legacy `carve_edits.vxw`/`raise_edits.vxw`
+  layers are read-only leftovers). Carve/Delete (`Clear`) **respect the water
+  level**: a scoop aimed at submerged ground is refused outright and no
+  subtractive brush clears a cell whose centre is below `WATER_LEVEL=-0.9`, so
+  the bed stays watertight (the log reports the held-back cell count).
+  In the splat backend, hovering
   with the tool active **tints the affected splats** (the exact brush volume:
   the carve cylinder or the delete/paint ball) so the LMB result is visible
   first — bind 13 `BrushUBO` (`SplatPass::setBrush`), tested against the surfel
   *centre* (per-splat, matching the CPU rasterizer's cell set) plus a 0.06 m
-  skin; debug view `VF_SPLAT_DEBUG=15` shows the volume directly. With
-  "Live patch" on, LMB **paints**: holding the button keeps stamping along
+  skin, with `bFlags.x` clipping subtractive brushes at the water plane; debug
+  view `VF_SPLAT_DEBUG=15` shows the volume directly. LMB **paints**: holding
+  the button keeps stamping along
   the cursor (spacing = ¼ brush diameter) and the result appears in the same
   frame. Each stamp applies cells to the runtime `ChunkStore`, rebuilds only
   the edited block region, refreshes per-chunk surfel caches (`LiveEditor`)
@@ -152,9 +157,11 @@
 - `python3 tests/live_edit_check.py build/voxelforge` — renders the hero view
   untouched and with `VF_TEST_EDIT` (live store patch) in **both backends**
   (splat + `--mode svo`) for Add, plus the splat-only Delete/Paint store modes
-  (micro detail off so the diff is geometry, not the dropped micro tail) and
-  the carve-brush hover tint; asserts a visible but bounded pixel diff and sane
-  edited-frame probes.
+  (micro detail off so the diff is geometry, not the dropped micro tail), the
+  carve-brush hover tint and the water-level rules (a submerged scoop is
+  refused pixel-identically, a deep scoop reports the held-back cells, and no
+  subtractive preview tints the water plane); asserts a visible but bounded
+  pixel diff and sane edited-frame probes.
 - `./build/voxelforge --selftest --width 640 --height 360` — sky probe +
   coverage acceptance.
 - `--probe X Y Z` reflects the live layered field (loads `world.json`).

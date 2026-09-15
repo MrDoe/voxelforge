@@ -60,18 +60,21 @@ stderr for quick diagnosis.
 
 Live-edit (M1–M3) regression guard. Renders a close view at 480×270 and
 compares pairs — untouched vs one live store edit
-(`VF_TEST_EDIT="432,509,452,<mode>"`, the "Live patch" path): terrain anchor
-near the camera is edited, dirty chunks rebuild, their surfels are regenerated
-from the store and patched into the paged splat buffer, and the same chunks
-are patched into the chunk-local SVO buffers. Checks:
+(`VF_TEST_EDIT="432,509,452,<mode>"`, the edit brush's live-store path):
+terrain anchor near the camera is edited, dirty chunks rebuild, their surfels
+are regenerated from the store and patched into the paged splat buffer, and
+the same chunks are patched into the chunk-local SVO buffers. Checks:
 
 - **raise** (Add) in `--mode splat` and `--mode svo`: the edited run logged
   `live edit: … surfels …`;
-- **delete** and **paint** (store-only modes, splat): with `VF_MICRO=0` so the
-  diff is the geometry — the new brush-volume modes must be visible, not just
-  the patched chunks' dropped micro tail;
+- **delete** and **paint** (splat): with `VF_MICRO=0` so the diff is the
+  geometry — the store-only brush modes must be visible, not just the patched
+  chunks' dropped micro tail;
 - **carve hover preview** (`VF_TEST_BRUSH`, no edit applied): the tint over
   the affected splats must be visible and warm;
+- **water level**: a deep scoop from a dry cell reports `held at the water
+  level`, a scoop at a submerged cell is refused with a pixel-identical frame,
+  and a subtractive preview over open water tints no water-plane pixel;
 - every edited frame passes the pixel-diff bounds (visible, not frame-wide:
   > 2 %, < 70 %), coverage (3–98.5 %), black-in-silhouette (<9 %) and
   sky-probe checks.
