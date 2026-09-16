@@ -523,6 +523,75 @@ TEST_CASE("chunk store: localized rebuild matches a full rebuild")
     CHECK_FALSE(store.cellAt(gx + 8, topY, gz + 8).solid);
 }
 
+TEST_CASE("chunk store: a deep clear stays air under the terrain boxes")
+{
+    LayeredWorld& lw = testLayeredWorld();
+    ChunkStore& store = lw.store();
+    const int n = latN();
+    const int gx = 4 * CHUNK_N + 32, gz = 4 * CHUNK_N + 32;
+    int topY = -1;
+    for (int y = n - 2; y > 0; --y)
+        if (store.cellAt(gx, y, gz).sdfRaw <= 0) {
+            topY = y;
+            break;
+        }
+    REQUIRE(topY > 40);
+
+    // Clear a shaft well below the SDF band. Deep blocks end up entirely air,
+    // so the localized rebuild drops their brick - but the chunk's SolidBoxes
+    // still cover them, and a box must never resurrect a cell an edit cleared
+    // (bricks win for BOTH signs).
+    const int ci = chunkIndexOfCell(gx, topY - 20, gz);
+    store.rebuildFull(ci); // normalize to the rebuild convention
+    std::vector<StoreEdit> edits;
+    for (int y = topY; y >= topY - 30; --y) {
+        StoreEdit e;
+        e.mode = StoreEdit::Mode::Clear;
+        e.x = gx; e.y = y; e.z = gz;
+        edits.push_back(e);
+    }
+    store.apply(edits);
+    store.rebuildDirty();
+    size_t stillSolid = 0;
+    for (int y = topY; y >= topY - 30; --y)
+        if (store.cellAt(gx, y, gz).solid)
+            ++stillSolid;
+    fprintf(stderr, "deep clear: %zu of 31 cells still solid\n", stillSolid);
+    CHECK(stillSolid == 0);
+
+    // the localized rebuild still matches a full rebuild cell by cell
+    struct CellRec {
+        bool solid;
+        int8_t raw;
+    };
+    std::vector<CellRec> localized;
+    const int cx0 = (ci % kChunkGridN) * CHUNK_N;
+    const int cy0 = ((ci / kChunkGridN) % kChunkGridN) * CHUNK_N;
+    const int cz0 = (ci / (kChunkGridN * kChunkGridN)) * CHUNK_N;
+    for (int z = cz0; z < cz0 + CHUNK_N; ++z)
+        for (int y = cy0; y < cy0 + CHUNK_N; ++y)
+            for (int x = cx0; x < cx0 + CHUNK_N; ++x) {
+                const StoreCell c = store.cellAt(x, y, z);
+                localized.push_back({ c.solid, c.sdfRaw });
+            }
+    store.rebuildFull(ci);
+    size_t signDiff = 0, distDiff = 0, idx = 0;
+    for (int z = cz0; z < cz0 + CHUNK_N; ++z)
+        for (int y = cy0; y < cy0 + CHUNK_N; ++y)
+            for (int x = cx0; x < cx0 + CHUNK_N; ++x) {
+                const StoreCell c = store.cellAt(x, y, z);
+                const CellRec& r = localized[idx++];
+                if (c.solid != r.solid)
+                    ++signDiff;
+                else if (c.sdfRaw != r.raw)
+                    ++distDiff;
+            }
+    fprintf(stderr, "deep clear localized vs full: signDiff %zu distDiff %zu\n",
+            signDiff, distDiff);
+    CHECK(signDiff == 0);
+    CHECK(distDiff == 0);
+}
+
 TEST_CASE("chunk store: rebuilt pool exposes edited geometry (SVO path)")
 {
     LayeredWorld& lw = testLayeredWorld();

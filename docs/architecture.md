@@ -133,9 +133,13 @@ patch path:
   normal, **Add** = a dome, **Delete** = clear every cell in the brush ball,
   **Paint** = recolour the ball with the selected material. There is no
   bake/record edit path any more (the legacy `carve_edits.vxw` /
-  `raise_edits.vxw` layers are read-only leftovers). Subtractive modes respect
-  the water level: a scoop aimed below the plane is refused and no `Clear` edit
-  ever touches a cell whose centre is below `WATER_LEVEL`. `ChunkStore::rebuildDirty`
+  `raise_edits.vxw` layers are read-only leftovers). Subtractive stamps may dig
+  below `WATER_LEVEL`: `App::floodNewlyDug` then adds water-plane splats over
+  the dug columns that have no solid left at/above the plane (skipping columns
+  that are already wet), and `SplatPass::patchWaterSurfels` re-uploads the
+  water run — it is uploaded with headroom so the common case needs no buffer
+  relayout. Covered scoops stay dry (the water only appears where the dig opens
+  the surface); the SVO plane is analytic and floods by itself. `ChunkStore::rebuildDirty`
   re-derives only the edited
   block region (edit AABB ± 12 cells, snapped to 8³ blocks; untouched blocks
   are copied verbatim — a unit test pins the localized result byte-equal to a

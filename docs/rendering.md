@@ -312,10 +312,29 @@ all-zero strength disables).
   The volume is grown by a 0.06 m skin so the surfels' `+0.05 m` emitter
   offset (pos = cell centre + n·0.05) stays inside; **Add** has no affected
   splats and shows nothing.
-- subtractive brushes (Carve/Delete) set `bFlags.x`: nothing at or below the
-  water plane is tinted, matching the app's rule that `Clear` edits never
-  touch a cell below `WATER_LEVEL` (a scoop aimed at submerged ground is
-  refused outright, with the held-back cell count in the log).
+- water-plane splats are never tinted (their `mat_ao.w > 1.5` flag): a carve
+  below the plane *floods* the plane instead of removing it, so showing water
+  as "about to be cut" would be wrong.
+- binds 13 also backs the debug mask (view 15) and the headless
+  `VF_TEST_BRUSH` hook; see `docs/tooling.md` for the env knobs.
+
+## Live-edit water fill (splat backend)
+
+The water surface is a 0.2 m grid of plane splats (`buildWaterSurfels`) emitted
+wherever the baked terrain top sits below `WATER_LEVEL`. Digging below the
+plane in dry ground would leave a dry hole, so a subtractive stamp floods the
+columns it dug below the plane that have no solid left at/above it:
+
+- `App::floodNewlyDug` scans the stamp's per-column cleared range
+  (`[plane, cleared top]` plus the first untouched cell above) and, for the open
+  columns, appends `makeWaterSurfel` splats to the app's water run (deduping
+  against the wet grid bitset, so repeated strokes never double up);
+- `SplatPass::patchWaterSurfels` re-uploads that run at its reserved slot range
+  and rebuilds the per-chunk ranges; the run is uploaded with 4096 slots of
+  headroom (`rebuildSurfels`), so only an unusually large flood needs the
+  `growOpaque` relayout. Indirection entries for the water slots are written as
+  identity (the vertex shader indexes `uCompact[gl_InstanceIndex]`).
+- `VF_NO_WATER_FILL=1` skips the flood (A/B for the tests).
 - tint: warm orange (carve), red (delete), the selected palette colour
   (paint, Material combo in the panel) at ~0.45–0.55 mix strength.
 - testing a splat's *centre* (not the fragment position) keeps the highlight

@@ -322,12 +322,24 @@ private:
     size_t m_lastEditSurfels = 0;
     vf::voxel::LiveEditor m_liveEditor;
     vf::voxel::OverlayWriter m_overlayWriter;
+    // Water-plane splats (kept for live-edit floods): chunk-bucketed run, its
+    // per-chunk offsets relative to the run start, and the wet grid bitset
+    // (one entry per water-grid point, j * (steps + 1) + i).
+    std::vector<vf::voxel::Surfel> m_waterSurfels;
+    std::vector<uint32_t> m_waterRel;
+    std::vector<uint8_t> m_waterGrid;
     bool m_overlayLoaded = false;
     bool m_hasStamp = false;
     bool m_dragging = false;
     glm::ivec3 m_lastStampVoxel { 0 };
 
     void applyEditLive();
+    // (Re)bucket the water-plane run per chunk (deterministic order) and
+    // return the per-chunk offsets relative to the run start.
+    std::vector<uint32_t> updateWaterBuckets();
+    // Flood the water-plane grid over the columns a subtractive stamp dug
+    // below the water plane, then re-upload the water run.
+    void floodNewlyDug(const std::vector<vf::voxel::VoxelRecord>& recs);
     void loadStoreOverlay();
     // Store-gradient surface normal at a lattice cell (test hooks / injected
     // hovers); falls back to +Y when the field around the cell is flat.
@@ -764,45 +776,23 @@ void App::rebuildSurfels()
     if (const char* e = getenv("VF_SURFEL_HFBLEND"))
         sp.terrainHeightfieldNormals = atoi(e) != 0;
     vf::voxel::SurfelSet set = vf::voxel::buildSurfels(m_layers.field(), sp);
-    std::vector<vf::voxel::Surfel> water =
-        vf::voxel::buildWaterSurfels(m_layers.field());
+    // water plane splats: keep them (live edits flood new columns) and bucket
+    // them per chunk (deterministic order) so the frame loop skips off-screen
+    // lake chunks instead of rasterizing the whole grid every frame
+    m_waterSurfels = vf::voxel::buildWaterSurfels(m_layers.field());
     const uint32_t waterStart = uint32_t(set.surfels.size());
-    // bucket water surfels per chunk (stable order => deterministic) so the
-    // frame loop skips off-screen lake chunks instead of rasterizing the
-    // whole water grid every frame
-    std::vector<uint32_t> waterRange(16 * 16 * 16 + 1, waterStart);
-    if (!water.empty()) {
-        auto chunkOf = [](const vf::voxel::Surfel& s) {
-            const float px = s.pos_rU.x, py = s.pos_rU.y, pz = s.pos_rU.z;
-            const auto ax = std::clamp(int(std::floor((px + 51.2f) / 6.4f)), 0, 15);
-            const auto ay = std::clamp(int(std::floor((py + 51.2f) / 6.4f)), 0, 15);
-            const auto az = std::clamp(int(std::floor((pz + 51.2f) / 6.4f)), 0, 15);
-            return uint32_t(vf::voxel::chunkIndexOf(ax, ay, az));
-        };
-        std::vector<uint32_t> order(water.size());
-        std::iota(order.begin(), order.end(), 0u);
-        std::stable_sort(order.begin(), order.end(),
-                         [&](uint32_t a, uint32_t b) {
-                             return chunkOf(water[a]) < chunkOf(water[b]);
-                         });
-        std::vector<vf::voxel::Surfel> sorted;
-        sorted.reserve(water.size());
-        uint32_t open = chunkOf(water[order[0]]);
-        waterRange[open] = waterStart;
-        for (size_t k = 0; k < order.size(); ++k) {
-            const uint32_t c = chunkOf(water[order[k]]);
-            if (c != open) {
-                for (uint32_t f = open + 1; f <= c; ++f)
-                    waterRange[f] = waterStart + uint32_t(k);
-                open = c;
-            }
-            sorted.push_back(water[order[k]]);
-        }
-        for (uint32_t f = open + 1; f < waterRange.size(); ++f)
-            waterRange[f] = waterStart + uint32_t(order.size());
-        water.swap(sorted);
-    }
-    set.surfels.insert(set.surfels.end(), water.begin(), water.end());
+    m_waterRel = updateWaterBuckets();
+    std::vector<uint32_t> waterRange(m_waterRel.size(), waterStart);
+    for (size_t i = 0; i < m_waterRel.size(); ++i)
+        waterRange[i] = waterStart + m_waterRel[i];
+    // Upload the water run with headroom so a live-edit flood can grow it in
+    // place (no GPU buffer relayout: the padding slots are zero splats that no
+    // chunk range covers, so nothing draws them).
+    static constexpr uint32_t kWaterHeadroomSlots = 4096;
+    const size_t waterSlots = m_waterSurfels.size() + kWaterHeadroomSlots;
+    set.surfels.resize(set.surfels.size() + waterSlots);
+    std::copy(m_waterSurfels.begin(), m_waterSurfels.end(),
+              set.surfels.begin() + waterStart);
     // chunkRange only covers opaque surfels; waterRange buckets the trailing
     // water run per chunk for frustum-culled water draws; microStart splits
     // each chunk into base + micro-detail for distance culling
@@ -811,9 +801,128 @@ void App::rebuildSurfels()
                            set.surfels.size(), set.chunkRange, waterStart, waterRange,
                            set.microStart, set.lod1Range, set.lod2Range);
     spdlog::info("splat backend: {} surfels ({} water), {} chunks, lod1 {} lod2 {}",
-                 set.surfels.size(), water.size(),
+                 set.surfels.size(), m_waterSurfels.size(),
                  set.chunkRange.empty() ? 0 : set.chunkRange.size() - 1,
                  set.lod1Count, set.lod2Count);
+}
+
+// Water-plane splats are a 0.2 m grid built at world load from the baked
+// terrain tops. Keep the run chunk-bucketed (ascending chunk) so the draw code
+// can frustum-cull lake chunks, and remember which grid points already exist.
+std::vector<uint32_t> App::updateWaterBuckets()
+{
+    constexpr uint32_t kChunks = 16 * 16 * 16;
+    const int steps = int(vf::voxel::WORLD / vf::voxel::kWaterSurfelSpacing);
+    m_waterGrid.assign(size_t(steps + 1) * (steps + 1), 0);
+    m_waterRel.assign(kChunks + 1, 0);
+    auto chunkOf = [](const vf::voxel::Surfel& s) {
+        const float px = s.pos_rU.x, py = s.pos_rU.y, pz = s.pos_rU.z;
+        const auto ax = std::clamp(int(std::floor((px + 51.2f) / 6.4f)), 0, 15);
+        const auto ay = std::clamp(int(std::floor((py + 51.2f) / 6.4f)), 0, 15);
+        const auto az = std::clamp(int(std::floor((pz + 51.2f) / 6.4f)), 0, 15);
+        return uint32_t(vf::voxel::chunkIndexOf(ax, ay, az));
+    };
+    const float half = 0.5f * vf::voxel::WORLD;
+    for (const vf::voxel::Surfel& w : m_waterSurfels) {
+        const int i = int(std::lround((w.pos_rU.x + half) / vf::voxel::kWaterSurfelSpacing - 0.5f));
+        const int j = int(std::lround((w.pos_rU.z + half) / vf::voxel::kWaterSurfelSpacing - 0.5f));
+        if (i >= 0 && j >= 0 && i <= steps && j <= steps)
+            m_waterGrid[size_t(j) * (steps + 1) + i] = 1;
+    }
+    if (m_waterSurfels.empty())
+        return m_waterRel;
+    std::vector<uint32_t> order(m_waterSurfels.size());
+    std::iota(order.begin(), order.end(), 0u);
+    std::stable_sort(order.begin(), order.end(), [&](uint32_t a, uint32_t b) {
+        return chunkOf(m_waterSurfels[a]) < chunkOf(m_waterSurfels[b]);
+    });
+    std::vector<vf::voxel::Surfel> sorted;
+    sorted.reserve(m_waterSurfels.size());
+    uint32_t open = chunkOf(m_waterSurfels[order[0]]);
+    m_waterRel[open] = 0;
+    for (size_t k = 0; k < order.size(); ++k) {
+        const uint32_t c = chunkOf(m_waterSurfels[order[k]]);
+        if (c != open) {
+            for (uint32_t f = open + 1; f <= c; ++f)
+                m_waterRel[f] = uint32_t(k);
+            open = c;
+        }
+        sorted.push_back(m_waterSurfels[order[k]]);
+    }
+    for (uint32_t f = open + 1; f < m_waterRel.size(); ++f)
+        m_waterRel[f] = uint32_t(order.size());
+    m_waterSurfels.swap(sorted);
+    return m_waterRel;
+}
+
+// Subtractive stamps may dig below the water plane: those columns are flooded
+// (the plane set grows) so the dug volume reads as water instead of a dry hole.
+// A column is flooded when the stamp cleared a cell below the plane and the
+// store has no solid left at/above it: scan [plane, cleared top] plus the
+// first unchanged cell above (the classic overhang caveat aside, that is the
+// whole column for terrain-style geometry).
+void App::floodNewlyDug(const std::vector<vf::voxel::VoxelRecord>& recs)
+{
+    if (recs.empty())
+        return;
+    // lattice y of the first cell whose centre is at/above the water plane
+    const int yPlane = int(std::ceil((vf::voxel::WATER_LEVEL + 0.5f * vf::voxel::WORLD) /
+                                         vf::voxel::VOXEL -
+                                     0.5f));
+    // per-column top of the cleared cells (dense window over the stamp bbox)
+    int x0 = int(recs[0].x), x1 = x0, z0 = int(recs[0].z), z1 = z0;
+    for (const vf::voxel::VoxelRecord& r : recs) {
+        x0 = std::min(x0, int(r.x)); x1 = std::max(x1, int(r.x));
+        z0 = std::min(z0, int(r.z)); z1 = std::max(z1, int(r.z));
+    }
+    const int wx = x1 - x0 + 1, wz = z1 - z0 + 1;
+    std::vector<int> yTop(size_t(wx) * wz, -1);
+    std::vector<uint8_t> dugBelow(size_t(wx) * wz, 0);
+    for (const vf::voxel::VoxelRecord& r : recs) {
+        const size_t k = size_t(int(r.x) - x0) * wz + size_t(int(r.z) - z0);
+        yTop[k] = std::max(yTop[k], int(r.y));
+        if (int(r.y) < yPlane)
+            dugBelow[k] = 1;
+    }
+
+    auto& store = m_layers.store();
+    const int latN = store.latN();
+    const int steps = int(vf::voxel::WORLD / vf::voxel::kWaterSurfelSpacing);
+    const float half = 0.5f * vf::voxel::WORLD;
+    size_t added = 0, scanned = 0;
+    for (int z = z0; z <= z1; ++z)
+        for (int x = x0; x <= x1; ++x) {
+            const size_t k = size_t(x - x0) * wz + size_t(z - z0);
+            if (!dugBelow[k])
+                continue; // this stamp cleared no cell below the plane
+            const int yHi = std::min(yTop[k], latN - 1);
+            bool dry = false;
+            for (int y = yHi; y >= yPlane && !dry; --y) {
+                ++scanned;
+                dry = store.cellAt(x, y, z).solid;
+            }
+            if (!dry && yHi + 1 < latN)
+                dry = store.cellAt(x, yHi + 1, z).solid; // unchanged above
+            if (dry)
+                continue;
+            const int i = std::clamp((x - 1) >> 1, 0, steps);
+            const int j = std::clamp((z - 1) >> 1, 0, steps);
+            if (m_waterGrid[size_t(j) * (steps + 1) + i])
+                continue; // already wet
+            const float gx = -half + (i + 0.5f) * vf::voxel::kWaterSurfelSpacing;
+            const float gz = -half + (j + 0.5f) * vf::voxel::kWaterSurfelSpacing;
+            if (gx < -half || gx > half || gz < -half || gz > half)
+                continue;
+            m_waterGrid[size_t(j) * (steps + 1) + i] = 1;
+            m_waterSurfels.push_back(vf::voxel::makeWaterSurfel(gx, gz));
+            ++added;
+        }
+    if (!added)
+        return;
+    m_splatPass.patchWaterSurfels(m_waterSurfels.data(), m_waterSurfels.size(),
+                                  updateWaterBuckets());
+    spdlog::info("live edit: flooded {} water splats ({} cells scanned, {} total)",
+                 added, scanned, m_waterSurfels.size());
 }
 
 // The edit brush: rasterize the volume (reusing the layer rasterizers), apply
@@ -831,22 +940,6 @@ void App::applyEditLive()
     n = glm::normalize(n);
     const float radius = m_editDiameter * 0.5f;
     const float length = m_editDepth;
-
-    // Carving and deleting always respect the water level: a scoop aimed at
-    // submerged ground is refused outright (otherwise the clamp below would
-    // silently cut the bank above the water instead), and no subtractive brush
-    // ever clears a cell below the water plane - the bed stays watertight and
-    // the water never gains a hole under it.
-    const bool subtractive = m_editBrush == EditBrush::Carve ||
-                             m_editBrush == EditBrush::Delete;
-    if (subtractive &&
-        vf::voxel::voxelCenter(m_hoverHit.voxel).y < vf::voxel::WATER_LEVEL) {
-        spdlog::info("edit: {} refused - {:.2f} is below the water level {:.2f}",
-                     brushName(m_editBrush),
-                     vf::voxel::voxelCenter(m_hoverHit.voxel).y,
-                     vf::voxel::WATER_LEVEL);
-        return;
-    }
 
     std::vector<vf::voxel::VoxelRecord> recs;
     switch (m_editBrush) {
@@ -868,17 +961,7 @@ void App::applyEditLive()
 
     std::vector<vf::voxel::StoreEdit> edits;
     edits.reserve(recs.size());
-    // lattice y of the lowest cell whose centre is still at/above the water
-    // plane: (y + 0.5) * VOXEL - WORLD/2 >= WATER_LEVEL
-    const int yMinDry = int(std::ceil((vf::voxel::WATER_LEVEL + 0.5f * vf::voxel::WORLD) /
-                                          vf::voxel::VOXEL -
-                                      0.5f));
-    size_t heldByWater = 0; // subtractive cells skipped at the water plane
     for (const vf::voxel::VoxelRecord& r : recs) {
-        if (subtractive && int(r.y) < yMinDry) {
-            ++heldByWater; // respect the water level
-            continue;
-        }
         vf::voxel::StoreEdit e;
         e.x = r.x;
         e.y = r.y;
@@ -896,6 +979,8 @@ void App::applyEditLive()
         edits.push_back(e);
     }
 
+    const bool subtractive = m_editBrush == EditBrush::Carve ||
+                             m_editBrush == EditBrush::Delete;
     const auto t0 = std::chrono::steady_clock::now();
     auto& store = m_layers.store();
     if (!m_liveEditor.attached())
@@ -935,6 +1020,11 @@ void App::applyEditLive()
         if (pool && !getenv("VF_LIVE_NOSVO"))
             m_svoPass.patchChunk(uint32_t(ci), *pool);
     }
+    // a scoop under the water plane floods the dug columns (splat backend: the
+    // SVO plane is analytic and fills them by itself). VF_NO_WATER_FILL=1
+    // skips the flood - an A/B knob for the tests.
+    if (subtractive && !getenv("VF_NO_WATER_FILL"))
+        floodNewlyDug(recs);
     m_taaFirstFrame = true; // no history across a geometry change
     const auto t2 = std::chrono::steady_clock::now();
     auto ms = [](auto a, auto b) {
@@ -942,16 +1032,11 @@ void App::applyEditLive()
     };
     m_lastEditMs = float(ms(t0, t2));
     m_lastEditSurfels = nRunSurfels;
-    if (!m_dragging || getenv("VF_TRACE")) {
-        std::string waterNote;
-        if (heldByWater)
-            waterNote = ", " + std::to_string(heldByWater) +
-                        " cells held at the water level";
+    if (!m_dragging || getenv("VF_TRACE"))
         spdlog::info("live edit: {} cells, {} chunks, {} run surfels, {:.1f} ms "
-                     "(stamp {:.1f}, gpu {:.1f}){}",
+                     "(stamp {:.1f}, gpu {:.1f})",
                      edits.size(), changed.size(), nRunSurfels, m_lastEditMs,
-                     ms(t0, t1), ms(t1, t2), waterNote);
-    }
+                     ms(t0, t1), ms(t1, t2));
 }
 
 glm::vec3 App::storeNormalAt(const glm::ivec3& v)
@@ -1715,24 +1800,19 @@ int App::run(const Args& args)
         // cylinder or the delete/paint ball. Add creates new geometry, so it
         // has no affected splats and stays off.
         {
-            glm::vec4 vol(0.f), axis(0.f), tint(0.f), flags(0.f);
+            glm::vec4 vol(0.f), axis(0.f), tint(0.f);
             // skin: surfels sit at cell centre + 0.05 m along their normal, so
             // grow the volume a little past the cell centres the CPU
             // rasterizer selects (see App::applyEditLive).
             constexpr float kBrushSkin = 0.06f;
             if (m_editActive && m_hoverHit.hit && m_editBrush != EditBrush::Add) {
-                const glm::vec3 c = vf::voxel::voxelCenter(m_hoverHit.voxel);
-                const bool subtractive = m_editBrush == EditBrush::Carve ||
-                                         m_editBrush == EditBrush::Delete;
-                // subtracting below the water level is refused (see
-                // applyEditLive): no preview there either
-                if (!(subtractive && c.y < vf::voxel::WATER_LEVEL)) {
+                {
+                    const glm::vec3 c = vf::voxel::voxelCenter(m_hoverHit.voxel);
                     glm::vec3 n = m_hoverHit.normal;
                     if (glm::length(n) < 1e-3f)
                         n = glm::vec3(0.f, 1.f, 0.f);
                     n = glm::normalize(n);
                     const float r = m_editDiameter * 0.5f + kBrushSkin;
-                    flags.x = subtractive ? 1.0f : 0.0f; // stop at the water plane
                     if (m_editBrush == EditBrush::Carve) {
                         // the exact volume makeOrientedCylinder emits: a cylinder
                         // based at the hit cell, `depth` long along -normal
@@ -1753,7 +1833,7 @@ int App::run(const Args& args)
                     }
                 }
             }
-            m_splatPass.setBrush(vol, axis, tint, flags);
+            m_splatPass.setBrush(vol, axis, tint);
         }
 
         // highlight feeds: selected (strong) + hover (faint) -> shader UBO

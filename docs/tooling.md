@@ -34,10 +34,11 @@ Interactive defaults: reference camera `1.0,2.0,1.5 → 5.3,1.0,11.3` (house.jpe
 | `VF_TEST_HOVER=x,y,z` | deterministic hover highlight |
 | `VF_TEST_BRUSH=x,y,z,carve\|add\|delete\|paint` | activate the edit tool at a voxel and render only the hover preview (no edit). Brush size via `VF_EDIT_DIAM`/`VF_EDIT_DEPTH` |
 | `VF_NO_OVERLAY=1` | ignore a saved `assets/runtime_edits.vxw` live-edit overlay at startup (the test scripts set it so interactive painting cannot pollute reference shots) |
-| `VF_TEST_EDIT=x,y,z,carve\|add\|delete\|paint` | apply one live store brush stamp after load (all modes patch the store; subtractive ones respect the water level) |
+| `VF_TEST_EDIT=x,y,z,carve\|add\|delete\|paint` | apply one live store brush stamp after load (all modes patch the store; subtractive digs below the water plane flood) |
 | `VF_TEST_STROKE=x,y,z,steps[,mode]` | simulate a drag stroke; add `VF_TEST_STROKE_SAVE=1` to persist the overlay |
 | `VF_EDIT_DIAM`, `VF_EDIT_DEPTH` | brush diameter/depth in m |
 | `VF_LIVE_NOSPLAT=1`, `VF_LIVE_NOSVO=1` | skip one backend when patching a live edit |
+| `VF_NO_WATER_FILL=1` | skip the live-edit water flood (A/B for the tests: an open pit below the water plane stays dry) |
 | `VF_SPLAT_DEBUG=15` | splat debug view: magenta = surfel centre inside the edit-brush volume |
 | `VF_IMGUI_DEBUG=1` | dump ImGui draw-data stats at frame 5 |
 

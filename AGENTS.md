@@ -82,17 +82,22 @@
   per-mode/size/perf readout and a "Clear live edits" button (drops
   `runtime_edits.vxw`). **Every stamp patches the live store** (there is no
   bake/record path any more; the legacy `carve_edits.vxw`/`raise_edits.vxw`
-  layers are read-only leftovers). Carve/Delete (`Clear`) **respect the water
-  level**: a scoop aimed at submerged ground is refused outright and no
-  subtractive brush clears a cell whose centre is below `WATER_LEVEL=-0.9`, so
-  the bed stays watertight (the log reports the held-back cell count).
-  In the splat backend, hovering
+  layers are read-only leftovers). Carving below `WATER_LEVEL` (-0.9) is
+  allowed and **floods the dug volume**: after a subtractive stamp the columns
+  it dug below the plane that have no solid left at/above it gain water-plane
+  splats (`App::floodNewlyDug` + `makeWaterSurfel`), and the water run is
+  re-uploaded (`SplatPass::patchWaterSurfels`, headroom reserved at upload so
+  the common case needs no buffer relayout). Columns already wet or still
+  capped by terrain get no water, so a covered scoop stays a dry void while an
+  open pit beside the river reads as a pond; the SVO plane is analytic and
+  floods by itself. In the splat backend, hovering
   with the tool active **tints the affected splats** (the exact brush volume:
   the carve cylinder or the delete/paint ball) so the LMB result is visible
   first — bind 13 `BrushUBO` (`SplatPass::setBrush`), tested against the surfel
   *centre* (per-splat, matching the CPU rasterizer's cell set) plus a 0.06 m
-  skin, with `bFlags.x` clipping subtractive brushes at the water plane; debug
-  view `VF_SPLAT_DEBUG=15` shows the volume directly. LMB **paints**: holding
+  skin; water-plane splats are skipped at the tint site (a carve floods the
+  plane instead of removing it); debug view `VF_SPLAT_DEBUG=15` shows the
+  volume directly. LMB **paints**: holding
   the button keeps stamping along
   the cursor (spacing = ¼ brush diameter) and the result appears in the same
   frame. Each stamp applies cells to the runtime `ChunkStore`, rebuilds only
@@ -115,7 +120,8 @@
   renders only the hover preview, no edit), `VF_TEST_STROKE="x,y,z,steps[,mode]"`
   + `VF_TEST_STROKE_SAVE=1` (drag simulation + persistence),
   `VF_EDIT_DIAM`/`VF_EDIT_DEPTH` (brush size), `VF_LIVE_NOSPLAT=1` /
-  `VF_LIVE_NOSVO=1` (skip one backend), `VF_NO_OVERLAY=1` (ignore
+  `VF_LIVE_NOSVO=1` (skip one backend), `VF_NO_WATER_FILL=1` (A/B: skip the
+  flood so a test can see its pixels), `VF_NO_OVERLAY=1` (ignore
   `runtime_edits.vxw`; the test scripts set it so a session's painting cannot
   pollute the reference shots).
 - Tile splat path (WIP, `VF_TILE=1`): compute-only pipeline
@@ -158,10 +164,10 @@
   untouched and with `VF_TEST_EDIT` (live store patch) in **both backends**
   (splat + `--mode svo`) for Add, plus the splat-only Delete/Paint store modes
   (micro detail off so the diff is geometry, not the dropped micro tail), the
-  carve-brush hover tint and the water-level rules (a submerged scoop is
-  refused pixel-identically, a deep scoop reports the held-back cells, and no
-  subtractive preview tints the water plane); asserts a visible but bounded
-  pixel diff and sane edited-frame probes.
+  carve-brush hover tint and the water fill (an open pit below the plane floods
+  with >=100 water splats whose surface pixels read as water, compared A/B
+  against `VF_NO_WATER_FILL=1`; no subtractive preview tints the water plane);
+  asserts a visible but bounded pixel diff and sane edited-frame probes.
 - `./build/voxelforge --selftest --width 640 --height 360` — sky probe +
   coverage acceptance.
 - `--probe X Y Z` reflects the live layered field (loads `world.json`).
@@ -316,6 +322,14 @@
   (`ChunkStore::decodeCell`, rebuild materialisation, `buildPoolOnly`,
   `buildChunkSurfels`); a `< 0` test erodes those cells on every rebuild.
   Store/field sign comparisons must tolerate `±2·VOXEL` at surfaces.
+- `ChunkStore::rebuildChunk` dense materialisation: a cell is brick-owned if
+  *any* brick covers it, **air or solid** (`fromBrick[]` records that); the
+  box/state fill must skip those, else a kept `SolidBox` re-solidifies cells an
+  edit just cleared (deep clears silently stayed solid - a live carve then left
+  a hidden crust). For the same reason an all-air region block that a kept
+  straddling box covers must not drop its brick: `cellAt` checks bricks before
+  boxes, so the box would cover the cleared cells again. Regression:
+  tests/test_store.cpp "a deep clear stays air under the terrain boxes".
 - SVO handles are **chunk-local**: every access adds the owning chunk's base
   from `uChunkInfo` (`common_svo.glsl` `Bases`/`chunkBases`). Never
   offset-adjust handles during the merge (`layered_world.cpp`) or reuse a

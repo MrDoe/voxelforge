@@ -52,6 +52,15 @@ public:
     void patchChunkSurfels(uint32_t chunk, const void* data, size_t bytes,
                            size_t count);
 
+    // Live-edit flood: replace the trailing water run (the plane splats the
+    // app regenerates when a carve digs columns below the water level, so the
+    // dug volume reads as water instead of a dry hole). `chunkRange` holds
+    // GRID_N^3 + 1 offsets RELATIVE to the run start. Grows the buffer
+    // (shifting the tail) when the run needs more slots; blocking (device idle
+    // + immediate submit), call between frames.
+    void patchWaterSurfels(const void* data, size_t count,
+                           const std::vector<uint32_t>& chunkRange);
+
     // Copy one chunk's current BASE surfels (micro tail excluded) into `out`
     // as raw 64 B records. Returns the surfel count. Used by the live editor
     // to seed its per-chunk cache from what the GPU already renders, so the
@@ -86,15 +95,13 @@ public:
     //   volume = (centre xyz, radius m)
     //   axis   = (unit axis xyz, half length m; 0 = sphere)
     //   tint   = (rgb, strength; 0 = preview off)
-    //   flags  = (x: 1 = never tint below the water plane, else 0)
     // Staged on the CPU and flushed into the mapped UBO by record().
     void setBrush(const glm::vec4& volume, const glm::vec4& axis,
-                  const glm::vec4& tint, const glm::vec4& flags = glm::vec4(0.f))
+                  const glm::vec4& tint)
     {
         m_brush[0] = volume;
         m_brush[1] = axis;
         m_brush[2] = tint;
-        m_brush[3] = flags;
     }
 
     // Record sky + opaque chunks + water. Assumes hdr/gpos already in
@@ -127,6 +134,8 @@ private:
     // Relayout the paged buffer with `minExtra` more opaque slots (copies the
     // opaque + LOD/water tail regions and remaps every absolute range).
     bool growOpaque(uint32_t minExtra);
+    // identity-fill compaction entries [first, first+count) (see the .cpp)
+    void writeCompactIdentity(uint32_t first, uint32_t count);
 
     const Context* m_ctx = nullptr;
     VkPipelineLayout m_layout = VK_NULL_HANDLE;
@@ -190,11 +199,10 @@ private:
     VmaAllocation m_surfelAlloc = VK_NULL_HANDLE;
     Image3D m_depth {};
     Buffer m_paramsBuf {}; // persistently mapped 2xvec4 kernel-tuning UBO
-    // Brush hover preview: persistently mapped 4xvec4 UBO (bind 13), flushed
+    // Brush hover preview: persistently mapped 3xvec4 UBO (bind 13), flushed
     // from m_brush in record() like the params above.
     Buffer m_brushBuf {};
-    glm::vec4 m_brush[4] { glm::vec4(0.f), glm::vec4(0.f), glm::vec4(0.f),
-                           glm::vec4(0.f) };
+    glm::vec4 m_brush[3] { glm::vec4(0.f), glm::vec4(0.f), glm::vec4(0.f) };
     // ---- occlusion culling (Hi-Z depth pyramid) ----
     static constexpr uint32_t kMaxHiZMips = 16;
     Image3D m_hiz {};

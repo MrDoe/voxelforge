@@ -441,6 +441,10 @@ void ChunkStore::rebuildChunk(int ci)
     // --- dense materialisation ---------------------------------------------
     // kind: 0 air, 1 solid from box/state (terrain/uniform), 2 explicit solid
     std::vector<uint8_t> kind(size_t(CHUNK_N) * CHUNK_N * CHUNK_N, 0);
+    // cells that a brick defines (air or solid): bricks win over overlapping
+    // SolidBoxes for BOTH signs, so a box must never re-solidify a cell an
+    // edit cleared (the local rebuild has to match a full rebuild either way)
+    std::vector<uint8_t> fromBrick(kind.size(), 0);
     std::vector<uint32_t> words(size_t(CHUNK_N) * CHUNK_N * CHUNK_N * 2, 0);
     auto di = [&](int lx, int ly, int lz) {
         return (size_t(lz) * CHUNK_N + size_t(ly)) * CHUNK_N + size_t(lx);
@@ -466,6 +470,7 @@ void ChunkStore::rebuildChunk(int ci)
                     const size_t si = (size_t(z) * BRICK_N + y) * BRICK_N + x;
                     words[k * 2] = src[si * 2];
                     words[k * 2 + 1] = src[si * 2 + 1];
+                    fromBrick[k] = 1;
                     // raw <= 0 is solid (see decodeCell)
                     kind[k] = int8_t(words[k * 2] >> 24) <= 0 ? 2 : 0;
                 }
@@ -486,7 +491,7 @@ void ChunkStore::rebuildChunk(int ci)
             for (int y = y0; y < y1; ++y)
                 for (int x = x0; x < x1; ++x) {
                     const size_t k = di(x, y, z);
-                    if (kind[k] != 0)
+                    if (fromBrick[k])
                         continue; // bricks win over overlapping boxes
                     kind[k] = 1;
                     fillBoxCell(k, x + gx0, z + gz0, b);
@@ -497,7 +502,7 @@ void ChunkStore::rebuildChunk(int ci)
             for (int ly = rly; ly < rhy; ++ly)
                 for (int lx = rlx; lx < rhx; ++lx) {
                     const size_t k = di(lx, ly, lz);
-                    if (kind[k] != 0)
+                    if (fromBrick[k])
                         continue;
                     kind[k] = 1;
                     fillBoxCell(k, lx + gx0, lz + gz0,
@@ -667,7 +672,20 @@ void ChunkStore::rebuildChunk(int ci)
                             anyBand = true;
                     }
                 }
-        if (allAir && !anyBand)
+        // A kept SolidBox that straddles the region boundary still covers this
+        // block's cells and cellAt checks bricks before boxes: dropping an
+        // all-air brick here would resurrect the box's solid for every cell the
+        // edit just cleared (the localized rebuild must match a full rebuild in
+        // both directions). Force a brick over such blocks.
+        bool boxCovered = false;
+        for (const SolidBox& kb : newBoxes)
+            if (kb.x < bx + BRICK_N && bx < kb.x + kb.side &&
+                kb.y < by + BRICK_N && by < kb.y + kb.side &&
+                kb.z < bz + BRICK_N && bz < kb.z + kb.side) {
+                boxCovered = true;
+                break;
+            }
+        if (allAir && !anyBand && !boxCovered)
             continue; // no brick needed: deep air
         if (allBox) {
             newBoxes.push_back({ int16_t(bx), int16_t(by), int16_t(bz), BRICK_N, 2,
@@ -697,6 +715,9 @@ void ChunkStore::rebuildChunk(int ci)
     const double ms = std::chrono::duration<double, std::milli>(
                           std::chrono::steady_clock::now() - t0)
                           .count();
+    if (getenv("VF_TRACE"))
+        spdlog::info("chunk rebuild {} state {} region local x[{}..{}] y[{}..{}] z[{}..{}]",
+                     ci, int(c.state), rlx, rhx, rly, rhy, rlz, rhz);
     if (getenv("VF_TRACE"))
         spdlog::info("chunk_store: rebuilt chunk {} in {:.1f} ms", ci, ms);
 }

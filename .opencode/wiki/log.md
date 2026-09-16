@@ -173,3 +173,35 @@ UBO (A/B verified: 1792 water-plane pixels tinted without the flag, 0 with it).
 Tests extended in `tests/live_edit_check.py` (deep-scoop log, refused-scoop
 pixel identity, shore-preview water check); gates green. Updated
 [[entities/live-edit-brush]].
+
+## 2026-09-15 ingest | edits always live, digs below the water plane are flooded
+Editing no longer has a bake path: the "Live patch" checkbox, `App::applyEdit()`
+and the `carve_edits.vxw`/`raise_edits.vxw` writers are gone; every stamp goes
+through `applyEditLive()`, drag painting and the stroke overlay work for all
+four modes, and the panel's legacy clear buttons became one "Clear live edits"
+button (drops `runtime_edits.vxw`). Per the follow-up request, carving/deleting
+below `WATER_LEVEL` is *allowed* again (the refusal + cell clamp from the
+previous pass were removed) and the dug volume is **filled with water**:
+`floodNewlyDug` appends water-plane splats over the columns a subtractive stamp
+opened below the plane (store-based open-column test, wet-grid dedupe) and
+`patchWaterSurfels` re-uploads the ~9k-splat water run (4096 slots of reserved
+headroom; identity indirection entries). Verified: an open 6 m pit in flat
+ground floods with 694 splats and changes 21.6% of a top-down frame (A/B
+`VF_NO_WATER_FILL=1`), the pit reads blue in the flooded render, and a
+subtractive preview still never tints the water surface.
+
+Two store/GPU bugs surfaced while testing and are fixed:
+1. `rebuildChunk` let the `SolidBox` fill overwrite cells that a brick defines
+   as *air* (`kind[k] != 0` only knows solid bricks): a deep clear stayed solid
+   (114810 of 154975 cells came back), which also hid the pit and starved the
+   flood. Now `fromBrick[]` gates the fill; regression test
+   "a deep clear stays air under the terrain boxes" (16/31 cells fail without
+   the fix). An all-air region block under a kept straddling box may also not
+   drop its brick, or `cellAt` falls through to the box.
+2. `patchWaterSurfels` growth destroyed the compaction buffer before the
+   replacement existed; a failed allocation left the scene unrenderable (a
+   uniform grey frame). The water run now carries headroom and the replacement
+   is created before the old buffer is released.
+
+Gates: unit_tests (incl. the new case), visual_check, live_edit_check and
+--selftest all green. Updated [[entities/live-edit-brush]] and the docs.

@@ -72,9 +72,11 @@ the same chunks are patched into the chunk-local SVO buffers. Checks:
   chunks' dropped micro tail;
 - **carve hover preview** (`VF_TEST_BRUSH`, no edit applied): the tint over
   the affected splats must be visible and warm;
-- **water level**: a deep scoop from a dry cell reports `held at the water
-  level`, a scoop at a submerged cell is refused with a pixel-identical frame,
-  and a subtractive preview over open water tints no water-plane pixel;
+- **water fill**: a 6 m ball delete in flat ground beside the river (floor
+  below the plane) must flood with ≥ 100 water splats and change ≥ 1 % of the
+  frame versus the same edit with `VF_NO_WATER_FILL=1`, with the water-surface
+  pixels reading brighter/blue; a subtractive preview over open water must
+  tint no water-plane pixel;
 - every edited frame passes the pixel-diff bounds (visible, not frame-wide:
   > 2 %, < 70 %), coverage (3–98.5 %), black-in-silhouette (<9 %) and
   sky-probe checks.

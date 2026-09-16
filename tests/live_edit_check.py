@@ -26,13 +26,14 @@ CAM = ["-5.5", "1.2", "-3.5", "-8", "0.4", "-6"]
 # terrain surface cell in front of the hero camera (world ~(-8, -0.15, -6))
 CELL = "432,509,452"
 EDIT = CELL + ",raise"
-# 2.25 m BELOW the water plane (-0.9) inside the same bank: subtractive
-# brushes must refuse it
-SUNKEN_CELL = "432,489,452"
 # dock plank next to open water (y ~ -0.35) + the water camera from
 # visual_check: a big brush here reaches over the water surface
 SHORE_CELL = "562,508,582"
 WATER_CAM = ["8.5", "0.6", "8.2", "4.5", "-1.1", "6.8"]
+# flat open ground beside the river (surface ~-0.45, plane -0.9): a 6 m ball
+# delete digs an open pit whose floor is submerged
+PIT_CELL = "512,507,512"
+PIT_CAM = ["0", "6", "0", "0", "-0.5", "0"]
 
 
 def read_ppm(path):
@@ -127,31 +128,47 @@ def is_water(r, g, b):
     return b > r + 12 and g > r + 4 and b > 120
 
 
-def check_water_level(binary, tmp, failures, baseline):
-    """Carving always respects the water level: a scoop aimed below the plane
-    is refused outright, a deep scoop keeps every cell below the plane, and
-    the subtractive hover tint never covers the water surface."""
-    # 1. deep scoop from a dry cell: cells below the plane are held back
-    deep = os.path.join(tmp, "water_deep.ppm")
-    r = render(binary, deep, {"VF_TEST_EDIT": f"{CELL},carve", "VF_EDIT_DIAM": "3.0",
-                              "VF_EDIT_DEPTH": "6.0"}, mode=None)
-    if "held at the water level" not in (r.stdout or "") + (r.stderr or ""):
-        failures.append("water: deep carve did not report cells held at the water level")
-    # 2. a scoop aimed below the plane is refused outright (frame unchanged)
-    sunken = os.path.join(tmp, "water_sunken.ppm")
-    r = render(binary, sunken, {"VF_TEST_EDIT": f"{SUNKEN_CELL},delete",
-                                "VF_EDIT_DIAM": "2.0"}, mode=None)
-    if "below the water level" not in (r.stdout or "") + (r.stderr or ""):
-        failures.append("water: submerged delete was not refused")
-    w, h, a = read_ppm(baseline)
-    _, _, b = read_ppm(sunken)
-    d = diff_stats(w, h, a, w, h, b)[0]
-    print(f"[water] sunkenground delete refused, frame diff {d*100:.3f}%")
-    if d > 0.001:
-        failures.append(f"water: refused edit changed the frame ({d*100:.2f}%)")
-    # 3. subtractive hover tint never covers the water surface: hover a dry
-    #    shore cell whose ball reaches over open water and count tinted
-    #    pixels whose baseline colour is water
+def check_water_fill(binary, tmp, failures):
+    """Carving below the water level is allowed and the dug volume is flooded:
+    an open pit below the plane gains water-plane splats so it reads as water
+    instead of a dry hole, while the subtractive hover tint leaves the water
+    surface alone."""
+    # an open pit below the plane: delete a 6 m ball in flat ground beside the
+    # river (surface ~-0.45, water plane -0.9, so the floor ends up submerged)
+    pit_env = {"VF_TEST_EDIT": f"{PIT_CELL},delete", "VF_EDIT_DIAM": "6.0"}
+    dry = os.path.join(tmp, "water_noflood.ppm")
+    wet = os.path.join(tmp, "water_flood.ppm")
+    r = render(binary, wet, pit_env, mode=None, cam=PIT_CAM)
+    logs = (r.stdout or "") + (r.stderr or "")
+    if "flooded" not in logs or "water splats" not in logs:
+        failures.append("water: digging below the plane never flooded the pit")
+    else:
+        n = int(logs.split("flooded ")[1].split(" ")[0])
+        print(f"[water] open pit flooded {n} water splats")
+        if n < 100:
+            failures.append(f"water: flood too small for an open pit ({n} splats)")
+    r1 = render(binary, dry, dict(pit_env, VF_NO_WATER_FILL="1"), mode=None, cam=PIT_CAM)
+    if r1.returncode != 0 or not os.path.exists(wet) or not os.path.exists(dry):
+        failures.append("water: pit renders failed")
+        return
+    w, h, a = read_ppm(dry)   # unflooded pit
+    _, _, b = read_ppm(wet)   # flooded pit
+    changed = surface = 0
+    for k in range(w * h):
+        if max(abs(a[3 * k + i] - b[3 * k + i]) for i in range(3)) > 12:
+            changed += 1
+            la = (a[3 * k] + a[3 * k + 1] + a[3 * k + 2]) / 3.0
+            lb = (b[3 * k] + b[3 * k + 1] + b[3 * k + 2]) / 3.0
+            if lb > la + 15 and b[3 * k + 2] >= b[3 * k]:
+                surface += 1  # brighter and blue-biased = the water surface
+    print(f"[water] flood changed {changed} px ({changed/(w*h)*100:.1f}%), "
+          f"{surface} read as the water surface")
+    if changed < w * h * 0.01:
+        failures.append(f"water: flood is invisible ({changed} px changed)")
+    if surface < 200:
+        failures.append(f"water: flood did not read as water ({surface} surface px)")
+
+    # subtractive hover tint leaves the water surface alone
     wbase = os.path.join(tmp, "water_base.ppm")
     wprev = os.path.join(tmp, "water_prev.ppm")
     r0 = render(binary, wbase, mode=None, cam=WATER_CAM)
@@ -176,16 +193,11 @@ def check_water_level(binary, tmp, failures, baseline):
         failures.append(f"water: subtractive preview tinted {water} water pixels")
 
 
-def check_preview(binary, tmp, failures):
+def check_preview(binary, tmp, failures, baseline):
     """Carve-brush hover preview: VF_TEST_BRUSH activates the edit tool with a
     brush volume but applies NO edit, so the only frame difference is the tint
     over the splats the brush would affect (splat backend only)."""
-    base = os.path.join(tmp, "splat_base.ppm")
     prev = os.path.join(tmp, "preview.ppm")
-    r0 = None if os.path.exists(base) else render(binary, base, mode=None)
-    if r0 is not None and (r0.returncode != 0 or not os.path.exists(base)):
-        failures.append("preview: baseline render failed")
-        return
     r1 = render(binary, prev, {"VF_TEST_BRUSH": f"{CELL},carve",
                                "VF_EDIT_DIAM": "1.5"}, mode=None)
     if r1.returncode != 0 or not os.path.exists(prev):
@@ -194,7 +206,7 @@ def check_preview(binary, tmp, failures):
     logs = (r1.stdout or "") + (r1.stderr or "")
     if "VF_TEST_BRUSH" not in logs:
         failures.append("preview: brush hook never ran")
-    w, h, a = read_ppm(base)
+    w, h, a = read_ppm(baseline)
     _, _, b = read_ppm(prev)
     d, warm_r, warm_b = diff_stats(w, h, a, w, h, b)
     print(f"[preview] carve tint on hover: pixel diff {d*100:.2f}%  warm R/B "
@@ -276,10 +288,10 @@ def main():
                    max_black=0.09, edit=CELL + ",paint",
                    base_name="splat_nomicro_base.ppm", extra_env=no_micro)
         # carve-brush hover preview (tint only, no edit)
-        check_preview(binary, tmp, failures)
-        # carving always respects the water level
-        check_water_level(binary, tmp, failures,
-                          os.path.join(tmp, "splat_base.ppm"))
+        check_preview(binary, tmp, failures,
+                      os.path.join(tmp, "splat_base.ppm"))
+        # carving below the water level floods the dug volume
+        check_water_fill(binary, tmp, failures)
 
     if failures:
         for f in failures:

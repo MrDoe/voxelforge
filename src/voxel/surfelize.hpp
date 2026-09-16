@@ -122,6 +122,13 @@ std::vector<std::vector<Surfel>> buildChunksSurfels(
 // water flag 2; the splat shader branches to water shading on the flag).
 // Append after the opaque set; the append offset is the water range start.
 // Default 0.2 m keeps water grain at the micro-surfel scale of the banks.
-std::vector<Surfel> buildWaterSurfels(const VoxelField& field, float spacing = 0.20f);
+inline constexpr float kWaterSurfelSpacing = 0.20f;
+// One water-plane splat at (wx, wz) (the water grid point covering the
+// lattice column below it). Shared by the bake and the live editor, which
+// floods columns a carve dug below the plane.
+Surfel makeWaterSurfel(float wx, float wz,
+                       float spacing = kWaterSurfelSpacing);
+std::vector<Surfel> buildWaterSurfels(const VoxelField& field,
+                                      float spacing = kWaterSurfelSpacing);
 
 } // namespace vf::voxel

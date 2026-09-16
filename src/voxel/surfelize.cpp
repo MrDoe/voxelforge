@@ -985,6 +985,17 @@ std::vector<std::vector<Surfel>> buildChunksSurfels(
     return out;
 }
 
+Surfel makeWaterSurfel(float wx, float wz, float spacing)
+{
+    Surfel s;
+    const float r = spacing * 0.9f; // overlap for watertight cover
+    s.pos_rU = glm::vec4(wx, WATER_LEVEL, wz, r);
+    s.normal_rV = glm::vec4(0.0f, 1.0f, 0.0f, r);
+    s.bent_sh = glm::vec4(0.0f, 1.0f, 0.0f, 1.0f); // unshadowed water
+    s.mat_ao = glm::vec4(0.0f, 40.0f, 200.0f, 3.0f); // ao=1 +2 = water
+    return s;
+}
+
 std::vector<Surfel> buildWaterSurfels(const VoxelField& field, float spacing)
 {
     std::vector<Surfel> out;
@@ -1010,13 +1021,7 @@ std::vector<Surfel> buildWaterSurfels(const VoxelField& field, float spacing)
                 continue;
             if (field.terrainTopY(cx, cz) > WATER_LEVEL - 0.02f)
                 continue;
-            Surfel s;
-            const float r = spacing * 0.9f; // overlap for watertight cover
-            s.pos_rU = glm::vec4(wx, WATER_LEVEL, wz, r);
-            s.normal_rV = glm::vec4(0.0f, 1.0f, 0.0f, r);
-            s.bent_sh = glm::vec4(0.0f, 1.0f, 0.0f, 1.0f); // unshadowed water
-            s.mat_ao = glm::vec4(0.0f, 40.0f, 200.0f, 3.0f); // ao=1 +2 = water
-            out.push_back(s);
+            out.push_back(makeWaterSurfel(wx, wz, spacing));
         }
     }
     return out;

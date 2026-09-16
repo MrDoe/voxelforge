@@ -852,6 +852,88 @@ bool SplatPass::growOpaque(uint32_t minExtra){
     return true;
 }
 
+// The vertex shader resolves every instance through uCompact, so a slot whose
+// indirection entry is stale renders the wrong surfel. Identity = slot index.
+void SplatPass::writeCompactIdentity(uint32_t first, uint32_t count)
+{
+    if (!count || !m_compactBuf.buf)
+        return;
+    Buffer ids = makeBuffer(*m_ctx, size_t(count) * sizeof(uint32_t),
+                            VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
+                            VMA_MEMORY_USAGE_AUTO_PREFER_HOST, true);
+    if (!ids.buf || !ids.mapped)
+        return;
+    auto* p = static_cast<uint32_t*>(ids.mapped);
+    for (uint32_t i = 0; i < count; ++i)
+        p[i] = first + i;
+    m_ctx->immediateSubmit([&](VkCommandBuffer cmd) {
+        VkBufferCopy c { 0, size_t(first) * sizeof(uint32_t),
+                         size_t(count) * sizeof(uint32_t) };
+        vkCmdCopyBuffer(cmd, ids.buf, m_compactBuf.buf, 1, &c);
+    });
+    destroyBuffer(*m_ctx, ids);
+}
+
+// Replace the trailing water run: the live editor floods columns a carve dug
+// below the water plane, so the plane set grows (or shrinks) without a full
+// world reload. `chunkRange` is GRID_N^3 + 1 offsets RELATIVE to the run.
+void SplatPass::patchWaterSurfels(const void* data, size_t count,
+                                  const std::vector<uint32_t>& chunkRange)
+{
+    const size_t kSurfelBytes = 64; // Surfel = 4 x vec4
+    if (!m_surfelBuf || !data || !count || m_waterStart == 0)
+        return;
+    vkDeviceWaitIdle(m_ctx->device()); // no in-flight frame may read the buffer
+    // The upload reserved headroom for the run; only a flood larger than that
+    // has to grow the buffer (which relayouts the tail).
+    const uint32_t reserved = m_bufSlots > m_waterStart ? m_bufSlots - m_waterStart : 0;
+    if (count > reserved && !growOpaque(uint32_t(count - reserved)))
+        return; // the tail moved; ranges below are rebuilt from scratch
+    if (getenv("VF_TRACE"))
+        spdlog::info("splat patch water: {} surfels at {} ({} reserved)", count,
+                     m_waterStart, reserved);
+
+    if ((size_t(m_waterStart) + count) * kSurfelBytes > m_compactBytes) {
+        // the grown tail needs indirection entries past the old buffer: create
+        // the replacement first so a failed allocation leaves the old one bound
+        const size_t need = (size_t(m_waterStart) + count) * kSurfelBytes;
+        Buffer nb = makeBuffer(*m_ctx, need,
+                               VK_BUFFER_USAGE_STORAGE_BUFFER_BIT |
+                                   VK_BUFFER_USAGE_TRANSFER_DST_BIT,
+                               VMA_MEMORY_USAGE_AUTO_PREFER_DEVICE, false);
+        if (!nb.buf)
+            return;
+        if (m_compactBuf.buf)
+            destroyBuffer(*m_ctx, m_compactBuf);
+        m_compactBuf = nb;
+        m_compactBytes = need;
+        VkDescriptorBufferInfo ci { m_compactBuf.buf, 0, VK_WHOLE_SIZE };
+        VkWriteDescriptorSet w { VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, nullptr, m_set, 4,
+                                 0, 1, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, nullptr, &ci,
+                                 nullptr };
+        vkUpdateDescriptorSets(m_ctx->device(), 1, &w, 0, nullptr);
+    }
+    writeCompactIdentity(m_waterStart, uint32_t(count));
+
+    Buffer staging = makeBuffer(*m_ctx, count * kSurfelBytes,
+                                VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
+                                VMA_MEMORY_USAGE_AUTO_PREFER_HOST, true);
+    if (!staging.buf || !staging.mapped)
+        return;
+    memcpy(staging.mapped, data, count * kSurfelBytes);
+    const bool ok = m_ctx->immediateSubmit([&](VkCommandBuffer cmd) {
+        VkBufferCopy c { 0, size_t(m_waterStart) * kSurfelBytes, count * kSurfelBytes };
+        vkCmdCopyBuffer(cmd, staging.buf, m_surfelBuf, 1, &c);
+    });
+    destroyBuffer(*m_ctx, staging);
+    if (!ok)
+        return;
+    m_count = m_waterStart + uint32_t(count);
+    m_waterChunkRange.assign(chunkRange.size(), 0);
+    for (size_t i = 0; i < chunkRange.size(); ++i)
+        m_waterChunkRange[i] = m_waterStart + chunkRange[i];
+}
+
 void SplatPass::patchChunkSurfels(uint32_t chunk, const void* data, size_t bytes,
                                   size_t count)
 {
@@ -894,20 +976,7 @@ void SplatPass::patchChunkSurfels(uint32_t chunk, const void* data, size_t bytes
         return;
     // keep the identity compaction entries fresh for the patched slots (the
     // per-frame cull pass rewrites them for drawn ranges anyway)
-    Buffer ids = makeBuffer(*m_ctx, count * sizeof(uint32_t),
-                            VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
-                            VMA_MEMORY_USAGE_AUTO_PREFER_HOST, true);
-    if (ids.buf && ids.mapped) {
-        auto* p = static_cast<uint32_t*>(ids.mapped);
-        for (uint32_t i = 0; i < count; ++i)
-            p[i] = base + i;
-        m_ctx->immediateSubmit([&](VkCommandBuffer cmd) {
-            VkBufferCopy c { 0, size_t(base) * sizeof(uint32_t),
-                             count * sizeof(uint32_t) };
-            vkCmdCopyBuffer(cmd, ids.buf, m_compactBuf.buf, 1, &c);
-        });
-    }
-    destroyBuffer(*m_ctx, ids);
+    writeCompactIdentity(base, uint32_t(count));
     m_chunkCount[chunk] = uint32_t(count);
     // a live-patched chunk has no regenerated micro tail or LOD ring yet
     if (m_microStart.size() == 16 * 16 * 16 + 1)
