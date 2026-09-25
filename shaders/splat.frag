@@ -1,6 +1,7 @@
 #version 460
 #extension GL_GOOGLE_include_directive : require
 #define SPLAT_BACKEND 1
+#include "common_surfel.glsl"
 // Voxelforge Gaussian-surfel rasterizer (fragment stage).
 // Exact ray/disk intersection gives per-fragment plane depth (no centroid
 // z-fighting); each surfel contributes a single pure 2D Gaussian kernel
@@ -35,13 +36,15 @@ layout(std140, set = 0, binding = 3) uniform SplatUBO {
 // Brush hover preview (bind 13): the app fills this with the active edit
 // brush volume so the splats the next stamp would affect can be tinted
 // before the click. The volume is the oriented carve cylinder (w > 0 on the
-// axis) or the delete/paint ball (w == 0). a = 0 disables the preview.
-// Water-plane splats are skipped at the tint site (their flag, not a height
-// test: a carve floods the plane instead of removing it).
+// axis), the delete/paint ball (w == 0) or the add dome (w < 0, |w| = the
+// dome height along the axis -> how far the surface grows). a = 0 disables the preview. Water-plane splats
+// are skipped at the tint site (their flag, not a height test: the plane is
+// one fixed level a carve exposes instead of removes).
 layout(std140, set = 0, binding = 13) uniform BrushUBO {
     vec4 bVolume; // xyz = centre (world), w = radius m
-    vec4 bAxis;   // xyz = unit axis, w = half length m (0 = sphere)
+    vec4 bAxis;   // xyz = unit axis, w = half length m (0 = ball, <0 = dome)
     vec4 bTint;   // rgb = tint colour, a = strength
+    vec4 bMeta;   // x = optional owning layer ID; 0 = spatial volume only
 } uBrush;
 
 layout(location = 0) in vec3 vCenter;
@@ -53,9 +56,11 @@ layout(location = 5) in vec4 vMat;   // mat, refl, rough, aoB(+2 if water)
 layout(location = 6) in vec3 vView;  // interpolated ray (cornerWorld - camPos)
 layout(location = 7) in float vFace; // dot(n, camPos-c): <0 would-collapse
 layout(location = 8) in vec4 vShade; // xyz = baked bent normal, w = baked shadow
+layout(location = 9) in float vTex;  // per-surfel texture override (0 = material slot)
 
 layout(location = 0) out vec4 oHdr;
 layout(location = 1) out vec4 oGPos;
+layout(location = 2) out vec4 oGNorm; // shading normal (xyz), 0 on sky
 
 layout(constant_id = 0) const int SKY_MODE = 0;
 // Pass split for the depth-resolved composite:
@@ -68,18 +73,52 @@ layout(constant_id = 1) const int PASS_MODE = 0;
 const float kWaterLevel = -0.9;
 
 // Brush hover preview volume test (bind 13): is `p` inside the brush volume?
-// w == 0 on the axis => ball, otherwise an oriented cylinder. Used by the
-// hover tint and by debug view 15 (brush mask).
-bool inBrushVolume(vec3 p)
+// w == 0 on the axis => ball, w > 0 => oriented cylinder (half length w),
+// w < 0 => add dome: the surface grows out along the axis - a ball of radius
+// r centred (|w| - r) up the axis, clipped to the half space in front of the
+// base plane, exactly the set EditableWorld::makeDome emits, so the tinted
+// splats are the surface patch the growth will bury. Used by the hover tint
+// and by debug view 15 (brush mask). r == 0 with a nonzero axis =>
+// box: the axis xyz are the half extents (the trackball rotate preview tints
+// the whole target layer AABB).
+bool inBrushVolume(vec3 p, float packedAo)
 {
     if (uBrush.bTint.a <= 0.0)
         return false;
+    const uint layer = uint(max(0.0, uBrush.bMeta.x));
+    if (layer > 0u && !surfelBelongsToLayer(packedAo, layer))
+        return false;
     vec3 rel = p - uBrush.bVolume.xyz;
     const float r2 = uBrush.bVolume.w * uBrush.bVolume.w;
-    if (uBrush.bAxis.w <= 0.0)
+    if (uBrush.bVolume.w == 0.0) {
+        // box: rel within the half extents on every axis (the skin is
+        // folded into the extents by the caller)
+        vec3 he = uBrush.bAxis.xyz;
+        return all(lessThanEqual(abs(rel), he));
+    }
+    if (uBrush.bAxis.w == 0.0)
         return dot(rel, rel) <= r2;
     const float along = dot(rel, uBrush.bAxis.xyz);
     const vec3 perp = rel - uBrush.bAxis.xyz * along;
+    if (uBrush.bAxis.w < 0.0) {
+        // dome: the footprint disk (radius r) extruded |w| up the axis, closed
+        // by a fillet of radius min(r, |w|) / 2 - exactly the set
+        // EditableWorld::makeDome emits. The base layer counts (makeDome's
+        // -voxelSize epsilon), and the two profile branches meet at t = lipY.
+        const float h = -uBrush.bAxis.w;
+        const float r = uBrush.bVolume.w;
+        if (along < -pc.b.y)
+            return false;
+        const float c = 0.5 * min(r, h);
+        const float lipY = h - c;
+        if (along <= lipY)
+            return dot(perp, perp) <= r2;
+        const float k = along - lipY;
+        if (k > c)
+            return false;
+        const float rr = (r - c) + sqrt(max(0.0, c * c - k * k));
+        return dot(perp, perp) <= rr * rr;
+    }
     return abs(along) <= uBrush.bAxis.w && dot(perp, perp) <= r2;
 }
 
@@ -90,6 +129,7 @@ void main()
 {
     kSunDir = normalize(pc.sunDir.xyz);
     gRenderFlags = int(pc.misc.x + 0.5);
+    gTexOv = vTex; // per-surfel override; 0 = use the material's atlas slot
     vec3 ro = pc.camPos.xyz;
 
     if (SKY_MODE == 1) {
@@ -111,6 +151,7 @@ void main()
         }
         oHdr = vec4(col, 1.0);
         oGPos = vec4(0.0, 0.0, 0.0, 0.0);
+        oGNorm = vec4(0.0, 0.0, 0.0, 0.0);
         return;
     }
 
@@ -161,16 +202,27 @@ void main()
     if (PASS_MODE == 1 && sp.uSplat.w < 0.5 && alpha < 0.004)
         discard;
 
-    bool isWater = vMat.w > 1.5;
-    float aoBaked = vMat.w - (isWater ? 2.0 : 0.0);
+    bool isWater = surfelIsWater(vMat.w);
+    float aoBaked = surfelBakedAo(vMat.w);
     vec3 col;
     float hitType = 1.0;
     float dbg = sp.uSplat.w;
     if (dbg > 0.5) {
         // debug views (flat, no lighting)
-        if (dbg > 14.5) {
+        if (dbg > 15.5) {
+            // Ownership mask. With a rotate target, GREEN is the exact selected
+            // layer, RED is another object layer, and DARK BLUE is terrain/water.
+            const bool object = surfelIsObject(vMat.w);
+            const uint target = uint(max(0.0, uBrush.bMeta.x));
+            const bool selected = target > 0u && surfelBelongsToLayer(vMat.w, target);
+            col = selected ? vec3(0.1, 1.0, 0.2)
+                 : (object ? (target > 0u ? vec3(0.8, 0.08, 0.05)
+                                          : vec3(0.1, 1.0, 0.2))
+                           : vec3(0.02, 0.05, 0.3));
+            alpha = 1.0;
+        } else if (dbg > 14.5) {
             // brush mask: magenta = splat centre inside the edit-brush volume
-            col = inBrushVolume(vCenter) ? vec3(1.0, 0.0, 1.0) : vec3(0.06);
+            col = inBrushVolume(vCenter, vMat.w) ? vec3(1.0, 0.0, 1.0) : vec3(0.06);
             alpha = 1.0;
         } else if (dbg > 13.5) {
             // kernel mask: white = outside one sigma (soft edge region),
@@ -208,8 +260,8 @@ void main()
                                                : vec3(clamp(soDbg * 0.5 + 0.5, 0.0, 1.0));
             alpha = 1.0;
         } else if (dbg > 8.5) {
-            // baked AO as grey
-            col = vec3(clamp(vMat.w > 1.5 ? vMat.w - 2.0 : vMat.w, 0.0, 1.0));
+            // baked AO as grey; layer ownership is metadata, not exposure
+            col = vec3(clamp(surfelBakedAo(vMat.w), 0.0, 1.0));
             alpha = 1.0;
         } else if (dbg > 7.5) {
             // baked shadow factor as grey
@@ -225,6 +277,13 @@ void main()
             col = kPalette[clamp(mDbg, 0u, 16u)];
             alpha = 1.0;
         } else if (dbg > 4.5) {
+            // vTex: per-surfel texture override as a heat ramp
+            // (0 = none -> dark blue, 3 -> green, higher -> red/white)
+            float tv = clamp(vTex / 8.0, 0.0, 1.0);
+            col = mix(vec3(0.02, 0.05, 0.3), vec3(0.1, 1.0, 0.2), tv);
+            col = mix(col, vec3(1.0, 0.9, 1.0), clamp((vTex - 4.0) / 4.0, 0.0, 1.0));
+            alpha = 1.0;
+        } else if (dbg > 3.5) {
             // collapse visualization: RED = would-collapse (facing<0)
             col = (vFace < 0.0) ? vec3(1.0, 0.1, 0.1) : vec3(0.1, 1.0, 0.1);
             alpha = 1.0;
@@ -291,7 +350,7 @@ void main()
     // Applied as a flat overlay after shading/fog so it reads on dark and
     // bright surfaces alike. The water plane is not a splat a stamp can
     // remove (a carve floods it instead), so water splats stay untinted.
-    if (!isWater && inBrushVolume(vCenter))
+    if (!isWater && inBrushVolume(vCenter, vMat.w))
         col = mix(col, uBrush.bTint.rgb, uBrush.bTint.a);
 
     // Depth resolve: the PASS_MODE 3 prepass holds the nearest full-disk
@@ -323,4 +382,8 @@ void main()
     else
         oHdr = (PASS_MODE == 1) ? vec4(col, alpha) : vec4(col * alpha, alpha);
     oGPos = vec4(q, hitType);
+    // Shading normal for the screen-space effects (SSAO/SSR). Water writes
+    // the flat plane normal: SSR's water reflection must stay plane-stable
+    // (the ripple normal is a shading-only detail, applied in-shader).
+    oGNorm = vec4(isWater ? vec3(0.0, 1.0, 0.0) : n, 0.0);
 }

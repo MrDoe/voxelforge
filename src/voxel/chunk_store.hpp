@@ -15,7 +15,8 @@
 //              layout (world.hpp): word0 = r|g<<8|b<<16|sdfByte<<24,
 //              word1 = a|refl<<8|rough<<16|(mat | objFlag<<7)<<24.
 //
-// Edits are cell-level (set/clear/paint). Dirty chunks rebuild incrementally:
+// Edits are cell-level (set/clear/paint, plus terrain-flagged Set batches for
+// Smooth). Dirty chunks rebuild incrementally:
 // the local SDF band is recomputed from a dense materialisation of the
 // chunk's cells and the octree pool is regenerated from the sparse data.
 // M0 wires queries, edits and tests; GPU chunk patching builds on this.
@@ -53,6 +54,23 @@ struct StoreEdit {
     uint8_t tags = 0;
     uint8_t r = 0, g = 0, b = 0, reflectivity = 0, roughness = 0;
     bool hasColor = false; // false -> palette colour/response of `mat`
+    // Set normally creates live object geometry. Terrain sculpt operations set
+    // this so raised cells keep the terrain flag and are not accidentally
+    // tagged as an object surface.
+    bool terrain = false;
+};
+
+// Result of one relaxation brush stamp (terrain column or object surface).
+// `riseCells` is the greatest upward movement in the batch, which lets the
+// caller refresh the height texture without scanning from an arbitrary world
+// height. `objectSurface` marks a batch produced by the object-surface
+// relaxation, so the caller can refresh the splat cache over the full store
+// band the edit solved (a Smooth stroke changes nearby normals/AO beyond the
+// brush footprint).
+struct SmoothTerrainEdits {
+    std::vector<StoreEdit> edits;
+    int riseCells = 0;
+    bool objectSurface = false;
 };
 
 class ChunkStore {
@@ -69,6 +87,11 @@ public:
     void adopt(const std::vector<std::unique_ptr<ChunkPool>>& pools,
                const std::vector<int16_t>& colTop,
                const std::vector<uint8_t>& colMat);
+    // Non-persistent provenance oracle for live surfels/picking. The brick
+    // format intentionally has no layer lane; base object cells borrow their
+    // owner from the current records-derived field, while newly added live
+    // cells remain world-space/unowned (layer 0).
+    void setLayerSource(const VoxelField* field) { m_layerSource = field; }
     void clear();
 
     bool loaded() const { return m_loaded; }
@@ -86,6 +109,11 @@ public:
     // a batch so neighbouring edits coalesce.
     void apply(const StoreEdit& e);
     void apply(const std::vector<StoreEdit>& edits);
+    // Build one non-mutating height-relaxation batch for the circular terrain
+    // footprint around `center`. Only terrain columns are changed; object
+    // surfaces are treated as protected samples and are never overwritten.
+    SmoothTerrainEdits makeSmoothEdits(glm::ivec3 center, float radiusM,
+                                       float strength) const;
     // Rebuild every dirty chunk (SDF band + octree pool).
     void rebuildDirty();
     // Force the full-chunk rebuild path for one chunk (ignores the recorded
@@ -159,6 +187,7 @@ private:
     std::vector<Chunk> m_chunks;
     std::vector<int16_t> m_colTop;
     std::vector<uint8_t> m_colMat;
+    const VoxelField* m_layerSource = nullptr; // borrowed; never serialized
     std::vector<int> m_dirty; // chunk indices, stable order
 };
 

@@ -21,11 +21,11 @@ below isolates the same difference in five reproducible views.*
 
 | | **Gaussian surfels** (`--mode splat`, default) | **SVO raymarcher** (`--mode svo`, reference) |
 |---|---|---|
-| Primitive | one 64 B 2D Gaussian disk per outer surface cell | exact SDF sphere tracing through brick-packed voxels |
+| Primitive | one 80 B 2D Gaussian disk per outer surface cell | exact SDF sphere tracing through brick-packed voxels |
 | Visibility | instanced quads, depth prepass + opaque base + Gaussian band | per-pixel octree traversal with 8³ brick SDFs |
 | Silhouettes | soft, rounded (Gaussian footprint ≈ 1.4 cells) | hard per-voxel stair steps |
 | Shadows / AO | baked per surfel on the CPU at world-reload time | marched exactly per pixel at render time |
-| Terrain LOD | merged tri-scale rings (`VF_LOD`) | none — always full detail |
+| Terrain LOD | merged rings, material-split (`VF_LOD`) | none — always full detail |
 | Micro detail | texture-texel child disks (`VF_MICRO`) | none |
 | Culling | frustum + GPU compaction + Hi-Z occlusion | per-ray empty/solid subtree masks |
 | Best for | interactive look, moving cameras, object-heavy views | correctness reference, A/B of shading changes |
@@ -41,7 +41,8 @@ below isolates the same difference in five reproducible views.*
 
 Interactively, **`F`** swaps the backend in place; **`N`** toggles TAA (shared
 by both). The switch is instantaneous — both backends read the same uploaded
-`GpuWorld` / surfel buffers and write the same HDR + G-buffer targets, so the
+`GpuWorld` / surfel buffers and write the same HDR + G-buffer targets
+(world pos + shading normal), so the
 TAA resolve, post pass and photorealism chain (SSR/SSAO/volfog/motion
 blur/DoF) run unchanged. See [Rendering & GPU contract](rendering.md) for the
 binding-by-binding contract.
@@ -55,8 +56,9 @@ binding-by-binding contract.
   normals, foliage translucency, fog, water tint) is linked into both.
 - **Camera, sun, animation clock.** One `RaymarchPush` / params block, so
   `--cam`, `--sun` and `--animtime` frame both modes identically.
-- **Outputs.** Identical `rgba16f` HDR + G-buffer images, so `--shot`, TAA
-  and the post chain are backend-agnostic.
+- **Outputs.** Identical `rgba16f` HDR + world-pos + normal G-buffer images,
+  so `--shot`, TAA and the post chain are backend-agnostic (SSR/SSAO use the
+  normal target in both).
 
 The differences below are therefore **only** the geometry representation and
 how shading inputs (normals, shadows, AO) are obtained.
@@ -155,8 +157,9 @@ submerged sediment bricks:
 
 ### Gaussian surfels (`src/render/splat_pass.*`, `shaders/splat.{vert,frag}`)
 
-- The CPU bake (`src/voxel/surfelize.*`) emits one 64 B surfel per outer
-  surface cell: position, normal, radii (isotropic 1.4 cells today), baked
+- The CPU bake (`src/voxel/surfelize.*`) emits one 80 B surfel per outer
+  surface cell: position, normal, two radii (anisotropic along the local
+  crease, base 1.4 cells), in-plane tangent, baked
   shadow, bent-normal AO, material — plus optional deterministic micro-detail
   children per texture texel. Rebuilt from the live `VoxelField` on every world
   reload (~2.5 s for the default scene, 8.17 M surfels incl. water).
@@ -168,7 +171,7 @@ submerged sediment bricks:
 - Per-frame GPU work: frustum cull, optional compute compaction/cull
   (`VF_NO_GPU_CULL=1` disables), optional Hi-Z occlusion pyramid
   (`VF_NO_OCCL=1`), back-to-front chunk sort. Terrain uses three baked LOD
-  rings with draw-time selection at 20 m / 60 m.
+  rings with draw-time selection at 30 m / 90 m (material-split blocks).
 - The experimental compute tile path (`VF_TILE=1`) replaces the two forward
   raster passes but is not yet at parity or faster; forward remains the default.
 
@@ -205,7 +208,7 @@ close-up collapse came from unbounded disk overdraw, not the representation.
 
 Memory is the other axis: the SVO world for the default scene is ~160 MB
 (11,348 nodes / 40,801 bricks / 459 active chunks), while the uploaded surfel
-SSBO is ~0.5 GB (8.17 M × 64 B, water/LOD/micro included). World load is
+SSBO is ~0.65 GB (surfel slots × 80 B, water/LOD/micro included). World load is
 dominated by SVO synthesis (~6.8 s) plus the surfel bake (~2.5 s); both rerun
 on every layer change.
 
@@ -233,7 +236,8 @@ All environment variables, defaults tuned:
 | `VF_SPLAT_RADIUS` / `VF_SPLAT_EXTENT` | disk footprint (also live via `[` / `]`) |
 | `VF_SPLAT_DEPTH_TOL` | depth-resolve band, default 0.002 |
 | `VF_MICRO=0` | disable micro-detail child disks |
-| `VF_LOD=0`, `VF_LOD1`, `VF_LOD2` | merged terrain LOD rings / selection distances |
+| `VF_MICRO_DIST` / `VF_MICRO_DIST_OBJ` | micro cull distance: terrain / object chunks (default 20 / 35 m) |
+| `VF_LOD=0`, `VF_LOD1`, `VF_LOD2`, `VF_LOD_SPLIT` | merged terrain LOD rings / selection distances (30/90 m) / material-split blocks |
 | `VF_NO_GPU_CULL=1`, `VF_NO_OCCL=1` | disable GPU compaction / Hi-Z occlusion |
 | `VF_SPLAT_NOCULL`, `VF_SPLAT_NOWATER` | debug: no culling / no water surfels |
 | `VF_SPLAT_DEBUG=1..14` | flat/normal/depth/shadow/AO/kernel-mask visualisation |

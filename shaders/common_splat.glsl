@@ -81,6 +81,7 @@ vec3 shadeSurfel(vec3 p, vec3 rd, vec3 alb, vec2 rr, vec3 ro, vec3 n,
                  vec3 bent, float sh, float ao, uint mId)
 {
     alb = detailAlbedo(alb, p, n, mId);
+    n = detailNormal(n, p, mId);
     applyFlora(p, rd, ro, mId, true, sh, alb, n, sh, ao);
 
     float ndl = max(dot(n, kSunDir), 0.0);
@@ -125,6 +126,11 @@ vec3 col = alb * (1.0 - fAvg) * (kSunCol * ndl * sh + amb + bounce)
         float depth = kWaterLevel - p.y;
         col *= exp(-depth * vec3(0.35, 0.18, 0.12) * 3.0);
         col = mix(col, vec3(0.05, 0.14, 0.13), clamp(depth * 0.8, 0.0, 0.85));
+        // refracted-sun caustics on the bed: the brightest thing in shallow
+        // water, and the depth cue that tells the eye the water is moving.
+        // Fades fast with depth (the focus is lost) and follows the sun.
+        col += kSunCol * causticAt(p.xz, pc.misc.y) * ndl * sh
+               * 0.25 * exp(-depth * 0.55);
     }
     col += (mId >= 9u && mId <= 15u) ? kEmissive[mId] : vec3(0.0);
     return col;
@@ -141,6 +147,7 @@ vec3 shadeFloorSplat(vec3 q, vec3 r)
     vec3 alb = kPalette[mId];
     vec2 rr = kMatRefl[mId];
     alb = detailAlbedo(alb, q, n, mId);
+    n = detailNormal(n, q, mId);
     vec3 V = -r;
     vec3 h = normalize(kSunDir + V);
     float vdh = max(dot(V, h), 0.0);
@@ -230,6 +237,12 @@ vec3 shadeWaterSplat(vec3 pw, vec3 rd, vec3 ro, float tWater, out float outA)
     float fp = vnoise(pw.xz * 3.7 + vec2(pc.misc.y * 0.35, -pc.misc.y * 0.22));
     fp = smoothstep(0.66, 0.90, fp + 0.28 * shoreF - 0.20);
     col = mix(col, vec3(0.92, 0.94, 0.95), fp * shoreF * 0.50);
+    // refracted-sun caustic web, applied AT THE SURFACE: the light path is
+    // sun -> surface -> bed -> back up, but the bed itself is hidden behind
+    // the absorption alpha (0.35 + depth*0.9 saturates at ~0.7 m), so the web
+    // has to be composited here to be visible at all. Scaled by shallowness
+    // so deep water stays dark; this is the depth cue that says "moving water".
+    col += kSunCol * causticAt(pw.xz, pc.misc.y) * 0.85 * exp(-max(kWaterLevel - bedH, 0.0) * 0.45);
     col = mix(col, fogColor(rd, pw), 1.0-exp(-tWater*0.004));
     // depth absorption -> alpha: shallow water shows the bed splat behind
     float depth = max(kWaterLevel - bedH, 0.0);

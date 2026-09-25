@@ -24,6 +24,8 @@
 #include "voxel/layered_world.hpp"
 #include "voxel/editable_world.hpp"
 #include "voxel/heightmap.hpp"
+#include "voxel/mesh_import.hpp"
+#include "voxel/mesh_voxel.hpp"
 #include "voxel/worldfile.hpp"
 
 #include <spdlog/spdlog.h>
@@ -137,6 +139,7 @@ struct RawVox {
     int r = -1, g = -1, b = -1;
     int mat = 6;
     int refl = -1, rough = -1;
+    int tex = 0; // per-cell texture override (atlas layer; 0 = material slot)
 };
 
 // Parse cells:[{...}] / voxels:[{...}]. Each entry supplies dx/dy/dz OR x/y/z
@@ -191,6 +194,7 @@ static bool parseRawVoxels(const std::string& json, const char* key,
         c.r = present("r") ? grab("r") : -1;
         c.g = present("g") ? grab("g") : -1;
         c.b = present("b") ? grab("b") : -1;
+        c.tex = present("tex") ? grab("tex") : 0;
         c.refl = present("refl") ? grab("refl") : -1;
         c.rough = present("rough") ? grab("rough") : -1;
         out.push_back(c);
@@ -416,12 +420,21 @@ struct Server {
         return { buf, false };
     }
 
-    // bottom-center lattice anchor from "anchor":[x,y,z] or "ground":[x,z]
+    // bottom-center lattice anchor from "anchor":[x,y,z] (cells),
+    // "at":[x,y,z] (world metres) or "ground":[x,z]
     bool resolveAnchor(const std::string& args, glm::ivec3& out, std::string& err)
     {
         std::vector<int> anc;
         if (ai::jsonGetIntArray(args, "anchor", anc, 3)) {
             out = { anc[0], anc[1], anc[2] };
+        } else if (jsonHasArray(args, "at")) {
+            std::vector<float> w;
+            if (!ai::jsonGetFloatArray(args, "at", w, 3)) {
+                err = "at must be [x,y,z] world metres";
+                return false;
+            }
+            for (int a = 0; a < 3; ++a)
+                out[a] = int(std::floor((w[a] + 0.5f * voxel::WORLD) / voxel::VOXEL));
         } else if (jsonHasArray(args, "ground")) {
             std::vector<float> g;
             if (!ai::jsonGetFloatArray(args, "ground", g, 2)) {
@@ -545,7 +558,8 @@ struct Server {
             if (ax < 0 || ay < 0 || az < 0 || ax >= 1024 || ay >= 1024 || az >= 1024)
                 continue;
             recs.push_back(voxel::makeVoxelRecord(ax, ay, az, uint8_t(c.mat), c.r,
-                                                  c.g, c.b, c.refl, c.rough));
+                                                  c.g, c.b, c.refl, c.rough,
+                                                  c.tex));
         }
         size_t added = editable.append(recs);
         if (added == 0)
@@ -623,7 +637,8 @@ struct Server {
                     continue;
                 recs.push_back(voxel::makeVoxelRecord(c.x, c.y, c.z,
                                                     uint8_t(c.mat), c.r, c.g,
-                                                    c.b, c.refl, c.rough));
+                                                    c.b, c.refl, c.rough,
+                                                    c.tex));
             }
             if (recs.empty())
                 return { "write_object: no valid voxels", true };
@@ -708,6 +723,73 @@ struct Server {
                      "\"; the running app hot-reloads within ~1 s",
                  false };
     }
+
+    // Convert an STL/OBJ mesh file into a voxel object layer. Same pipeline as
+    // the offline mesh_to_voxel tool: solid voxelization on the 0.1 m lattice,
+    // written as a named layer the app hot-reloads.
+    ToolResult importMesh(const std::string& args)
+    {
+        std::string file = jsonGetString(args, "file");
+        if (file.empty())
+            file = jsonGetString(args, "path");
+        if (file.empty())
+            return { "import_mesh needs a \"file\" (.stl or .obj)", true };
+        std::string name = jsonGetString(args, "name");
+        if (name.empty())
+            name = jsonGetString(args, "layer");
+        if (name.empty())
+            return { "import_mesh needs a \"name\" for the object layer", true };
+        glm::ivec3 anchor;
+        std::string err;
+        if (!resolveAnchor(args, anchor, err))
+            return { err, true };
+
+        voxel::MeshImportOptions imp;
+        float scale = 0.f, fit = 0.f, rotY = 0.f;
+        if (ai::jsonGetFloat(args, "scale", scale) && scale > 0.f) {
+            imp.scale = scale;
+        } else if (ai::jsonGetFloat(args, "fit", fit) && fit > 0.f) {
+            imp.fitMeters = glm::clamp(fit, 0.1f, 90.f);
+            imp.hasFit = true;
+        }
+        if (ai::jsonGetFloat(args, "rotY", rotY))
+            imp.rotY = rotY;
+        if (ai::jsonGetFloat(args, "rot_y", rotY))
+            imp.rotY = rotY;
+        int sw = 0, fl = 0, sh = 0;
+        ai::jsonGetInt(args, "swapYz", sw) || ai::jsonGetInt(args, "swap_yz", sw);
+        ai::jsonGetInt(args, "flip", fl);
+        ai::jsonGetInt(args, "shell", sh);
+        imp.swapYz = sw != 0;
+        imp.flip = fl != 0;
+        ai::jsonGetInt(args, "material", imp.mat) ||
+            ai::jsonGetInt(args, "mat", imp.mat);
+        imp.mat = std::clamp(imp.mat, 0, int(vf::voxel::kPaletteN) - 1);
+
+        std::vector<voxel::VoxelRecord> recs;
+        voxel::MeshImportStats stats;
+        if (!voxel::convertMeshToRecords(file, imp, sh == 0, anchor,
+                                         recs, stats, err))
+            return { "mesh conversion failed: " + err, true };
+
+        if (!editable.writeObjectLayer(name, recs))
+            return { "import_mesh failed (illegal name or manifest error)",
+                     true };
+        std::ostringstream o;
+        o << "imported " << file << " -> layer \"" << name << "\": " << recs.size()
+          << " voxels, size " << stats.nx << "x" << stats.ny << "x" << stats.nz
+          << " cells (~" << stats.extent.x << "m x " << stats.extent.y << "m x "
+          << stats.extent.z << "m) at anchor [" << anchor.x << " " << anchor.y
+          << " " << anchor.z << "]";
+        if (stats.clamped > 0)
+            o << "; " << stats.clamped << " cells were out of bounds and dropped";
+        if (sh == 0 && stats.leak)
+            o << "\nWARNING: no interior volume (the mesh is not watertight at "
+                 "this scale) - only the shell was written, so it may render "
+                 "hollow. Repair the mesh or increase --fit.";
+        o << "; the running app hot-reloads within ~1 s";
+        return { o.str(), false };
+    }
 };
 
 std::string toolSchemas()
@@ -760,8 +842,9 @@ std::string toolSchemas()
         "\"cells\":{\"type\":\"array\",\"items\":{\"type\":\"object\"}}";
     entry("add_voxels",
           "Add an arbitrary voxel shape from explicit cells relative to the "
-          "anchor/ground. Each cell: {dx,dy,dz,mat?,r?,g?,b?,refl?,rough?} "
-          "(omit r,g,b to use the material palette).",
+          "anchor/ground. Each cell: {dx,dy,dz,mat?,r?,g?,b?,refl?,rough?,tex?} "
+          "(omit r,g,b to use the material palette; tex = optional texture "
+          "atlas layer 1..255 overriding the material's slot).",
           obj(anchorSchema + "," + cellSchema), false);
     std::string voxSchema =
         "\"voxels\":{\"type\":\"array\",\"items\":{\"type\":\"object\"}}";
@@ -773,9 +856,9 @@ std::string toolSchemas()
           "cylinder\", at:[dx,dy,dz] relative to anchor/ground, size:[sx,sy,sz] "
           "voxels OR radii:[rx,ry,rz] m OR radius/height m, mat?, rgb?:[r,g,b], "
           "refl?,rough?},...] - the easy path for creatures/structures; (2) raw "
-          "absolute voxels:[{x,y,z,mat?,r?,g?,b?,refl?,rough?}]. Registers + "
-          "enables in world.json so the app hot-reloads. Modify by read_object "
-          "-> edit -> write_object.",
+          "absolute voxels:[{x,y,z,mat?,r?,g?,b?,refl?,rough?,tex?}]. Registers "
+          "+ enables in world.json so the app hot-reloads. Modify by "
+          "read_object -> edit -> write_object.",
           obj(jstr("name") + ":{\"type\":\"string\"}," + anchorSchema + "," +
                   voxSchema + "," + shapeSchema),
           false);
@@ -789,6 +872,28 @@ std::string toolSchemas()
           "Remove a named object layer file + its manifest entry (never "
           "landscape/packed).",
           obj(jstr("name") + ":{\"type\":\"string\"}"), false);
+    entry("import_mesh",
+          "Convert an STL or OBJ mesh file into a voxel object layer (solid "
+          "fill on the 0.1m lattice; the app hot-reloads it). Args: "
+          "\"file\" (path, .stl/.obj; resolved relative to CWD or assets/), "
+          "\"name\" (layer to create/overwrite), \"anchor\":[x,y,z] lattice "
+          "cells or \"ground\":[x,z] for the bottom-center, then options: "
+          "\"scale\" (model units per metre; STL from CAD is usually 0.001) "
+          "OR \"fit\" (uniform scale so the longest side = this many metres), "
+          "\"rotY\" degrees, \"swapYz\" true for a Z-up model, \"flip\" true "
+          "for reversed winding, \"shell\" true for a thin shell instead of "
+          "solid fill, \"mat\" palette id 0..20 for STL / untextured faces. "
+          "OBJ MTL Kd colours map to the nearest palette material.",
+          obj(jstr("file") + ":{\"type\":\"string\"}," + jstr("name") +
+                  ":{\"type\":\"string\"}," + anchorSchema +
+                  ",\"mat\":{\"type\":\"integer\"},"
+                  "\"scale\":{\"type\":\"number\"},"
+                  "\"fit\":{\"type\":\"number\"},"
+                  "\"rotY\":{\"type\":\"number\"},"
+                  "\"swapYz\":{\"type\":\"boolean\"},"
+                  "\"flip\":{\"type\":\"boolean\"},"
+                  "\"shell\":{\"type\":\"boolean\"}"),
+          false);
     entry("clear_edits", "Remove all session edits", obj(""), true);
     t += "] } ";
     return t;
@@ -802,7 +907,7 @@ ToolResult callTool(Server& srv, const std::string& name, std::string args)
                                       "ground",        "clear_edits",  "add_box",
                                       "add_cylinder",  "add_ellipsoid", "add_stamp",
                                       "add_voxels",    "write_object", "read_object",
-                                      "delete_object" };
+                                      "delete_object", "import_mesh" };
     std::string canonical = name;
     bool native = false;
     for (const char* n : kNative)
@@ -841,6 +946,8 @@ ToolResult callTool(Server& srv, const std::string& name, std::string args)
         return srv.readObject(args);
     if (canonical == "delete_object")
         return srv.deleteObject(args);
+    if (canonical == "import_mesh")
+        return srv.importMesh(args);
     if (canonical.rfind("add_", 0) == 0)
         return srv.addShape(canonical, args);
     return { "unknown tool: " + name, true };

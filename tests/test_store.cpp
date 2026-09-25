@@ -4,10 +4,12 @@
 #include "voxel/chunk_index.hpp"
 #include "voxel/chunk_store.hpp"
 #include "voxel/layered_world.hpp"
+#include "voxel/live_editor.hpp"
 #include "voxel/surfelize.hpp"
 #include <doctest/doctest.h>
 #include <algorithm>
 #include <cstring>
+#include <limits>
 #include <memory>
 #include <vector>
 
@@ -23,7 +25,7 @@ int latN() { return int(WORLD / VOXEL); }
 // --- synthetic pool for fast, isolated edit tests ---------------------------
 // One chunk with a single 8^3 brick: solid for ly < 4, air above. Block (0,0,0)
 // so the editable surface sits at chunk-local y = 4.
-std::vector<std::unique_ptr<ChunkPool>> syntheticPools(int ci)
+std::vector<std::unique_ptr<ChunkPool>> syntheticPools(int ci, bool object)
 {
     std::vector<std::unique_ptr<ChunkPool>> pools(kChunkCount);
     auto p = std::make_unique<ChunkPool>();
@@ -36,7 +38,8 @@ std::vector<std::unique_ptr<ChunkPool>> syntheticPools(int ci)
                 const int8_t sdf = solid ? -1 : 2;
                 data[i * 2] = 0x40u | (0x80u << 8) | (0x20u << 16) |
                               (uint32_t(uint8_t(sdf)) << 24);
-                data[i * 2 + 1] = 255u | (0u << 8) | (200u << 16) | (4u << 24);
+                data[i * 2 + 1] = 255u | (0u << 8) | (200u << 16) |
+                                   ((4u | (object ? 0x80u : 0u)) << 24);
             }
     p->emitBrick(data);
     p->root = int32_t(p->bricks.empty() ? -1 : ((p->bricks.size() / BRICK_WORDS - 1) << 2 | 1));
@@ -44,13 +47,54 @@ std::vector<std::unique_ptr<ChunkPool>> syntheticPools(int ci)
     return pools;
 }
 
-ChunkStore makeSyntheticStore(int ci)
+ChunkStore makeSyntheticStore(int ci, bool object = false)
 {
     ChunkStore s;
     const int n = latN();
     std::vector<int16_t> colTop(size_t(n) * n, 400);
     std::vector<uint8_t> colMat(size_t(n) * n, 3);
-    s.adopt(syntheticPools(ci), colTop, colMat);
+    s.adopt(syntheticPools(ci, object), colTop, colMat);
+    return s;
+}
+
+// A single-brick terrain patch with deliberately varied column tops. The
+// optional object spike verifies that Smooth treats object-owned columns as
+// protected rather than treating their roofs as terrain samples.
+ChunkStore makePatternStore(int ci, bool pit, bool objectSpike)
+{
+    std::vector<std::unique_ptr<ChunkPool>> pools(kChunkCount);
+    auto p = std::make_unique<ChunkPool>();
+    uint32_t data[BRICK_WORDS];
+    const int baseY = (ci / kChunkGridN % kChunkGridN) * CHUNK_N;
+    for (int z = 0; z < BRICK_N; ++z) {
+        for (int y = 0; y < BRICK_N; ++y) {
+            for (int x = 0; x < BRICK_N; ++x) {
+                const size_t i = (size_t(z) * BRICK_N + y) * BRICK_N + x;
+                int top = 4;
+                if (!pit && x == 4 && z == 4)
+                    top = 7; // terrain spike
+                if (pit && x == 2 && z == 2)
+                    top = 1; // terrain pit
+                const bool object = objectSpike && x == 5 && z == 5 && y >= 5;
+                if (object)
+                    top = 7;
+                const bool solid = y <= top;
+                const int8_t sdf = solid ? -1 : 2;
+                data[i * 2] = 0x40u | (0x80u << 8) | (0x20u << 16) |
+                              (uint32_t(uint8_t(sdf)) << 24);
+                data[i * 2 + 1] = 255u | (0u << 8) | (200u << 16) |
+                                   ((4u | (object ? 0x80u : 0u)) << 24);
+            }
+        }
+    }
+    p->root = int32_t(p->emitBrick(data));
+    pools[size_t(ci)] = std::move(p);
+
+    ChunkStore s;
+    const int n = latN();
+    std::vector<int16_t> colTop(size_t(n) * n, int16_t(baseY + 4));
+    std::vector<uint8_t> colMat(size_t(n) * n, 3);
+    s.adopt(pools, colTop, colMat);
     return s;
 }
 
@@ -163,6 +207,253 @@ TEST_CASE("chunk store: synthetic adoption, query and pool validity")
     CHECK(validatePool(*s.pool(ci)));
     CHECK(s.stats().chunks == 1);
     CHECK(s.stats().bricks == 1);
+}
+
+TEST_CASE("chunk store: smooth terrain relaxes a spike and protects objects")
+{
+    const int ci = chunkIndexOf(2, 1, 3);
+    ChunkStore store = makePatternStore(ci, /*pit=*/false, /*objectSpike=*/true);
+    const int gx = 2 * CHUNK_N + 4;
+    const int gz = 3 * CHUNK_N + 4;
+    const int gy = 1 * CHUNK_N;
+
+    const SmoothTerrainEdits batch =
+        store.makeSmoothEdits({ gx, gy + 7, gz }, VOXEL * 1.5f, 1.0f);
+    REQUIRE(!batch.edits.empty());
+    bool clearsSpike = false;
+    for (const StoreEdit& e : batch.edits) {
+        if (e.x == gx && e.z == gz && e.mode == StoreEdit::Mode::Clear &&
+            e.y > gy + 4)
+            clearsSpike = true;
+        // No edit may be an object-tagged Set in this terrain-only batch.
+        const bool objectSet =
+            e.mode == StoreEdit::Mode::Set && !e.terrain;
+        CHECK_FALSE(objectSet);
+    }
+    CHECK(clearsSpike);
+
+    store.apply(batch.edits);
+    store.rebuildDirty();
+    CHECK(store.cellAt(gx, gy + 4, gz).solid);
+    CHECK_FALSE(store.cellAt(gx, gy + 5, gz).solid);
+    CHECK_FALSE(store.cellAt(gx, gy + 5, gz).obj);
+
+    const int objectX = 2 * CHUNK_N + 5;
+    const int objectZ = 3 * CHUNK_N + 5;
+    CHECK(store.cellAt(objectX, gy + 7, objectZ).solid);
+    CHECK(store.cellAt(objectX, gy + 7, objectZ).obj);
+}
+
+TEST_CASE("chunk store: smooth relaxes an object surface without touching terrain")
+{
+    const int ci = chunkIndexOf(2, 1, 3);
+    ChunkStore store = makePatternStore(ci, /*pit=*/false, /*objectSpike=*/true);
+    const int gx = 2 * CHUNK_N + 5;
+    const int gz = 3 * CHUNK_N + 5;
+    const int gy = 1 * CHUNK_N;
+
+    const SmoothTerrainEdits batch =
+        store.makeSmoothEdits({ gx, gy + 7, gz }, VOXEL * 1.5f, 1.0f);
+    REQUIRE(!batch.edits.empty());
+    CHECK(batch.objectSurface);
+    bool clearedObject = false;
+    bool createdTerrain = false;
+    for (const StoreEdit& e : batch.edits) {
+        if (e.x == gx && e.z == gz && e.mode == StoreEdit::Mode::Clear &&
+            e.y >= gy + 5)
+            clearedObject = true;
+        if (e.mode == StoreEdit::Mode::Set && e.terrain)
+            createdTerrain = true;
+    }
+    CHECK(clearedObject);
+    CHECK_FALSE(createdTerrain);
+
+    store.apply(batch.edits);
+    store.rebuildDirty();
+    // The whole grounded run settles onto the terrain in one stamp, so no
+    // unsupported floater is left behind (the splat surface is then exactly
+    // the ground plane).
+    CHECK_FALSE(store.cellAt(gx, gy + 7, gz).solid);
+    CHECK_FALSE(store.cellAt(gx, gy + 6, gz).solid);
+    CHECK_FALSE(store.cellAt(gx, gy + 5, gz).solid);
+    CHECK(store.cellAt(gx, gy + 4, gz).solid);
+    CHECK_FALSE(store.cellAt(gx, gy + 4, gz).obj);
+
+    // Convergence: a second stamp at the collapsed spot is a no-op.
+    const SmoothTerrainEdits again =
+        store.makeSmoothEdits({ gx, gy + 5, gz }, VOXEL * 1.5f, 1.0f);
+    CHECK(again.edits.empty());
+}
+
+// Build a single object-owned Set, the same shape the brush emits.
+static vf::voxel::StoreEdit objectCell(int x, int y, int z)
+{
+    vf::voxel::StoreEdit e;
+    e.x = x;
+    e.y = y;
+    e.z = z;
+    e.mode = vf::voxel::StoreEdit::Mode::Set;
+    e.terrain = false;
+    e.hasColor = true;
+    e.mat = 6;
+    e.r = 160;
+    e.g = 80;
+    e.b = 40;
+    e.reflectivity = 40;
+    e.roughness = 180;
+    return e;
+}
+
+TEST_CASE("chunk store: smooth preserves object walls, posts and staircase steps")
+{
+    const int ci = chunkIndexOf(2, 1, 3);
+    const int bx = 2 * CHUNK_N;
+    const int by = 1 * CHUNK_N;
+    const int bz = 3 * CHUNK_N;
+    ChunkStore store = makePatternStore(ci, /*pit=*/false, /*objectSpike=*/false);
+
+    std::vector<StoreEdit> seed;
+    // 1-cell-thick wall in the YZ plane at local x=5, 3 cells tall.
+    for (int z = 0; z < 8; ++z)
+        for (int y = 5; y <= 7; ++y)
+            seed.push_back(objectCell(bx + 5, by + y, bz + z));
+    // Tall isolated post: a grounded run longer than the bump run, so it is a
+    // feature and must not be mistaken for a bump.
+    for (int y = 5; y <= 12; ++y)
+        seed.push_back(objectCell(bx + 2, by + y, bz + 2));
+    // 45-degree staircase: one cell per step in the XZ plane.
+    for (int i = 0; i < 6; ++i)
+        seed.push_back(objectCell(bx + 1 + i, by + 5 + i, bz + 6));
+    store.apply(seed);
+    store.rebuildDirty();
+
+    // Flat wall face: every row of the plane has the same surface
+    // coordinate, so the relaxation is at its fixed point.
+    const SmoothTerrainEdits wall =
+        store.makeSmoothEdits({ bx + 5, by + 6, bz + 4 }, VOXEL * 1.5f, 1.0f);
+    CHECK(wall.objectSurface);
+    CHECK(wall.edits.empty());
+
+    // Tall post tip: bare ring, but the run is longer than the bump run.
+    const SmoothTerrainEdits post =
+        store.makeSmoothEdits({ bx + 2, by + 12, bz + 2 }, VOXEL * 1.5f, 1.0f);
+    CHECK(post.objectSurface);
+    CHECK(post.edits.empty());
+
+    // Middle staircase step: the adjacent steps are its neighbourhood, so it
+    // averages to its own height (the ground must not drag it down).
+    const SmoothTerrainEdits stair = store.makeSmoothEdits(
+        { bx + 3, by + 7, bz + 6 }, VOXEL * 1.5f, 1.0f);
+    CHECK(stair.objectSurface);
+    CHECK(stair.edits.empty());
+}
+
+TEST_CASE("chunk store: smooth fills an object notch without creating terrain")
+{
+    const int ci = chunkIndexOf(2, 1, 3);
+    const int bx = 2 * CHUNK_N;
+    const int by = 1 * CHUNK_N;
+    const int bz = 3 * CHUNK_N;
+    ChunkStore store = makePatternStore(ci, /*pit=*/false, /*objectSpike=*/false);
+
+    std::vector<StoreEdit> seed;
+    // 2-cell plate resting on the terrain.
+    for (int z = 0; z < 8; ++z)
+        for (int x = 0; x < 8; ++x)
+            for (int y = 5; y <= 6; ++y)
+                seed.push_back(objectCell(bx + x, by + y, bz + z));
+    // One-cell notch in the plate top (local (6,6): clear of the fixture's
+    // terrain spike at (4,4)).
+    StoreEdit notch = objectCell(bx + 6, by + 6, bz + 6);
+    notch.mode = StoreEdit::Mode::Clear;
+    seed.push_back(notch);
+    store.apply(seed);
+    store.rebuildDirty();
+    REQUIRE_FALSE(store.cellAt(bx + 6, by + 6, bz + 6).solid);
+
+    const SmoothTerrainEdits batch =
+        store.makeSmoothEdits({ bx + 6, by + 5, bz + 6 }, VOXEL * 1.5f, 1.0f);
+    REQUIRE(batch.objectSurface);
+    bool filled = false;
+    for (const StoreEdit& e : batch.edits) {
+        // Object fills only: the height texture/water bed depend on it.
+        if (e.mode == StoreEdit::Mode::Set)
+            CHECK_FALSE(e.terrain);
+        if (e.x == bx + 6 && e.y == by + 6 && e.z == bz + 6 &&
+            e.mode == StoreEdit::Mode::Set && !e.terrain)
+            filled = true;
+    }
+    CHECK(filled);
+
+    store.apply(batch.edits);
+    store.rebuildDirty();
+    CHECK(store.cellAt(bx + 6, by + 6, bz + 6).solid);
+    CHECK(store.cellAt(bx + 6, by + 6, bz + 6).obj);
+    CHECK_FALSE(store.cellAt(bx + 6, by + 7, bz + 6).solid);
+}
+
+TEST_CASE("chunk store: smooth terrain raises a pit with terrain ownership")
+{
+    const int ci = chunkIndexOf(2, 1, 3);
+    ChunkStore store = makePatternStore(ci, /*pit=*/true, /*objectSpike=*/false);
+    const int gx = 2 * CHUNK_N + 2;
+    const int gz = 3 * CHUNK_N + 2;
+    const int gy = 1 * CHUNK_N;
+
+    const SmoothTerrainEdits batch =
+        store.makeSmoothEdits({ gx, gy + 1, gz }, VOXEL * 1.5f, 1.0f);
+    REQUIRE(!batch.edits.empty());
+    bool sawTerrainSet = false;
+    for (const StoreEdit& e : batch.edits)
+        if (e.mode == StoreEdit::Mode::Set && e.terrain)
+            sawTerrainSet = true;
+    CHECK(sawTerrainSet);
+
+    store.apply(batch.edits);
+    store.rebuildDirty();
+    const StoreCell top = store.cellAt(gx, gy + 4, gz);
+    CHECK(top.solid);
+    CHECK_FALSE(top.obj);
+    CHECK_FALSE(store.cellAt(gx, gy + 5, gz).solid);
+    CHECK(store.makeSmoothEdits(
+              { gx, gy + 1, gz }, VOXEL,
+              std::numeric_limits<float>::quiet_NaN())
+              .edits.empty());
+}
+
+TEST_CASE("chunk store: smooth finds a live terrain top beyond the search band")
+{
+    const int ci = chunkIndexOf(2, 1, 3);
+    ChunkStore store = makePatternStore(ci, /*pit=*/false, /*objectSpike=*/false);
+    const int gx = 2 * CHUNK_N + 2;
+    const int gz = 3 * CHUNK_N + 2;
+    const int gy = 1 * CHUNK_N;
+
+    // The adopted m_colTop is still gy+4, while the live column is raised far
+    // beyond the 192-cell fast-search band. The next Smooth pass must see the
+    // actual top, not the first Set cell above the baked surface.
+    std::vector<StoreEdit> raise;
+    for (int y = gy + 5; y <= gy + 220; ++y) {
+        StoreEdit e;
+        e.x = gx;
+        e.y = y;
+        e.z = gz;
+        e.mode = StoreEdit::Mode::Set;
+        e.terrain = true;
+        e.mat = 4;
+        raise.push_back(e);
+    }
+    store.apply(raise);
+
+    const SmoothTerrainEdits batch =
+        store.makeSmoothEdits({ gx, gy + 220, gz }, VOXEL * 1.5f, 1.0f);
+    REQUIRE(!batch.edits.empty());
+    bool clearedBeyondBand = false;
+    for (const StoreEdit& e : batch.edits)
+        if (e.x == gx && e.z == gz && e.mode == StoreEdit::Mode::Clear &&
+            e.y > gy + 192)
+            clearedBeyondBand = true;
+    CHECK(clearedBeyondBand);
 }
 
 TEST_CASE("chunk store: clear edit removes cells and rebuilds locally")
@@ -393,10 +684,18 @@ TEST_CASE("chunk store: per-chunk surfels follow store edits")
 
     const std::vector<Surfel> after = buildChunkSurfels(store, ci, sp);
     CHECK(after != before);
-    CHECK(maxSurfelY(after) > maxSurfelY(before) + 0.2f);
+    // The plateau may cross into the chunk above (the test column's surface
+    // sits near the top of its chunk): the per-chunk rebuild follows the
+    // edited chunks, so check the union of both runs for the raised top.
+    std::vector<Surfel> raised = after;
+    const int ciAbove = chunkIndexOf(8, (topY + 6) / CHUNK_N, 8);
+    if (ciAbove != ci)
+        for (const Surfel& s : buildChunkSurfels(store, ciAbove, sp))
+            raised.push_back(s);
+    CHECK(maxSurfelY(raised) > maxSurfelY(before) + 0.2f);
     // a surfel was emitted on top of the new plateau with an up normal
     bool top = false;
-    for (const Surfel& s : after) {
+    for (const Surfel& s : raised) {
         if (std::fabs(s.pos_rU.y - (-51.2f + (topY + 5 + 1.0f) * VOXEL)) < 0.25f &&
             glm::vec3(s.normal_rV).y > 0.5f)
             top = true;
@@ -404,6 +703,148 @@ TEST_CASE("chunk store: per-chunk surfels follow store edits")
     CHECK(top);
     // the far chunk is unaffected by the edit
     CHECK(buildChunkSurfels(store, other, sp) == otherBefore);
+}
+
+TEST_CASE("chunk store: set then clear round-trips the chunk (undo path)")
+{
+    // Undo replays the pre-stroke state of every touched cell as Set/Clear
+    // edits (App::undoEdit). The store must return to the exact canonical
+    // state - hash and surfels included - or an undone stroke lingers.
+    const int ci = 0;
+    ChunkStore s = makeSyntheticStore(ci);
+    const SurfelParams sp;
+    auto maxY = [](const std::vector<Surfel>& v) {
+        float m = -1e9f;
+        for (const Surfel& x : v)
+            m = std::max(m, x.pos_rU.y);
+        return m;
+    };
+    const uint64_t h0 = s.chunkHash(ci);
+    const std::vector<Surfel> run0 = buildChunkSurfels(s, ci, sp);
+
+    // raise material above the synthetic surface (solid for ly < 4)
+    std::vector<StoreEdit> set;
+    for (int dz = 1; dz <= 2; ++dz)
+        for (int y = 5; y <= 7; ++y) {
+            StoreEdit e;
+            e.mode = StoreEdit::Mode::Set;
+            e.x = 2; e.y = y; e.z = dz;
+            e.mat = 6;
+            e.hasColor = true;
+            e.r = 10; e.g = 200; e.b = 30;
+            set.push_back(e);
+        }
+    s.apply(set);
+    s.rebuildDirty();
+    for (const StoreEdit& e : set)
+        CHECK(s.cellAt(e.x, e.y, e.z).solid);
+    CHECK(s.chunkHash(ci) != h0);
+    const std::vector<Surfel> run1 = buildChunkSurfels(s, ci, sp);
+    CHECK(run1 != run0);
+    CHECK(maxY(run1) > maxY(run0) + 0.2f);
+
+    // undo: clear exactly the cells that were air before (the recorded inverse)
+    std::vector<StoreEdit> clear;
+    for (const StoreEdit& e : set) {
+        StoreEdit inv;
+        inv.mode = StoreEdit::Mode::Clear;
+        inv.x = e.x; inv.y = e.y; inv.z = e.z;
+        clear.push_back(inv);
+    }
+    s.apply(clear);
+    s.rebuildDirty();
+    for (const StoreEdit& e : clear)
+        CHECK(!s.cellAt(e.x, e.y, e.z).solid);
+    // The added geometry is gone: nothing sits above the original surface.
+    // (Byte-exact equality would be too strict: the edited chunk's SDF band is
+    // recomputed with the store's chamfer, so its shading differs from the
+    // bake's until a full rebuild - see the live-editor round-trip test.)
+    const std::vector<Surfel> after = buildChunkSurfels(s, ci, sp);
+    CHECK(maxY(after) <= maxY(run0) + 0.01f);
+    CHECK(s.chunkHash(ci) != 0); // still a valid, loaded chunk
+}
+
+TEST_CASE("chunk store: live editor set-then-clear round-trips the cached run")
+{
+    // The app's undo replays the recorded pre-stroke cells through
+    // LiveEditor::stamp (region-limited refresh). Added geometry must leave the
+    // cached run again, otherwise an undone stroke keeps rendering.
+    ChunkStore s = makeSyntheticStore(0);
+    LiveEditor le;
+    le.attach(&s);
+    const SurfelParams sp;
+    le.seedFromStore(0, sp);
+    const std::vector<Surfel> run0 = le.chunkRun(0, sp);
+    REQUIRE(!run0.empty());
+
+    auto cell = [](int y, int z, StoreEdit::Mode mode) {
+        StoreEdit e;
+        e.mode = mode;
+        e.x = 2; e.y = y; e.z = z; e.mat = 6;
+        e.hasColor = true; e.r = 10; e.g = 200; e.b = 30;
+        return e;
+    };
+    std::vector<StoreEdit> up;
+    for (int y = 5; y <= 7; ++y)
+        for (int z = 1; z <= 2; ++z)
+            up.push_back(cell(y, z, StoreEdit::Mode::Set));
+    CHECK(le.stamp(up, sp) == std::vector<int> { 0 });
+    const std::vector<Surfel> run1 = le.chunkRun(0, sp);
+    CHECK(run1 != run0);
+
+    std::vector<StoreEdit> down;
+    for (const StoreEdit& e : up)
+        down.push_back(cell(e.y, e.z, StoreEdit::Mode::Clear));
+    CHECK(le.stamp(down, sp) == std::vector<int> { 0 });
+    CHECK(!s.cellAt(2, 6, 1).solid);
+    // The cached run must lose the added geometry (the undo bug was a
+    // zero-surfel chunk patch that the GPU never received); byte-exact
+    // equality with run0 is not expected - the region refresh re-derives the
+    // edited cells from the store's SDF band, whose shading differs from the
+    // initial seed until a full rebuild.
+    auto maxY = [](const std::vector<Surfel>& v) {
+        float m = -1e9f;
+        for (const Surfel& x : v)
+            m = std::max(m, x.pos_rU.y);
+        return m;
+    };
+    const std::vector<Surfel>& r2 = le.chunkRun(0, sp);
+    CHECK(maxY(r2) <= maxY(run0) + 0.01f);
+    CHECK(r2.size() <= run1.size());
+}
+
+TEST_CASE("chunk store: live editor keeps hard-edge bridges outside the micro tail")
+{
+    ChunkStore store = makeSyntheticStore(0, true);
+    LiveEditor editor;
+    editor.attach(&store);
+    SurfelParams params;
+    params.edgeShrink = 0.35f;
+    params.edgeFill = true;
+    params.microDetail = false;
+    params.anisotropy = false;
+
+    editor.seedFromStore(0, params);
+    const uint32_t parents = uint32_t(editor.chunkSurfels(0, params).size());
+    const uint32_t edges = editor.edgeCountOf(0);
+    const std::vector<Surfel>& run = editor.chunkRun(0, params);
+    REQUIRE(parents > 0);
+    CHECK(edges > 0);
+    CHECK(run.size() == parents + edges);
+    CHECK(editor.microStartOf(0) == parents + edges);
+    for (uint32_t i = parents; i < run.size(); ++i) {
+        CHECK(run[i].pos_rU.w > 0.0f);
+        CHECK(run[i].normal_rV.w > 0.0f);
+        CHECK(glm::length(glm::vec3(run[i].tan_aspect)) > 0.99f);
+    }
+
+    // A full region refresh removes and rebuilds both segments together; it
+    // must not duplicate bridges or fold them into the material micro tail.
+    CHECK(editor.refreshRegion(0, glm::ivec3(0), glm::ivec3(CHUNK_N), params));
+    CHECK(editor.chunkSurfels(0, params).size() == parents);
+    CHECK(editor.edgeCountOf(0) == edges);
+    CHECK(editor.chunkRun(0, params).size() == parents + edges);
+    CHECK(editor.microStartOf(0) == parents + edges);
 }
 
 TEST_CASE("chunk store: rebuild preserves surface density of untouched dirty chunks")
@@ -747,4 +1188,120 @@ TEST_CASE("chunk store: adoption is deterministic")
     CHECK(a.stats().bricks == b.stats().bricks);
     for (int c = 0; c < kChunkCount; c += 97)
         CHECK(a.chunkHash(c) == b.chunkHash(c));
+}
+
+TEST_CASE("chunk store: micro-detail is deterministic and follows edits")
+{
+    LayeredWorld& lw = testLayeredWorld();
+    ChunkStore& store = lw.store();
+    const int n = latN();
+    const int gx = 7 * CHUNK_N + 24, gz = 7 * CHUNK_N + 24;
+    int topY = -1;
+    for (int y = n - 2; y > 0; --y)
+        if (store.cellAt(gx, y, gz).sdfRaw <= 0) {
+            topY = y;
+            break;
+        }
+    REQUIRE(topY > 10);
+    const int ci = chunkIndexOf(7, topY / CHUNK_N, 7);
+    glm::ivec3 lo, hi;
+    chunkCoordsOf(ci, lo.x, lo.y, lo.z);
+    lo *= CHUNK_N;
+    hi = lo + glm::ivec3(CHUNK_N);
+
+    const SurfelParams sp;
+    const SurfelRange rg = buildChunkSurfelsRange(store, ci, lo, hi, sp);
+    REQUIRE(!rg.surfels.empty());
+    CHECK(rg.keys.size() == rg.surfels.size());
+    const std::vector<Surfel> micros = buildMicroSurfels(rg.keys, rg.surfels);
+    CHECK(!micros.empty());
+    // deterministic: the same cell always yields the same micro geometry
+    CHECK(micros == buildMicroSurfels(rg.keys, rg.surfels));
+    // bounded fan-out (0-3 children per base surfel)
+    CHECK(micros.size() < rg.surfels.size() * 3u);
+    for (const Surfel& m : micros) {
+        CHECK(std::isfinite(m.pos_rU.x));
+        CHECK(std::isfinite(m.pos_rU.y));
+        CHECK(std::isfinite(m.pos_rU.z));
+        CHECK(m.pos_rU.w > 0.0f);
+        CHECK(m.normal_rV.w > 0.0f);
+        const float nl = glm::length(glm::vec3(m.normal_rV));
+        CHECK(nl > 0.99f);
+        CHECK(nl < 1.01f);
+    }
+    // every micro sits on its parent cell (tangent offset + lift), never
+    // detached from the base surface
+    for (size_t i = 0; i < std::min<size_t>(micros.size(), 64); ++i) {
+        float best = 1e9f;
+        for (const Surfel& b : rg.surfels)
+            best = std::min(best, glm::length(glm::vec3(micros[i].pos_rU) -
+                                              glm::vec3(b.pos_rU)));
+        CHECK(best < 0.15f);
+    }
+}
+
+TEST_CASE("chunk store: live editor keeps micro detail across stamps")
+{
+    LayeredWorld& lw = testLayeredWorld();
+    ChunkStore& store = lw.store();
+    const int n = latN();
+    const int gx = 5 * CHUNK_N + 12, gz = 5 * CHUNK_N + 12;
+    int topY = -1;
+    for (int y = n - 2; y > 0; --y)
+        if (store.cellAt(gx, y, gz).sdfRaw <= 0) {
+            topY = y;
+            break;
+        }
+    REQUIRE(topY > 10);
+    const int ci = chunkIndexOf(5, topY / CHUNK_N, 5);
+
+    LiveEditor ed;
+    ed.attach(&store);
+    SurfelParams sp;
+    sp.microDetail = true;
+
+    std::vector<StoreEdit> edits;
+    for (int dy = 1; dy <= 3; ++dy)
+        for (int dz = -1; dz <= 1; ++dz)
+            for (int dx = -1; dx <= 1; ++dx) {
+                StoreEdit e;
+                e.mode = StoreEdit::Mode::Set;
+                e.x = gx + dx;
+                e.y = topY + dy;
+                e.z = gz + dz;
+                e.mat = 2;
+                edits.push_back(e);
+            }
+    const std::vector<int> changed = ed.stamp(edits, sp);
+    REQUIRE(std::find(changed.begin(), changed.end(), ci) != changed.end());
+
+    const uint32_t baseN = uint32_t(ed.chunkSurfels(ci, sp).size());
+    const std::vector<Surfel>& run = ed.chunkRun(ci, sp);
+    CHECK(ed.microStartOf(ci) == baseN);
+    CHECK(run.size() > baseN); // a live-patched chunk keeps its micro tail
+    const std::vector<Surfel>* runPtr = &ed.chunkRun(ci, sp);
+    CHECK(runPtr == &run); // cached, no spurious rebuild
+
+    // a second stamp re-marks the run dirty and regenerates base + micros
+    StoreEdit paint;
+    paint.mode = StoreEdit::Mode::Paint;
+    paint.x = gx + 1;
+    paint.y = topY + 3;
+    paint.z = gz + 1;
+    paint.hasColor = true;
+    paint.r = 200;
+    paint.g = 10;
+    paint.b = 10;
+    const std::vector<int> changed2 = ed.stamp({ paint }, sp);
+    CHECK(std::find(changed2.begin(), changed2.end(), ci) != changed2.end());
+    const std::vector<Surfel>& run2 = ed.chunkRun(ci, sp);
+    CHECK(ed.microStartOf(ci) <= run2.size());
+    CHECK(run2.size() > ed.microStartOf(ci));
+
+    // microDetail off: the same cache collapses to the base run
+    SurfelParams off = sp;
+    off.microDetail = false;
+    const std::vector<Surfel>& baseRun = ed.chunkRun(ci, off);
+    CHECK(baseRun.size() <= run2.size());
+    CHECK(ed.microStartOf(ci) == uint32_t(baseRun.size()));
 }

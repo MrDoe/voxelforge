@@ -19,7 +19,11 @@ constexpr int CHUNK_N = 64;
 constexpr float CHUNK_M = float(CHUNK_N) * VOXEL;
 constexpr int GRID_N = int(WORLD / CHUNK_M);
 
-inline const std::array<glm::vec3, 17> kPalette {
+// The palette size is load-bearing: the shader tables (kPalette/kMatRefl/
+// matTex) and the atlas layer count must all match it exactly.
+inline constexpr int kPaletteN = 21;
+
+inline const std::array<glm::vec3, kPaletteN> kPalette {
     glm::vec3 { 0.07f, 0.52f, 0.06f }, // 0 grass dark - vivid
     glm::vec3 { 0.16f, 0.68f, 0.10f }, // 1 grass light - vivid
     glm::vec3 { 0.62f, 0.36f, 0.14f }, // 2 soil - warm brown
@@ -37,10 +41,14 @@ inline const std::array<glm::vec3, 17> kPalette {
     glm::vec3 { 0.10f, 0.35f, 0.95f }, // 14 glow blue - emissive
     glm::vec3 { 0.95f, 0.90f, 0.85f }, // 15 white-hot - emissive
     glm::vec3 { 0.92f, 0.95f, 0.99f }, // 16 snow - cold white
+    glm::vec3 { 0.36f, 0.22f, 0.10f }, // 17 bark - tree trunks (was the tex=9 override slot)
+    glm::vec3 { 0.20f, 0.38f, 0.12f }, // 18 moss - damp stone/wood
+    glm::vec3 { 0.62f, 0.50f, 0.20f }, // 19 thatch - dry reed roofs
+    glm::vec3 { 0.80f, 0.76f, 0.70f }, // 20 plaster - white-washed walls
 };
 
 // per-material surface attributes, 0-255: x = reflectivity, y = roughness
-inline const std::array<glm::vec2, 17> kMaterialReflection {
+inline const std::array<glm::vec2, kPaletteN> kMaterialReflection {
     glm::vec2 { 35.f, 235.f },  // 0 grass dark
     glm::vec2 { 40.f, 230.f },  // 1 grass light
     glm::vec2 { 55.f, 225.f },  // 2 soil
@@ -58,6 +66,10 @@ inline const std::array<glm::vec2, 17> kMaterialReflection {
     glm::vec2 { 40.f, 200.f },  // 14 glow blue
     glm::vec2 { 40.f, 200.f },  // 15 white-hot
     glm::vec2 { 50.f, 200.f },  // 16 snow
+    glm::vec2 { 70.f, 160.f },  // 17 bark
+    glm::vec2 { 35.f, 235.f },  // 18 moss
+    glm::vec2 { 60.f, 170.f },  // 19 thatch
+    glm::vec2 { 115.f, 135.f }, // 20 plaster
 };
 
 inline constexpr float WATER_LEVEL = -0.9f;
@@ -65,11 +77,13 @@ inline constexpr float WATER_LEVEL = -0.9f;
 // Build a single surface VoxelRecord. When r/g/b are absent (negative) the
 // colour is taken from kPalette[mat]; when refl/rough are absent (negative) the
 // surface response is taken from kMaterialReflection[mat]. Coordinates are
-// clamped into the valid 1024^3 lattice. This is the shared record constructor
-// used by the MCP object-authoring tools (add_voxels / write_object).
+// clamped into the valid 1024^3 lattice. `tex` is an optional per-cell texture
+// override (atlas layer index, 1..255; 0 = use the material's atlas slot).
+// This is the shared record constructor used by the MCP object-authoring
+// tools (add_voxels / write_object).
 inline VoxelRecord makeVoxelRecord(int x, int y, int z, uint8_t mat, int r = -1,
                                    int g = -1, int b = -1, int refl = -1,
-                                   int rough = -1)
+                                   int rough = -1, int tex = 0)
 {
     auto clamp255 = [](int v) { return v < 0 ? 0 : (v > 255 ? 255 : v); };
     auto clampCoord = [](int v) { return v < 0 ? 0 : (v > 1023 ? 1023 : v); };
@@ -77,7 +91,7 @@ inline VoxelRecord makeVoxelRecord(int x, int y, int z, uint8_t mat, int r = -1,
     v.x = uint16_t(clampCoord(x));
     v.y = uint16_t(clampCoord(y));
     v.z = uint16_t(clampCoord(z));
-    int mi = mat > 16 ? 16 : int(mat);
+    int mi = mat >= kPaletteN ? kPaletteN - 1 : int(mat);
     if (r >= 0 && g >= 0 && b >= 0) {
         v.r = uint8_t(clamp255(r));
         v.g = uint8_t(clamp255(g));
@@ -98,7 +112,7 @@ inline VoxelRecord makeVoxelRecord(int x, int y, int z, uint8_t mat, int r = -1,
     else
         v.roughness = uint8_t(kMaterialReflection[mi].y);
     v.materialId = uint8_t(mi);
-    v.reserved = 0;
+    v.reserved = uint8_t(tex < 0 ? 0 : (tex > 255 ? 255 : tex));
     return v;
 }
 

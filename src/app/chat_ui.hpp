@@ -27,10 +27,14 @@ public:
     void init(const std::string& baseUrl, const std::string& model);
     void shutdown();
 
-    // called each frame from App::drawHud
-    void draw(vf::voxel::EditableWorld& editable, vf::voxel::LayeredWorld& world,
-              const vf::voxel::PickHit* hover, const vf::voxel::PickHit* selection, bool hasSelection,
-              std::function<void()> rebuildFn);
+    // Drawn as a section of the editor sidebar (App::drawSidebar), inside an
+    // ImGui child region the sidebar owns. This renders only the body: the
+    // sidebar is the single window, so there is no Begin/End or positioning
+    // here. Still called every frame even when the section is not on screen,
+    // so an in-flight response keeps polling and the input state stays live.
+    void drawPanel(vf::voxel::EditableWorld& editable, vf::voxel::LayeredWorld& world,
+                   const vf::voxel::PickHit* hover, const vf::voxel::PickHit* selection,
+                   bool hasSelection, std::function<void()> rebuildFn);
 
     bool isSending() const { return m_sending; }
     bool wantsCaptureKeyboard() const { return m_inputFocused; }

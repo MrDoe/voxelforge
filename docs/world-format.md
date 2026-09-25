@@ -133,7 +133,7 @@ Field semantics:
 | `file` | relative to the manifest's directory; **required** |
 | `role` | `"landscape"` \| `"object"` \| `"scatter"` \| `"packed"`. Only one landscape layer should exist; `packed` entries are skipped by all loaders (legacy merged cache). |
 | `name` | human id used by GUI/MCP (`enable_layer` matches name *or* file) |
-| `pos`, `rot` | **informational only** — where the baker placed the layer. Never applied at runtime; layer files hold absolute lattice coordinates. Note the JSON key is `rot` even though the struct member is `rotDeg`. |
+| `pos`, `rot`, `rotX`, `rotZ` | **Applied at runtime** to `object`/`scatter` files. `transformRecords()` rotates the authored records about their exact bottom-center using `Ry(rot)·Rx(rotX)·Rz(rotZ)`, then applies `pos`; the placement hash dirties both old and new occupied chunks. All-zero is the authored lattice pose. JSON `rot` maps to C++ `rotDeg`; angles are degrees and are not restricted to `[0,360]`. |
 | `enabled` | disabled files stay on disk but are excluded from merges |
 | `listed` | runtime bookkeeping: `false` marks folder-discovered entries not yet persisted |
 
@@ -142,21 +142,51 @@ Parser notes:
 - The minimal JSON reader tolerates `//` comments and skips unknown keys
   robustly (values may be any JSON value).
 - `writeManifest` emits the canonical compact shape above.
-- A fresh bake writes **only** `landscape` (+ `ai_edits` when non-empty)
-  as enabled; everything else ships disabled for opt-in via the GUI panel.
+- A fresh bake creates the terrain shell while preserving enabled
+  `ai_edits.vxw` and foreign manifest entries whose `.vxw` files still exist;
+  authored `hamlet_*` object layers are data, not baker-owned geometry.
+
+The interactive trackball composes each ring drag on the right of the current
+absolute pose (`Rnext = Rcurrent * Rlocal(axis, angle)`), so the object rotates
+around its own local X/Y/Z axis. `placementEuler()` converts that local-axis
+pose back to the manifest's `Ry(yaw)·Rx(pitch)·Rz(roll)` representation only
+for persistence; the preview uses the resulting exact relative matrix. Ring
+release only stages the pose: the explicit **Apply rotation** button writes the
+manifest, while **Cancel** discards it. Move mode uses the same staged flow for
+a constrained world X/Y/Z `pos` delta; the scene exposes all three colored
+axis handles, and **Apply move** persists the selected delta.
+
+## Runtime owner IDs and provenance
+
+Owner IDs are derived at load time and are **not manifest fields**. For every
+enabled `object`/`scatter` file, `LayeredWorld` chooses a stable ID in 1–254
+(FNV-style filename preference, deterministic collision probing, and previous
+IDs retained across toggles/reloads). The winning file ID travels with the
+merged cell through `VoxelField::Sample::layer`, `PickHit::layer`, the sparse
+`ChunkStore`, and full/live surfelization, including micro children. ID 0 means
+terrain or live-added geometry with no base-file owner and is intentionally not
+eligible for layer rotation.
+
+This chain makes editor interaction exact: a plain LMB click in Rotate mode
+reads and activates the picked cell owner, while `layerBox(file)` supplies only
+the projected centre and bounds radius of its trackball. The shared 80-byte
+surfel contract packs the owner into
+`mat_ao.w` as `AO + 8 + 16*ownerId`; see [Rendering](rendering.md#selected-layer-rotation-preview).
 
 ## Layer merge semantics
 
 `worldfile::readLayered(manifestPath, expectedMeta, out)` (used by tools/tests)
-and `LayeredWorld::load()` share the same rules:
+and `LayeredWorld::load()` share the record-level rules:
 
 1. skip `role == "packed"` and `!enabled` entries;
-2. read each `.vxw`, validate meta against `{WORLD, VOXEL, GRID_N}`
-   (mismatch = hard error / layer skipped respectively);
-3. dedupe by packed lattice key `(x<<20)|(y<<10)|z`, first claimant wins;
-4. the layer whose `name == "landscape"` (or file `landscape.vxw`) additionally
-   fills the per-column terrain arrays; all its other cells still participate
-   in the normal dedupe.
+2. read each `.vxw` and validate meta against `{WORLD, VOXEL, GRID_N}`;
+3. apply `pos` and **all three** angles to `object`/`scatter` records;
+4. dedupe by packed lattice key `(x<<20)|(y<<10)|z`, first claimant wins.
+
+`LayeredWorld` then adds terrain-column classification, sparse object
+provenance, AABBs/pivots/owner IDs, SVO synthesis, and dirty-chunk tracking.
+Its first claimant also supplies the owner ID propagated to picking and
+surfels; plain `readLayered()` intentionally returns records only.
 
 ## `worldfile` API reference
 
@@ -173,12 +203,28 @@ bool write(const std::string& path, const WorldFileData&);
 bool read(const std::string& path, WorldFileData&);   // validates magic+version+CRC
 
 struct WorldLayer { std::string file, role, name;
-                    float pos[3]; float rotDeg; bool enabled, listed; };
+                    float pos[3]; float rotDeg, rotX, rotZ; bool enabled, listed; };
 
 bool loadManifest(const std::string& path, std::vector<WorldLayer>& out);
 bool writeManifest(const std::string& path, const std::vector<WorldLayer>&);
 bool readLayered(const std::string& manifestPath, const WorldFileMeta& expected,
-                 std::vector<VoxelRecord>& out);      // priority merge
+                 std::vector<VoxelRecord>& out);      // placed priority merge
+
+enum class PlacementAxis : uint8_t { X, Y, Z };
+glm::mat3 placementRotation(float yawDeg, float pitchDeg, float rollDeg);
+glm::vec3 placementEuler(const glm::mat3& rotation);
+glm::mat3 rotatePlacementLocal(const glm::mat3& current,
+                               PlacementAxis axis, float degrees);
+glm::mat3 relativePlacementRotation(float oldYawDeg, float oldPitchDeg,
+                                    float oldRollDeg,
+                                    float newYawDeg, float newPitchDeg,
+                                    float newRollDeg);
+bool recordBottomCenter(const std::vector<VoxelRecord>& src,
+                        const WorldFileMeta& meta, glm::vec3& out);
+void transformRecords(const std::vector<VoxelRecord>& src,
+                      const WorldFileMeta& meta, const glm::vec3& offset,
+                      float rotDeg, float rotX, float rotZ,
+                      std::vector<VoxelRecord>& out);
 }
 ```
 

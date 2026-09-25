@@ -4,21 +4,29 @@ vec3 kSunDir = normalize(vec3(0.42, 0.78, 0.30)); // set from push in main()
 const vec3 kSunCol = vec3(1.00, 0.95, 0.84) * 1.35;
 const vec3 kZenith = vec3(0.20, 0.36, 0.62);
 const vec3 kHorizon = vec3(0.72, 0.80, 0.90);
-const vec3 kPalette[17] = vec3[17](
+const vec3 kPalette[21] = vec3[21](
     vec3(0.07,0.52,0.06), vec3(0.16,0.68,0.10), vec3(0.62,0.36,0.14),
     vec3(0.84,0.72,0.38), vec3(0.48,0.42,0.38), vec3(0.66,0.64,0.60),
     vec3(0.62,0.33,0.10), vec3(0.42,0.22,0.10), vec3(0.04,0.52,0.03),
     vec3(1.00,0.35,0.06), vec3(0.95,0.20,0.05), vec3(0.10,0.55,0.95),
     vec3(0.15,0.85,0.25), vec3(0.55,0.10,0.85), vec3(0.10,0.35,0.95), vec3(0.95,0.90,0.85),
-    vec3(0.92,0.95,0.99)
+    vec3(0.92,0.95,0.99),
+    vec3(0.36,0.22,0.10), // 17 bark
+    vec3(0.20,0.38,0.12), // 18 moss
+    vec3(0.62,0.50,0.20), // 19 thatch
+    vec3(0.80,0.76,0.70)  // 20 plaster
 );
-const vec2 kMatRefl[17] = vec2[17](
+const vec2 kMatRefl[21] = vec2[21](
     vec2(35,235)/255.0, vec2(40,230)/255.0, vec2(55,225)/255.0,
     vec2(130,190)/255.0, vec2(95,150)/255.0, vec2(115,135)/255.0,
     vec2(70,160)/255.0, vec2(60,170)/255.0, vec2(30,235)/255.0,
     vec2(45,205)/255.0, vec2(45,205)/255.0, vec2(40,200)/255.0,
     vec2(40,200)/255.0, vec2(40,200)/255.0, vec2(40,200)/255.0, vec2(40,200)/255.0,
-    vec2(50,200)/255.0
+    vec2(50,200)/255.0,
+    vec2(70,160)/255.0,  // 17 bark
+    vec2(35,235)/255.0,  // 18 moss
+    vec2(60,170)/255.0,  // 19 thatch
+    vec2(115,135)/255.0  // 20 plaster
 );
 // emissive (self-illuminating) term per material id; 0-8 are inert, 9-15 glow.
 const vec3 kEmissive[16] = vec3[16](
@@ -101,6 +109,59 @@ float fbm(vec2 q)
     return v;
 }
 
+// Refracted-sunlight caustics on the submerged bed. Two crossed sine grids
+// drifting at different rates interfere into a cell web; the pow() sharpens
+// the bright cells the way a real caustic focuses light. Pure function of
+// (world xz, time) so both backends and every water path agree.
+float causticAt(vec2 xz, float t)
+{
+    vec2 d1 = vec2(t * 0.13, t * 0.09);
+    vec2 d2 = vec2(-t * 0.07, t * 0.11);
+    float a = sin(xz.x * 1.9 + d1.x) * sin(xz.y * 1.7 + d1.y);
+    float b = sin((xz.x * 1.3 + xz.y * 0.8) * 1.6 + d2.x)
+            * sin((xz.y * 1.5 - xz.x * 0.5) * 1.4 + d2.y);
+    return pow(clamp((a * 0.6 + b * 0.4) * 0.5 + 0.5, 0.0, 1.0), 4.0);
+}
+
+
+// ---- optional PNG texture atlas (opt-in via world.json "textures") --------
+// Material-indexed photo textures sampled triplanar in world space. A material
+// whose slot >= 0 replaces the palette base albedo with the texture; the
+// universal mottling/grain terms still apply on top (per-material accents are
+// skipped for textured materials). Scale is metres per tile. Pure function
+// of (p, n) => bit-exact across rebuilds, identical in both backends.
+// gTexOv (phase 2) overrides the material slot per surfel: > 0 = atlas layer.
+layout(set = 0, binding = 22) uniform sampler2DArray uTexAtlas;
+layout(std140, set = 0, binding = 23) uniform TexTable {
+    vec4 matTex[21]; // x = layer index (-1 = none, palette), y = m/tile
+} uTex;
+float gTexOv = 0.0;
+
+vec3 texTriplanar(vec3 p, vec3 n, float scale, float slot)
+{
+    vec3 w = pow(abs(n), vec3(8.0));
+    float wsum = w.x + w.y + w.z;
+    if (wsum < 1e-6)
+        return vec3(0.5);
+    w /= wsum;
+    // dominant axis: single tap (voxel surfaces are near-axis-aligned, and
+    // the projection choice is per-surfel so it cannot shimmer per pixel)
+    if (w.x > 0.98) return texture(uTexAtlas, vec3(p.zy / scale, slot)).rgb;
+    if (w.y > 0.98) return texture(uTexAtlas, vec3(p.xz / scale, slot)).rgb;
+    if (w.z > 0.98) return texture(uTexAtlas, vec3(p.xy / scale, slot)).rgb;
+    return w.x * texture(uTexAtlas, vec3(p.zy / scale, slot)).rgb
+         + w.y * texture(uTexAtlas, vec3(p.xz / scale, slot)).rgb
+         + w.z * texture(uTexAtlas, vec3(p.xy / scale, slot)).rgb;
+}
+
+// returns the sampled texture colour, or vec3(-1) when the material has none
+vec3 sampleTex(vec3 p, vec3 n, uint mId)
+{
+    float slot = gTexOv > 0.5 ? floor(gTexOv + 0.5) : uTex.matTex[mId].x;
+    if (slot < 0.0)
+        return vec3(-1.0);
+    return texTriplanar(p, n, max(uTex.matTex[mId].y, 0.01), slot);
+}
 
 // ---- landscape helpers ------------------------------------------------------
 vec3 grassDetail(vec3 alb, vec3 p, inout vec3 n)
@@ -117,11 +178,22 @@ vec3 grassDetail(vec3 alb, vec3 p, inout vec3 n)
 // roof moss and shoreline pebbles). Pure function of (matId, worldPos, normal).
 vec3 detailAlbedo(vec3 alb, vec3 p, vec3 n, uint mId)
 {
+    // ---- optional texture override (phase 1: material table) -------------
+    // A textured material replaces the palette base; the universal mottling
+    // + grain below still runs so the photo is not flat-lit.
+    vec3 tex = sampleTex(p, n, mId);
+    bool textured = tex.r >= 0.0;
+    if (textured)
+        alb = tex;
     // large-scale mottling breaks up flat airbrushed fills
     float big = fbm(p.xz * 1.7 + p.y * 1.3);
     alb *= 0.86 + 0.28 * big;
     // fine grain for close-up texture
     alb *= 0.93 + 0.10 * vnoise(p.xz * 23.0 + p.y * 17.0);
+    if (textured) {
+        // the photo carries its own accents; only the universal terms apply
+        return alb;
+    }
     if (mId <= 1u) {
         // meadow: desaturate neon greens toward olive, patchy dry spots
         float lum = dot(alb, vec3(0.33));
@@ -135,13 +207,13 @@ vec3 detailAlbedo(vec3 alb, vec3 p, vec3 n, uint mId)
         alb *= 0.88 + 0.24 * peb;
         float clod = fbm(p.xz * 5.5);
         alb *= 0.90 + 0.20 * clod;
-    } else if (mId == 4u || mId == 5u || mId == 16u) {
+    } else if (mId == 4u || mId == 5u || mId == 16u || mId == 18u) {
         // rock/snow: strata bands + lichen tint on up-faces
         float strata = vnoise(vec2(p.y * 9.0, dot(p.xz, vec2(0.6, 0.8)) * 2.0));
         alb *= 0.86 + 0.26 * strata;
         float lichen = smoothstep(0.55, 0.85, fbm(p.xz * 4.2 + p.y * 2.0)) * clamp(n.y, 0.0, 1.0);
         alb = mix(alb, vec3(0.35, 0.38, 0.20), lichen * 0.35);
-    } else if (mId == 6u) {
+    } else if (mId == 6u || mId == 17u) {
         // weathered logs: horizontal course grooves every 0.27 m + long grain
         float course = fract(p.y / 0.27);
         float groove = smoothstep(0.0, 0.14, course) * smoothstep(1.0, 0.86, course);
@@ -149,7 +221,7 @@ vec3 detailAlbedo(vec3 alb, vec3 p, vec3 n, uint mId)
         float grain = vnoise(vec2((p.x + p.z) * 34.0, p.y * 7.0));
         alb *= 0.88 + 0.20 * grain;
         alb *= vec3(0.82, 0.78, 0.75); // knock back the orange bake tint
-    } else if (mId == 7u) {
+    } else if (mId == 7u || mId == 19u) {
         // shingles with moss creeping on up-faces (reference cabin roof)
         float shingle = vnoise(vec2((p.x + p.z) * 22.0, p.y * 30.0));
         alb *= 0.85 + 0.25 * shingle;
@@ -163,6 +235,57 @@ vec3 detailAlbedo(vec3 alb, vec3 p, vec3 n, uint mId)
         alb *= 0.70 + 0.35 * fbm(p.xz * 2.6 + p.y * 2.2);
     }
     return alb;
+}
+
+// ---- detail normal from the material texture (render flag bit 7) -----------
+// Sobel of the sampled albedo's luminance over the *same* triplanar projection
+// texTriplanar uses, turned into a tangent-space perturbation of the shading
+// normal. This is what makes a photo texture read as a surface rather than
+// painted colour: the eye reads relief from shading, not from albedo. Pure
+// function of (p, n, mId) - no extra marches, identical in both backends.
+//
+// Invariants (do not relax):
+//   * the SHADING normal only - never written to the G-buffer, so SSAO keeps
+//     the geometric normal and SSR's water reflection stays plane-stable
+//     (the water path does not call this at all);
+//   * skipped for foliage (mat 8: its random facet normals ARE the canopy
+//     volume) and for untextured materials, so VF_TEXTURES=0 stays bit-exact;
+//   * the projection axis follows texTriplanar's dominant-axis rule and the
+//     step is a fixed world size tied to the material's m/tile, so the
+//     perturbation is resolution-independent and cannot shimmer per pixel.
+const float kDetailRelief = 0.08; // metres of relief per unit luma (calibrated: 0.06 ~ +29% HF energy, 0.12 ~ +66%; 0.08 ~ +40%)
+const vec3 kLumaWeights = vec3(0.2126, 0.7152, 0.0722);
+
+vec3 detailNormal(vec3 n, vec3 p, uint mId)
+{
+    if ((gRenderFlags & 128) == 0 || mId == 8u)
+        return n;
+    float slot = gTexOv > 0.5 ? floor(gTexOv + 0.5) : uTex.matTex[mId].x;
+    if (slot < 0.0)
+        return n;
+    float scale = max(uTex.matTex[mId].y, 0.01);
+    // in-plane axes of the dominant-axis projection (same choice as
+    // texTriplanar): offsetting along uA moves the texture's first coordinate
+    vec3 w = pow(abs(n), vec3(8.0));
+    vec3 uA, vA;
+    if (w.x >= w.y && w.x >= w.z) { uA = vec3(0.0, 0.0, 1.0); vA = vec3(0.0, 1.0, 0.0); }
+    else if (w.y >= w.z)          { uA = vec3(1.0, 0.0, 0.0); vA = vec3(0.0, 0.0, 1.0); }
+    else                          { uA = vec3(1.0, 0.0, 0.0); vA = vec3(0.0, 1.0, 0.0); }
+    float h = scale * 0.004; // ~2 texels at the 512 atlas layer
+    float cL = dot(texTriplanar(p - uA * h, n, scale, slot), kLumaWeights);
+    float cR = dot(texTriplanar(p + uA * h, n, scale, slot), kLumaWeights);
+    float cD = dot(texTriplanar(p - vA * h, n, scale, slot), kLumaWeights);
+    float cU = dot(texTriplanar(p + vA * h, n, scale, slot), kLumaWeights);
+    // luminance as a height field: slope = dL/dx * relief (metres of relief
+    // per unit luminance), so the perturbation is a physical bump, not an
+    // arbitrary gain - a full black-to-white edge reads as a kDetailRelief
+    // step and the rest scales with local contrast.
+    vec2 g = vec2((cR - cL) / (2.0 * h), (cU - cD) / (2.0 * h)) * kDetailRelief;
+    // bound the tilt so the perturbation can never invert the normal
+    float gl = length(g);
+    if (gl > 1.0)
+        g *= 1.0 / gl;
+    return normalize(n - (uA * g.x + vA * g.y));
 }
 
 // ---- flora field (deterministic, shared by both backends) ------------------

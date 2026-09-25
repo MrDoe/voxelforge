@@ -38,8 +38,8 @@ inline uint32_t cellIndexInBrick(int lx, int ly, int lz)
 inline void paletteOf(uint8_t mat, uint8_t& r, uint8_t& g, uint8_t& b,
                       uint8_t& refl, uint8_t& rough)
 {
-    const glm::vec3& c = kPalette[std::min(int(mat), 16)];
-    const glm::vec2& rr = kMaterialReflection[std::min(int(mat), 16)];
+    const glm::vec3& c = kPalette[std::min(int(mat), kPaletteN - 1)];
+    const glm::vec2& rr = kMaterialReflection[std::min(int(mat), kPaletteN - 1)];
     r = uint8_t(c.r * 255.0f);
     g = uint8_t(c.g * 255.0f);
     b = uint8_t(c.b * 255.0f);
@@ -210,6 +210,10 @@ void ChunkStore::decodeCell(const Chunk& c, uint32_t slot, int lx, int ly, int l
     out.reflectivity = uint8_t((w[1] >> 8) & 0xFFu);
     out.roughness = uint8_t((w[1] >> 16) & 0xFFu);
     out.mat = uint8_t((w[1] >> 24) & 0x7Fu);
+    // word1 byte 0 is the per-cell texture override (layered_world encodes the
+    // record's reserved byte there); it rides StoreCell::tags into the store
+    // surfel path's tan_aspect.w
+    out.tags = out.a;
 }
 
 void ChunkStore::encodeCell(uint32_t* words, const StoreCell& cell)
@@ -217,7 +221,9 @@ void ChunkStore::encodeCell(uint32_t* words, const StoreCell& cell)
     const uint8_t sdfByte = uint8_t(int8_t(std::clamp<int>(cell.sdfRaw, -127, 127)));
     words[0] = uint32_t(cell.r) | (uint32_t(cell.g) << 8) | (uint32_t(cell.b) << 16) |
                (uint32_t(sdfByte) << 24);
-    words[1] = uint32_t(cell.a) | (uint32_t(cell.reflectivity) << 8) |
+    // word1 byte 0 is the texture override slot (tags); `a` and tags are the
+    // same byte on purpose (see decodeCell)
+    words[1] = uint32_t(cell.tags) | (uint32_t(cell.reflectivity) << 8) |
                (uint32_t(cell.roughness) << 16) |
                ((uint32_t(cell.mat) | (cell.obj ? 0x80u : 0u)) << 24);
 }
@@ -265,7 +271,13 @@ VoxelField::Sample ChunkStore::sample(int x, int y, int z) const
     const StoreCell c = cellAt(x, y, z);
     s.d = float(c.sdfRaw) * VOXEL;
     s.mat = c.mat;
+    s.tex = c.tags;
     s.obj = c.obj;
+    if (c.obj && m_layerSource) {
+        const VoxelField::Sample source = m_layerSource->sample(x, y, z);
+        if (source.obj)
+            s.layer = source.layer;
+    }
     return s;
 }
 
@@ -316,12 +328,13 @@ void ChunkStore::apply(const StoreEdit& e)
     cell.reflectivity = uint8_t((w[1] >> 8) & 0xFFu);
     cell.roughness = uint8_t((w[1] >> 16) & 0xFFu);
     cell.mat = uint8_t((w[1] >> 24) & 0x7Fu);
+    cell.tags = cell.a; // word1 byte 0 = per-cell texture override (see decodeCell)
 
     switch (e.mode) {
     case StoreEdit::Mode::Set:
         cell.solid = true;
         cell.sdfRaw = -1;
-        cell.obj = true; // edits shade via SDF gradient until rebaked
+        cell.obj = !e.terrain; // live adds are objects; terrain sculpt stays terrain
         cell.mat = e.mat;
         cell.tags = e.tags;
         if (e.hasColor) {
@@ -337,6 +350,7 @@ void ChunkStore::apply(const StoreEdit& e)
         cell.solid = false;
         cell.sdfRaw = int8_t(kFar);
         cell.obj = false;
+        cell.tags = 0; // cleared cells fall back to the material's atlas slot
         break;
     case StoreEdit::Mode::Paint:
         cell.mat = e.mat;
@@ -377,6 +391,626 @@ void ChunkStore::apply(const std::vector<StoreEdit>& edits)
 {
     for (const StoreEdit& e : edits)
         apply(e);
+}
+
+SmoothTerrainEdits ChunkStore::makeSmoothEdits(glm::ivec3 center,
+                                               float radiusM,
+                                               float strength) const
+{
+    SmoothTerrainEdits result;
+    if (!m_loaded || m_latN <= 0 || !std::isfinite(radiusM) ||
+        !std::isfinite(strength) || radiusM <= 0.0f || strength <= 0.0f)
+        return result;
+
+    // The UI's useful range is already modest; cap the public helper as well
+    // so a malformed headless value cannot turn one click into a million-cell
+    // column scan.
+    radiusM = std::min(radiusM, 16.0f);
+    strength = std::clamp(strength, 0.0f, 1.0f);
+
+    const int cx = std::clamp(center.x, 0, m_latN - 1);
+    const int cy = std::clamp(center.y, 0, m_latN - 1);
+    const int cz = std::clamp(center.z, 0, m_latN - 1);
+    const int radiusCells = std::max(1, int(std::ceil(radiusM / VOXEL)));
+
+    // A picked object is smoothed with the SAME relaxation the terrain path
+    // below uses, generalised to an arbitrary surface axis. The axis and the
+    // outward side come from the picked cell's exposed faces (the store SDF
+    // gradient only breaks the two-sided tie of a thin wall), so a roof is a Y
+    // surface and a wall is an X or Z surface, and the footprint is always the
+    // 2D plane of that surface: one click costs O(pi r^2) surface samples
+    // instead of an O(r^3) volume scan.
+    //
+    // Relaxing a surface POSITION rather than filtering per-voxel occupancy is
+    // what makes this exact for splats. A bump is removed in a single stamp
+    // (the span from the neighbour level down to the bump is cleared as one
+    // contiguous run, so no unsupported floater is left behind), a notch is
+    // filled, and a flat face, a 1-cell wall, a post or a staircase is its own
+    // neighbourhood average and therefore survives untouched instead of being
+    // eroded. The min/max clamp is the same fixed point the terrain path has,
+    // so a second stamp over the same spot is a no-op. Only object cells are
+    // ever cleared and every fill is an object cell, so terrain columns, the
+    // height texture and the water bed are never touched.
+    const StoreCell picked = cellAt(cx, cy, cz);
+    if (picked.solid && picked.obj) {
+        result.objectSurface = true;
+        static constexpr int kUnit[3][3] = { { 1, 0, 0 }, { 0, 1, 0 },
+                                             { 0, 0, 1 } };
+        const int centre[3] = { cx, cy, cz };
+
+        // Surface axis. A face the surface can be relaxed along is ONE-SIDED:
+        // solid on one side of the cell, air on the other. An axis that is air
+        // on BOTH sides is only a 1-cell cross-section (the rod of a post, the
+        // thickness of a wall), never a face, so it is kept purely as a
+        // fallback. Counting exposed faces instead would make a 1x1 spike look
+        // like a wall in X and Z and smooth the wrong plane. Among one-sided
+        // axes the strongest SDF gradient wins, which picks the flat face of a
+        // corner over its bevel.
+        int axis = -1;
+        float bestFace = 0.0f;
+        int thinAxis = -1;
+        float bestThin = -1.0f;
+        int openAxes = 0;
+        for (int a = 0; a < 3; ++a) {
+            const bool posAir = !cellAt(cx + kUnit[a][0], cy + kUnit[a][1],
+                                        cz + kUnit[a][2]).solid;
+            const bool negAir = !cellAt(cx - kUnit[a][0], cy - kUnit[a][1],
+                                        cz - kUnit[a][2]).solid;
+            if (!posAir && !negAir)
+                continue; // enclosed along this axis
+            ++openAxes;
+            const float grad = std::abs(
+                sample(cx + kUnit[a][0], cy + kUnit[a][1], cz + kUnit[a][2]).d -
+                sample(cx - kUnit[a][0], cy - kUnit[a][1], cz - kUnit[a][2]).d);
+            if (posAir != negAir) {
+                if (grad > bestFace) {
+                    bestFace = grad;
+                    axis = a;
+                }
+            } else if (grad > bestThin) {
+                bestThin = grad;
+                thinAxis = a;
+            }
+        }
+        // The thin fallback needs exactly one open axis: that is a wall face
+        // (thin across the wall, enclosed along the wall plane). A diagonal or
+        // rod is thin across two or three axes and has no surface plane, so it
+        // is left alone - a 45-degree staircase must not be faired into a
+        // zigzag.
+        if (axis < 0 && openAxes == 1)
+            axis = thinAxis;
+        if (axis < 0) {
+            if (getenv("VF_TRACE"))
+                spdlog::info("smooth object: center=({},{},{}) axis=none "
+                             "(interior or rod), no relaxation",
+                             center.x, center.y, center.z);
+            return result; // interior or rod geometry: nothing to relax
+        }
+
+        // Outward side. A one-sided surface is unambiguous; for a thin wall,
+        // where both sides are exposed, the SDF gradient points the same way
+        // the surfel normals do.
+        const int sign =
+            (sample(cx + kUnit[axis][0], cy + kUnit[axis][1],
+                    cz + kUnit[axis][2]).d -
+             sample(cx - kUnit[axis][0], cy - kUnit[axis][1],
+                    cz - kUnit[axis][2]).d) >= 0.0f
+                ? +1
+                : -1;
+
+        // The surface plane: u/v are the two axes perpendicular to the chosen
+        // one, so the circular footprint lives in that plane.
+        //   axis X -> (u,v) = (Y,Z)   axis Y -> (X,Z)   axis Z -> (X,Y)
+        const int uAxis = (axis == 0) ? 1 : 0;
+        const int vAxis = (axis == 2) ? 1 : 2;
+        auto planeCell = [&](int u, int s, int v) {
+            int p[3] = { 0, 0, 0 };
+            p[uAxis] = u;
+            p[axis] = s;
+            p[vAxis] = v;
+            return cellAt(p[0], p[1], p[2]);
+        };
+        // A surface cell of this row: object, with air on the outward side.
+        auto isSurface = [&](int u, int s, int v) {
+            const StoreCell c = planeCell(u, s, v);
+            if (!c.solid || !c.obj)
+                return false;
+            return !planeCell(u, s + sign, v).solid;
+        };
+
+        // A SHORT object run that RESTS ON SOLID GROUND is a bump, not a
+        // feature. Its lateral rows carry no object surface of their own, so
+        // they contribute the supported ground level instead, and one stamp
+        // settles the bump onto that ground. A tall post is longer than the
+        // bump run and an overhanging slab edge is not grounded, so both keep
+        // their height. Only an upward-facing Y surface has ground beside it;
+        // walls and ceilings do not.
+        constexpr int kBumpRunCells = 4;
+        bool bumpMode = false;
+        if (axis == 1 && sign > 0) {
+            int run = 0;
+            int s = centre[axis];
+            while (s >= 0 && planeCell(centre[uAxis], s, centre[vAxis]).obj) {
+                ++run;
+                --s;
+            }
+            bumpMode = run > 0 && run <= kBumpRunCells && s >= 0 &&
+                       planeCell(centre[uAxis], s, centre[vAxis]).solid;
+        }
+
+        // A usable surface sample: either an object surface, or - for a bump
+        // that rests on the ground - the supported ground level of that row.
+        struct SurfaceColumn {
+            bool initialized = false;
+            bool valid = false;
+            bool ground = false;
+            int pos = -1;
+            StoreCell surface {};
+        };
+        const int cu = centre[uAxis];
+        const int cv = centre[vAxis];
+        const int u0 = std::max(0, cu - radiusCells - 1);
+        const int u1 = std::min(m_latN - 1, cu + radiusCells + 1);
+        const int v0 = std::max(0, cv - radiusCells - 1);
+        const int v1 = std::min(m_latN - 1, cv + radiusCells + 1);
+        const int nu = u1 - u0 + 1;
+        const int nv = v1 - v0 + 1;
+        std::vector<SurfaceColumn> columns(size_t(nu) * size_t(nv));
+
+        auto findSurface = [&](int u, int v) {
+            SurfaceColumn out;
+            const int s0 = std::clamp(centre[axis], 0, m_latN - 1);
+            // Local walk first: the rows of a surface around the pick sit within
+            // a few cells of the picked axis coordinate, so this keeps a click
+            // in the sub-millisecond range instead of 1024 taps per row.
+            constexpr int kWalk = 24;
+            for (int k = 0; k <= kWalk; ++k) {
+                for (int dir = 0; dir < 2; ++dir) {
+                    const int s = s0 + (dir == 0 ? sign : -sign) * k;
+                    if (s < 0 || s > m_latN - 1)
+                        continue;
+                    if (isSurface(u, s, v)) {
+                        out.valid = true;
+                        out.pos = s;
+                        out.surface = planeCell(u, s, v);
+                        return out;
+                    }
+                }
+            }
+            // Full fallback, walked against the outward side so a surface far
+            // from the pick is still found.
+            for (int s = (sign > 0 ? m_latN - 1 : 0); s >= 0 && s < m_latN;
+                 s -= sign) {
+                if (isSurface(u, s, v)) {
+                    out.valid = true;
+                    out.pos = s;
+                    out.surface = planeCell(u, s, v);
+                    return out;
+                }
+            }
+            // Bump fallback: this row has no object surface, so stand in the
+            // supported ground under the pick. Ground rows are samples only,
+            // never targets, so an object brush never sculpts terrain.
+            if (bumpMode) {
+                for (int s = s0; s >= 0; --s) {
+                    const StoreCell g = planeCell(u, s, v);
+                    if (g.solid && !g.obj) {
+                        out.valid = true;
+                        out.ground = true;
+                        out.pos = s;
+                        out.surface = g;
+                        return out;
+                    }
+                }
+            }
+            return out;
+        };
+
+        auto surfaceAt = [&](int u, int v) -> const SurfaceColumn& {
+            static const SurfaceColumn invalid;
+            if (u < u0 || u > u1 || v < v0 || v > v1)
+                return invalid;
+            SurfaceColumn& c = columns[size_t(v - v0) * size_t(nu) +
+                                         size_t(u - u0)];
+            if (!c.initialized) {
+                c = findSurface(u, v);
+                c.initialized = true;
+            }
+            return c;
+        };
+
+        static constexpr int kNeighbour[8][2] = {
+            { -1, 0 }, { 1, 0 }, { 0, -1 }, { 0, 1 },
+            { -1, -1 }, { 1, -1 }, { -1, 1 }, { 1, 1 }
+        };
+
+        result.edits.reserve(size_t(radiusCells * radiusCells) * 2u);
+        int validRows = 0;
+        int sampledRows = 0;
+        int observedMin = m_latN;
+        int observedMax = -1;
+        for (int v = v0; v <= v1; ++v) {
+            for (int u = u0; u <= u1; ++u) {
+                const float du = float(u - cu) * VOXEL;
+                const float dv = float(v - cv) * VOXEL;
+                const float distance = std::sqrt(du * du + dv * dv);
+                if (distance > radiusM)
+                    continue;
+                const SurfaceColumn& current = surfaceAt(u, v);
+                if (!current.valid || current.ground)
+                    continue; // ground rows are samples, never targets
+                ++validRows;
+                observedMin = std::min(observedMin, current.pos);
+                observedMax = std::max(observedMax, current.pos);
+
+                float sum = 0.0f;
+                float weightSum = 0.0f;
+                int minPos = current.pos;
+                int maxPos = current.pos;
+                // Ground may stand in for a missing object surface only when
+                // the whole 3x3 ring is bare. If any lateral row carries an
+                // object surface - the adjacent step of a staircase, the rest
+                // of a wall top - that surface is the neighbourhood and the
+                // ground must not drag the feature down.
+                bool anyObjectNeighbour = false;
+                for (const auto& d : kNeighbour) {
+                    const SurfaceColumn& s = surfaceAt(u + d[0], v + d[1]);
+                    if (s.valid && !s.ground) {
+                        anyObjectNeighbour = true;
+                        break;
+                    }
+                }
+                for (const auto& d : kNeighbour) {
+                    const SurfaceColumn& sampleCol =
+                        surfaceAt(u + d[0], v + d[1]);
+                    if (!sampleCol.valid)
+                        continue;
+                    if (sampleCol.ground && anyObjectNeighbour)
+                        continue;
+                    const float w = (d[0] == 0 || d[1] == 0) ? 1.0f : 0.5f;
+                    // Ground stands in for a missing object surface, but at
+                    // half weight so object-to-object smoothing dominates.
+                    const float gw = sampleCol.ground ? 0.5f * w : w;
+                    sum += float(sampleCol.pos) * gw;
+                    weightSum += gw;
+                    minPos = std::min(minPos, sampleCol.pos);
+                    maxPos = std::max(maxPos, sampleCol.pos);
+                }
+                // A surface with no lateral object neighbour (a post, a lone
+                // 1-cell column) has nothing to average against: keep it.
+                if (weightSum <= 0.0f)
+                    continue;
+                ++sampledRows;
+
+                const float q =
+                    std::clamp(1.0f - distance / radiusM, 0.0f, 1.0f);
+                const float falloff = q * q * (3.0f - 2.0f * q);
+                const float relaxed = float(current.pos) +
+                    (sum / weightSum - float(current.pos)) * strength * falloff;
+                int target = std::clamp(int(std::lround(relaxed)), minPos, maxPos);
+                target = std::clamp(target, 0, m_latN - 1);
+                if (target == current.pos)
+                    continue;
+
+                if (target > current.pos) {
+                    // Never raise object geometry into terrain or through
+                    // another object: the whole row is left alone instead.
+                    bool blocked = false;
+                    for (int s = current.pos + 1; s <= target; ++s) {
+                        const StoreCell c = planeCell(u, s, v);
+                        if (c.solid && !c.obj) {
+                            blocked = true;
+                            break;
+                        }
+                    }
+                    if (blocked)
+                        continue;
+                    for (int s = current.pos + 1; s <= target; ++s) {
+                        if (planeCell(u, s, v).solid)
+                            continue; // already object geometry
+                        StoreEdit e;
+                        int p[3] = { 0, 0, 0 };
+                        p[uAxis] = u;
+                        p[axis] = s;
+                        p[vAxis] = v;
+                        e.x = p[0];
+                        e.y = p[1];
+                        e.z = p[2];
+                        e.mode = StoreEdit::Mode::Set;
+                        // Object-owned fill: never terrain, so the height
+                        // texture and the water bed stay correct.
+                        e.terrain = false;
+                        e.mat = current.surface.mat;
+                        e.tags = current.surface.tags;
+                        e.r = current.surface.r;
+                        e.g = current.surface.g;
+                        e.b = current.surface.b;
+                        e.reflectivity = current.surface.reflectivity;
+                        e.roughness = current.surface.roughness;
+                        e.hasColor = true;
+                        result.edits.push_back(e);
+                    }
+                } else {
+                    // Lower: clear the whole object run down to the new surface
+                    // level. Terrain inside the span is left alone, so a bump
+                    // sitting on ground settles onto that ground.
+                    for (int s = target + 1; s <= current.pos; ++s) {
+                        const StoreCell c = planeCell(u, s, v);
+                        if (!c.solid || !c.obj)
+                            continue;
+                        StoreEdit e;
+                        int p[3] = { 0, 0, 0 };
+                        p[uAxis] = u;
+                        p[axis] = s;
+                        p[vAxis] = v;
+                        e.x = p[0];
+                        e.y = p[1];
+                        e.z = p[2];
+                        e.mode = StoreEdit::Mode::Clear;
+                        result.edits.push_back(e);
+                    }
+                }
+            }
+        }
+        if (getenv("VF_TRACE")) {
+            spdlog::info("smooth object: center=({},{},{}) radius={:.2f} "
+                         "strength={:.2f} axis={} sign={:+d} bump={} rows={} "
+                         "sampled={} posRange=[{},{}] edits={}",
+                         center.x, center.y, center.z, radiusM, strength, axis,
+                         sign, bumpMode, validRows, sampledRows, observedMin,
+                         observedMax, result.edits.size());
+        }
+        return result;
+    }
+
+    // Include one ring outside the footprint for the height samples. The
+    // targets themselves are still restricted to the circular brush below.
+    const int x0 = std::max(0, cx - radiusCells - 1);
+    const int x1 = std::min(m_latN - 1, cx + radiusCells + 1);
+    const int z0 = std::max(0, cz - radiusCells - 1);
+    const int z1 = std::min(m_latN - 1, cz + radiusCells + 1);
+    const int nx = x1 - x0 + 1;
+    const int nz = z1 - z0 + 1;
+
+    struct Column {
+        bool initialized = false;
+        bool valid = false;
+        int top = -1;
+        StoreCell surface {};
+    };
+    std::vector<Column> columns(size_t(nx) * size_t(nz));
+
+    auto findColumn = [&](int x, int z) {
+        Column out;
+        if (x < 0 || z < 0 || x >= m_latN || z >= m_latN)
+            return out;
+
+        // The adopted column top is an excellent first guess and remains close
+        // to the live surface after ordinary edits. Search a generous band on
+        // both sides first; the full scan fallback handles unusual tall edits
+        // without making the common terrain brush pay for 1024 taps/column.
+        int guess = std::clamp(center.y, 0, m_latN - 1);
+        if (m_colTop.size() == size_t(m_latN) * size_t(m_latN)) {
+            const int16_t baseTop = m_colTop[size_t(z) * size_t(m_latN) + size_t(x)];
+            // A column with no landscape record is not a terrain-sculpt target;
+            // in particular, do not mistake a promoted Solid underground chunk
+            // for an editable surface.
+            if (baseTop < 0)
+                return out;
+            guess = std::clamp(int(baseTop), 0, m_latN - 1);
+        }
+        constexpr int kSearchBand = 192;
+        auto tryCell = [&](int y, Column& target) {
+            const StoreCell c = cellAt(x, y, z);
+            if (!c.solid)
+                return false;
+            // An object owns the top of its column. Do not turn an object into
+            // terrain, and do not use an object roof as a terrain height sample.
+            if (c.obj) {
+                target.valid = false;
+                target.top = -1;
+                return true; // blocked: stop rather than sampling below it
+            }
+            target.valid = true;
+            target.top = y;
+            target.surface = c;
+            return true;
+        };
+
+        // A raised terrain column is contiguous above the baked top, so do
+        // not return the first Set cell above `guess`: track the highest solid
+        // in the fast band and only accept it after an air gap proves that the
+        // surface ended. If the band ends while still solid, the raise may
+        // exceed it; the true top-down fallback below resolves that rare case.
+        Column raised;
+        bool haveRaised = false;
+        bool airAfterRaised = false;
+        const int upHi = std::min(m_latN - 1, guess + kSearchBand);
+        for (int y = std::min(m_latN - 1, guess + 1); y <= upHi; ++y) {
+            Column candidate;
+            if (tryCell(y, candidate)) {
+                if (!candidate.valid)
+                    return candidate;
+                raised = candidate;
+                haveRaised = true;
+                airAfterRaised = false;
+            } else if (haveRaised) {
+                airAfterRaised = true;
+            }
+        }
+        if (haveRaised) {
+            if (airAfterRaised)
+                return raised;
+            for (int y = m_latN - 1; y >= 0; --y) {
+                Column global;
+                if (!tryCell(y, global))
+                    continue;
+                if (!global.valid || global.top > raised.top)
+                    return global;
+                break;
+            }
+            return raised;
+        }
+
+        // No live surface above the adopted guess. Walk down to find a lowered
+        // terrain top, still stopping at an object rather than sampling below
+        // it. A very large drop outside this band uses the full fallback.
+        for (int y = guess; y >= std::max(0, guess - kSearchBand); --y) {
+            Column lower;
+            if (tryCell(y, lower))
+                return lower;
+        }
+        for (int y = m_latN - 1; y >= 0; --y) {
+            Column global;
+            if (tryCell(y, global))
+                return global;
+        }
+        return out;
+    };
+
+    auto columnAt = [&](int x, int z) -> const Column& {
+        if (x < x0 || x > x1 || z < z0 || z > z1) {
+            static const Column invalid;
+            return invalid;
+        }
+        Column& c = columns[size_t(z - z0) * size_t(nx) + size_t(x - x0)];
+        if (!c.initialized) {
+            c = findColumn(x, z);
+            c.initialized = true;
+        }
+        return c;
+    };
+
+    static constexpr int kNeighbour[8][2] = {
+        { -1, 0 }, { 1, 0 }, { 0, -1 }, { 0, 1 },
+        { -1, -1 }, { 1, -1 }, { -1, 1 }, { 1, 1 }
+    };
+
+    result.edits.reserve(size_t(radiusCells * radiusCells) * 2u);
+    int validColumns = 0;
+    int sampledColumns = 0;
+    int observedMin = m_latN;
+    int observedMax = -1;
+    int observedMinX = cx;
+    int observedMinZ = cz;
+    int observedMaxX = cx;
+    int observedMaxZ = cz;
+    for (int z = z0; z <= z1; ++z) {
+        for (int x = x0; x <= x1; ++x) {
+            const float dx = float(x - cx) * VOXEL;
+            const float dz = float(z - cz) * VOXEL;
+            const float distance = std::sqrt(dx * dx + dz * dz);
+            if (distance > radiusM)
+                continue;
+            const Column& current = columnAt(x, z);
+            if (!current.valid)
+                continue;
+            ++validColumns;
+            if (current.top < observedMin) {
+                observedMin = current.top;
+                observedMinX = x;
+                observedMinZ = z;
+            }
+            if (current.top > observedMax) {
+                observedMax = current.top;
+                observedMaxX = x;
+                observedMaxZ = z;
+            }
+
+            float sum = 0.0f;
+            float weightSum = 0.0f;
+            int minTop = current.top;
+            int maxTop = current.top;
+            for (const auto& d : kNeighbour) {
+                const int nxSample = x + d[0];
+                const int nzSample = z + d[1];
+                const Column& sample = columnAt(nxSample, nzSample);
+                if (!sample.valid)
+                    continue;
+                const float w = (d[0] == 0 || d[1] == 0) ? 1.0f : 0.5f;
+                sum += float(sample.top) * w;
+                weightSum += w;
+                minTop = std::min(minTop, sample.top);
+                maxTop = std::max(maxTop, sample.top);
+            }
+            if (weightSum <= 0.0f)
+                continue;
+            ++sampledColumns;
+
+            float q = std::clamp(1.0f - distance / radiusM, 0.0f, 1.0f);
+            const float falloff = q * q * (3.0f - 2.0f * q);
+            const float relaxed = float(current.top) +
+                (sum / weightSum - float(current.top)) * strength * falloff;
+            if (getenv("VF_TRACE") && x == cx && z == cz) {
+                spdlog::info("smooth centre sample: top={} avg={:.3f} min={} max={} "
+                             "falloff={:.3f} relaxed={:.3f}",
+                             current.top, sum / weightSum, minTop, maxTop,
+                             falloff, relaxed);
+            }
+            int target = std::clamp(int(std::lround(relaxed)), minTop, maxTop);
+            target = std::clamp(target, 0, m_latN - 1);
+            if (target == current.top)
+                continue;
+
+            // Never raise through or lower past an object in the affected
+            // vertical span. This keeps smoothing a terrain pass from
+            // swallowing props/trees that share the column.
+            bool objectInSpan = false;
+            for (int y = std::min(current.top, target);
+                 y <= std::max(current.top, target); ++y) {
+                const StoreCell c = cellAt(x, y, z);
+                if (c.solid && c.obj) {
+                    objectInSpan = true;
+                    break;
+                }
+            }
+            if (objectInSpan)
+                continue;
+
+            if (target > current.top) {
+                result.riseCells = std::max(result.riseCells,
+                                            target - current.top);
+                for (int y = current.top + 1; y <= target; ++y) {
+                    StoreEdit e;
+                    e.x = x;
+                    e.y = y;
+                    e.z = z;
+                    e.mode = StoreEdit::Mode::Set;
+                    e.terrain = true;
+                    e.mat = current.surface.mat;
+                    e.tags = current.surface.tags;
+                    e.r = current.surface.r;
+                    e.g = current.surface.g;
+                    e.b = current.surface.b;
+                    e.reflectivity = current.surface.reflectivity;
+                    e.roughness = current.surface.roughness;
+                    e.hasColor = true;
+                    result.edits.push_back(e);
+                }
+            } else {
+                for (int y = target + 1; y <= current.top; ++y) {
+                    StoreEdit e;
+                    e.x = x;
+                    e.y = y;
+                    e.z = z;
+                    e.mode = StoreEdit::Mode::Clear;
+                    result.edits.push_back(e);
+                }
+            }
+        }
+    }
+    if (getenv("VF_TRACE")) {
+        const StoreCell centre = cellAt(cx, std::clamp(center.y, 0, m_latN - 1), cz);
+        spdlog::info("smooth terrain: center=({},{},{}) radius={:.2f} strength={:.2f} "
+                     "centreCell=(solid={}, obj={}, mat={}) valid={} sampled={} "
+                     "topRange=[{},{}] at=({}, {})..({}, {}) edits={} rise={}",
+                     center.x, center.y, center.z, radiusM, strength,
+                     centre.solid, centre.obj, int(centre.mat), validColumns,
+                     sampledColumns, observedMin, observedMax,
+                     observedMinX, observedMinZ, observedMaxX, observedMaxZ,
+                     result.edits.size(), result.riseCells);
+    }
+    return result;
 }
 
 bool ChunkStore::chunkDirty(int ci) const
@@ -479,6 +1113,7 @@ void ChunkStore::rebuildChunk(int ci)
         StoreCell cell;
         cell.solid = true;
         cell.sdfRaw = -1;
+        cell.a = 0; // no texture override: boxes are bulk-filled regions
         cell.mat = b.terrain ? m_colMat[size_t(z) * m_latN + size_t(x)] : b.mat;
         paletteOf(cell.mat, cell.r, cell.g, cell.b, cell.reflectivity, cell.roughness);
         encodeCell(words.data() + k * 2, cell);
@@ -905,7 +1540,12 @@ uint64_t ChunkStore::chunkHash(int ci) const
 // ---------------------------------------------------------------------------
 namespace {
 
-constexpr uint32_t kOverlaySchema = 2; // v2: adds the edit AABB per chunk
+// v2: adds the edit AABB per chunk.
+// v3: word1 byte 0 is now the per-cell texture override (was alpha=255
+//     filler). A stale v2 overlay carries garbage in that byte (the writer
+//     never initialized it), which would paint random atlas layers over the
+//     restored geometry, so the schema bumps to reject it.
+constexpr uint32_t kOverlaySchema = 3;
 
 void put32(std::vector<uint8_t>& b, uint32_t v)
 {

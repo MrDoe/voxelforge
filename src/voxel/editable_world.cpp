@@ -34,6 +34,8 @@ std::string EditableWorld::sanitizeLayerName(const std::string& name)
 
 // Insert an object layer entry (or enable it if already present) before the
 // landscape layer so AI-authored content wins cell collisions over terrain.
+// When replacing an existing entry, leave pos/rot/rotX/rotZ untouched: those
+// fields are the authored world placement/orientation, not mesh-import data.
 static void upsertObjectLayer(std::vector<worldfile::WorldLayer>& layers,
                               const std::string& file, const std::string& name)
 {
@@ -136,17 +138,26 @@ std::vector<VoxelRecord> EditableWorld::makeBox(glm::ivec3 anchor, glm::ivec3 si
     glm::vec3 half(sizeVox.x*VOXEL*0.5f, sizeVox.y*VOXEL*0.5f, sizeVox.z*VOXEL*0.5f);
     auto sdf = [&](glm::vec3 p){ return sdBoxF(p, center, half); };
     std::vector<VoxelRecord> res;
-    for (int dz=-he.z; dz<=he.z + (sizeVox.z%2==0?1:0); ++dz)
+    // The box SDF is centred on the anchor cell centre with half = size*VOXEL/2,
+    // so the true d<=0 cell set is exactly -he..+he on X/Z: an ODD size covers
+    // he+he+1 == size cells (3 -> -1..1), an EVEN size covers size+1 cells
+    // (2 -> -1..1) because both end cells sit exactly on the surface (d==0).
+    // The old bound ran to he+1 for even sizes: that extra column lies at
+    // d=+VOXEL, still inside kBand, so it was emitted as a phantom shell slab
+    // hanging off +X/+Z - every even-sized box (most thin posts and rails) was
+    // one cell too big and lopsided. Shrinking to he-1 is equally wrong: it
+    // drops a real d==0 boundary cell and skews the box the other way.
+    for (int dz = -he.z; dz <= he.z; ++dz)
         for (int dy=0; dy<sizeVox.y; ++dy)
-            for (int dx=-he.x; dx<=he.x + (sizeVox.x%2==0?1:0); ++dx) {
+            for (int dx = -he.x; dx <= he.x; ++dx) {
                 glm::ivec3 c(anchor.x + dx, anchor.y + dy, anchor.z + dz);
                 if (c.x<0||c.y<0||c.z<0||c.x>=1024||c.y>=1024||c.z>=1024) continue;
                 glm::vec3 p = voxelCenter(c);
                 float d = sdf(p);
                 if (std::fabs(d) > kBand) continue;
                 VoxelRecord v; v.x=uint16_t(c.x); v.y=uint16_t(c.y); v.z=uint16_t(c.z);
-                const glm::vec3& col = kPalette[std::min(int(mat),16)];
-                const glm::vec2& rr = kMaterialReflection[std::min(int(mat),16)];
+                const glm::vec3& col = kPalette[std::min(int(mat), kPaletteN - 1)];
+                const glm::vec2& rr = kMaterialReflection[std::min(int(mat), kPaletteN - 1)];
                 v.r=uint8_t(col.r*255.f); v.g=uint8_t(col.g*255.f); v.b=uint8_t(col.b*255.f);
                 v.a=255; v.reflectivity=uint8_t(rr.x); v.roughness=uint8_t(rr.y); v.materialId=mat;
                 res.push_back(v);
@@ -175,8 +186,8 @@ std::vector<VoxelRecord> EditableWorld::makeEllipsoid(glm::ivec3 anchor, glm::ve
                 float d = sdf(p);
                 if (std::fabs(d) > kBand) continue;
                 VoxelRecord v; v.x=uint16_t(c.x); v.y=uint16_t(c.y); v.z=uint16_t(c.z);
-                const glm::vec3& col = kPalette[std::min(int(mat),16)];
-                const glm::vec2& rr = kMaterialReflection[std::min(int(mat),16)];
+                const glm::vec3& col = kPalette[std::min(int(mat), kPaletteN - 1)];
+                const glm::vec2& rr = kMaterialReflection[std::min(int(mat), kPaletteN - 1)];
                 v.r=uint8_t(col.r*255.f); v.g=uint8_t(col.g*255.f); v.b=uint8_t(col.b*255.f);
                 v.a=255; v.reflectivity=uint8_t(rr.x); v.roughness=uint8_t(rr.y); v.materialId=mat;
                 res.push_back(v);
@@ -203,8 +214,8 @@ std::vector<VoxelRecord> EditableWorld::makeCylinderY(glm::ivec3 anchor, float r
                 float d = sdCylY(p, cylCenter, y0, y1, radiusM);
                 if (std::fabs(d) > kBand) continue;
                 VoxelRecord v; v.x=uint16_t(c.x); v.y=uint16_t(c.y); v.z=uint16_t(c.z);
-                const glm::vec3& col = kPalette[std::min(int(mat),16)];
-                const glm::vec2& rr = kMaterialReflection[std::min(int(mat),16)];
+                const glm::vec3& col = kPalette[std::min(int(mat), kPaletteN - 1)];
+                const glm::vec2& rr = kMaterialReflection[std::min(int(mat), kPaletteN - 1)];
                 v.r=uint8_t(col.r*255.f); v.g=uint8_t(col.g*255.f); v.b=uint8_t(col.b*255.f);
                 v.a=255; v.reflectivity=uint8_t(rr.x); v.roughness=uint8_t(rr.y); v.materialId=mat;
                 res.push_back(v);
@@ -218,8 +229,8 @@ std::vector<VoxelRecord> EditableWorld::makeStamp(glm::ivec3 anchor, const std::
     for (auto &c : cells) {
         glm::ivec3 p(anchor.x + c.dx, anchor.y + c.dy, anchor.z + c.dz);
         if (p.x<0||p.y<0||p.z<0||p.x>=1024||p.y>=1024||p.z>=1024) continue;
-        const glm::vec3& col = kPalette[std::min(int(c.mat),16)];
-        const glm::vec2& rr = kMaterialReflection[std::min(int(c.mat),16)];
+        const glm::vec3& col = kPalette[std::min(int(c.mat), kPaletteN - 1)];
+        const glm::vec2& rr = kMaterialReflection[std::min(int(c.mat), kPaletteN - 1)];
         VoxelRecord v; v.x=uint16_t(p.x); v.y=uint16_t(p.y); v.z=uint16_t(p.z);
         v.r=uint8_t(col.r*255.f); v.g=uint8_t(col.g*255.f); v.b=uint8_t(col.b*255.f);
         v.a=255; v.reflectivity=uint8_t(rr.x); v.roughness=uint8_t(rr.y); v.materialId=c.mat;
@@ -387,13 +398,19 @@ std::vector<VoxelRecord> EditableWorld::makeOrientedCylinder(
     const glm::mat3 R = glm::mat3(glm::rotation(glm::vec3(0.f, 1.f, 0.f), axisDir));
     const glm::mat3 Rt = glm::transpose(R);
 
+    // Carve scoops open the ground they start at (kCarveTopMargin above the
+    // base plane); see the note on the constant. Add keeps the exact
+    // [0, length] extent: its shell cap must not poke above the surface.
+    const float sdfY0 = carve ? -kCarveTopMargin : 0.f;
+
     const glm::vec3 base = voxelCenter(anchor);
     const glm::vec3 center = base + axisDir * (lengthM * 0.5f);
     const float r = radiusM;
     // world-space AABB of the oriented cylinder
-    const glm::vec3 half(r + (lengthM * 0.5f) * std::abs(axisDir.x),
-                         r + (lengthM * 0.5f) * std::abs(axisDir.y),
-                         r + (lengthM * 0.5f) * std::abs(axisDir.z));
+    const float axial = lengthM * 0.5f + kCarveTopMargin;
+    const glm::vec3 half(r + axial * std::abs(axisDir.x),
+                         r + axial * std::abs(axisDir.y),
+                         r + axial * std::abs(axisDir.z));
     const glm::vec3 lo = center - half, hi = center + half;
 
     const int N = int(WORLD / VOXEL);
@@ -410,14 +427,21 @@ std::vector<VoxelRecord> EditableWorld::makeOrientedCylinder(
             for (int x = x0; x <= x1; ++x) {
                 const glm::vec3 p = voxelCenter(glm::ivec3(x, y, z));
                 const glm::vec3 local = Rt * (p - base);
-                const float d = sdCylY(local, c, 0.f, lengthM, radiusM);
-                // carve: emit the solid removed volume; add: emit a thin shell band
-                if (carve ? (d > 0.f) : (std::fabs(d) > kBand))
+                const float d = sdCylY(local, c, sdfY0, lengthM, radiusM);
+                // carve: emit the solid removed volume; add: emit a thin shell
+                // band. The carve test keeps boundary cells (d == 0), e.g. the
+                // anchor cell on the base plane: glm::rotation(up, axisDir) is
+                // degenerate for an axis exactly opposite to up (it picks an
+                // arbitrary perpendicular axis, and the resulting basis is
+                // tilted by ~1e-7), so an exact `d > 0` test drops half of the
+                // base-plane layer - the scoop would keep a one-cell lid above
+                // half its disk and never flood. The epsilon is 0.001 voxel.
+                if (carve ? (d > VOXEL * 1e-3f) : (std::fabs(d) > kBand))
                     continue;
                 VoxelRecord v;
                 v.x = uint16_t(x); v.y = uint16_t(y); v.z = uint16_t(z);
-                const glm::vec3& col = kPalette[std::min(int(mat), 16)];
-                const glm::vec2& rr = kMaterialReflection[std::min(int(mat), 16)];
+                const glm::vec3& col = kPalette[std::min(int(mat), kPaletteN - 1)];
+                const glm::vec2& rr = kMaterialReflection[std::min(int(mat), kPaletteN - 1)];
                 v.r = uint8_t(col.r * 255.f); v.g = uint8_t(col.g * 255.f); v.b = uint8_t(col.b * 255.f);
                 v.a = 255;
                 v.reflectivity = uint8_t(rr.x);
@@ -439,36 +463,80 @@ std::vector<VoxelRecord> EditableWorld::makeDome(glm::ivec3 anchor, glm::vec3 ax
     heightM = std::max(heightM, VOXEL * 0.5f);
 
     // rotation mapping local +Y -> world axisDir; Rt brings a world offset into
-    // the dome's local frame (axis = +Y) for the half-ellipsoid test.
+    // the dome's local frame (axis = +Y) for the profile test below.
     const glm::mat3 R = glm::mat3(glm::rotation(glm::vec3(0.f, 1.f, 0.f), axisDir));
     const glm::mat3 Rt = glm::transpose(R);
 
+    // The volume grows OUT of the surface along +axisDir: the brush footprint
+    // is a disk of radius `radiusM` in the plane across the axis, extruded
+    // `heightM` along it and closed by a fillet of radius c = min(radiusM,
+    // heightM) / 2, so the new face is flat over a radius of (radiusM - c).
+    // Clicking a wall therefore thickens it by the full heightM over its whole
+    // footprint and only rounds the outer edge - a dome that tapers to nothing
+    // at the rim would bulge the middle instead.
+    // The cross-section is a straight side for the first (heightM - c) and a
+    // quarter round after that. The two branches of that rule AGREE at
+    // t == lipY (both give radiusM), so a 1-ulp sign flip at the switch plane
+    // cannot drop half the footprint - unlike a branch on the cap plane, which
+    // is exactly the degenerate glm::rotation(up, -up) trap the carve cylinder
+    // documents.
+    const float c = 0.5f * std::min(radiusM, heightM);
+    const float lipY = heightM - c;
+    const float eps = VOXEL;
+
+    // World AABB of that volume: +-radiusM across the axis, [0, heightM] along
+    // it. The reach MUST be projected on the axis. The pre-2026-09 version of
+    // this loop spanned the height on world Y (x/z got +-max(radius, height)),
+    // which is only correct for an up-facing surface: on a wall it clipped the
+    // footprint to y >= base.y, so the brush covered nothing below the picked
+    // cell (measured: 0 of 4612 cells, vs 2148 now) and produced a bulge
+    // instead of a thicker wall.
     const glm::vec3 base = voxelCenter(anchor);
-    const float reach = std::max(radiusM, heightM);
+    const glm::vec3 half(radiusM + heightM * std::abs(axisDir.x),
+                         radiusM + heightM * std::abs(axisDir.y),
+                         radiusM + heightM * std::abs(axisDir.z));
     const int N = int(WORLD / VOXEL);
     auto toCell = [&](float w) { return int(std::floor((w + 0.5f * WORLD) / VOXEL)); };
-    const int x0 = std::max(0, toCell(base.x - reach)), x1 = std::min(N - 1, toCell(base.x + reach));
-    const int y0 = std::max(0, toCell(base.y)),          y1 = std::min(N - 1, toCell(base.y + heightM));
-    const int z0 = std::max(0, toCell(base.z - reach)), z1 = std::min(N - 1, toCell(base.z + reach));
+    // +1 cell of slack on every side: the box edge lands exactly ON the
+    // footprint's boundary cell, and toCell() floors, so a sum that comes out
+    // one ulp low silently drops that outer ring (the shape test rejects the
+    // extra cells, the loop just has to visit them).
+    const int x0 = std::max(0, toCell(base.x - half.x) - 1), x1 = std::min(N - 1, toCell(base.x + half.x) + 1);
+    const int y0 = std::max(0, toCell(base.y - half.y) - 1), y1 = std::min(N - 1, toCell(base.y + half.y) + 1);
+    const int z0 = std::max(0, toCell(base.z - half.z) - 1), z1 = std::min(N - 1, toCell(base.z + half.z) + 1);
 
-    const float invR2 = 1.f / (radiusM * radiusM);
-    const float invH2 = 1.f / (heightM * heightM);
-    const float eps = VOXEL;
+    // boundary cells are kept (the footprint edge, the fillet): an exact test
+    // would drop the rim of the disk wherever fp lands on the wrong side.
+    const float keep = VOXEL * 1e-3f;
+    const float r2 = radiusM * radiusM, c2 = c * c;
     for (int z = z0; z <= z1; ++z)
         for (int y = y0; y <= y1; ++y)
             for (int x = x0; x <= x1; ++x) {
                 const glm::vec3 p = voxelCenter(glm::ivec3(x, y, z));
                 const glm::vec3 local = Rt * (p - base);
-                if (local.y < -eps)
-                    continue; // only the half above the surface
-                const float r2 = local.x * local.x + local.z * local.z;
-                const float v = r2 * invR2 + (local.y * local.y) * invH2;
-                if (v > 1.f + 1e-4f)
-                    continue; // outside the half-ellipsoid
+                const float t = local.y;
+                if (t < -eps)
+                    continue; // nothing behind the surface
+                const float perp2 = local.x * local.x + local.z * local.z;
+                bool inside;
+                if (t <= lipY) {
+                    inside = perp2 <= r2 + keep; // straight extruded disk
+                } else {
+                    const float k = t - lipY;
+                    if (k > c + keep) {
+                        inside = false; // past the top of the growth
+                    } else {
+                        const float rr = radiusM - c +
+                                         std::sqrt(std::max(0.f, c2 - k * k));
+                        inside = perp2 <= rr * rr + keep; // rounded lip
+                    }
+                }
+                if (!inside)
+                    continue;
                 VoxelRecord rec;
                 rec.x = uint16_t(x); rec.y = uint16_t(y); rec.z = uint16_t(z);
-                const glm::vec3& col = kPalette[std::min(int(mat), 16)];
-                const glm::vec2& rr = kMaterialReflection[std::min(int(mat), 16)];
+                const glm::vec3& col = kPalette[std::min(int(mat), kPaletteN - 1)];
+                const glm::vec2& rr = kMaterialReflection[std::min(int(mat), kPaletteN - 1)];
                 rec.r = uint8_t(col.r * 255.f); rec.g = uint8_t(col.g * 255.f); rec.b = uint8_t(col.b * 255.f);
                 rec.a = 255;
                 rec.reflectivity = uint8_t(rr.x);
@@ -477,6 +545,32 @@ std::vector<VoxelRecord> EditableWorld::makeDome(glm::ivec3 anchor, glm::vec3 ax
                 res.push_back(rec);
             }
     return res;
+}
+
+std::vector<VoxelRecord> EditableWorld::makeSingleVoxel(glm::ivec3 anchor,
+                                                        glm::vec3 axisDir, uint8_t mat,
+                                                        bool stepAlongNormal) const
+{
+    if (stepAlongNormal) {
+        // "Add" a single voxel: the pick always lands on solid material, so
+        // adding the picked cell would be a no-op. Step one cell along the
+        // DOMINANT axis of the normal instead (round(normal / VOXEL) is wrong
+        // for a smoothed corner normal like (0.7, 0.7, 0)), which stacks a
+        // cube on a floor and hangs one off a wall, like the volume brush.
+        if (glm::length(axisDir) < 1e-6f)
+            axisDir = glm::vec3(0.f, 1.f, 0.f);
+        const glm::vec3 a = glm::abs(glm::normalize(axisDir));
+        const int ax = (a.y > a.x && a.y >= a.z) ? 1 : (a.x > a.z ? 0 : 2);
+        glm::vec3 step(0.f);
+        step[ax] = (glm::abs(axisDir[ax]) > 1e-6f &&
+                    axisDir[ax] < 0.f) ? -1.f : 1.f;
+        anchor += glm::ivec3(glm::round(step));
+    }
+    const int N = int(WORLD / VOXEL);
+    if (anchor.x < 0 || anchor.y < 0 || anchor.z < 0 ||
+        anchor.x >= N || anchor.y >= N || anchor.z >= N)
+        return {}; // stepped out of the lattice
+    return { makeVoxelRecord(anchor.x, anchor.y, anchor.z, mat) };
 }
 
 std::vector<VoxelRecord> EditableWorld::makeSphere(glm::ivec3 anchor, float radiusM,
@@ -501,8 +595,8 @@ std::vector<VoxelRecord> EditableWorld::makeSphere(glm::ivec3 anchor, float radi
                     continue;
                 VoxelRecord rec;
                 rec.x = uint16_t(x); rec.y = uint16_t(y); rec.z = uint16_t(z);
-                const glm::vec3& col = kPalette[std::min(int(mat), 16)];
-                const glm::vec2& rr = kMaterialReflection[std::min(int(mat), 16)];
+                const glm::vec3& col = kPalette[std::min(int(mat), kPaletteN - 1)];
+                const glm::vec2& rr = kMaterialReflection[std::min(int(mat), kPaletteN - 1)];
                 rec.r = uint8_t(col.r * 255.f); rec.g = uint8_t(col.g * 255.f); rec.b = uint8_t(col.b * 255.f);
                 rec.a = 255;
                 rec.reflectivity = uint8_t(rr.x);

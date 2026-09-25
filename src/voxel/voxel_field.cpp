@@ -52,6 +52,7 @@ struct Comp {
 struct Scratch {
     std::vector<float> distOcc, distAir;
     std::vector<uint8_t> occupied, exterior, argmat;
+    std::vector<uint8_t> argtex, arglayer;
     std::vector<uint32_t> bfs;
     using QE = std::pair<float, uint32_t>; // dist, cell index
     std::priority_queue<QE, std::vector<QE>, std::greater<QE>> pq;
@@ -153,6 +154,7 @@ static bool processComponent(const std::vector<uint32_t>& cells, const std::vect
 
     s.occupied.assign(ncells, 0);
     s.argmat.assign(ncells, 0);
+    s.argtex.assign(ncells, 0); // carve cells carry no texture override
     for (uint32_t ci : c.cellIdx) {
         uint32_t k = cells[ci];
         int x = int(k >> 20), y = int((k >> 10) & 0x3FFu), z = int(k & 0x3FFu);
@@ -274,7 +276,9 @@ static bool processComponent(const std::vector<uint32_t>& cells, const std::vect
                 if (wx >= uint32_t(N) || wy >= uint32_t(N) || wz >= uint32_t(N))
                     continue;
                 out.keys.push_back(cellKey(wx, wy, wz));
-                out.vals.push_back(uint32_t(uint8_t(raw & 0xFF)) | (uint32_t(s.argmat[i]) << 8));
+                out.vals.push_back(uint32_t(uint8_t(raw & 0xFF)) |
+                                   (uint32_t(s.argmat[i]) << 8) |
+                                   (uint32_t(s.argtex[i]) << 16));
             }
     return true;
 }
@@ -320,10 +324,12 @@ void VoxelField::build(const std::vector<VoxelRecord>& records,
                        const std::vector<int16_t>& colTop, const std::vector<uint8_t>& colMat,
                        const std::vector<uint32_t>& objCells,
                        const std::vector<uint8_t>& objMats,
+                       const std::vector<uint8_t>& objTexs,
                        const std::vector<uint32_t>& carveCells,
                        const std::vector<uint8_t>& carveMats,
                        const std::vector<uint32_t>& raiseCells,
-                       const std::vector<uint8_t>& raiseMats)
+                       const std::vector<uint8_t>& raiseMats,
+                       const std::vector<uint8_t>& objLayers)
 {
     auto tStart = std::chrono::steady_clock::now();
     m_latN = int(WORLD / VOXEL);
@@ -448,7 +454,9 @@ void VoxelField::build(const std::vector<VoxelRecord>& records,
         uint64_t h = c.cellIdx.size();
         for (uint32_t ci : c.cellIdx) {
             uint64_t x = (uint64_t(objCells[ci]) << 8) ^
-                         (uint64_t(objMats[ci]) * 0xff51afd7ed558ccdull);
+                         (uint64_t(objMats[ci]) * 0xff51afd7ed558ccdull) ^
+                         (uint64_t(objTexs.size() > ci ? objTexs[ci] : 0) * 0x9e3779b97f4a7c15ull) ^
+                         (uint64_t(objLayers.size() > ci ? objLayers[ci] : 0) * 0xd6e8feb86659fd93ull);
             x ^= x >> 33;
             x *= 0xff51afd7ed558ccdull;
             x ^= x >> 33;
@@ -487,12 +495,16 @@ void VoxelField::build(const std::vector<VoxelRecord>& records,
 
         s.occupied.assign(cells, 0);
         s.argmat.assign(cells, 0);
+        s.argtex.assign(cells, 0);
+        s.arglayer.assign(cells, 0);
         for (uint32_t ci : c.cellIdx) {
             uint32_t k = objCells[ci];
             int x = int(k >> 20), y = int((k >> 10) & 0x3FFu), z = int(k & 0x3FFu);
             size_t i = (size_t(z - gz0) * ny + size_t(y - gy0)) * nx + size_t(x - gx0);
             s.occupied[i] = 1;
             s.argmat[i] = objMats[ci];
+            s.argtex[i] = objTexs.size() > ci ? objTexs[ci] : uint8_t(0);
+            s.arglayer[i] = objLayers.size() > ci ? objLayers[ci] : uint8_t(0);
         }
 
         auto idx = [&](int lx, int ly, int lz) {
@@ -522,6 +534,8 @@ void VoxelField::build(const std::vector<VoxelRecord>& records,
                 if (nd < s.distOcc[j]) {
                     s.distOcc[j] = nd;
                     s.argmat[j] = s.argmat[i]; // inherit nearest record's material
+                    s.argtex[j] = s.argtex[i]; // ...texture override
+                    s.arglayer[j] = s.arglayer[i]; // ...and owning .vxw layer
                     s.pq.push({nd, uint32_t(j)});
                 }
             }
@@ -609,8 +623,12 @@ void VoxelField::build(const std::vector<VoxelRecord>& records,
                     if (wx >= uint32_t(N) || wy >= uint32_t(N) || wz >= uint32_t(N))
                         continue;
                     out.keys.push_back(cellKey(wx, wy, wz));
+                    // bits 0..7 = signed SDF (voxel units), 8..15 = material,
+                    // 16..23 = texture override, 24..31 = owning layer ID.
                     out.vals.push_back(uint32_t(uint8_t(raw & 0xFF)) |
-                                       (uint32_t(s.argmat[i]) << 8));
+                                       (uint32_t(s.argmat[i]) << 8) |
+                                       (uint32_t(s.argtex[i]) << 16) |
+                                       (uint32_t(s.arglayer[i]) << 24));
                 }
         return true;
     };
@@ -764,6 +782,8 @@ VoxelField::Sample VoxelField::sample(int cx, int cy, int cz) const
         if (d < out.d) {
             out.d = d;
             out.mat = uint8_t(v >> 8);
+            out.tex = uint8_t(v >> 16); // per-cell texture override (0 = none)
+            out.layer = uint8_t(v >> 24); // owning .vxw layer (0 = unowned)
             out.obj = true;
         }
     }

@@ -54,8 +54,17 @@ TEST_CASE("rayPick hits terrain from the hero camera")
         CHECK(h.mat != 0);
         // the picked cell itself must be solid in the live field
         CHECK(f.sampleWorld(voxelCenter(h.voxel)).d <= 0.f);
-        // normal points out of the surface (upward-ish for terrain)
-        CHECK(h.normal.y > -0.1f);
+        // The normal must be a real outward normal in every case. Whether it
+        // also points UP is a terrain property, not a rayPick contract - and
+        // which cell this particular hero ray reaches is a CONTENT question:
+        // the enabled layer set changed when the hamlet was re-authored
+        // (hamlet_hall/pier/well/market disabled, CabinPart1 enabled), so the
+        // ray now lands on structure and a sideways normal is the CORRECT
+        // answer. Assert the direction only when the hit is terrain, which is
+        // what this check was actually a proxy for.
+        CHECK(glm::length(h.normal) > 0.5f);
+        if (!h.object)
+            CHECK(h.normal.y > -0.1f);
     }
 
     // rays into the sky must not hit
@@ -134,7 +143,8 @@ TEST_CASE("rayPick selects an object layer voxel by material")
         std::ofstream out(tmp.json);
         out << "{\"layers\":["
                "{\"file\":\"picktest_obj.vxw\",\"role\":\"object\",\"name\":"
-               "\"picktest\",\"pos\":[0,0,0],\"rotDeg\":0,\"enabled\":true},"
+               "\"picktest\",\"pos\":[1,0.5,-0.7],\"rotDeg\":17,\"rotX\":4,"
+               "\"rotZ\":-3,\"enabled\":true},"
                "{\"file\":\"landscape.vxw\",\"role\":\"landscape\",\"name\":"
                "\"landscape\",\"pos\":[0,0,0],\"rotDeg\":0,\"enabled\":true}]}";
     }
@@ -143,16 +153,28 @@ TEST_CASE("rayPick selects an object layer voxel by material")
     REQUIRE(lw.load(tmp.json));
     const VoxelField& f = lw.field();
     REQUIRE(f.valid());
+    glm::vec3 sourcePivot;
+    REQUIRE(worldfile::recordBottomCenter(data.voxels, data.meta, sourcePivot));
+    glm::vec3 placedPivot{0.0f};
+    REQUIRE(lw.layerPivot("picktest_obj.vxw", placedPivot));
+    CHECK(glm::distance(placedPivot,
+                        sourcePivot + glm::vec3(1.f, 0.5f, -0.7f)) < 1e-5f);
 
-    PickHit h = rayPick(f, {bx, ground + 8.f, bz}, {0.f, -1.f, 0.f});
+    PickHit h = rayPick(f, {placedPivot.x, ground + 12.f, placedPivot.z},
+                        {0.f, -1.f, 0.f});
     CHECK(h.hit);
     if (h.hit) {
         CHECK(int(h.mat) == int(kObjMat));
+        CHECK(h.object);
+        CHECK(h.layer == lw.layerId("picktest_obj.vxw"));
+        CHECK(lw.layerFile(h.layer) == "picktest_obj.vxw");
         CHECK(f.sampleWorld(voxelCenter(h.voxel)).d <= 0.f);
-        CHECK(h.voxel.x >= ix - 3);
-        CHECK(h.voxel.x <= ix + 3);
-        CHECK(h.voxel.z >= iz - 3);
-        CHECK(h.voxel.z <= iz + 3);
+        const WorldAABB placedBox = lw.layerBox("picktest_obj.vxw");
+        const glm::vec3 hit = voxelCenter(h.voxel);
+        const bool insideX = hit.x >= placedBox.lo.x && hit.x <= placedBox.hi.x;
+        const bool insideZ = hit.z >= placedBox.lo.z && hit.z <= placedBox.hi.z;
+        CHECK(insideX);
+        CHECK(insideZ);
     }
 }
 

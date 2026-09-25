@@ -11,7 +11,8 @@ class SSRPass {
 public:
     bool init(const Context& ctx);
     void destroy();
-    void updateDescriptors(VkImageView sceneView, VkImageView gposView, VkImageView outView);
+    void updateDescriptors(VkImageView sceneView, VkImageView gposView,
+                           VkImageView gnormView, VkImageView outView);
     void record(VkCommandBuffer cmd, uint32_t width, uint32_t height, const RaymarchPush& push) const;
 
 private:

@@ -1,8 +1,13 @@
+#define GLM_ENABLE_EXPERIMENTAL
 #include "voxel/worldfile.hpp"
+#include "voxel/common.hpp"
+#include <glm/gtx/quaternion.hpp>
 #include <spdlog/spdlog.h>
 #include <cctype>
+#include <cmath>
 #include <cstdlib>
 #include <cstring>
+#include <fstream>
 #include <unordered_set>
 
 namespace vf::voxel::worldfile {
@@ -41,12 +46,6 @@ void putU64(std::vector<uint8_t>& b, uint64_t v)
 {
     putU32(b, uint32_t(v));
     putU32(b, uint32_t(v >> 32));
-}
-void putF32(std::vector<uint8_t>& b, float f)
-{
-    uint32_t u;
-    std::memcpy(&u, &f, 4);
-    putU32(b, u);
 }
 
 struct Reader {
@@ -133,6 +132,7 @@ bool readRecords(const uint8_t* p, size_t n, std::vector<VoxelRecord>& out)
         if (!r.get(tail, 4))
             return false; // mat reserved pad pad
         v.materialId = tail[0];
+        v.reserved = tail[1]; // per-cell texture override (phase 2)
     }
     return true;
 }
@@ -285,6 +285,7 @@ bool read(const std::string& path, WorldFileData& out)
             if (!r.get(tail, 4))
                 return false; // mat reserved pad pad
             v.materialId = tail[0];
+            v.reserved = tail[1]; // per-cell texture override (phase 2)
         }
         return true;
     }
@@ -468,6 +469,10 @@ bool loadManifest(const std::string& path, std::vector<WorldLayer>& out)
                         j.str(layer.name);
                     else if (k == "rot")
                         j.num(layer.rotDeg);
+                    else if (k == "rotX")
+                        j.num(layer.rotX);
+                    else if (k == "rotZ")
+                        j.num(layer.rotZ);
                     else if (k == "enabled")
                         j.boolean(layer.enabled);
                     else if (k == "pos") {
@@ -504,8 +509,200 @@ bool loadManifest(const std::string& path, std::vector<WorldLayer>& out)
     return foundLayers && !out.empty();
 }
 
+// Optional "textures" table from the same manifest (see loadTextureManifest).
+// Shares the Json helper above; unknown keys are skipped so the table can grow.
+bool loadTextureManifest(const std::string& path, std::vector<TextureBinding>& out)
+{
+    out.clear();
+    std::FILE* f = std::fopen(path.c_str(), "rb");
+    if (!f)
+        return false;
+    std::string text;
+    char buf[4096];
+    size_t n;
+    while ((n = std::fread(buf, 1, sizeof(buf), f)) > 0)
+        text.append(buf, n);
+    std::fclose(f);
+
+    Json j{ text };
+    if (!j.eat('{'))
+        return false;
+    while (!j.peek('}') && j.i < text.size()) {
+        std::string key;
+        if (!j.str(key) || !j.eat(':'))
+            return false;
+        if (key == "textures" && j.eat('[')) {
+            while (!j.peek(']') && j.i < text.size()) {
+                TextureBinding b;
+                if (!j.eat('{'))
+                    return false;
+                while (!j.peek('}') && j.i < text.size()) {
+                    std::string k;
+                    if (!j.str(k) || !j.eat(':'))
+                        return false;
+                    if (k == "file")
+                        j.str(b.file);
+                    else if (k == "mat") {
+                        float v = -1.f;
+                        j.num(v);
+                        b.mat = int(v);
+                    } else if (k == "scale") {
+                        j.num(b.scale);
+                    } else {
+                        j.skipValue();
+                    }
+                    if (!j.eat(','))
+                        break;
+                }
+                j.eat('}');
+                if (!b.file.empty() && b.mat >= 0 && b.mat < int(kPaletteN))
+                    out.push_back(std::move(b));
+                if (!j.eat(','))
+                    break;
+            }
+            j.eat(']');
+        } else {
+            j.skipValue();
+        }
+        if (!j.eat(','))
+            break;
+    }
+    return true;
+}
+
+// One top-level "key": <value> pair of a manifest, value text verbatim.
+// Scanning is balanced-brace aware, so nested objects/arrays (and the odd
+// comment or trailing comma inside them) survive a rewrite untouched.
+struct TopPair {
+    std::string key;
+    std::string value;
+};
+
+static void scanTopLevel(const std::string& text, std::vector<TopPair>& out)
+{
+    size_t i = 0;
+    while (i < text.size() && text[i] != '{')
+        ++i;
+    if (i == text.size())
+        return;
+    ++i; // past the top-level '{'
+    for (;;) {
+        while (i < text.size() && text[i] != '"' && text[i] != '}')
+            ++i;
+        if (i >= text.size() || text[i] == '}')
+            return;
+        std::string key;
+        size_t k0 = i + 1;
+        for (size_t j = k0; j < text.size(); ++j) {
+            if (text[j] == '\\') {
+                ++j;
+                continue;
+            }
+            if (text[j] == '"') {
+                key = text.substr(k0, j - k0);
+                i = j + 1;
+                break;
+            }
+        }
+        while (i < text.size() && (text[i] == ' ' || text[i] == '\t'))
+            ++i;
+        if (i >= text.size() || text[i] != ':')
+            return; // malformed; stop scanning
+        ++i;
+        size_t v0 = i;
+        int depth = 0;
+        while (i < text.size()) {
+            char c = text[i];
+            if (c == '"') {
+                ++i;
+                while (i < text.size()) {
+                    if (text[i] == '\\')
+                        ++i;
+                    else if (text[i] == '"')
+                        break;
+                    ++i;
+                }
+            } else if (c == '{' || c == '[') {
+                ++depth;
+            } else if (c == '}' || c == ']') {
+                if (depth == 0)
+                    break; // the manifest's closing brace
+                --depth;
+                if (depth == 0) {
+                    ++i;
+                    break;
+                }
+            } else if (depth == 0 && c == ',') {
+                break;
+            }
+            ++i;
+        }
+        std::string raw = text.substr(v0, i - v0);
+        while (!raw.empty() && (raw.back() == ' ' || raw.back() == '\t' ||
+                                raw.back() == '\n' || raw.back() == '\r'))
+            raw.pop_back();
+        if (!key.empty())
+            out.push_back({ key, raw });
+    }
+}
+
+static std::string readFileText(const std::string& path)
+{
+    std::ifstream in(path, std::ios::binary);
+    if (!in)
+        return {};
+    return std::string(std::istreambuf_iterator<char>(in),
+                       std::istreambuf_iterator<char>());
+}
+
+// Re-emit every scanned pair verbatim except the ones the caller replaces.
+// `first` tracks whether the caller has already written a member, so the
+// separators stay valid whichever keys are skipped.
+static void emitPreserved(std::FILE* f, const std::vector<TopPair>& pairs,
+                          const char* skipA, const char* skipB, bool& first)
+{
+    for (const TopPair& p : pairs) {
+        if (p.key == skipA || (skipB && p.key == skipB))
+            continue;
+        std::fprintf(f, "%s\n  \"%s\":%s", first ? "" : ",",
+                     p.key.c_str(), p.value.c_str());
+        first = false;
+    }
+}
+
+bool writeTextureManifest(const std::string& path,
+                          const std::vector<TextureBinding>& textures)
+{
+    std::vector<TopPair> pairs;
+    scanTopLevel(readFileText(path), pairs);
+
+    std::FILE* f = std::fopen(path.c_str(), "wb");
+    if (!f)
+        return false;
+    std::fprintf(f, "{");
+    bool first = true;
+    emitPreserved(f, pairs, "textures", nullptr, first);
+    const char* sep = first ? "" : ",";
+    if (textures.empty()) {
+        std::fprintf(f, "%s\n  \"textures\": []\n}\n", sep);
+    } else {
+        std::fprintf(f, "%s\n  \"textures\": [\n", sep);
+        for (size_t i = 0; i < textures.size(); ++i) {
+            const TextureBinding& b = textures[i];
+            std::fprintf(f,
+                         "    { \"file\": \"%s\", \"mat\": %d, \"scale\": %.2f }%s\n",
+                         b.file.c_str(), b.mat, b.scale,
+                         i + 1 < textures.size() ? "," : "");
+        }
+        std::fprintf(f, "  ]\n}\n");
+    }
+    return std::fclose(f) == 0;
+}
+
 bool writeManifest(const std::string& path, const std::vector<WorldLayer>& layers)
 {
+    const std::string prev = readFileText(path);
+
     std::FILE* f = std::fopen(path.c_str(), "wb");
     if (!f)
         return false;
@@ -514,12 +711,21 @@ bool writeManifest(const std::string& path, const std::vector<WorldLayer>& layer
         const WorldLayer& l = layers[i];
         std::fprintf(f,
                      "    { \"file\": \"%s\", \"role\": \"%s\", \"name\": \"%s\", "
-                     "\"pos\": [%.2f, %.2f, %.2f], \"rot\": %.1f, \"enabled\": %s }%s\n",
+                     "\"pos\": [%.2f, %.2f, %.2f], \"rot\": %.1f, \"rotX\": %.1f, "
+                     "\"rotZ\": %.1f, \"enabled\": %s }%s\n",
                      l.file.c_str(), l.role.c_str(), l.name.c_str(), l.pos[0], l.pos[1],
-                     l.pos[2], l.rotDeg, l.enabled ? "true" : "false",
+                     l.pos[2], l.rotDeg, l.rotX, l.rotZ,
+                     l.enabled ? "true" : "false",
                      i + 1 < layers.size() ? "," : "");
     }
-    std::fprintf(f, "  ]\n}\n");
+    std::fprintf(f, "  ]");
+    if (!prev.empty()) {
+        std::vector<TopPair> pairs;
+        scanTopLevel(prev, pairs);
+        bool first = false; // version + layers are already written
+        emitPreserved(f, pairs, "version", "layers", first);
+    }
+    std::fprintf(f, "\n}\n");
     return std::fclose(f) == 0;
 }
 
@@ -549,7 +755,17 @@ bool readLayered(const std::string& manifestPath, const WorldFileMeta& expected,
             spdlog::warn("worldfile: layer '{}' meta mismatch (rejected)", l.file);
             return false;
         }
-        for (VoxelRecord& v : data.voxels) {
+        const std::vector<VoxelRecord>* vox = &data.voxels;
+        std::vector<VoxelRecord> placed;
+        if ((l.role == "object" || l.role == "scatter") &&
+            (l.pos[0] != 0.f || l.pos[1] != 0.f || l.pos[2] != 0.f ||
+             l.rotDeg != 0.f || l.rotX != 0.f || l.rotZ != 0.f)) {
+            transformRecords(data.voxels, expected,
+                             glm::vec3(l.pos[0], l.pos[1], l.pos[2]),
+                             l.rotDeg, l.rotX, l.rotZ, placed);
+            vox = &placed;
+        }
+        for (const VoxelRecord& v : *vox) {
             uint32_t key = (uint32_t(v.x) << 20) | (uint32_t(v.y) << 10) | uint32_t(v.z);
             if (claimed.insert(key).second)
                 out.push_back(v);
@@ -558,4 +774,177 @@ bool readLayered(const std::string& manifestPath, const WorldFileMeta& expected,
     return true;
 }
 
+glm::mat3 placementRotation(float yawDeg, float pitchDeg, float rollDeg)
+{
+    return glm::mat3(glm::rotate(glm::mat4(1.f), glm::radians(yawDeg),
+                                 glm::vec3(0.f, 1.f, 0.f))) *
+           glm::mat3(glm::rotate(glm::mat4(1.f), glm::radians(pitchDeg),
+                                 glm::vec3(1.f, 0.f, 0.f))) *
+           glm::mat3(glm::rotate(glm::mat4(1.f), glm::radians(rollDeg),
+                                 glm::vec3(0.f, 0.f, 1.f)));
+}
+
+glm::vec3 placementEuler(const glm::mat3& rotation)
+{
+    // Inverse of placementRotation() for R = Ry(yaw) Rx(pitch) Rz(roll).
+    // GLM's mat3 indexing is column-major: [column][row].
+    const float sp = std::clamp(-rotation[2][1], -1.0f, 1.0f);
+    const float pitch = std::asin(sp);
+    const float cp = std::cos(pitch);
+    float yaw = 0.0f;
+    float roll = 0.0f;
+    if (std::abs(cp) > 1e-5f) {
+        roll = std::atan2(rotation[0][1], rotation[1][1]);
+        yaw = std::atan2(rotation[2][0], rotation[2][2]);
+    } else {
+        // At the gimbal-lock pole choose roll = 0 and fold the remaining
+        // rotation into yaw; any equivalent Euler triple is valid there.
+        roll = 0.0f;
+        yaw = std::atan2(-rotation[2][0], rotation[0][0]);
+    }
+    return glm::degrees(glm::vec3(yaw, pitch, roll));
+}
+
+glm::mat3 rotatePlacementLocal(const glm::mat3& current,
+                               PlacementAxis axis, float degrees)
+{
+    const glm::vec3 v = axis == PlacementAxis::X   ? glm::vec3(1, 0, 0)
+                      : axis == PlacementAxis::Y   ? glm::vec3(0, 1, 0)
+                                                   : glm::vec3(0, 0, 1);
+    const glm::mat3 local = glm::mat3(glm::rotate(
+        glm::mat4(1.0f), glm::radians(degrees), v));
+    return current * local;
+}
+
+glm::mat3 relativePlacementRotation(float oldYawDeg, float oldPitchDeg,
+                                    float oldRollDeg,
+                                    float newYawDeg, float newPitchDeg,
+                                    float newRollDeg)
+{
+    const glm::mat3 oldR = placementRotation(oldYawDeg, oldPitchDeg, oldRollDeg);
+    const glm::mat3 newR = placementRotation(newYawDeg, newPitchDeg, newRollDeg);
+    return newR * glm::transpose(oldR);
+}
+
+bool recordBottomCenter(const std::vector<VoxelRecord>& src,
+                        const WorldFileMeta& meta, glm::vec3& out)
+{
+    if (src.empty())
+        return false;
+    glm::vec3 lo(1e30f), hi(-1e30f);
+    for (const VoxelRecord& v : src) {
+        const glm::vec3 p = v.position(meta);
+        lo = glm::min(lo, p);
+        hi = glm::max(hi, p);
+    }
+    out = glm::vec3(0.5f * (lo.x + hi.x), lo.y, 0.5f * (lo.z + hi.z));
+    return true;
+}
+
+void transformRecords(const std::vector<VoxelRecord>& src,
+                      const WorldFileMeta& meta,
+                      const glm::vec3& offset,
+                      float rotDeg, float rotX, float rotZ,
+                      std::vector<VoxelRecord>& out)
+{
+    out.clear();
+    if (src.empty())
+        return;
+    const float vox = meta.voxelSize;
+    const float half = 0.5f * meta.worldSize;
+    // the lattice extent: gridN is the CHUNK grid, the record lattice spans
+    // worldSize/voxelSize cells (e.g. 1024 at VOXEL=0.1 over WORLD=102.4)
+    const int grid = int(std::lround(meta.worldSize / meta.voxelSize));
+    const auto toWorld = [&](const VoxelRecord& v) -> glm::vec3 {
+        return { -half + (float(v.x) + 0.5f) * vox,
+                 -half + (float(v.y) + 0.5f) * vox,
+                 -half + (float(v.z) + 0.5f) * vox };
+    };
+    const auto toCell = [&](const glm::vec3& p) -> glm::ivec3 {
+        return { int(std::floor((p.x + half) / vox)),
+                 int(std::floor((p.y + half) / vox)),
+                 int(std::floor((p.z + half) / vox)) };
+    };
+    const auto inBounds = [&](const glm::ivec3& c) -> bool {
+        return c.x >= 0 && c.y >= 0 && c.z >= 0 && c.x < grid && c.y < grid && c.z < grid;
+    };
+    const auto keyOf = [](uint16_t x, uint16_t y, uint16_t z) -> uint32_t {
+        return (uint32_t(x) << 20) | (uint32_t(y) << 10) | uint32_t(z);
+    };
+    const bool noRot = rotDeg == 0.f && rotX == 0.f && rotZ == 0.f;
+    const bool noOff = offset.x == 0.f && offset.y == 0.f && offset.z == 0.f;
+    if (noRot && noOff) {
+        out = src; // identity: byte-identical to the unplaced merge
+        return;
+    }
+    if (noRot) {
+        // pure translation: the offset is an exact cell delta (toCell/toWorld
+        // are exact inverses on a record's centre)
+        const glm::ivec3 d = toCell(toWorld(src.front()) + offset) -
+                             glm::ivec3(src.front().x, src.front().y, src.front().z);
+        out.reserve(src.size());
+        for (const VoxelRecord& v : src) {
+            const glm::ivec3 c(int(v.x) + d.x, int(v.y) + d.y, int(v.z) + d.z);
+            if (!inBounds(c))
+                continue;
+            VoxelRecord t = v;
+            t.x = uint16_t(c.x);
+            t.y = uint16_t(c.y);
+            t.z = uint16_t(c.z);
+            out.push_back(t);
+        }
+        return;
+    }
+    // rotation: destination-driven inverse map over the rotated AABB.
+    // Every destination cell queries its pre-image, so the rotated shell
+    // covers its whole footprint - holes can only come from the source
+    // itself - and a 90-degree step (pivot at a cell centre or edge) maps
+    // cell centres to cell centres exactly.
+    std::unordered_map<uint32_t, const VoxelRecord*> srcCell;
+    srcCell.reserve(src.size() * 2);
+    for (const VoxelRecord& v : src)
+        srcCell.emplace(keyOf(v.x, v.y, v.z), &v);
+    glm::vec3 pivot;
+    if (!recordBottomCenter(src, meta, pivot))
+        return;
+    // Composite Euler rotation about that canonical pivot. The destination-
+    // driven loop queries each cell through R^-1, so the rotated shell covers
+    // its whole footprint (holes can only come from the source itself).
+    const glm::mat3 R = placementRotation(rotDeg, rotX, rotZ);
+    const glm::mat3 Rinv = glm::transpose(R);
+    const auto fwd = [&](const glm::vec3& p) -> glm::vec3 {
+        return pivot + R * (p - pivot) + offset;
+    };
+    const auto inv = [&](const glm::vec3& q) -> glm::vec3 {
+        return pivot + Rinv * (q - offset - pivot);
+    };
+    glm::vec3 dmn(1e9f), dmx(-1e9f);
+    for (const VoxelRecord& v : src) {
+        const glm::vec3 q = fwd(v.position(meta));
+        dmn = glm::min(dmn, q);
+        dmx = glm::max(dmx, q);
+    }
+    const glm::ivec3 c0 = toCell(dmn) - glm::ivec3(1);
+    const glm::ivec3 c1 = toCell(dmx) + glm::ivec3(1);
+    out.reserve(src.size());
+    for (int y = std::max(0, c0.y); y <= std::min(grid - 1, c1.y); ++y)
+        for (int z = std::max(0, c0.z); z <= std::min(grid - 1, c1.z); ++z)
+            for (int x = std::max(0, c0.x); x <= std::min(grid - 1, c1.x); ++x) {
+                VoxelRecord q;
+                q.x = uint16_t(x);
+                q.y = uint16_t(y);
+                q.z = uint16_t(z);
+                const glm::ivec3 s = toCell(inv(toWorld(q)));
+                if (!inBounds(s))
+                    continue;
+                const auto it = srcCell.find(keyOf(uint16_t(s.x), uint16_t(s.y), uint16_t(s.z)));
+                if (it == srcCell.end())
+                    continue;
+                VoxelRecord t = *it->second;
+                t.x = uint16_t(x);
+                t.y = uint16_t(y);
+                t.z = uint16_t(z);
+                out.push_back(t);
+            }
+}
 } // namespace vf::voxel::worldfile

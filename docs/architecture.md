@@ -133,13 +133,20 @@ patch path:
   normal, **Add** = a dome, **Delete** = clear every cell in the brush ball,
   **Paint** = recolour the ball with the selected material. There is no
   bake/record edit path any more (the legacy `carve_edits.vxw` /
-  `raise_edits.vxw` layers are read-only leftovers). Subtractive stamps may dig
-  below `WATER_LEVEL`: `App::floodNewlyDug` then adds water-plane splats over
-  the dug columns that have no solid left at/above the plane (skipping columns
-  that are already wet), and `SplatPass::patchWaterSurfels` re-uploads the
-  water run — it is uploaded with headroom so the common case needs no buffer
-  relayout. Covered scoops stay dry (the water only appears where the dig opens
-  the surface); the SVO plane is analytic and floods by itself. `ChunkStore::rebuildDirty`
+  `raise_edits.vxw` layers are read-only leftovers). The water is one
+  fixed-level plane (`WATER_LEVEL = -0.9`) subdivided into a world-wide 0.2 m
+  grid of coplanar surfels (coverage only; the shader intersects the analytic
+  plane per fragment) and the depth test against the opaque prepass clips it to
+  the wet area — so a dig below the level is water with no per-column
+  bookkeeping and no water-buffer patching, and the SVO plane is analytic the
+  same way. The Carve scoop reaches `EditableWorld::kCarveTopMargin` (0.2 m)
+  above the picked cell with inclusive boundary cells, so it opens the surface
+  it starts at (a flat cap left a one-cell roof over the ±1 cell of relief and
+  the channel stayed dry-looking). `App::patchHeightTexture` re-derives the
+  edited columns (top solid cell + material) from the store and re-uploads that
+  sub-rect of the terrain height texture, which the water shading (foam,
+  absorption, reflected bed) and the splat shadow/AO marches read — stale, the
+  new water shaded differently from the river. `ChunkStore::rebuildDirty`
   re-derives only the edited
   block region (edit AABB ± 12 cells, snapped to 8³ blocks; untouched blocks
   are copied verbatim — a unit test pins the localized result byte-equal to a
@@ -148,8 +155,10 @@ patch path:
   the updated run into the **paged** surfel buffer: each chunk owns a slot run
   with reserved capacity (`m_chunkStart/Count/Cap`) so untouched chunks stay
   put; a chunk that outgrows its slot relocates into the opaque free area, and
-  the buffer grows (tail regions shift) if needed. Patched chunks drop their
-  micro tail + LOD ring until the next full upload. A freshly GPU-seeded chunk
+  the buffer grows (tail regions shift) if needed. Patched chunks keep their
+  micro tail — `LiveEditor::chunkRun` regenerates it from the cached base run
+  with the same deterministic `buildMicroSurfels` hash the bake uses — while
+  their LOD ring drops until the next full upload. A freshly GPU-seeded chunk
   is the *pre-edit* run, so `stamp()` always refreshes the edited region on
   top of the seed (without it the first stamp in a chunk looks like a no-op).
   The hover **preview** tints the affected splats before the click (bind 13

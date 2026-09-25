@@ -10,6 +10,7 @@ layout(local_size_x = 8, local_size_y = 8, local_size_z = 1) in;
 layout(set = 0, binding = 0, rgba16f) uniform readonly image2D uScene;
 layout(set = 0, binding = 1, rgba16f) uniform readonly image2D uGPos;
 layout(set = 0, binding = 2, rgba16f) uniform writeonly image2D uOut;
+layout(set = 0, binding = 3, rgba16f) uniform readonly image2D uGNorm;
 
 layout(push_constant) uniform PC {
     vec4 camPos;
@@ -87,10 +88,18 @@ void main()
         return;
     }
 
-    // surface normal from G-buffer finite differences, faced toward viewer
-    vec3 dpdx = gposClamped(pix + ivec2(1, 0)) - gposClamped(pix - ivec2(1, 0));
-    vec3 dpdy = gposClamped(pix + ivec2(0, 1)) - gposClamped(pix - ivec2(0, 1));
-    vec3 n = normalize(cross(dpdy, dpdx) + vec3(1e-6));
+    // Surface normal from the G-buffer (written by both backends; water
+    // stores the flat plane normal). Degenerate (0) normals fall back to the
+    // old finite-difference reconstruction so a missing writer degrades
+    // gracefully instead of reflecting off garbage.
+    vec3 n = imageLoad(uGNorm, pix).xyz;
+    if (dot(n, n) < 1e-6) {
+        vec3 dpdx = gposClamped(pix + ivec2(1, 0)) - gposClamped(pix - ivec2(1, 0));
+        vec3 dpdy = gposClamped(pix + ivec2(0, 1)) - gposClamped(pix - ivec2(0, 1));
+        n = normalize(cross(dpdy, dpdx) + vec3(1e-6));
+    } else {
+        n = normalize(n);
+    }
     vec3 viewDir = normalize(pc.camPos.xyz - worldPos);
     if (dot(n, viewDir) < 0.0)
         n = -n;

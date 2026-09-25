@@ -24,7 +24,8 @@ namespace vf::voxel {
 class VoxelField {
 public:
     // colTop/colMat: per-column landscape tops (lattice y, -1 = none) and the
-    // top record's material. objCells/objMats: packed keys + material of every
+    // top record's material. objCells/objMats/objTexs: packed keys + material
+    // (and per-cell texture override, i.e. the record's reserved byte) of every
     // non-landscape record cell (priority-merged union). carveCells/carveMats:
     // packed keys + material of subtractive "carve" cells (role "carve"); the
     // field lowers the terrain heightfield where carved and subtracts the carve
@@ -32,10 +33,12 @@ public:
     void build(const std::vector<VoxelRecord>& records,
                const std::vector<int16_t>& colTop, const std::vector<uint8_t>& colMat,
                const std::vector<uint32_t>& objCells, const std::vector<uint8_t>& objMats,
+               const std::vector<uint8_t>& objTexs = {},
                const std::vector<uint32_t>& carveCells = {},
                const std::vector<uint8_t>& carveMats = {},
                const std::vector<uint32_t>& raiseCells = {},
-               const std::vector<uint8_t>& raiseMats = {});
+               const std::vector<uint8_t>& raiseMats = {},
+               const std::vector<uint8_t>& objLayers = {});
 
     bool valid() const { return m_built; }
 
@@ -43,6 +46,8 @@ public:
         float d = 1e9f;
         uint8_t mat = 0;
         bool obj = false; // true when the object field is the closest surface
+        uint8_t tex = 0;  // per-cell texture override (atlas layer; 0 = none)
+        uint8_t layer = 0; // owning .vxw layer (1..254; 0 = terrain/unowned)
     };
 
     // Cached component distance-transform output (content-keyed reuse across
@@ -106,7 +111,7 @@ private:
     std::vector<glm::vec2> m_heightTex;
 
     // sparse object field: key = packed lattice cell (+1), value =
-    // uint32(uint8(sdfRaw)) | uint32(mat) << 8 ; sdf meters = int8(raw)*VOXEL
+    // uint8(sdfRaw) | mat << 8 | texture << 16 | layerId << 24
     std::vector<uint32_t> m_okey;
     std::vector<uint32_t> m_oval;
     size_t m_omask = 0;

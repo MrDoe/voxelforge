@@ -1,5 +1,6 @@
 #include "voxel/live_editor.hpp"
 #include <algorithm>
+#include <numeric>
 #include <utility>
 
 namespace vf::voxel {
@@ -46,32 +47,47 @@ void LiveEditor::seedFromStore(int chunk, const SurfelParams& params)
     Cache& c = m_cache[chunk];
     c.keys = std::move(rg.keys);
     c.surfels = std::move(rg.surfels);
+    c.edgeKeys = std::move(rg.edgeKeys);
+    c.edgeSurfels = std::move(rg.edgeSurfels);
+    c.runDirty = true;
 }
 
 void LiveEditor::seed(int chunk, const SurfelParams& params)
 {
     if (m_seedFn) {
-        std::vector<Surfel> run = m_seedFn(chunk);
-        if (!run.empty()) {
+        SurfelRange rg = m_seedFn(chunk);
+        if (!rg.surfels.empty()) {
             Cache& c = m_cache[chunk];
-            c.surfels = std::move(run);
-            c.keys.resize(c.surfels.size());
-            for (size_t i = 0; i < c.surfels.size(); ++i)
-                c.keys[i] = keyFromSurfel(c.surfels[i]);
-            if (!std::is_sorted(c.keys.begin(), c.keys.end())) {
-                std::vector<std::pair<uint64_t, Surfel>> pairs(c.keys.size());
-                for (size_t i = 0; i < c.keys.size(); ++i)
-                    pairs[i] = { c.keys[i], c.surfels[i] };
-                std::sort(pairs.begin(), pairs.end(),
-                          [](const std::pair<uint64_t, Surfel>& a,
-                             const std::pair<uint64_t, Surfel>& b) {
-                              return a.first < b.first;
-                          });
-                for (size_t i = 0; i < pairs.size(); ++i) {
-                    c.keys[i] = pairs[i].first;
-                    c.surfels[i] = pairs[i].second;
+            c.keys.resize(rg.surfels.size());
+            for (size_t i = 0; i < rg.surfels.size(); ++i)
+                c.keys[i] = keyFromSurfel(rg.surfels[i]);
+            c.surfels = std::move(rg.surfels);
+
+            c.edgeKeys.resize(rg.edgeSurfels.size());
+            for (size_t i = 0; i < rg.edgeSurfels.size(); ++i)
+                c.edgeKeys[i] = keyFromSurfel(rg.edgeSurfels[i]);
+            c.edgeSurfels = std::move(rg.edgeSurfels);
+
+            auto sortSegment = [](std::vector<uint64_t>& keys,
+                                  std::vector<Surfel>& values) {
+                std::vector<size_t> order(keys.size());
+                std::iota(order.begin(), order.end(), 0u);
+                std::stable_sort(order.begin(), order.end(),
+                                 [&](size_t a, size_t b) {
+                                     return keys[a] < keys[b];
+                                 });
+                std::vector<uint64_t> sortedKeys(keys.size());
+                std::vector<Surfel> sortedValues(values.size());
+                for (size_t i = 0; i < order.size(); ++i) {
+                    sortedKeys[i] = keys[order[i]];
+                    sortedValues[i] = values[order[i]];
                 }
-            }
+                keys.swap(sortedKeys);
+                values.swap(sortedValues);
+            };
+            sortSegment(c.keys, c.surfels);
+            sortSegment(c.edgeKeys, c.edgeSurfels);
+            c.runDirty = true;
             return;
         }
     }
@@ -81,21 +97,29 @@ void LiveEditor::seed(int chunk, const SurfelParams& params)
 void LiveEditor::splice(int chunk, const SurfelRange& rg)
 {
     Cache& c = m_cache[chunk];
-    std::vector<std::pair<uint64_t, Surfel>> merged;
-    merged.reserve(c.keys.size() + rg.keys.size());
-    for (size_t i = 0; i < c.keys.size(); ++i)
-        merged.push_back({ c.keys[i], c.surfels[i] });
-    for (size_t i = 0; i < rg.keys.size(); ++i)
-        merged.push_back({ rg.keys[i], rg.surfels[i] });
-    std::sort(merged.begin(), merged.end(),
-              [](const std::pair<uint64_t, Surfel>& a,
-                 const std::pair<uint64_t, Surfel>& b) { return a.first < b.first; });
-    c.keys.resize(merged.size());
-    c.surfels.resize(merged.size());
-    for (size_t i = 0; i < merged.size(); ++i) {
-        c.keys[i] = merged[i].first;
-        c.surfels[i] = merged[i].second;
-    }
+    auto merge = [](std::vector<uint64_t>& keys, std::vector<Surfel>& values,
+                    const std::vector<uint64_t>& addKeys,
+                    const std::vector<Surfel>& addValues) {
+        std::vector<std::pair<uint64_t, Surfel>> merged;
+        merged.reserve(keys.size() + addKeys.size());
+        for (size_t i = 0; i < keys.size(); ++i)
+            merged.push_back({ keys[i], values[i] });
+        for (size_t i = 0; i < addKeys.size(); ++i)
+            merged.push_back({ addKeys[i], addValues[i] });
+        std::stable_sort(merged.begin(), merged.end(),
+                         [](const auto& a, const auto& b) {
+                             return a.first < b.first;
+                         });
+        keys.resize(merged.size());
+        values.resize(merged.size());
+        for (size_t i = 0; i < merged.size(); ++i) {
+            keys[i] = merged[i].first;
+            values[i] = merged[i].second;
+        }
+    };
+    merge(c.keys, c.surfels, rg.keys, rg.surfels);
+    merge(c.edgeKeys, c.edgeSurfels, rg.edgeKeys, rg.edgeSurfels);
+    c.runDirty = true;
 }
 
 bool LiveEditor::refreshRegion(int chunk, glm::ivec3 lo, glm::ivec3 hi,
@@ -107,24 +131,30 @@ bool LiveEditor::refreshRegion(int chunk, glm::ivec3 lo, glm::ivec3 hi,
     if (it == m_cache.end())
         return false;
     Cache& c = it->second;
-    // drop cached cells inside the region (keys are sorted by x,y,z but an
-    // AABB is not a key range, so filter by unpacking)
-    size_t w = 0;
-    for (size_t i = 0; i < c.keys.size(); ++i) {
-        if (keyInside(c.keys[i], lo, hi))
-            continue;
-        c.keys[w] = c.keys[i];
-        c.surfels[w] = c.surfels[i];
-        ++w;
-    }
-    c.keys.resize(w);
-    c.surfels.resize(w);
+    // Drop parents and their derived edge bridges together. Keys are sorted
+    // by x,y,z but an AABB is not a key range, so filter by unpacking.
+    auto retainOutside = [&](std::vector<uint64_t>& keys,
+                             std::vector<Surfel>& values) {
+        size_t w = 0;
+        for (size_t i = 0; i < keys.size(); ++i) {
+            if (keyInside(keys[i], lo, hi))
+                continue;
+            keys[w] = keys[i];
+            values[w] = values[i];
+            ++w;
+        }
+        keys.resize(w);
+        values.resize(w);
+    };
+    retainOutside(c.keys, c.surfels);
+    retainOutside(c.edgeKeys, c.edgeSurfels);
     splice(chunk, buildChunkSurfelsRange(*m_store, chunk, lo, hi, params));
     return true;
 }
 
 std::vector<int> LiveEditor::stamp(const std::vector<StoreEdit>& edits,
-                                   const SurfelParams& params)
+                                   const SurfelParams& params,
+                                   int margin)
 {
     std::vector<int> changed;
     if (!m_store || edits.empty())
@@ -138,11 +168,12 @@ std::vector<int> LiveEditor::stamp(const std::vector<StoreEdit>& edits,
     m_store->apply(edits);
     std::vector<int> dirty = m_store->dirtyChunks();
     m_store->rebuildDirty();
-    // Surface membership changes within 1 cell of the brush; AO/shadow change
-    // within the store band. Refresh +-3 cells per stamp for immediacy — the
-    // next full rebuild refreshes the wider band.
-    const glm::ivec3 slo(lox - 3, loy - 3, loz - 3);
-    const glm::ivec3 shi(hix + 4, hiy + 4, hiz + 4);
+    // Surface membership changes within 1 cell of the brush; the SDF-gradient
+    // normals and the baked AO/shadow of nearby surfels change within the
+    // store band the rebuild just solved. `margin` is 3 for the fast path and
+    // kExactStampMargin for Smooth, which then matches a full reload.
+    const glm::ivec3 slo(lox - margin, loy - margin, loz - margin);
+    const glm::ivec3 shi(hix + margin + 1, hiy + margin + 1, hiz + margin + 1);
     for (int ci : dirty) {
         // A freshly seeded chunk's cache is the GPU's CURRENT run, which is
         // pre-edit geometry (the GPU has not been patched yet): refresh the
@@ -163,6 +194,54 @@ const std::vector<Surfel>& LiveEditor::chunkSurfels(int chunk, const SurfelParam
     static const std::vector<Surfel> empty;
     auto it = m_cache.find(chunk);
     return it == m_cache.end() ? empty : it->second.surfels;
+}
+
+void LiveEditor::rebuildRun(int chunk, const SurfelParams& params)
+{
+    auto it = m_cache.find(chunk);
+    if (it == m_cache.end())
+        return;
+    Cache& c = it->second;
+    if (params.microDetail)
+        c.micros = buildMicroSurfels(c.keys, c.surfels);
+    else
+        c.micros.clear();
+    c.microStart = uint32_t(c.surfels.size() + c.edgeSurfels.size());
+    c.run.clear();
+    c.run.reserve(c.surfels.size() + c.edgeSurfels.size() + c.micros.size());
+    c.run.insert(c.run.end(), c.surfels.begin(), c.surfels.end());
+    c.run.insert(c.run.end(), c.edgeSurfels.begin(), c.edgeSurfels.end());
+    c.run.insert(c.run.end(), c.micros.begin(), c.micros.end());
+    c.runDirty = false;
+    c.runMicroDetail = params.microDetail;
+}
+
+const std::vector<Surfel>& LiveEditor::chunkRun(int chunk, const SurfelParams& params)
+{
+    static const std::vector<Surfel> empty;
+    if (!hasChunk(chunk)) {
+        if (!m_store)
+            return empty;
+        seed(chunk, params);
+    }
+    auto it = m_cache.find(chunk);
+    if (it == m_cache.end())
+        return empty;
+    if (it->second.runDirty || it->second.runMicroDetail != params.microDetail)
+        rebuildRun(chunk, params);
+    return it->second.run;
+}
+
+uint32_t LiveEditor::microStartOf(int chunk) const
+{
+    auto it = m_cache.find(chunk);
+    return it == m_cache.end() ? 0u : it->second.microStart;
+}
+
+uint32_t LiveEditor::edgeCountOf(int chunk) const
+{
+    auto it = m_cache.find(chunk);
+    return it == m_cache.end() ? 0u : uint32_t(it->second.edgeSurfels.size());
 }
 
 } // namespace vf::voxel

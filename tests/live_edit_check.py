@@ -3,29 +3,46 @@
 
 Renders the close-up view several times and asserts:
   - an untouched render is sane (coverage / sky probe),
-  - one live store edit (VF_TEST_EDIT) at a known terrain cell for each brush
-    mode - raise (Add), carve, delete and paint - logs dirty chunks + patched
+  - one live store edit (VF_TEST_EDIT) at a known cell for each brush mode -
+    raise (Add), carve, delete, paint and object-surface smooth - logs dirty
+    chunks + patched
     surfels and changes a visible but bounded fraction of pixels, without
     wrecking the frame (both backends for raise; splat for the store-only
     delete/paint modes, which have no record-layer form),
-  - the carve-brush hover preview (VF_TEST_BRUSH, no edit applied) tints the
-    affected splats warm (splat backend only).
+  - an object-surface Smooth pick takes the surface-axis relaxation (log
+    "smooth object:") and never the terrain column path, and the patched
+    splats change visible pixels,
+  - a live-patched chunk keeps its deterministic micro-detail tail (run surfel
+    count with VF_MICRO on >> off for the same edit),
+  - the carve hover preview tints warm and the add preview tints the growth's
+    footprint green (VF_TEST_BRUSH, no edit applied; splat backend only),
+  - a 1-voxel Add/Carve stamps EXACTLY one cell (the per-voxel sculpt mode),
+  - undo and "Clear live edits" remove live geometry again (an undone stroke
+    and a cleared world must stop rendering the removed material, and the
+    cleared overlay file must be gone).
 
 Usage: live_edit_check.py <path-to-voxelforge-binary>
 Stdlib only - parses the PPM output directly.
 """
 import os
+import re
 import subprocess
 import sys
 import tempfile
 
 W, H = 480, 270
+FAST = os.environ.get("VF_FAST_TESTS") == "1"
 # close view of the edited terrain cell (432,509,452): the dome fills a
 # meaningful part of the frame in both backends
 CAM = ["-5.5", "1.2", "-3.5", "-8", "0.4", "-6"]
 # terrain surface cell in front of the hero camera (world ~(-8, -0.15, -6))
 CELL = "432,509,452"
 EDIT = CELL + ",raise"
+# hero view (the reference house.jpeg camera): its centre ray lands on the
+# cabin's underside at this surface cell, so an object-pick Smooth exercises
+# the object-surface relaxation end to end (object branch, live splat patch).
+HERO_CAM = ["1.0", "2.0", "1.5", "5.3", "1.0", "11.3"]
+OBJECT_CELL = "557,523,607"
 # dock plank next to open water (y ~ -0.35) + the water camera from
 # visual_check: a big brush here reaches over the water surface
 SHORE_CELL = "562,508,582"
@@ -34,6 +51,11 @@ WATER_CAM = ["8.5", "0.6", "8.2", "4.5", "-1.1", "6.8"]
 # delete digs an open pit whose floor is submerged
 PIT_CELL = "512,507,512"
 PIT_CAM = ["0", "6", "0", "0", "-0.5", "0"]
+# shore channel that reaches the river (surface ~-0.3, the river edge ~0.4 m
+# away): the carve digs below the plane and the channel water must read exactly
+# like the open river water in the same frame (one fixed level, one shader)
+CHANNEL_CELL = "512,508,542"
+CHANNEL_CAM = ["0", "2", "-1.5", "0", "-1", "4"]
 
 
 def read_ppm(path):
@@ -90,7 +112,7 @@ def diff_stats(wa, ha, a, wb, hb, b, thresh=10):
         raise RuntimeError("frame size mismatch")
     n = wa * ha
     d = 0
-    warm_r = warm_b = 0
+    warm_r = warm_b = warm_g = 0
     for k in range(n):
         m = max(
             abs(a[3 * k] - b[3 * k]),
@@ -103,15 +125,18 @@ def diff_stats(wa, ha, a, wb, hb, b, thresh=10):
                     a[3 * k] + a[3 * k + 1] + a[3 * k + 2]):
                 warm_r += b[3 * k]
                 warm_b += b[3 * k + 2]
-    return d / n, warm_r, warm_b
+                warm_g += b[3 * k + 1]
+    return d / n, warm_r, warm_b, warm_g
 
 
-def render(binary, out, extra_env=None, mode=None, cam=None):
+def render(binary, out, extra_env=None, mode=None, cam=None, overlay=False):
     env = dict(os.environ)
-    # hermetic: skip restoring a saved live-edit overlay so the comparison
-    # isolates this run's VF_TEST_EDIT (a session's painted edits would
-    # otherwise dominate both frames)
-    env["VF_NO_OVERLAY"] = "1"
+    # hermetic by default: skip restoring a saved live-edit overlay so the
+    # comparison isolates this run's own edits (a session's painting would
+    # otherwise dominate both frames). overlay=True reads the file the run's
+    # own VF_OVERLAY_PATH points at (undo/clear checks).
+    if not overlay:
+        env["VF_NO_OVERLAY"] = "1"
     if extra_env:
         env.update(extra_env)
     cmd = [
@@ -125,34 +150,16 @@ def render(binary, out, extra_env=None, mode=None, cam=None):
 
 
 def is_water(r, g, b):
-    return b > r + 12 and g > r + 4 and b > 120
+    # blue clearly dominant over red AND green: excludes fog-washed grey
+    # surfaces that the old loose rule (b > r+12) misclassified as water
+    return b > r + 25 and b > g + 8 and b > 120
 
 
-def check_water_fill(binary, tmp, failures):
-    """Carving below the water level is allowed and the dug volume is flooded:
-    an open pit below the plane gains water-plane splats so it reads as water
-    instead of a dry hole, while the subtractive hover tint leaves the water
-    surface alone."""
-    # an open pit below the plane: delete a 6 m ball in flat ground beside the
-    # river (surface ~-0.45, water plane -0.9, so the floor ends up submerged)
-    pit_env = {"VF_TEST_EDIT": f"{PIT_CELL},delete", "VF_EDIT_DIAM": "6.0"}
-    dry = os.path.join(tmp, "water_noflood.ppm")
-    wet = os.path.join(tmp, "water_flood.ppm")
-    r = render(binary, wet, pit_env, mode=None, cam=PIT_CAM)
-    logs = (r.stdout or "") + (r.stderr or "")
-    if "flooded" not in logs or "water splats" not in logs:
-        failures.append("water: digging below the plane never flooded the pit")
-    else:
-        n = int(logs.split("flooded ")[1].split(" ")[0])
-        print(f"[water] open pit flooded {n} water splats")
-        if n < 100:
-            failures.append(f"water: flood too small for an open pit ({n} splats)")
-    r1 = render(binary, dry, dict(pit_env, VF_NO_WATER_FILL="1"), mode=None, cam=PIT_CAM)
-    if r1.returncode != 0 or not os.path.exists(wet) or not os.path.exists(dry):
-        failures.append("water: pit renders failed")
-        return
-    w, h, a = read_ppm(dry)   # unflooded pit
-    _, _, b = read_ppm(wet)   # flooded pit
+def flood_pixels(dry_path, wet_path):
+    """(changed, surface) between an unflooded and a flooded frame: a surface
+    pixel got brighter and blue-biased (the water-plane splats)."""
+    w, h, a = read_ppm(dry_path)
+    _, _, b = read_ppm(wet_path)
     changed = surface = 0
     for k in range(w * h):
         if max(abs(a[3 * k + i] - b[3 * k + i]) for i in range(3)) > 12:
@@ -160,13 +167,115 @@ def check_water_fill(binary, tmp, failures):
             la = (a[3 * k] + a[3 * k + 1] + a[3 * k + 2]) / 3.0
             lb = (b[3 * k] + b[3 * k + 1] + b[3 * k + 2]) / 3.0
             if lb > la + 15 and b[3 * k + 2] >= b[3 * k]:
-                surface += 1  # brighter and blue-biased = the water surface
-    print(f"[water] flood changed {changed} px ({changed/(w*h)*100:.1f}%), "
-          f"{surface} read as the water surface")
-    if changed < w * h * 0.01:
-        failures.append(f"water: flood is invisible ({changed} px changed)")
+                surface += 1
+    return changed, surface
+
+
+def check_per_voxel(binary, tmp, failures):
+    """A 1-voxel brush is the per-voxel sculpt mode and must touch EXACTLY one
+    cell. This pins two ways that used to break: the old radius clamp had a
+    0.1 m floor, so even a "1 voxel" brush rasterized 3 cells across, and the
+    dome/cylinder volume shapes would also pick up the neighbouring cell along
+    the normal. The cell count in the stamp log is the strong, resolution-
+    independent signal (one 0.1 m voxel is near the ASCII/render limit), so
+    there is deliberately no pixel-diff lower bound here - only a sanity cap.
+    """
+    for mode in ("add", "carve"):
+        out = os.path.join(tmp, f"pervoxel_{mode}.ppm")
+        r = render(binary, out, {
+            "VF_TEST_EDIT": f"{CELL},{mode}",
+            "VF_EDIT_DIAM": "0.1",  # one voxel
+            "VF_OVERLAY_PATH": os.path.join(tmp, f"pervoxel_{mode}.vxw"),
+        })
+        logs = (r.stdout or "") + (r.stderr or "")
+        if r.returncode != 0 or not os.path.exists(out):
+            failures.append(f"per-voxel {mode}: render failed")
+            continue
+        m = re.search(r"live edit: (\d+) cells", logs)
+        if not m:
+            failures.append(f"per-voxel {mode}: no 'live edit: N cells' log")
+            continue
+        cells = int(m.group(1))
+        w, h, img = read_ppm(out)
+        s = stats(w, h, img)
+        print(f"[per-voxel] {mode}: {cells} cells  coverage {s['obj']*100:.1f}%  "
+              f"black {s['black']*100:.2f}%")
+        if cells != 1:
+            failures.append(f"per-voxel {mode}: stamped {cells} cells, expected 1 "
+                            "(the brush is not per-voxel)")
+        if s["black"] > 0.09:
+            failures.append(f"per-voxel {mode}: black-in-silhouette "
+                            f"{s['black']*100:.2f}%")
+
+
+def check_water_fill(binary, tmp, failures):
+    """The water is one fixed-level plane: a dug volume below LEVEL shows the
+    same water as the river, with no per-column bookkeeping. A/B against
+    VF_SPLAT_NOWATER=1 proves the pit/channel is water; the channel case also
+    pins the colour parity with the open water in the same frame (a stale
+    height texture used to shade carved water as a thin foam-washed sheet)."""
+    # an open pit below the plane: delete a 6 m ball in flat ground beside the
+    # river (surface ~-0.45, water plane -0.9, so the floor ends up submerged)
+    pit_env = {"VF_TEST_EDIT": f"{PIT_CELL},delete", "VF_EDIT_DIAM": "6.0"}
+    dry = os.path.join(tmp, "water_noflood.ppm")
+    wet = os.path.join(tmp, "water_flood.ppm")
+    r = render(binary, wet, pit_env, mode=None, cam=PIT_CAM)
+    if r.returncode != 0 or not os.path.exists(wet):
+        failures.append("water: pit render failed")
+        return
+    r1 = render(binary, dry, dict(pit_env, VF_SPLAT_NOWATER="1"), mode=None,
+                cam=PIT_CAM)
+    if r1.returncode != 0 or not os.path.exists(dry):
+        failures.append("water: pit no-water render failed")
+        return
+    changed, surface = flood_pixels(dry, wet)
+    print(f"[water] dug pit vs no-water changed {changed} px "
+          f"({changed/(W*H)*100:.1f}%), {surface} read as the water surface")
+    if changed < W * H * 0.01:
+        failures.append(f"water: pit water is invisible ({changed} px changed)")
     if surface < 200:
-        failures.append(f"water: flood did not read as water ({surface} surface px)")
+        failures.append(f"water: pit water did not read as water ({surface} surface px)")
+
+    # colour parity: carve a channel that reaches the river. Existing water
+    # pixels must keep their colour and the newly exposed water (only below the
+    # level) must match them - one level, one material, one shader.
+    cbase = os.path.join(tmp, "water_channel_base.ppm")
+    cchan = os.path.join(tmp, "water_channel.ppm")
+    r0 = render(binary, cbase, mode=None, cam=CHANNEL_CAM)
+    r1 = render(binary, cchan,
+                {"VF_TEST_EDIT": f"{CHANNEL_CELL},carve", "VF_EDIT_DIAM": "4.0",
+                 "VF_EDIT_DEPTH": "2.0"}, mode=None, cam=CHANNEL_CAM)
+    if r1.returncode != 0 or not os.path.exists(cchan) or not os.path.exists(cbase):
+        failures.append("water: channel renders failed")
+        return
+    w, h, a = read_ppm(cbase)
+    _, _, b = read_ppm(cchan)
+    old_water, new_water = [], []
+    for k in range(w * h):
+        c0 = (a[3 * k], a[3 * k + 1], a[3 * k + 2])
+        c1 = (b[3 * k], b[3 * k + 1], b[3 * k + 2])
+        if is_water(*c0):
+            old_water.append(c1)   # existing water, carved frame
+        elif is_water(*c1):
+            new_water.append(c1)   # water only the dig exposed
+    print(f"[water] channel water: {len(old_water)} existing px, "
+          f"{len(new_water)} newly exposed px")
+    if len(old_water) < 200:
+        failures.append("water: channel frame lost the open water")
+    if len(new_water) < 250:
+        failures.append(f"water: carve exposed too little water ({len(new_water)} px)")
+    if old_water and new_water:
+        mo = [sum(c[i] for c in old_water) / len(old_water) for i in range(3)]
+        mn = [sum(c[i] for c in new_water) / len(new_water) for i in range(3)]
+        print(f"[water] channel colour existing ({mo[0]:.0f},{mo[1]:.0f},{mo[2]:.0f}) "
+              f"vs new ({mn[0]:.0f},{mn[1]:.0f},{mn[2]:.0f})")
+        if max(abs(mo[i] - mn[i]) for i in range(3)) > 12:
+            failures.append(
+                "water: carved water does not match the open water colour "
+                f"({mo[0]:.0f},{mo[1]:.0f},{mo[2]:.0f} vs "
+                f"{mn[0]:.0f},{mn[1]:.0f},{mn[2]:.0f})")
+    else:
+        failures.append("water: channel colour comparison had no water")
 
     # subtractive hover tint leaves the water surface alone
     wbase = os.path.join(tmp, "water_base.ppm")
@@ -189,54 +298,215 @@ def check_water_fill(binary, tmp, failures):
     print(f"[water] shore preview tinted {tinted} px, water-plane pixels tinted {water}")
     if tinted == 0:
         failures.append("water: shore preview tinted nothing")
-    if water:
+    # The intent is "the water PLANE is never tinted". A handful of pixels
+    # along the shoreline flip between is_water classes when a shore splat is
+    # tinted (the heuristic reads the blended edge colour, not the plane), so
+    # allow a small boundary margin - 2-3 px on the current scene, both on
+    # this tree and on the pre-texture baseline. A real leak tints thousands.
+    if water > 25 and water > 0.002 * tinted:
         failures.append(f"water: subtractive preview tinted {water} water pixels")
 
 
-def check_preview(binary, tmp, failures, baseline):
-    """Carve-brush hover preview: VF_TEST_BRUSH activates the edit tool with a
-    brush volume but applies NO edit, so the only frame difference is the tint
-    over the splats the brush would affect (splat backend only)."""
-    prev = os.path.join(tmp, "preview.ppm")
-    r1 = render(binary, prev, {"VF_TEST_BRUSH": f"{CELL},carve",
-                               "VF_EDIT_DIAM": "1.5"}, mode=None)
-    if r1.returncode != 0 or not os.path.exists(prev):
-        failures.append("preview: render failed")
+def check_micro_persistence(binary, tmp, failures, splat_log=None):
+    """A live-patched chunk must keep its micro-detail tail: the same edit run
+    with micros enabled logs substantially more run surfels than the same run
+    with VF_MICRO=0 (the live editor regenerates the bake's hash-driven
+    children instead of dropping them until the next full reload)."""
+    def parse_surfels(logs):
+        if not logs or "live edit:" not in logs:
+            return None
+        seg = logs.split("live edit:")[-1]
+        if "run surfels" not in seg:
+            return None
+        try:
+            return int(seg.split("run surfels")[0].split(",")[-1])
+        except ValueError:
+            return None
+
+    def run_surfels(tag, extra_env):
+        out = os.path.join(tmp, f"micro_{tag}.ppm")
+        r = render(binary, out, extra_env)
+        return parse_surfels((r.stdout or "") + (r.stderr or ""))
+
+    # the splat pair above already rendered the same edit with micros on
+    on = parse_surfels(splat_log)
+    if on is None:
+        on = run_surfels("on", {"VF_TEST_EDIT": EDIT})
+    off = run_surfels("off", {"VF_TEST_EDIT": EDIT, "VF_MICRO": "0"})
+    if on is None or off is None:
+        failures.append("micro: live edit never logged a run surfel count")
         return
-    logs = (r1.stdout or "") + (r1.stderr or "")
-    if "VF_TEST_BRUSH" not in logs:
-        failures.append("preview: brush hook never ran")
+    print(f"[micro] patched run surfels with micros {on} vs without {off}")
+    if on <= off * 1.1:
+        failures.append(
+            f"micro: live patch dropped its micro tail ({on} vs {off} surfels)")
+
+
+def check_preview(binary, tmp, failures, baseline):
+    """Hover previews: VF_TEST_BRUSH activates the edit tool with a brush
+    volume but applies NO edit, so the only frame difference is the tint over
+    the splats the brush would affect (splat backend only). Carve tints warm,
+    Add tints the growth footprint green (the volume the raised shell buries),
+    and Smooth tints its conservative terrain footprint blue."""
     w, h, a = read_ppm(baseline)
-    _, _, b = read_ppm(prev)
-    d, warm_r, warm_b = diff_stats(w, h, a, w, h, b)
-    print(f"[preview] carve tint on hover: pixel diff {d*100:.2f}%  warm R/B "
-          f"{warm_r}/{warm_b}")
-    if d < 0.0005:
-        failures.append(f"preview: no visible highlight ({d*100:.3f}%)")
-    if d > 0.25:
-        failures.append(f"preview: highlight covers too much ({d*100:.1f}%)")
-    if not (warm_r > warm_b and warm_r > 0):
-        failures.append("preview: tinted pixels are not warm (carve tint)")
+
+    def preview(tag, env, warm=None, green=None, blue=None):
+        prev = os.path.join(tmp, f"preview_{tag}.ppm")
+        r1 = render(binary, prev, env, mode=None)
+        if r1.returncode != 0 or not os.path.exists(prev):
+            failures.append(f"preview({tag}): render failed")
+            return
+        logs = (r1.stdout or "") + (r1.stderr or "")
+        if "VF_TEST_BRUSH" not in logs:
+            failures.append(f"preview({tag}): brush hook never ran")
+        _, _, b = read_ppm(prev)
+        d, wr, wb, wg = diff_stats(w, h, a, w, h, b)
+        print(f"[preview] {tag} tint on hover: pixel diff {d*100:.2f}%  "
+              f"brighter R/G/B {wr}/{wg}/{wb}")
+        if d < 0.0005:
+            failures.append(f"preview({tag}): no visible highlight ({d*100:.3f}%)")
+        if d > 0.25:
+            failures.append(f"preview({tag}): highlight covers too much ({d*100:.1f}%)")
+        if warm and not (wr > wb and wr > 0):
+            failures.append(f"preview({tag}): tinted pixels are not warm")
+        if green and not (wg > wr and wg > wb):
+            failures.append(f"preview({tag}): tinted pixels are not green")
+        if blue and not (wb > wr and wb > wg):
+            failures.append(f"preview({tag}): tinted pixels are not blue")
+
+    preview("carve", {"VF_TEST_BRUSH": f"{CELL},carve", "VF_EDIT_DIAM": "1.5"},
+            warm=True)
+    preview("add", {"VF_TEST_BRUSH": f"{CELL},add", "VF_EDIT_DIAM": "1.5",
+                    "VF_EDIT_DEPTH": "1.0"}, green=True)
+    preview("smooth", {"VF_TEST_BRUSH": f"{CELL},smooth", "VF_EDIT_DIAM": "1.5",
+                       "VF_SMOOTH_STRENGTH": "0.8"}, blue=True)
+
+
+def region_mean(img, w, x0, y0, x1, y1):
+    s = n = 0
+    for y in range(y0, y1):
+        for x in range(x0, x1):
+            k = y * w + x
+            s += (img[3 * k] + img[3 * k + 1] + img[3 * k + 2]) / 3.0
+            n += 1
+    return s / n
+
+
+def check_undo_and_clear(binary, tmp, failures, baseline):
+    """Undo and "Clear live edits" must actually remove live geometry.
+
+    Regression: a chunk whose run became empty was never patched (an empty
+    vector's data() is null, which tripped patchChunkSurfels' null-data
+    guard), so an undone stroke - and a cleared world - kept rendering the
+    removed material. Overlay reads/writes go through VF_OVERLAY_PATH into the
+    temp dir, so a session's own painting is never touched.
+
+    The raise stroke at CELL fills the frame centre at this close-up camera
+    (measured there: mean luma ~51 vs ~92 untouched); both reverts must bring
+    that region back to the untouched luma (the touched chunks' store-derived
+    shading can shift it a few counts until the next full reload).
+    """
+    over = os.path.join(tmp, "runtime_edits.vxw")
+    env = {"VF_OVERLAY_PATH": over}
+
+    def blob(img):
+        return region_mean(img, W, 150, 90, 460, 250)
+
+    w, h, base = read_ppm(baseline)
+    b0 = blob(base)
+    stroke = {"VF_TEST_STROKE": f"{CELL},3,raise", "VF_TEST_STROKE_SAVE": "1"}
+
+    # 1) a stroke + save (mirrors the interactive release path)
+    sa = os.path.join(tmp, "undo_stroke.ppm")
+    r = render(binary, sa, dict(env, **stroke), mode=None)
+    if r.returncode != 0 or not os.path.exists(sa):
+        failures.append("undo: stroke render failed")
+        return
+    if not os.path.exists(over):
+        failures.append("undo: the stroke did not persist an overlay")
+    _, _, ai = read_ppm(sa)
+    print(f"[undo] blob luma untouched {b0:.0f}, stroke {blob(ai):.0f}")
+    if blob(ai) > b0 - 20:
+        failures.append(f"undo: the stroke is not visible (blob {blob(ai):.0f})")
+
+    # 2) undo: the geometry must be gone again (emptied chunks included)
+    un = os.path.join(tmp, "undo_undone.ppm")
+    r = render(binary, un,
+               dict(stroke, VF_OVERLAY_PATH=os.path.join(tmp, "undo_overlay.vxw"),
+                    VF_TEST_UNDO="1"), mode=None)
+    logs = (r.stdout or "") + (r.stderr or "")
+    if r.returncode != 0 or not os.path.exists(un):
+        failures.append("undo: undo render failed")
+        return
+    for key in ("live edit undo:", "undo: stroke recorded"):
+        if key not in logs:
+            failures.append(f"undo: log missing '{key}'")
+    _, _, ui = read_ppm(un)
+    print(f"[undo] undone blob luma {blob(ui):.0f}")
+    if blob(ui) < blob(ai) + 20:
+        failures.append("undo: the undone stroke still renders")
+    if abs(blob(ui) - b0) > 12:
+        failures.append("undo: the undone frame does not match the untouched ground")
+
+    # 3) restore the saved overlay, then Clear live edits
+    cl = os.path.join(tmp, "undo_cleared.ppm")
+    r = render(binary, cl, dict(env, VF_TEST_CLEAR="1"), mode=None, overlay=True)
+    logs = (r.stdout or "") + (r.stderr or "")
+    if r.returncode != 0 or not os.path.exists(cl):
+        failures.append("clear: render failed")
+        return
+    if "live overlay: restored" not in logs:
+        failures.append("clear: the saved overlay was not restored (test premise)")
+    if "live edits: cleared" not in logs:
+        failures.append("clear: never logged 'live edits: cleared'")
+    if os.path.exists(over):
+        failures.append("clear: the overlay file survived the clear")
+    _, _, ci = read_ppm(cl)
+    print(f"[clear] cleared blob luma {blob(ci):.0f} (stroke {blob(ai):.0f})")
+    if blob(ci) < blob(ai) + 20:
+        failures.append("clear: the cleared geometry still renders")
+
+
+def render_batch(binary, tmp, views, mode=None, extra_env=None):
+    """One process renders every untouched baseline of a (mode, env) group: a
+    world load is ~13 s and dominates a single --shot, so the suite batches.
+    views: list of (out basename, cam)."""
+    list_path = os.path.join(tmp, "shots.txt")
+    with open(list_path, "w") as lf:
+        for name, cam in views:
+            lf.write(" ".join([os.path.join(tmp, name + ".ppm"), *cam]) + "\n")
+    env = dict(os.environ, VF_NO_OVERLAY="1")
+    if extra_env:
+        env.update(extra_env)
+    cmd = [binary, "--shotlist", list_path, "--width", str(W), "--height", str(H)]
+    if mode:
+        cmd += ["--mode", mode]
+    r = subprocess.run(cmd, capture_output=True, text=True, timeout=900, env=env)
+    if r.returncode != 0:
+        print(r.stderr[-2000:])
+    return r.returncode == 0
 
 
 def check_pair(binary, tmp, tag, mode, failures, min_diff=0.02, max_diff=0.60,
-               max_black=0.05, edit=EDIT, base_name=None, extra_env=None):
+               max_black=0.05, edit=EDIT, base_name=None, extra_env=None,
+               cam=None):
+    logs = ""
     # the untouched frame is shared between all checks on the same backend
     base = os.path.join(tmp, base_name or f"{tag}_base.ppm")
     editp = os.path.join(tmp, f"{tag}_edit.ppm")
     if os.path.exists(base):
         r0 = None
     else:
-        r0 = render(binary, base, extra_env, mode=mode)
+        r0 = render(binary, base, extra_env, mode=mode, cam=cam)
     if r0 is not None and (r0.returncode != 0 or not os.path.exists(base)):
         failures.append(f"{tag}: baseline render failed")
-        return
+        return logs
     env = dict(extra_env) if extra_env else {}
     env["VF_TEST_EDIT"] = edit
-    r1 = render(binary, editp, env, mode=mode)
+    r1 = render(binary, editp, env, mode=mode, cam=cam)
     if r1.returncode != 0 or not os.path.exists(editp):
         failures.append(f"{tag}: edited render failed")
-        return
+        return logs
     logs = (r1.stdout or "") + (r1.stderr or "")
     if "live edit:" not in logs:
         failures.append(f"{tag}: edited run never logged 'live edit:'")
@@ -263,6 +533,7 @@ def check_pair(binary, tmp, tag, mode, failures, min_diff=0.02, max_diff=0.60,
 
     if not se["sky_ok"]:
         failures.append(f"{tag}: edited sky probe not blue-dominant")
+    return logs
 
 
 def main():
@@ -271,15 +542,43 @@ def main():
         return 2
     binary = os.path.abspath(sys.argv[1])
     failures = []
+    if FAST:
+        # Fast iteration profile: retain the core live-store patch assertion,
+        # but defer the exhaustive backend/water/undo matrix to the full gate.
+        with tempfile.TemporaryDirectory() as tmp:
+            render_batch(binary, tmp, [("splat_base", CAM)])
+            check_pair(binary, tmp, "splat_fast", None, failures,
+                       min_diff=0.05, max_diff=0.70, max_black=0.09,
+                       base_name="splat_base.ppm")
+        if failures:
+            for f in failures:
+                print("FAIL:", f)
+            return 1
+        print("live_edit_check FAST PASSED")
+        return 0
+
     with tempfile.TemporaryDirectory() as tmp:
+        # every untouched baseline first, batched per (mode, env): the checks
+        # below find the files present and skip their own render
+        render_batch(binary, tmp, [
+            ("splat_base", CAM),
+            ("hero_base", HERO_CAM),
+            ("water_base", WATER_CAM),
+            ("water_channel_base", CHANNEL_CAM),
+        ])
+        render_batch(binary, tmp, [("splat_nomicro_base", CAM)],
+                     extra_env={"VF_MICRO": "0"})
+        render_batch(binary, tmp, [("svo_base", CAM)], mode="svo")
         # splat (default) and the SVO reference both patch the same edit
-        check_pair(binary, tmp, "splat", None, failures, min_diff=0.05, max_diff=0.70,
-                   max_black=0.09, base_name="splat_base.ppm")
+        splat_log = check_pair(binary, tmp, "splat", None, failures, min_diff=0.05,
+                               max_diff=0.70, max_black=0.09,
+                               base_name="splat_base.ppm")
         check_pair(binary, tmp, "svo", "svo", failures, min_diff=0.03, max_diff=0.70,
                    max_black=0.09, base_name="svo_base.ppm")
         # store-only brush modes (no record-layer equivalent): delete clears the
         # brush ball, paint recolours it. Micro-detail off so the diff is the
-        # geometry itself, not the patched chunks' dropped micro tail.
+        # edit geometry itself instead of micro-disk noise (the patched chunk
+        # keeps its micro tail now - see check_micro_persistence).
         no_micro = {"VF_MICRO": "0"}
         check_pair(binary, tmp, "delete", None, failures, min_diff=0.02, max_diff=0.70,
                    max_black=0.09, edit=CELL + ",delete",
@@ -287,11 +586,32 @@ def main():
         check_pair(binary, tmp, "paint", None, failures, min_diff=0.02, max_diff=0.70,
                    max_black=0.09, edit=CELL + ",paint",
                    base_name="splat_nomicro_base.ppm", extra_env=no_micro)
-        # carve-brush hover preview (tint only, no edit)
+        # object-surface smooth: a picked object cell must relax the surface
+        # along its own axis (never the terrain column path) and patch the
+        # splats over the exact store band.
+        obj_logs = check_pair(binary, tmp, "object_smooth", None, failures,
+                              min_diff=0.01, max_diff=0.50, max_black=0.09,
+                              edit=OBJECT_CELL + ",smooth",
+                              base_name="hero_base.ppm",
+                              extra_env={"VF_EDIT_DIAM": "4.0", "VF_TRACE": "1"},
+                              cam=HERO_CAM)
+        if "smooth object:" not in obj_logs:
+            failures.append("object_smooth: object pick did not run the "
+                            "surface-axis relaxation")
+        if "smooth terrain:" in obj_logs:
+            failures.append("object_smooth: object pick ran the terrain path")
+        # a live-patched chunk must keep its deterministic micro-detail tail
+        # (reuses the splat edit run's log instead of re-rendering it)
+        check_micro_persistence(binary, tmp, failures, splat_log)
+        # carve/add/smooth hover previews (tint only, no edit)
         check_preview(binary, tmp, failures,
                       os.path.join(tmp, "splat_base.ppm"))
-        # carving below the water level floods the dug volume
+        check_per_voxel(binary, tmp, failures)
+        # a dug volume below the water level reads as the fixed-level plane
         check_water_fill(binary, tmp, failures)
+        # undo + "Clear live edits" must remove live geometry (and the overlay)
+        check_undo_and_clear(binary, tmp, failures,
+                             os.path.join(tmp, "splat_base.ppm"))
 
     if failures:
         for f in failures:

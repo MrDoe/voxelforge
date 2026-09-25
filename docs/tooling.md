@@ -32,13 +32,17 @@ Interactive defaults: reference camera `1.0,2.0,1.5 → 5.3,1.0,11.3` (house.jpe
 | `VF_GUI_TEST=LAYERNAME` | test hook: toggle that layer like its checkbox at frame 20 |
 | `VF_TEST_SELECT=x,y,z` | deterministic anchor selection for highlight shots |
 | `VF_TEST_HOVER=x,y,z` | deterministic hover highlight |
-| `VF_TEST_BRUSH=x,y,z,carve\|add\|delete\|paint` | activate the edit tool at a voxel and render only the hover preview (no edit). Brush size via `VF_EDIT_DIAM`/`VF_EDIT_DEPTH` |
+| `VF_TEST_BRUSH=x,y,z,carve\|add\|delete\|paint\|smooth` | activate the edit tool at a voxel and render only the hover preview (no edit). Brush size via `VF_EDIT_DIAM`/`VF_EDIT_DEPTH`; Smooth strength via `VF_SMOOTH_STRENGTH` |
 | `VF_NO_OVERLAY=1` | ignore a saved `assets/runtime_edits.vxw` live-edit overlay at startup (the test scripts set it so interactive painting cannot pollute reference shots) |
-| `VF_TEST_EDIT=x,y,z,carve\|add\|delete\|paint` | apply one live store brush stamp after load (all modes patch the store; subtractive digs below the water plane flood) |
+| `VF_TEST_EDIT=x,y,z,carve\|add\|delete\|paint\|smooth` | apply one live store brush stamp after load (all modes patch the store, the surfels, the SVO pool and the edited height-texture columns) |
 | `VF_TEST_STROKE=x,y,z,steps[,mode]` | simulate a drag stroke; add `VF_TEST_STROKE_SAVE=1` to persist the overlay |
-| `VF_EDIT_DIAM`, `VF_EDIT_DEPTH` | brush diameter/depth in m |
+| `VF_TEST_UNDO=1` | close the pending stroke and undo it (undo path check) |
+| `VF_TEST_CLEAR=1` | drop every runtime edit + the overlay (the "Clear live edits" button) |
+| `VF_OVERLAY_PATH=<file>` | read/write the live-edit store overlay there instead of `assets/runtime_edits.vxw` (tests keep their edits out of the repo assets) |
+| `VF_EDIT_DIAM`, `VF_EDIT_DEPTH` | brush width/depth in metres, **snapped to whole voxels** (`App::quantiseBrush`), so `VF_EDIT_DIAM=0.1` is exactly 1 voxel = the per-voxel mode, where Add/Carve stamp a single cell (`EditableWorld::makeSingleVoxel`) instead of a volume |
+| `VF_SMOOTH_STRENGTH`, `VF_EDIT_STRENGTH` | terrain Smooth relaxation strength, clamped to 0..1 (the latter is an alias) |
 | `VF_LIVE_NOSPLAT=1`, `VF_LIVE_NOSVO=1` | skip one backend when patching a live edit |
-| `VF_NO_WATER_FILL=1` | skip the live-edit water flood (A/B for the tests: an open pit below the water plane stays dry) |
+| `VF_SPLAT_NOWATER=1` | skip the splat water-plane draw (A/B for the tests: a dug pit stays dry-looking) |
 | `VF_SPLAT_DEBUG=15` | splat debug view: magenta = surfel centre inside the edit-brush volume |
 | `VF_IMGUI_DEBUG=1` | dump ImGui draw-data stats at frame 5 |
 
@@ -64,6 +68,43 @@ printf '%s\n' \
  '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}' \
  '{"jsonrpc":"2.0","id":2,"method":"tools/list"}' | ./build/vf_mcp
 ```
+
+## STL / OBJ mesh import
+
+The in-app **Mesh** section of the editor sidebar (rail `IM`, `Ctrl+5`) lists
+`.stl`
+and `.obj` files under `assets/models/`, accepts a path typed manually, and
+writes a named `.vxw` layer through the same parser/voxelizer as the CLI and
+MCP tool. It exposes fit-to-longest-side or explicit scale, source-axis and
+winding fixes, material selection, solid-vs-shell mode, and a lattice anchor.
+A Ctrl+LMB pick can supply the anchor; for an existing layer, **Use layer
+source pivot** reads the untransformed bottom-center. Replacing an existing
+layer preserves its `world.json` `pos`, `rot`, `rotX`, and `rotZ` fields, so
+re-importing geometry does not change its authored orientation.
+
+The explicit offline converter remains useful for reproducible asset builds:
+
+```sh
+ninja -C build vf_mesh2vox
+./build/vf_mesh2vox assets/models/Forrest_Hunting_Cabin.stl \
+  --out hamlet_cabin --fit 5 --cell 428,507,676 --mat 6
+```
+
+`--dry-run` prints triangle/AABB/grid statistics without writing. `--scale`
+is for CAD units (millimetres normally use `0.001`); `--fit M` scales the
+longest AABB side to `M` metres. The importer defaults to a solid voxel fill;
+use `--shell` only for a known-watertight mesh because a thin raster shell can
+render hollow after VoxelField loading.
+
+For a deterministic headless exercise of the GUI method, set:
+
+```sh
+VF_TEST_MESH_IMPORT='models/Forrest_Hunting_Cabin.stl,hamlet_cabin,428,507,676,5,6,0,1' \
+  ./build/voxelforge --smoke 1
+```
+
+The fields are `file,name,x,y,z,fit[,material,meshYaw,solid]`; it calls the
+same `importMeshFromGui()` path and then rebuilds the layered world.
 
 ## `vf_slice`
 
@@ -147,9 +188,12 @@ OpenAI endpoint (see [getting started](getting-started.md#ai-editing-quick-start
 cmake -S . -B build -G Ninja     # once
 ninja -C build                   # all binaries + shaders (vf_shaders)
 ninja -C build world             # bake assets (explicit!)
-ctest --test-dir build           # unit_tests + visual_check
-./build/vf_tests --test-case='*world*'   # single suite
+ninja -C build test-surfel       # focused surfel group; choose per change
+ninja -C build test-live-edit    # focused live-edit group
+ninja -C build test-visual       # focused visual group
+./build/vf_tests --test-case='*world*'   # single doctest filter
 ./build/vf_slice ...             # ASCII cross-sections
+./build/vf_mesh2vox ...          # STL/OBJ -> named .vxw layer
 ./build/vf_mcp                   # MCP stdio server
 ./build/voxelforge               # the app
 ```

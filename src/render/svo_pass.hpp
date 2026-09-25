@@ -37,9 +37,13 @@ public:
     // Blocking (device idle + immediate submit): call between frames.
     void patchChunk(uint32_t chunk, const voxel::ChunkPool& pool);
 
-    void updateDescriptors(const Image3D& hdrImage, const Image3D& gposImage);
+    void updateDescriptors(const Image3D& hdrImage, const Image3D& gposImage,
+                           const Image3D& gnormImage);
     void setHeightmapView(VkImageView view);
     void setObjVolumeView(VkImageView view);
+    // Texture atlas (bindings 22/23, shared detailAlbedo). Writes once into
+    // the SVO set; null handles bind nothing (palette path).
+    void setTexAtlas(VkImageView view, VkSampler sampler, VkBuffer tableUbo);
     // Highlight feeds written to a persistently mapped UBO (binding 8):
     // slot 0 = selected voxel (strong warm), slot 1 = hover preview (faint).
     // xyz = voxel center (world), w = active flag.

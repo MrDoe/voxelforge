@@ -6,9 +6,9 @@ sphere tracer kept as the pixel reference — where a local AI can add, remove
 and shape voxel objects at runtime through chat or MCP tool calls, **without
 ever touching source code**.
 
-Every piece of geometry — rolling terrain, the river, the log cabin, trees,
-rocks, fences, anything the AI builds — lives in plain `.vxw` voxel-record
-files. The renderer bakes those records into GPU octrees and surfels on the fly
+Every piece of geometry — rolling terrain, the lake, the hamlet's hall,
+tower, pier, boat and props, anything the AI builds — lives in plain `.vxw`
+voxel-record files. The renderer bakes those records into GPU octrees and surfels on the fly
 and hot-reloads them while running.
 
 | Gaussian surfels (`--mode splat`, default) | SVO raymarcher (`--mode svo`, reference) |
@@ -22,7 +22,7 @@ side-by-side views, pixel-level zooms and measured timings.*
 ## Features
 
 - **Gaussian-surfel rendering (primary backend, `--mode splat`, default)**: the
-  CPU bake (`src/voxel/surfelize.*`) extracts one 64 B 2D Gaussian disk per
+  CPU bake (`src/voxel/surfelize.*`) extracts one 80 B 2D Gaussian disk per
   outer surface cell — position, normal, baked sun shadow, bent-normal AO,
   material — plus deterministic micro-detail children that turn texture texels
   into real geometry. Instanced quads rasterize through a depth prepass +
@@ -51,6 +51,11 @@ side-by-side views, pixel-level zooms and measured timings.*
 - **AI tooling**: in-app chat window plus a stdio **MCP server**
   (`vf_mcp`) exposing `add_box / add_cylinder / add_ellipsoid / add_stamp /
   list_layers / enable_layer / probe / ground / clear_edits`.
+- **STL/OBJ authoring in the GUI**: Dashboard/World Layers → **Import STL /
+  OBJ** scans `assets/models/`, voxelizes a selected mesh onto the 10 cm
+  lattice, and writes a named `.vxw` layer. Fit/scale, source-axis/winding,
+  material, solid/shell, and anchor controls are exposed; replacing a placed
+  layer preserves its manifest pose/orientation.
 - **Authoring tools**: `vf_slice` prints ASCII cross-sections of the baked
   field (including AI edits); `--probe` answers point queries.
 
@@ -79,20 +84,24 @@ offline baker (`tools/heightmap_gen.cpp`), which writes:
 |---|---|
 | `assets/heightmap.png` | baker-side terrain source (2048², 5 cm/texel) |
 | `assets/landscape.vxw` | terrain shell records (per lattice column) |
-| `assets/house` |tree1..6|rock1..3|bushes|alpaca|fence1.vxw` | authored objects |
+| `assets/hamlet_*.vxw` | runtime-authored object layers (hall, imported cabin, tower, pier, boat, well, market, garden, pines, props) written by `vf_mcp` or the GUI mesh importer |
 | `assets/world.json` | layer manifest — order = dedupe priority, first wins a cell |
 | `assets/ai_edits.vxw` | highest-priority live layer for chat/MCP edits |
 
-The app starts as a **bare valley**: only `landscape` (+ your AI edits) are
-loaded. The "World layers" panel in-app lists every `.vxw` file as a checkbox —
-tick `house.vxw`, `tree1.vxw`, … to load them into the running world; untick to
-remove them. New files dropped into `assets/` appear after a rescan.
+The app starts in the **lakeside hamlet**: `landscape` + the `hamlet_*`
+object layers (plus your AI edits) are loaded. The "World layers" panel in-app
+lists every `.vxw` file as a checkbox — tick `hamlet_tower.vxw`, … to load it
+into the running world; untick to remove it. New files dropped into `assets/`
+appear after a rescan.
 
 Layers store absolute world coordinates, so a checkbox materializes the object
 exactly where it was baked. To place a copy somewhere else, pick an anchor with
 `Ctrl+LMB` and hit the layer's **Import** button — it stamps the object at the
 selection (bottom-center) by appending translated records to `ai_edits.vxw`,
-leaving the original layer untouched.
+leaving the original layer untouched. For triangle assets, use **Import STL /
+OBJ** in the same panel; the current `hamlet_cabin` is reimported from
+`assets/models/Forrest_Hunting_Cabin.stl` without changing its authored
+`world.json` orientation.
 
 ## Controls
 
@@ -102,7 +111,13 @@ leaving the original layer untouched.
 | `RMB` + mouse | look |
 | wheel | movement speed (Shift/Ctrl boost/slow) |
 | `Ctrl+LMB` | pick a voxel → becomes the bottom-center anchor for AI builds |
-| `ESC` | quit |
+| `C` → Rotate | select the rotation tool |
+| plain LMB in Rotate | activate the exact object under the cursor |
+| click-drag trackball ring | local Y (outer), local X (wide), or local Z (tall); release stages, then press Apply |
+| `C` → Move | grab the exact object under the cursor |
+| `C` → Smooth | relax nearby terrain column heights; Size sets the footprint and Strength sets relaxation per stamp |
+| drag in Move | translate along the selected world X/Y/Z handle; release stages, then press Apply |
+| window close button | quit (`Esc` is reserved and does not exit) |
 
 ## AI editing
 
@@ -132,6 +147,7 @@ Register once (already wired for opencode in `.opencode/opencode.json`):
 | `add_box / add_cylinder / add_ellipsoid / add_stamp` | append records to `ai_edits.vxw` (anchored at `"anchor":[x,y,z]` or `"ground":[x,z]`) |
 | `list_layers` / `enable_layer` | inspect/toggle manifest layers |
 | `clear_edits` | wipe `ai_edits.vxw` |
+| `import_mesh` | convert an STL/OBJ into a named `.vxw` layer (GUI, CLI, and MCP share the pipeline) |
 
 Edits are visible to a running instance within ~0.5 s — no repack, no rebuild.
 
@@ -151,11 +167,22 @@ Edits are visible to a running instance within ~0.5 s — no repack, no rebuild.
 
 ## Testing
 
+Tests are organized into focused, opt-in groups. Build once, then run only the
+group that covers the change; do not run a bare all-tests command.
+
 ```sh
-ctest --test-dir build                     # unit_tests + visual_check
-python3 tests/visual_check.py ./build/voxelforge   # 3 canonical shots
-./build/voxelforge --selftest --width 640 --height 360
+ninja -C build
+ninja -C build test-surfel       # surfelize / surfel geometry
+ninja -C build test-live-edit    # ChunkStore and live patches
+ninja -C build test-visual       # camera / shader / scene acceptance
+ninja -C build test-store        # store foundations and rebuilds
+ninja -C build test-world        # layered world / SVO / records
+ninja -C build test-smoke        # quick cross-area check; test-fast alias
 ```
+
+Additional groups: `test-unit`, `test-effects`, `test-textures`, and
+`test-fog`. CTest entries are group-gated; a bare `ctest --test-dir build`
+skips them and there is no all-tests target.
 
 Unit tests cover the authoring primitives, stamp semantics, VXW round-trip and
 corruption handling, camera math, chat-tool normalization, and cross-check the

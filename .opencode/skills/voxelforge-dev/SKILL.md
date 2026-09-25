@@ -23,6 +23,29 @@ If no RAG results, run `opencode-rag index`.
 
 Persist discoveries: `add_quirk(content)` for build failures, workarounds, env constraints. Fix stale entries with `update_quirk`/`delete_quirk` — never duplicate.
 
+## 1b. Calling tools correctly — read before you call
+
+- **`edit` takes exactly three keys: `path` + `oldString` + `newString`.** All three
+  are required; omitting `path` fails schema validation before the edit is even
+  attempted, and it fails the same way on every retry. Put the path first in the
+  argument object. `oldString` must match the file byte-for-byte — copy it from a
+  read, do not retype it from memory.
+- **`read` / `grep` / `shell` / `glob` / `edit` are top-level tools only.** Inside
+  the `execute` (Code Mode) runtime only the catalog tools are callable
+  (`tools.search_semantic`, `tools.read`, `tools.get_file_skeleton`,
+  `tools.add_quirk`, …); calling `read` or `shell` from inside `execute` fails
+  with a no-such-tool error. To explore files, use `shell` with
+  `sed -n A,Bp file` / `grep -n` at the top level.
+- **JS given to `execute` is parsed before anything runs.** An unescaped double
+  quote inside a quoted string is a parse error, and *every* tool call in that
+  block is silently lost. Use backtick template strings for content that may
+  contain quotes, and keep `execute` blocks to one concern.
+- **Instrument before theorising.** When a numeric or geometry assertion fails,
+  print the actual values (a throwaway `g++` binary, `--probe`, `vf_slice`) before
+  proposing a cause. Two rounds of float-behaviour guessing on `makeDome` were
+  both wrong; one measurement settled it. Verify a hypothesis with a test run
+  only after a measurement shows it can matter.
+
 ## 2. Where things live
 
 | Area | Path | Notes |
@@ -90,28 +113,28 @@ Persist discoveries: `add_quirk(content)` for build failures, workarounds, env c
 - All geometry is data: terrain from `uHeight` (rg32f: top Y + material), objects from bricks + `uObjVol` (r8_snorm object SDF for shadows). No analytic scene constants exist in GLSL — don't add any.
 - Shader compile: `glslangValidator -V --target-env vulkan1.3 -o build/shaders/<name>.spv shaders/<name>` — Ninja target `vf_shaders` does this.
 
-## 7. Verification gates — must pass before done
+## 7. Verification gates — focused groups only
 
-Run in order; all must be green for any shader/scene change:
+Build once, then run only the group(s) affected by the change. **Never run a
+bare `ctest --test-dir build` or an all-tests target**; all CTest entries are
+group-gated by `tests/group_gate.py`.
 
 ```bash
 ninja -C build
-ctest --test-dir build                         # unit_tests + visual_check
-# or single suite:
-./build/vf_tests --test-case="*worldfile*"
-./build/vf_tests --test-case="chunk*"          # ChunkStore foundation (adoption/edits/rebuild)
-ctest -R unit_tests -V
-
-python3 tests/visual_check.py build/voxelforge # 3 canonical shots hero/house/water @480×270: coverage 3-97%, black-in-silhouette <5%, blue sky probe
-
-python3 tests/live_edit_check.py build/voxelforge # hero baseline vs VF_TEST_EDIT live store patch: visible (>2%) but bounded (<60%) pixel diff + sane probes
-
-./build/voxelforge --selftest --width 640 --height 360   # asserts sky probe + coverage bounds
-
-# debug traces:
-VF_TRACE=1 ./build/voxelforge --shot /tmp/vf.ppm --cam -16 6.5 -14 6.5 0.8 11
-python3 .opencode/skills/voxel-object/scripts/ascii_view.py /tmp/vf.ppm 96 40
+ninja -C build test-surfel       # surfelize / radius / surfel geometry
+ninja -C build test-live-edit    # ChunkStore, brushes, live GPU patches
+ninja -C build test-store        # store foundations and rebuild invariants
+ninja -C build test-world        # layered world / SVO / records
+ninja -C build test-visual       # camera / shader / scene acceptance + selftest
+ninja -C build test-effects      # SSAO; also test-textures / test-fog
+ninja -C build test-smoke        # short cross-area check; test-fast alias
 ```
+
+Use `./build/vf_tests --test-case="*worldfile*"` or
+`--test-case="chunk*"` only for a single focused doctest filter. Add a second
+group only when the changed files cross that boundary. The `visual` and
+`surfel` groups include the GPU `--selftest` acceptance check.
+
 
 - `vf_tests` does NOT depend on `vf_heightmap`; without baked assets field-consuming tests abort at runtime with "run 'ninja -C build world' first" instead of triggering a bake.
 - No validation layers on dev machine; rely on `selftest`/`visual_check` + unit tests + `VF_TRACE`.
@@ -127,19 +150,21 @@ python3 .opencode/skills/voxel-object/scripts/ascii_view.py /tmp/vf.ppm 96 40
 - Chunk handles: `-1` (`0xFFFFFFFF`) = empty, **`-2` (`0xFFFFFFFE`) = solid terminal** — both negative as `int32_t`, so never use a bare `root < 0` test (`ChunkStore::adopt` compares against the exact handle values).
 - Baked brick SDF uses `int(d/VOXEL)` truncation, so surface cells can store `raw == 0` (the SVO DDA treats `sdf <= 0` as solid). Sign comparisons between store and `VoxelField` must tolerate `±2·VOXEL` at surfaces.
 - Chunk indexing is **z-major** everywhere (`src/voxel/chunk_index.hpp`); the surfel path used to be x-major — use the helpers, don't re-derive.
-- Live edit: `ChunkStore::apply()` → region-limited `rebuildDirty()` (edit AABB ± `kLiveBand`=12, block-snapped; untouched blocks copied verbatim) → `LiveEditor::stamp()` refreshes per-chunk surfel caches (±3-cell region; a GPU-seeded chunk is *pre-edit*, so the edited region must be refreshed on top of the seed) → `SplatPass::patchChunkSurfels()` (paged buffer) **and** `SvoPass::patchChunk()` (chunk-local handle arenas). Brush modes Carve/Add/Delete/Paint all patch the live store (no bake path); Carve/Delete never clear below `WATER_LEVEL`. Drag-painting holds LMB (spacing = ¼ diameter); steady-state ~5–15 ms/stamp. Strokes save asynchronously to `assets/runtime_edits.vxw` (VXW v2 store section, loaded explicitly at startup/reload — not in world.json; `VF_NO_OVERLAY=1` skips the restore). Headless: `VF_TEST_EDIT="x,y,z,carve|add|delete|paint"`, `VF_TEST_BRUSH="x,y,z,mode"` (hover preview only), `VF_TEST_STROKE="x,y,z,steps[,mode]"` (+ `VF_TEST_STROKE_SAVE=1`), `VF_EDIT_DIAM`/`VF_EDIT_DEPTH`, `VF_LIVE_NOSPLAT/NOSVO`, `VF_SPLAT_DEBUG=15` (brush-volume mask).
+- Live edit: `ChunkStore::apply()` → region-limited `rebuildDirty()` (edit AABB ± `kLiveBand`=12, block-snapped; untouched blocks copied verbatim) → `LiveEditor::stamp()` refreshes per-chunk surfel caches (±3-cell region; a GPU-seeded chunk is *pre-edit*, so the edited region must be refreshed on top of the seed) → `SplatPass::patchChunkSurfels()` (paged buffer) **and** `SvoPass::patchChunk()` (chunk-local pool patches). Brush modes Carve/Add/Delete/Paint/Smooth all patch the live store (no bake path); Carve/Delete never clear below `WATER_LEVEL`. The brush is sized in **voxels** (1..120): 1 voxel is per-voxel mode, where Add/Carve bypass the volume rasterizers and stamp exactly one cell (`makeSingleVoxel` — Carve takes the picked cell, Add steps one cell along the normal's dominant axis; never `round(n/VOXEL)`), and the radius clamp floor is `VOXEL*0.5`, not 0.1 m. `App::quantiseBrush()` snaps every `VF_EDIT_DIAM`/`VF_EDIT_DEPTH` onto the lattice, so `VF_EDIT_DIAM=0.1` is 1 voxel. **Every oriented brush rasterizer (`makeOrientedCylinder` carve, `makeDome` add) must project its loop bounds on `axisDir`** (`half_i = radius + reach*|axisDir_i|`), never on world Y: a box that assumes the axis is up clips the footprint to `y >= base.y`, so on a wall the brush covers nothing below the picked cell and reads as a bulge instead of a thickening. Add grows the surface *out* along the picked normal — the footprint disk extruded `depth` and closed by a fillet of `min(radius, depth)/2` (measured on a vertical wall: 4612 cells, 2148 of them below the pick, vs 1748/0 before the fix; a render-diff assertion cannot tell old from new — 2.50 % vs 2.68 % pixels changed — so gate this in `tests/test_editable.cpp`, not in `live_edit_check.py`). Drag-painting holds LMB (spacing = ¼ diameter); steady-state ~5–15 ms/stamp. Strokes save asynchronously to `assets/runtime_edits.vxw` (VXW v2 store section, loaded explicitly at startup/reload — not in world.json; `VF_NO_OVERLAY=1` skips the restore). Headless: `VF_TEST_EDIT="x,y,z,carve|add|delete|paint"`, `VF_TEST_BRUSH="x,y,z,mode"` (hover preview only), `VF_TEST_STROKE="x,y,z,steps[,mode]"` (+ `VF_TEST_STROKE_SAVE=1`), `VF_EDIT_DIAM`/`VF_EDIT_DEPTH`, `VF_LIVE_NOSPLAT/NOSVO`, `VF_SPLAT_DEBUG=15` (brush-volume mask).
+- Rotate mode: one plain LMB click on an object activates its exact `PickHit::layer` owner; the click itself never rotates. The trackball is centered on the placed AABB and sized from its projected bounds; click-drag the outer/Y, wide/X, or tall/Z ring. Ring drags compose on the object's own local X/Y/Z axes (`Rnext = Rcurrent * Rlocal`) before conversion back to the manifest Euler angles. `projectScreen()` must mirror `splat.vert` (`dot(rel,basis)/dot(rel,fwd)`)—normalizing `rel` puts the gizmo off-object. Ring hits are tested before ImGui capture, and entering Rotate hides World Layers. **Live** — forward splats, GPU cull, and tile paths rotate only that owner about the canonical source bottom-center + manifest `pos` (bind 14; tile 24), using `Rnew * transpose(Rold)`. Terrain, water, other layers, and source-chunk culling stay fixed. Release stages the pose; **Apply rotation** commits once and leaves the object active, while **Cancel** discards it. Move mode grabs the exact owner, draws all three colored world X/Y/Z handles, hit-tests each handle independently, constrains dragging to the selected axis, and stages `pos` until **Apply move**; the selected-owner translation lane is applied in forward/cull/tile shaders and `VF_TEST_MOVE_LIVE` is preview-only. Stable IDs 1–254 are packed after AO smoothing as `mat_ao.w = AO + 8 + 16*ownerId`; water is `AO + 2`; use `shaders/common_surfel.glsl` decoders everywhere. `VF_SPLAT_DEBUG=16` paints selected green, other objects red, terrain/water blue. `VF_TEST_ROTATE_LIVE` is preview-only; `VF_TEST_ROTATE` commits/rebuilds; both use `VF_ROTATE_LAYER=<file>`.
 - Brick sign convention: `raw <= 0` is solid (the bake truncates `int(d/VOXEL)`, so surface cells can be 0 and the SVO DDA hits `sdf <= 0`). A `< 0` test in any store/rebuild path silently erodes surface cells on every rebuild.
 - SVO handles are **chunk-local**: every shader access adds the chunk's base from `uChunkInfo` (`common_svo.glsl` `chunkBases`). Never offset-adjust handles in the merge; `patchChunk` arena growth must treat bricks in `BRICK_WORDS` (×4096 bytes) and grow payload+childBase together.
 - `Chunk::lo/hi` are **global** lattice coords: the localized rebuild converts them to chunk-local before snapping to blocks. Boxes straddling the region boundary must be kept (dropping them uncovers their out-of-region cells); `Chunk::edited` drives overlay persistence. `Solid`/`Empty` chunks have no `slotOf` — guard (`hasSlots`) and skip `Solid` in rebuild paths (a dirty Solid neighbour used to segfault).
 - LiveEditor seeds new chunks from the GPU run (`SplatPass::readChunkSurfels`, base only) and the overlay (schema 2) stores each chunk's edit AABB so a restore re-refreshes just that region; schema-1 overlay files are rejected, delete `assets/runtime_edits.vxw` after a schema change.
 - World bounds ±51.2 m; water `-0.9`. Determinism only: use `hash2`, never wall-clock/RNG state. Baker sweeps are hot (~10 M SDF calls/regen) — add cheap reject (distance²/vertical cull) for scatter objects like `treesAt` does.
-- Interactive keys: WASD/QE move, RMB look, wheel speed, Ctrl+LMB pick anchor, ESC quit.
+- Interactive keys: WASD/QE move, RMB look, wheel speed, Ctrl+LMB pick anchor. The window close button quits; Esc is reserved and does not exit.
 - Docs: `README.md`, `AGENTS.md`, `docs/` (start at `docs/index.md`; history in `docs/history/rework.md`).
 
 ## 9. Quick reference
 
 ```bash
-ninja -C build && ctest --test-dir build
+ninja -C build
+ninja -C build test-surfel       # or the smallest relevant test-<group>
 ninja -C build world            # regen assets after common.hpp / heightmap_gen changes
 ./build/voxelforge --probe X Y Z
 ./build/vf_slice --axis y --center X Y Z --span 8

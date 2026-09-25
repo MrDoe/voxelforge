@@ -1,14 +1,38 @@
 #version 460
 #extension GL_GOOGLE_include_directive : require
-// Voxelforge - Screen-Space Ambient Occlusion (HBAO-style).
-// Samples the G-buffer world positions in a hemisphere pattern per pixel
-// to compute occlusion based on horizon angles.
+// Voxelforge - Screen-Space Ambient Occlusion (world-scale, two-band).
+//
+// This pass computes the raw AO term only; `ssao_apply.comp` denoises it
+// (cross-bilateral) and multiplies it into the LDR scene. Splitting the two
+// keeps this kernel free of the scene colour and lets the apply pass reuse
+// the G-buffer for its edge-aware weights.
+//
+// The kernel marches screen-space rays with a world-space radius per band:
+// each tap's world position (from the G-buffer) is tested against the pixel's
+// tangent plane, so occlusion is measured in metres, independent of
+// resolution and view distance. Two bands mirror the baked multi-scale AO:
+// a near "crease" band (~0.35 m default) that grounds crevices and contacts,
+// and a far "grounding" band (~1 m default) that darkens valleys, wall/floor
+// junctions and object bases. Foliage (chaotic geometry at every scale) keeps
+// the dense contact shading the old pixel-space kernel gave it.
+//
+// Normal: the shading normal G-buffer written by both backends (water stores
+// the flat plane normal); a finite-difference fallback covers a missing
+// writer. Sky and water write AO 0, and out-of-bounds / sky / water taps
+// count as non-occluders in the denominator (dropping them would darken
+// silhouettes instead of leaving them alone).
+//
+// Push block: shared RaymarchPush (128 B) + one local vec4 (see SSAOPass).
+//   params.x = debug (consumed by the apply pass)
+//   params.y = strength
+//   params.z = far-band radius in metres
+//   params.w = blur toggle
 
 layout(local_size_x = 8, local_size_y = 8, local_size_z = 1) in;
 
-layout(set = 0, binding = 0, rgba16f) uniform readonly image2D uGPos;
-layout(set = 0, binding = 1, rgba16f) uniform readonly image2D uCurrent;
-layout(set = 0, binding = 2, rgba16f) uniform writeonly image2D uOut;
+layout(set = 0, binding = 0, rgba16f) uniform writeonly image2D uAo;
+layout(set = 0, binding = 1, rgba16f) uniform readonly image2D uGPos;
+layout(set = 0, binding = 2, rgba16f) uniform readonly image2D uGNorm;
 
 layout(push_constant) uniform PC {
     vec4 camPos;
@@ -19,76 +43,120 @@ layout(push_constant) uniform PC {
     vec4 b; // worldSize, voxelSize, gridN, frameIdx
     vec4 sunDir;
     vec4 misc;
+    vec4 params; // x=debug, y=strength, z=far radius m, w=blur
 } pc;
 
-const float kOcclusionRadius = 0.5;
-const int kSamples = 16;
-const float kAoLevel = 1.0;
+const int kDirs = 6;
+const int kSteps = 3;
+const float kNormalBias = 0.03; // tangent-plane horizon bias (self-occlusion)
+const float kNearFrac = 0.35;   // near-band radius as a fraction of the far band
+const float kAoFade0 = 45.0;    // distance fade start (m)
+const float kAoFade1 = 80.0;    // fully faded (m)
+// The tap budget (2 bands x 6 dirs x 3 steps) samples only a thin fan of the
+// hemisphere, so the raw occluded fraction is a few percent even in tight
+// corners. The gain maps that fraction onto the visible [0,1] range; sky /
+// water / out-of-bounds taps still dilute (they add weight, never occlusion),
+// so silhouettes stay clean instead of darkening.
+const float kAoGain = 5.0;
 
-int gRenderFlags = 31;
+float hashPix(ivec2 p)
+{
+    return fract(sin(dot(vec2(p), vec2(12.9898, 78.233))) * 43758.5453);
+}
+
+bool inBounds(ivec2 p, ivec2 ext)
+{
+    return all(greaterThanEqual(p, ivec2(0))) && all(lessThan(p, ext));
+}
 
 void main()
 {
-    gRenderFlags = int(pc.misc.x + 0.5);
+    ivec2 ext = ivec2(int(pc.a.z), int(pc.a.w));
     ivec2 pix = ivec2(gl_GlobalInvocationID.xy);
-    if (pix.x >= int(pc.a.z) || pix.y >= int(pc.a.w)) return;
+    if (pix.x >= ext.x || pix.y >= ext.y)
+        return;
 
     vec4 gp = imageLoad(uGPos, pix);
     vec3 worldPos = gp.xyz;
-    float hitType = gp.w;
+    float hitType = gp.w; // 0 sky, 1 solid, 2 water
 
-    vec3 base = imageLoad(uCurrent, pix).rgb;
-    if (hitType < 0.5) {
-        imageStore(uOut, pix, vec4(base, 1.0));
+    // Sky and water get AO 0: SSAO is a solid-surface grounding effect, the
+    // water plane already has its own depth-graded absorption.
+    if (hitType < 0.5 || hitType > 1.5) {
+        imageStore(uAo, pix, vec4(0.0));
         return;
     }
 
-    // Reconstruct view-space position from world position
-    vec3 viewPos = worldPos - vec3(-pc.b.x * 0.5);
+    // Shading normal from the G-buffer; the ±1 px finite-difference fallback
+    // keeps the pass alive if a backend ever fails to write the target.
+    vec3 n = imageLoad(uGNorm, pix).xyz;
+    if (dot(n, n) < 1e-6) {
+        vec3 p0 = imageLoad(uGPos, clamp(pix + ivec2(1, 0), ivec2(0), ext - 1)).xyz;
+        vec3 p1 = imageLoad(uGPos, clamp(pix - ivec2(1, 0), ivec2(0), ext - 1)).xyz;
+        vec3 q0 = imageLoad(uGPos, clamp(pix + ivec2(0, 1), ivec2(0), ext - 1)).xyz;
+        vec3 q1 = imageLoad(uGPos, clamp(pix - ivec2(0, 1), ivec2(0), ext - 1)).xyz;
+        n = normalize(cross(q1 - q0, p1 - p0) + vec3(1e-6));
+    } else {
+        n = normalize(n);
+    }
+    if (dot(n, normalize(pc.camPos.xyz - worldPos)) < 0.0)
+        n = -n;
 
-    // Estimate normal from G-buffer finite differences, faced toward viewer
-    vec3 n = vec3(0.0, 1.0, 0.0);
-    {
-        ivec2 s = ivec2(1, 0);
-        vec3 p0 = imageLoad(uGPos, clamp(pix + s, ivec2(0), ivec2(int(pc.a.z), int(pc.a.w)))).xyz;
-        vec3 p1 = imageLoad(uGPos, clamp(pix - s, ivec2(0), ivec2(int(pc.a.z), int(pc.a.w)))).xyz;
-        vec3 dpdx = p1 - p0;
-        s = ivec2(0, 1);
-        p0 = imageLoad(uGPos, clamp(pix + s, ivec2(0), ivec2(int(pc.a.z), int(pc.a.w)))).xyz;
-        p1 = imageLoad(uGPos, clamp(pix - s, ivec2(0), ivec2(int(pc.a.z), int(pc.a.w)))).xyz;
-        vec3 dpdy = p1 - p0;
-        n = normalize(cross(dpdy, dpdx) + vec3(1e-6));
-        if (dot(n, normalize(pc.camPos.xyz - worldPos)) < 0.0)
-            n = -n;
+    float z = dot(worldPos - pc.camPos.xyz, pc.camFwd.xyz);
+    if (z < 0.05) {
+        imageStore(uAo, pix, vec4(0.0));
+        return;
     }
 
-    // Hemisphere sampling for AO: screen-space taps around the pixel.
-    // For each tap, the vector to the tapped surface is tested against the
-    // pixel normal — neighbours above the tangent plane are occluders
-    // (classic depth-difference AO). Strong signal in creases and contact
-    // zones, ~zero on open planes. No world->pixel projection involved.
-    float ao = 0.0;
-    float wSum = 0.0;
-    for (int i = 0; i < 10; ++i) {
-        float ang = float(i) * 2.39996; // golden-angle spiral
-        float rad = 3.0 + float(i) * 1.8; // 3..~19 px
-        ivec2 tp = pix + ivec2(int(round(cos(ang) * rad)),
-                               int(round(sin(ang) * rad)));
-        if (tp.x < 0 || tp.y < 0 || tp.x >= int(pc.a.z) || tp.y >= int(pc.a.w))
-            continue;
-        vec4 g2 = imageLoad(uGPos, tp);
-        if (g2.w < 0.5)
-            continue;
-        vec3 d = g2.xyz - worldPos;
-        float L = length(d);
-        if (L < 1e-4 || L > 2.5)
-            continue;
-        float o = max(dot(n, d / L) - 0.12, 0.0) / (1.0 + L * L * 2.0);
-        ao += o;
-        wSum += 1.0;
+    // pixels per metre at this depth (vertical fov + framebuffer height)
+    float ppm = (0.5 * pc.a.w) / max(pc.a.x * z, 1e-4);
+
+    float rFar = clamp(pc.params.z, 2.0 * pc.b.y, 40.0 * pc.b.y);
+    float rNear = kNearFrac * rFar;
+    float rot = hashPix(pix) * 6.2831853;
+
+    // Two world-space bands; out-of-bounds, sky, water and bias-rejected taps
+    // still add their nominal weight so they dilute (never darken) the result.
+    float occ = 0.0;
+    float wsum = 0.0;
+    for (int band = 0; band < 2; ++band) {
+        float r = (band == 0) ? rNear : rFar;
+        float bw = (band == 0) ? 0.55 : 0.45;
+        float rPx = clamp(r * ppm, 3.0, 48.0);
+        for (int d = 0; d < kDirs; ++d) {
+            float ang = rot + float(d) * 6.2831853 / float(kDirs);
+            vec2 dir = vec2(cos(ang), sin(ang));
+            for (int st = 0; st < kSteps; ++st) {
+                float tPx = rPx * (0.25 + 0.75 * float(st + 1) / float(kSteps));
+                ivec2 tp = pix + ivec2(round(dir * tPx));
+                float w = bw / float(kSteps);
+                wsum += w;
+                if (!inBounds(tp, ext))
+                    continue;
+                vec4 g2 = imageLoad(uGPos, tp);
+                if (g2.w < 0.5 || g2.w > 1.5)
+                    continue; // sky / water: non-occluders
+                vec3 dv = g2.xyz - worldPos;
+                float L = length(dv);
+                if (L < 1e-4)
+                    continue;
+                float h = dot(n, dv / L);
+                // slope-scaled tangent-plane bias: ignore taps that sit inside
+                // the pixel's own surface band (flat-surface acne)
+                float planeDist = h * L;
+                if (planeDist < max(1.5 * pc.b.y, 0.02 * L))
+                    continue;
+                float wEnv = exp(-(L * L) / (r * r)); // smooth world-range falloff
+                float s = clamp((h - kNormalBias) / (1.0 - kNormalBias), 0.0, 1.0);
+                occ += w * wEnv * s;
+            }
+        }
     }
 
-    ao = clamp(ao / max(wSum, 1e-4) * 2.0 * kAoLevel, 0.0, 1.0);
-    vec3 darkened = base * (1.0 - ao * 0.75);
-    imageStore(uOut, pix, vec4(darkened, 1.0));
+    float ao = clamp(occ * kAoGain / max(wsum, 1e-4), 0.0, 1.0);
+    // Distance fade: beyond ~45 m the world-space footprint is sub-pixel and
+    // the AO turns into noise; fade it out instead of aliasing.
+    ao *= 1.0 - smoothstep(kAoFade0, kAoFade1, z);
+
+    imageStore(uAo, pix, vec4(ao));
 }

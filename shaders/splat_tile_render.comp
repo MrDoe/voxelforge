@@ -1,6 +1,7 @@
 #version 460
 #extension GL_GOOGLE_include_directive : require
 #define SPLAT_BACKEND 1
+#include "common_surfel.glsl"
 // Voxelforge tile splat renderer (unified compute pass).
 //
 // Replaces the two forward raster passes (opaque Gaussian-alpha + water)
@@ -27,23 +28,25 @@
 //    like the water pipe (col*a^2 + dst*(1-a))
 //  - gpos is written by every surviving layer (no blend on att1, like HW)
 
-struct Surfel {
-    vec4 pos_rU;
-    vec4 normal_rV;
-    vec4 bent_sh;
-    vec4 mat_ao;
-};
-
 layout(set = 0, binding = 0) readonly buffer Surfels { Surfel uSurfels[]; };
 layout(set = 0, binding = 1, rg32f) uniform readonly highp image2D uHeight;
 layout(set = 0, binding = 2, r8_snorm) uniform readonly highp image3D uObjVol;
 layout(set = 0, binding = 14, rgba16f) uniform highp image2D uHdr;
 layout(set = 0, binding = 15, rgba16f) uniform highp image2D uGPos;
+layout(set = 0, binding = 21, rgba16f) uniform highp image2D uGNorm;
 
 layout(std140, set = 0, binding = 3) uniform SplatUBO {
     vec4 uSplat;  // x=buried, y=sigma2, z=quad extent, w=debug mode
     vec4 uSplat2; // x=radius scale, y=opacity, z/w=spare
 } sp;
+
+layout(std140, set = 0, binding = 24) uniform RotUBO {
+    vec4 uRot;
+    vec4 uRotRow0;
+    vec4 uRotRow1;
+    vec4 uRotRow2; // w = target layer ID
+    vec4 uMove;    // xyz = optional world translation for Move mode
+} rp;
 
 layout(set = 0, binding = 6) readonly buffer TileOffsets { uint uTileOffsets[]; };
 layout(set = 0, binding = 7) readonly buffer TileEnds { uint uTileEnds[]; };
@@ -83,8 +86,16 @@ struct DiskHit {
 bool diskHit(Surfel s, vec3 ro, vec3 rd, bool noCollapse, float extent,
              float rScale, out DiskHit h)
 {
-    const vec3 c = s.pos_rU.xyz;
+    vec3 c = s.pos_rU.xyz;
     h.n = normalize(s.normal_rV.xyz);
+    vec3 tangent = s.tan_aspect.xyz;
+    if (rp.uRot.x > 0.5 &&
+        surfelBelongsToLayer(s.mat_ao.w, uint(max(0.0, rp.uRotRow2.w)))) {
+        mat3 R = mat3(rp.uRotRow0.xyz, rp.uRotRow1.xyz, rp.uRotRow2.xyz);
+        c = rp.uRot.yzw + R * (c - rp.uRot.yzw) + rp.uMove.xyz;
+        h.n = R * h.n;
+        tangent = R * tangent;
+    }
     const float facing = dot(h.n, ro - c);
     const float rU = max(s.pos_rU.w, 1e-4) * rScale;
     const float rV = max(s.normal_rV.w, 1e-4) * rScale;
@@ -94,8 +105,15 @@ bool diskHit(Surfel s, vec3 ro, vec3 rd, bool noCollapse, float extent,
         return false;
     if (facing < 0.0 && thinShell)
         h.n = -h.n;
-    const vec3 upRef = abs(h.n.y) < 0.99 ? vec3(0.0, 1.0, 0.0) : vec3(1.0, 0.0, 0.0);
-    const vec3 tT = normalize(cross(h.n, upRef));
+    vec3 tProj = tangent - h.n * dot(tangent, h.n);
+    vec3 tT;
+    if (dot(tProj, tProj) < 1e-8) {
+        const vec3 upRef = abs(h.n.y) < 0.99 ? vec3(0.0, 1.0, 0.0)
+                                               : vec3(1.0, 0.0, 0.0);
+        tT = normalize(cross(h.n, upRef));
+    } else {
+        tT = normalize(tProj);
+    }
     const vec3 tB = normalize(cross(h.n, tT));
     const float denom = dot(rd, h.n);
     if (abs(denom) < 1e-6)
@@ -140,6 +158,7 @@ void main()
     // per-pixel compositing state (== HDR/G-buffer/depth targets)
     vec4 hdr = imageLoad(uHdr, pix);
     vec4 gpos = imageLoad(uGPos, pix);
+    vec4 gnorm = imageLoad(uGNorm, pix);
 
     const int tilesX = int(fr.uTileInfo.x + 0.5);
     const uint tile = uint((pix.y / 16) * tilesX + (pix.x / 16));
@@ -159,7 +178,7 @@ void main()
     float depth = 1.0;
     for (uint b = b0; b < b1; ++b) {
         Surfel s = uSurfels[uDupVals[b]];
-        if (s.mat_ao.w > 1.5)
+        if (surfelIsWater(s.mat_ao.w))
             continue; // water has its own path, never seeds depth
         DiskHit h;
         if (!diskHit(s, ro, rd, noCollapse, extent, rScale, h))
@@ -183,7 +202,7 @@ void main()
         vec3 q = ro + rd * t;
 
         const vec4 vMat = s.mat_ao;
-        const bool isWater = vMat.w > 1.5;
+        const bool isWater = surfelIsWater(vMat.w);
 
         // pure Gaussian alpha (mirrors splat.frag PASS_MODE 1); the discard
         // threshold also frees pixels from far sub-threshold ghosts.
@@ -199,7 +218,7 @@ void main()
                 continue;
         }
 
-        const float aoBaked = vMat.w - (isWater ? 2.0 : 0.0);
+        const float aoBaked = surfelBakedAo(vMat.w);
         vec3 col;
         float hitType = 1.0;
         if (isWater) {
@@ -226,7 +245,13 @@ void main()
                                   ? s.bent_sh.w
                                   : 1.0;
             const float aoB = ((gRenderFlags & 1) != 0) ? clamp(aoBaked, 0.0, 1.0) : 1.0;
-            const vec3 bentB = normalize(s.bent_sh.xyz);
+            vec3 bent = s.bent_sh.xyz;
+            if (rp.uRot.x > 0.5 &&
+                surfelBelongsToLayer(s.mat_ao.w, uint(max(0.0, rp.uRotRow2.w)))) {
+                mat3 R = mat3(rp.uRotRow0.xyz, rp.uRotRow1.xyz, rp.uRotRow2.xyz);
+                bent = R * bent;
+            }
+            const vec3 bentB = normalize(bent);
             col = shadeSurfel(q, rd, alb, rr, ro, n, bentB, shB, aoB, mId);
             const float fog = 1.0 - exp(-t * 0.0016);
             vec3 fc = fogColor(rd, q);
@@ -249,6 +274,7 @@ void main()
             hdr.rgb = hdr.rgb * (1.0 - alpha) + col * alpha * alpha;
             hdr.a = hdr.a * (1.0 - alpha) + alpha;
             gpos = vec4(q, hitType);
+            gnorm = vec4(0.0, 1.0, 0.0, 0.0);
         } else if (fragDepthQ == depth) {
             // opaque base (PASS_MODE 4 mirror): the exact nearest fragment
             // writes opaque colour so the sky can never bleed through the
@@ -258,15 +284,18 @@ void main()
             // two orders agree to first order.
             hdr = vec4(col, 1.0);
             gpos = vec4(q, hitType);
+            gnorm = vec4(n, 0.0);
         } else {
             // opaque band: straight colour source-over in back-to-front
             // draw order (the depth resolve above is the HW test mirror).
             hdr.rgb = hdr.rgb * (1.0 - alpha) + col * alpha;
             hdr.a = hdr.a * (1.0 - alpha) + alpha;
             gpos = vec4(q, hitType);
+            gnorm = vec4(n, 0.0);
         }
     }
 
     imageStore(uHdr, pix, hdr);
     imageStore(uGPos, pix, gpos);
+    imageStore(uGNorm, pix, gnorm);
 }

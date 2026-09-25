@@ -168,9 +168,9 @@ int ChatUi::executeToolCalls(const std::vector<ToolCall>& calls, glm::ivec3 anch
     return rejected;
 }
 
-void ChatUi::draw(vf::voxel::EditableWorld& editable, vf::voxel::LayeredWorld& world,
-                  const vf::voxel::PickHit* hover, const vf::voxel::PickHit* selection, bool hasSelection,
-                  std::function<void()> rebuildFn){
+void ChatUi::drawPanel(vf::voxel::EditableWorld& editable, vf::voxel::LayeredWorld& world,
+                       const vf::voxel::PickHit* hover, const vf::voxel::PickHit* selection,
+                       bool hasSelection, std::function<void()> rebuildFn){
     // poll async results
     {
         std::queue<ChatResult> toProcess;
@@ -217,27 +217,10 @@ void ChatUi::draw(vf::voxel::EditableWorld& editable, vf::voxel::LayeredWorld& w
         }
     }
 
-    ImGui::SetNextWindowPos(ImVec2(ImGui::GetIO().DisplaySize.x - 380, 12), ImGuiCond_FirstUseEver);
-    ImGui::SetNextWindowSize(ImVec2(368, 520), ImGuiCond_FirstUseEver);
-    ImGui::Begin("AI Chat", nullptr, 0);
-
-    // self-heal layouts saved by wider windows: keep the whole panel reachable
-    // on the current display
-    {
-        ImVec2 wp = ImGui::GetWindowPos(), ws = ImGui::GetWindowSize();
-        const ImVec2 ds = ImGui::GetIO().DisplaySize;
-        float nx = wp.x, ny = wp.y;
-        if (nx + ws.x > ds.x)
-            nx = std::max(12.f, ds.x - ws.x - 12.f);
-        if (ny + ws.y > ds.y)
-            ny = std::max(12.f, ds.y - ws.y - 12.f);
-        if (nx < 0.f)
-            nx = 12.f;
-        if (ny < 0.f)
-            ny = 12.f;
-        if (nx != wp.x || ny != wp.y)
-            ImGui::SetWindowPos(ImVec2(nx, ny));
-    }
+    // The assistant is a sidebar section, not a window: the caller only
+    // reaches this point when the AI section is on screen. Request polling
+    // above runs unconditionally, so a response that arrives while another
+    // section is showing still lands in m_history.
 
     ImGui::TextDisabled("%s", m_status.c_str());
     if(m_sending) { ImGui::SameLine(); ImGui::Text("⋯"); }
@@ -249,7 +232,12 @@ void ChatUi::draw(vf::voxel::EditableWorld& editable, vf::voxel::LayeredWorld& w
         ImGui::Text("Selected %d %d %d  (%.1f, %.1f, %.1f) mat %d",
                     selection->voxel.x, selection->voxel.y, selection->voxel.z,
                     w.x, w.y, w.z, int(selection->mat));
-        ImGui::TextDisabled("Center-bottom for new object • Ctrl+LMB to move");
+        const std::string owner = selection->object
+            ? world.layerFile(selection->layer) : std::string();
+        if (!owner.empty())
+            ImGui::TextDisabled("Owner: %s", owner.c_str());
+        else
+            ImGui::TextDisabled("Terrain / unowned geometry • center-bottom anchor");
         ImGui::EndChild();
         ImGui::PopStyleColor();
     } else {
@@ -314,7 +302,6 @@ void ChatUi::draw(vf::voxel::EditableWorld& editable, vf::voxel::LayeredWorld& w
     ImGui::SameLine();
     ImGui::Checkbox("thinking", &m_showThinking);
     if(ImGui::IsItemHovered()) ImGui::SetTooltip("Show model thinking traces");
-    ImGui::End();
 }
 
 } // namespace vf::ai

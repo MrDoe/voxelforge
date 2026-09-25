@@ -1,4 +1,6 @@
 #version 460
+#extension GL_GOOGLE_include_directive : require
+#include "common_surfel.glsl"
 // Voxelforge GPU-driven splat cull (compute pre-pass).
 //
 // One workgroup per opaque draw entry (chunk run, far->near sorted). Each
@@ -17,13 +19,6 @@
 // Exactness: culled quads produce zero fragments today (zero-area collapse,
 // behind-camera clip, chunk AABB frustum cull is a superset), so the
 // rendered image is unchanged - only vertex/clipper work disappears.
-
-struct Surfel {
-    vec4 pos_rU;    // xyz = centre (m), w = radiusU (m)
-    vec4 normal_rV; // xyz = geometric normal, w = radiusV (m)
-    vec4 bent_sh;
-    vec4 mat_ao;
-};
 
 layout(set = 0, binding = 0) readonly buffer Surfels { Surfel uSurfels[]; };
 // compaction slots: surviving surfel index per draw slot (written by this
@@ -56,6 +51,14 @@ layout(std140, set = 0, binding = 3) uniform SplatUBO {
     vec4 uSplat2;
 } sp;
 
+layout(std140, set = 0, binding = 14) uniform RotUBO {
+    vec4 uRot;
+    vec4 uRotRow0;
+    vec4 uRotRow1;
+    vec4 uRotRow2; // w = target layer ID
+    vec4 uMove;    // xyz = optional world translation for Move mode
+} rp;
+
 // Hi-Z pyramid (binding 10) + occlusion parameters (binding 11)
 layout(set = 0, binding = 10) uniform sampler2D uHiz;
 layout(set = 0, binding = 11) uniform OcclParams {
@@ -87,8 +90,16 @@ void main()
         bool keep = false;
         if (i < count) {
             Surfel s = uSurfels[first + i];
-            const vec3 c = s.pos_rU.xyz;
-            const vec3 n = normalize(s.normal_rV.xyz);
+            vec3 c = s.pos_rU.xyz;
+            vec3 n = normalize(s.normal_rV.xyz);
+            vec3 tangent = s.tan_aspect.xyz;
+            if (rp.uRot.x > 0.5 &&
+                surfelBelongsToLayer(s.mat_ao.w, uint(max(0.0, rp.uRotRow2.w)))) {
+                mat3 R = mat3(rp.uRotRow0.xyz, rp.uRotRow1.xyz, rp.uRotRow2.xyz);
+                c = rp.uRot.yzw + R * (c - rp.uRot.yzw) + rp.uMove.xyz;
+                n = R * n;
+                tangent = R * tangent;
+            }
             // identical collapse rule to splat.vert: opaque backfaces fold
             // to zero-area quads (foliage mat 8 and roof shells mat 7 stay)
             const float facing = dot(n, camPos - c);
@@ -111,9 +122,16 @@ void main()
             }
             // ---- occlusion cull via Hi-Z ----
             if (keep && oc.occlEnabled != 0) {
-                vec3 cn = normalize(s.normal_rV.xyz);
-                vec3 up = abs(cn.y) < 0.99 ? vec3(0.0, 1.0, 0.0) : vec3(1.0, 0.0, 0.0);
-                vec3 t = normalize(cross(cn, up));
+                const vec3 cn = normalize(n);
+                vec3 tp = tangent - cn * dot(tangent, cn);
+                vec3 t;
+                if (dot(tp, tp) < 1e-8) {
+                    vec3 up = abs(cn.y) < 0.99 ? vec3(0.0, 1.0, 0.0)
+                                               : vec3(1.0, 0.0, 0.0);
+                    t = normalize(cross(cn, up));
+                } else {
+                    t = normalize(tp);
+                }
                 vec3 b = normalize(cross(cn, t));
                 const float rScale = clamp(sp.uSplat2.x, 0.5, 2.0);
                 const float rU = max(s.pos_rU.w, 1e-4) * rScale;

@@ -64,27 +64,16 @@ LayeredWorld& allLayersWorld()
 }
 } // namespace
 
-// Analytic reference composition (terrain heightfield + authored object SDFs),
-// mirroring what the baker swept into the layers.
 // exposed for the determinism test
 std::string allLayersWorldPath() { return allLayersManifest(); }
 
+// Analytic reference composition. The default world is now runtime-authored
+// (hamlet_*.vxw layers, no baker object sweeps), so the only analytic truth
+// the field can be compared against is the terrain heightfield.
 float analyticD(glm::vec3 p)
 {
     const HeightMap& hm = sharedHeightmap();
-    float dTerrain = p.y - hm.sample(p.x, p.z);
-    float dObj = houseAt(p).d;
-    dObj = glm::min(dObj, treesAt(p).d);
-    dObj = glm::min(dObj, rocksAt(p).d);
-    dObj = glm::min(dObj, bushesAt(p).d);
-    dObj = glm::min(dObj, fenceAt(p).d);
-    dObj = glm::min(dObj, alpacaAt(p).d);
-    dObj = glm::min(dObj, bridgeAt(p).d);
-    dObj = glm::min(dObj, forestAt(p).d);
-    dObj = glm::min(dObj, docksideAt(p).d);
-    dObj = glm::min(dObj, shoreAt(p).d);
-    dObj = glm::min(dObj, fernsAt(p).d);
-    return glm::min(dTerrain, dObj);
+    return p.y - hm.sample(p.x, p.z);
 }
 TEST_CASE("layered world synthesizes a sparse SVO")
 {
@@ -115,12 +104,17 @@ TEST_CASE("VoxelField sign matches analytic scene truth at probes")
     glm::vec3 bc{ 0.f, -3.6f, 5.f };
     CHECK(f.sampleWorld(bc).d < -0.2f);
 
-    // near-surface agreement with the analytic SDF within tolerance band
+    // near-surface agreement with the analytic heightfield within a tolerance
+    // band: walk a path across the valley and sample the field close to the
+    // smooth terrain surface (objects are runtime-authored, so terrain is the
+    // only analytic reference left)
+    const HeightMap& hm = sharedHeightmap();
     int agree = 0, tested = 0;
     for (int i = 0; i < 400; ++i) {
-        float t = float(i) / 400.0f;
-        glm::vec3 p(glm::mix(-44.0f, 44.0f, t), 2.0f + sinf(t * 9.0f) * 1.8f,
-                    glm::mix(-44.0f, 44.0f, cosf(t * 7.0f)));
+        const float t = float(i) / 400.0f;
+        const float x = glm::mix(-44.0f, 44.0f, t);
+        const float z = glm::mix(-44.0f, 44.0f, cosf(t * 7.0f));
+        glm::vec3 p(x, hm.sample(x, z) + sinf(t * 9.0f) * 1.2f, z);
         float dRef = analyticD(p);
         if (std::abs(dRef) > 1.5f)
             continue; // only compare near the surface

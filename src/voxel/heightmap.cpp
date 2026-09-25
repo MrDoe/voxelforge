@@ -6,6 +6,7 @@
 
 #define STB_IMAGE_IMPLEMENTATION
 #define STBI_ONLY_PNG
+#define STBI_ONLY_JPEG // the texture picker takes dropped .jpg too
 #define STBI_ONLY_HDR
 #include <stb_image.h>
 
@@ -32,6 +33,23 @@ bool HeightMap::loadFromFile(const std::string& path)
         texels_[i] = kHmMinMeters + (float(raw[i]) / 65535.0f) * span;
     stbi_image_free(raw);
     spdlog::info("heightmap '{}' loaded: {}x{} texels", path, w_, h_);
+    return true;
+}
+
+bool loadPngRGBA8(const std::string& path, std::vector<uint8_t>& out,
+                  int& w, int& h)
+{
+    int comp = 0;
+    // The 8-bit path accepts PNG and JPEG (both are enabled above); the
+    // texture picker lists either, so a dropped .jpg works as-is.
+    stbi_uc* raw = stbi_load(path.c_str(), &w, &h, &comp, 4);
+    if (!raw) {
+        spdlog::warn("failed to load texture '{}': {}", path,
+                     stbi_failure_reason() ? stbi_failure_reason() : "unknown");
+        return false;
+    }
+    out.assign(raw, raw + size_t(w) * h * 4);
+    stbi_image_free(raw);
     return true;
 }
 

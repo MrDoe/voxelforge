@@ -1,6 +1,7 @@
 #include "voxel/layered_world.hpp"
 #include "voxel/common.hpp"
 #include <algorithm>
+#include <array>
 #include <spdlog/spdlog.h>
 #include <atomic>
 #include <chrono>
@@ -37,7 +38,7 @@ struct CellMap {
     {
         return uint64_t(v.r) | (uint64_t(v.g) << 8) | (uint64_t(v.b) << 16) |
                (uint64_t(v.reflectivity) << 24) | (uint64_t(v.roughness) << 32) |
-               (uint64_t(v.materialId) << 40);
+               (uint64_t(v.materialId) << 40) | (uint64_t(v.reserved) << 48);
     }
     void build(const std::vector<VoxelRecord>& recs)
     {
@@ -85,21 +86,27 @@ struct CellMap {
 
 inline uint32_t paletteWordLo(uint8_t mat)
 {
-    const glm::vec3& c = kPalette[std::min(int(mat), 16)];
+    const glm::vec3& c = kPalette[std::min(int(mat), kPaletteN - 1)];
     return uint32_t(c.r * 255.f) | (uint32_t(c.g * 255.f) << 8) |
            (uint32_t(c.b * 255.f) << 16);
 }
-inline uint32_t paletteWordHi(uint8_t mat, bool isObj = false)
+// word1 layout: a|refl<<8|rough<<16|(mat|objFlag)<<24. The `a` byte is
+// otherwise unused (255): the SVO shader reads only refl/rough/mat from word1,
+// so it carries the per-cell texture override (0 = none) for phase 2. The
+// store decode maps it onto StoreCell::tags, which the store surfel path
+// forwards to tan_aspect.w.
+inline uint32_t paletteWordHi(uint8_t mat, bool isObj = false, uint8_t tex = 0)
 {
-    const glm::vec2& rr = kMaterialReflection[std::min(int(mat), 16)];
-    return 255u | (uint32_t(rr.x) << 8) | (uint32_t(rr.y) << 16) |
+    const glm::vec2& rr = kMaterialReflection[std::min(int(mat), kPaletteN - 1)];
+    return uint32_t(tex) | (uint32_t(rr.x) << 8) | (uint32_t(rr.y) << 16) |
            (uint32_t(mat) | (isObj ? 0x80u : 0u)) << 24;
 }
 
-inline void wordsFromPacked(uint64_t p, int sdfRaw, bool isObj, uint32_t w[2])
+inline void wordsFromPacked(uint64_t p, int sdfRaw, bool isObj, uint8_t tex,
+                            uint32_t w[2])
 {
     w[0] = uint32_t(p & 0xFFFFFFu) | (uint32_t(sdfRaw & 0xFF) << 24);
-    w[1] = 255u | (uint32_t((p >> 24) & 0xFFu) << 8) |
+    w[1] = uint32_t(tex) | (uint32_t((p >> 24) & 0xFFu) << 8) |
            (uint32_t((p >> 32) & 0xFFu) << 16) |
            ((uint32_t((p >> 40) & 0xFFu) | (isObj ? 0x80u : 0u)) << 24);
 }
@@ -113,6 +120,19 @@ unsigned long long sigOf(const std::filesystem::path& p)
     auto ns = std::chrono::duration_cast<std::chrono::nanoseconds>(t.time_since_epoch())
                   .count();
     return static_cast<unsigned long long>(ns) * 0x9E3779B97F4A7C15ull;
+}
+
+// Preferred owner slot for a layer file. IDs are persisted for the lifetime
+// of a loaded world; this hash only chooses an initial slot after restart.
+// The parser resolves the astronomically rare 8-bit collision by probing.
+uint8_t preferredLayerId(const std::string& file)
+{
+    uint64_t h = 1469598103934665603ull;
+    for (unsigned char c : file) {
+        h ^= c;
+        h *= 1099511628211ull;
+    }
+    return uint8_t(1 + (h % 254));
 }
 
 struct BuildCtx {
@@ -183,11 +203,11 @@ void fillBrick(const BuildCtx& c, uint32_t* data, int bx0, int by0, int bz0)
                     uint32_t ridx;
                     if (c.map->find(cellKey(uint32_t(cx), uint32_t(cy), uint32_t(cz)), p,
                                     ridx))
-                        wordsFromPacked(p, int(h.d / VOXEL), h.obj, w);
+                        wordsFromPacked(p, int(h.d / VOXEL), h.obj, h.tex, w);
                     else {
                         w[0] = paletteWordLo(h.mat) |
                                (uint32_t(int32_t(int(h.d / VOXEL)) & 0xFF) << 24);
-                        w[1] = paletteWordHi(h.mat, h.obj);
+                        w[1] = paletteWordHi(h.mat, h.obj, h.tex);
                     }
                 } else if (worldYc < WATER_LEVEL) {
                     // water volume (shader-only surface at y = WATER_LEVEL)
@@ -198,7 +218,7 @@ void fillBrick(const BuildCtx& c, uint32_t* data, int bx0, int by0, int bz0)
                     // air: distance to nearest surface + material for hit shading
                     int sraw = h.d > 32.0f * VOXEL ? 32 : int(h.d / VOXEL);
                     w[0] = paletteWordLo(h.mat) | (uint32_t(sraw & 0xFF) << 24);
-                    w[1] = paletteWordHi(h.mat);
+                    w[1] = paletteWordHi(h.mat, h.obj, h.tex);
                 }
                 size_t i = (size_t(bz) * BRICK_N + size_t(by)) * BRICK_N + bx;
                 data[i * 2] = w[0];
@@ -276,6 +296,8 @@ bool LayeredWorld::parseAndComputeDirty(bool& outFull, std::vector<int>& outDirt
     m_colMat.assign(size_t(kLatN) * kLatN, 0);
     m_objCells.clear();
     m_objMats.clear();
+    m_objTexs.clear();
+    m_objLayerIds.clear();
     m_carveCells.clear();
     m_carveMats.clear();
     m_raiseCells.clear();
@@ -302,11 +324,55 @@ bool LayeredWorld::parseAndComputeDirty(bool& outFull, std::vector<int>& outDirt
     std::map<std::string, WorldAABB> curBox;
     std::map<std::string, bool> curEnabled;
     std::map<std::string, unsigned long long> curSig;
+    std::map<std::string, uint64_t> curPlace;
+    std::map<std::string, uint8_t> curLayerIds;
+    std::map<std::string, glm::vec3> curPivots;
     std::string landscapeFile;
     for (const auto& l : manifest) {
         curEnabled[l.file] = l.enabled;
         if (l.name == "landscape" || l.file == "landscape.vxw")
             landscapeFile = l.file;
+    }
+
+    // Stable owner IDs are allocated only for enabled object/scatter layers —
+    // the same roles transformRecords can place. Sorted filenames make a fresh
+    // process deterministic; retaining m_prevLayerIds keeps IDs stable while
+    // layers are toggled or new files are added during a session.
+    {
+        std::vector<std::string> ownerFiles;
+        for (const auto& l : manifest)
+            if (l.enabled && !l.role.empty() && l.role != "packed" &&
+                (l.role == "object" || l.role == "scatter"))
+                ownerFiles.push_back(l.file);
+        std::sort(ownerFiles.begin(), ownerFiles.end());
+        ownerFiles.erase(std::unique(ownerFiles.begin(), ownerFiles.end()),
+                         ownerFiles.end());
+        std::array<bool, 255> used{};
+        for (const std::string& file : ownerFiles) {
+            uint8_t id = 0;
+            const auto old = m_prevLayerIds.find(file);
+            if (old != m_prevLayerIds.end() && old->second != 0 &&
+                !used[old->second]) {
+                id = old->second;
+            } else {
+                const uint8_t start = preferredLayerId(file);
+                for (unsigned step = 0; step < 254; ++step) {
+                    const uint8_t candidate =
+                        uint8_t(1 + ((unsigned(start) - 1 + step) % 254));
+                    if (!used[candidate]) {
+                        id = candidate;
+                        break;
+                    }
+                }
+            }
+            if (id == 0) {
+                spdlog::warn("layered_world: no owner id left for '{}'; rotation disabled",
+                             file);
+                continue;
+            }
+            used[id] = true;
+            curLayerIds[file] = id;
+        }
     }
 
     for (const worldfile::WorldLayer& l : manifest) {
@@ -356,8 +422,53 @@ bool LayeredWorld::parseAndComputeDirty(bool& outFull, std::vector<int>& outDirt
         const bool isLandscape = (l.name == "landscape" || l.file == "landscape.vxw");
         const bool isCarve = (l.role == "carve");
         const bool isRaise = (l.role == "raise");
+        const bool isPlaceable = l.role == "object" || l.role == "scatter";
+        uint8_t layerId = 0;
+        if (isPlaceable) {
+            const auto id = curLayerIds.find(l.file);
+            if (id != curLayerIds.end())
+                layerId = id->second;
+            glm::vec3 pivot;
+            if (worldfile::recordBottomCenter(*vox, expected, pivot))
+                curPivots[l.file] =
+                    pivot + glm::vec3(l.pos[0], l.pos[1], l.pos[2]);
+        }
+        // Runtime placement (manifest pos/rot): object and scatter layers may
+        // be translated and rotated about their bottom-center on the fly. The
+        // record AABB below follows the placed records, so a placement change
+        // marks both the old and the new footprint dirty (the moved layer's
+        // chunks rebuild, the rest is reused verbatim).
+        const std::vector<VoxelRecord>* layerVox = vox;
+        std::vector<VoxelRecord> placed;
+        const float rot[3] = { l.rotDeg, l.rotX, l.rotZ };
+        if ((l.role == "object" || l.role == "scatter") &&
+            (l.pos[0] != 0.f || l.pos[1] != 0.f || l.pos[2] != 0.f ||
+             rot[0] != 0.f || rot[1] != 0.f || rot[2] != 0.f)) {
+            worldfile::transformRecords(*vox, expected,
+                                        glm::vec3(l.pos[0], l.pos[1], l.pos[2]),
+                                        rot[0], rot[1], rot[2], placed);
+            layerVox = &placed;
+        }
+        // placement hash: a rotation that leaves the AABB unchanged (a
+        // near-symmetric footprint) still rebuilds - the box check alone
+        // would miss it
+        uint64_t placeKey = 1469598103934665603ULL;
+        for (int c = 0; c < 3; ++c) {
+            uint32_t bits;
+            std::memcpy(&bits, &l.pos[c], 4);
+            placeKey ^= bits;
+            placeKey *= 1099511628211ULL;
+        }
+        for (int c = 0; c < 3; ++c) {
+            uint32_t bits;
+            std::memcpy(&bits, &rot[c], 4);
+            placeKey ^= bits;
+            placeKey *= 1099511628211ULL;
+        }
+        curPlace[l.file] = placeKey;
+
         WorldAABB& box = curBox[l.file];
-        for (const VoxelRecord& v : *vox) {
+        for (const VoxelRecord& v : *layerVox) {
             uint32_t key = cellKey(v.x, v.y, v.z);
             glm::vec3 wp = v.position(expected);
             box.lo = glm::min(box.lo, wp);
@@ -387,6 +498,8 @@ bool LayeredWorld::parseAndComputeDirty(bool& outFull, std::vector<int>& outDirt
             } else {
                 m_objCells.push_back(key);
                 m_objMats.push_back(v.materialId);
+                m_objTexs.push_back(v.reserved);
+                m_objLayerIds.push_back(layerId);
             }
         }
     }
@@ -412,7 +525,12 @@ bool LayeredWorld::parseAndComputeDirty(bool& outFull, std::vector<int>& outDirt
             bool sigSame =
                 (psig == m_prevSig.end()) == (csig == curSig.end()) &&
                 (psig == m_prevSig.end() || psig->second == csig->second);
-            if (sigSame && pbox != m_prevBox.end() && cbox != curBox.end() &&
+            bool placeSame = false;
+            auto pplace = m_prevPlace.find(kv.first);
+            auto cplace = curPlace.find(kv.first);
+            placeSame = (pplace == m_prevPlace.end()) == (cplace == curPlace.end()) &&
+                        (pplace == m_prevPlace.end() || pplace->second == cplace->second);
+            if (sigSame && placeSame && pbox != m_prevBox.end() && cbox != curBox.end() &&
                 pbox->second.lo == cbox->second.lo && pbox->second.hi == cbox->second.hi)
                 changed = false;
         }
@@ -421,19 +539,19 @@ bool LayeredWorld::parseAndComputeDirty(bool& outFull, std::vector<int>& outDirt
                 full = true;
             // dirty whatever box we know: the current one (enabled / content
             // change) or the previous one (layer just disabled - its chunks
-            // must be rebuilt or the old geometry would linger)
-            const WorldAABB* b = nullptr;
-            auto cbox = curBox.find(kv.first);
-            if (cbox != curBox.end())
-                b = &cbox->second;
-            else {
-                auto pbox = m_prevBox.find(kv.first);
-                if (pbox != m_prevBox.end())
-                    b = &pbox->second;
+            // must be rebuilt or the old geometry would linger). A placement
+            // change needs BOTH: the new footprint to build the moved layer
+            // and the old one to erase the geometry it left behind.
+            const auto cbox = curBox.find(kv.first);
+            const auto pbox = m_prevBox.find(kv.first);
+            if (cbox != curBox.end()) {
+                dirty.lo = glm::min(dirty.lo, cbox->second.lo);
+                dirty.hi = glm::max(dirty.hi, cbox->second.hi);
+                dirtyValid = true;
             }
-            if (b) {
-                dirty.lo = glm::min(dirty.lo, b->lo);
-                dirty.hi = glm::max(dirty.hi, b->hi);
+            if (pbox != m_prevBox.end()) {
+                dirty.lo = glm::min(dirty.lo, pbox->second.lo);
+                dirty.hi = glm::max(dirty.hi, pbox->second.hi);
                 dirtyValid = true;
             }
         }
@@ -472,6 +590,9 @@ bool LayeredWorld::parseAndComputeDirty(bool& outFull, std::vector<int>& outDirt
     m_prevBox = std::move(curBox);
     m_prevEnabled = std::move(curEnabled);
     m_prevSig = std::move(curSig);
+    m_prevPlace = std::move(curPlace);
+    m_prevLayerIds = std::move(curLayerIds);
+    m_prevPivots = std::move(curPivots);
     return true;
 }
 
@@ -490,6 +611,14 @@ LayeredWorld::ReloadResult LayeredWorld::reloadIfChanged(glm::vec3 cam)
             double r = 0, f = 0;
             if (!parseAndComputeDirty(full, dirty, r, f))
                 return kNone;
+            if (!full && dirty.empty()) {
+                // Manifest-only edit that touches no layer (e.g. a GUI texture
+                // swap rewriting the "textures" key): the parse above already
+                // refreshed the signatures, so there is nothing to rebuild and
+                // no reason to pay a full VoxelField rebuild for it.
+                spdlog::info("layered_world: manifest-only change, layers unchanged");
+                return kNone;
+            }
             return kick(full, std::move(dirty), cam);
         }
     }
@@ -598,14 +727,17 @@ bool LayeredWorld::buildInto(bool full, const std::vector<int>& dirty,
         glm::vec3 wc(0.06f, 0.22f, 0.28f); // matches analytic water tint
         ctx.waterLo = uint32_t(wc.r * 255.f) | (uint32_t(wc.g * 255.f) << 8) |
                       (uint32_t(wc.b * 255.f) << 16);
-        ctx.waterHi = 255u | (130u << 8) | (25u << 16) | (9u << 24); // shiny, mat 9
+        // byte 0 of word1 is the texture override slot: 0 = none (water is
+        // shaded analytically and never carries a texture)
+        ctx.waterHi = (130u << 8) | (25u << 16) | (9u << 24); // shiny, mat 9
     }
 
     // records-derived geometry oracle: terrain columns + flood-filled object
     // components with a signed distance transform. Replaces the old analytic
     // scene() sampling entirely.
-    outField.build(m_records, m_colTop, m_colMat, m_objCells, m_objMats, m_carveCells, m_carveMats,
-                   m_raiseCells, m_raiseMats);
+    outField.build(m_records, m_colTop, m_colMat, m_objCells, m_objMats,
+                   m_objTexs, m_carveCells, m_carveMats, m_raiseCells,
+                   m_raiseMats, m_objLayerIds);
 
     // global presence grid (record cells + object interiors) for the SVO builder
     const size_t gBlocks = size_t(kGBlocks) * kGBlocks * kGBlocks;

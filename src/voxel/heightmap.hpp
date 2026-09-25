@@ -38,4 +38,10 @@ const HeightMap& sharedHeightmap();
 // Offline tools can inject their own instance before building worlds.
 void setSharedHeightmap(const HeightMap* m);
 
+// 8-bit RGBA PNG decode (this TU owns the single stb_image implementation;
+// do not define STB_IMAGE_IMPLEMENTATION elsewhere). Returns false on any
+// failure; out is row-major [y][x], 4 bytes/texel.
+bool loadPngRGBA8(const std::string& path, std::vector<uint8_t>& out,
+                  int& w, int& h);
+
 } // namespace vf::voxel

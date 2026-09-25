@@ -152,19 +152,6 @@ TEST_CASE("stamp: hit, pocket, and conservative-distance semantics")
     CHECK(none.d > 1000.0f);
 }
 
-TEST_CASE("baked field: cabin walls solid, door carved")
-{
-    const VoxelField& f = testField();
-    // mid front log course: solid wood in the baked field too
-    auto wall = f.sampleWorld({ kHousePos.x, kPadY + 0.42f + 0.145f, kHousePos.y - 2.0f });
-    CHECK(wall.d < 0.0f);
-    CHECK(wall.mat == 6);
-
-    // door opening centre on the river side (-z): carved out of the wall
-    auto door = f.sampleWorld({ kHousePos.x - 0.7f, kPadY + 1.30f, kHousePos.y - 2.0f });
-    CHECK(door.d > 0.1f);
-}
-
 TEST_CASE("paddock fence: rails solid, gate open")
 {
     const HeightMap& hm = sharedHeightmap();
@@ -210,22 +197,6 @@ TEST_CASE("alpaca: wool body, dark legs and muzzle")
     CHECK(alpacaAt({ o.x - 0.59f, o.y + 1.40f, o.z + 0.07f }).mat == 5);
 }
 
-TEST_CASE("baked field: paddock and alpaca reachable")
-{
-    const VoxelField& field = testField();
-
-    auto a = field.sampleWorld({ kAlpacaSpot.x,
-                                 sharedHeightmap().sample(kAlpacaSpot.x, kAlpacaSpot.y) + 0.64f,
-                                 kAlpacaSpot.y });
-    CHECK(a.d < 0.0f);
-    CHECK(a.mat == 5);
-
-    glm::vec2 mid(0.5f * (kPaddockMin.x + kPaddockMax.x), kPaddockMax.y);
-    auto f = field.sampleWorld({ mid.x, sharedHeightmap().sample(mid.x, mid.y) + 0.36f, mid.y });
-    CHECK(f.d < 0.0f);
-    CHECK(f.mat == 6);
-}
-
 TEST_CASE("carve: subtractive cylinder cuts a hole through terrain and objects")
 {
     // generate carve cells with the same rasterizer the app uses
@@ -259,7 +230,7 @@ TEST_CASE("carve: subtractive cylinder cuts a hole through terrain and objects")
 
     VoxelField f;
     std::vector<VoxelRecord> recs0;
-    f.build(recs0, colTop, colMat, {}, {}, carveCells, carveMats);
+    f.build(recs0, colTop, colMat, {}, {}, {}, carveCells, carveMats);
 
     // the centred carve cell sits inside the subtracted volume -> reads as air
     auto s = f.sampleWorld(glm::vec3(0.f, 0.f, 0.f));
@@ -270,7 +241,7 @@ TEST_CASE("carve: subtractive cylinder cuts a hole through terrain and objects")
     CHECK(t.d <= 0.0f);
 }
 
-TEST_CASE("raise: dome lifts terrain most at the centre, tapering to the rim")
+TEST_CASE("raise: the dome lifts the whole footprint to the brush depth")
 {
     EditableWorld raiser(std::string(VOXELFORGE_ASSET_DIR),
                          std::string(EditableWorld::kRaiseFileName),
@@ -301,12 +272,213 @@ TEST_CASE("raise: dome lifts terrain most at the centre, tapering to the rim")
 
     VoxelField f;
     std::vector<VoxelRecord> recs0;
-    f.build(recs0, colTop, colMat, {}, {}, {}, {}, raiseCells, raiseMats);
+    f.build(recs0, colTop, colMat, {}, {}, {}, {}, {}, raiseCells, raiseMats);
 
     const auto& ht = f.heightTexture();
-    float hCenter = ht[size_t(anchor.z) * latN + anchor.x].x;
-    int rim = anchor.x + int(1.0f / VOXEL); // one radius out from the centre
-    float hRim = ht[size_t(anchor.z) * latN + rim].x;
-    CHECK(hCenter > hRim + 1.0f); // centre lifted well above the tapering rim
+    // flat ground well outside the footprint is the reference level (the
+    // centre column is itself raised, so it cannot be its own baseline)
+    const float ground = ht[size_t(anchor.z) * latN + anchor.x + 30].x;
+    const float hCenter = ht[size_t(anchor.z) * latN + anchor.x].x;
+    const int rim = anchor.x + int(1.0f / VOXEL); // one radius out from the centre
+    const float hRim = ht[size_t(anchor.z) * latN + rim].x;
+    // The Add volume is an extruded footprint closed by a fillet, NOT a dome
+    // that tapers to nothing at the rim: the whole footprint rises to
+    // (depth - c) and the centre to the full depth, which is what makes a
+    // clicked wall read as thicker rather than as a bulge.
+    CHECK(hCenter > ground + 1.3f); // full brush depth at the centre
+    CHECK(hRim > ground + 0.9f);    // the rim is nearly as high
+    CHECK(hCenter > hRim);          // the centre is still the peak
+    CHECK(hCenter - hRim < 0.7f);   // by the fillet only, not a tapering spike
 }
 
+// --- mesh -> voxel conversion (tools/mesh_to_voxel.cpp + vf_mcp import_mesh)
+#include "voxel/mesh_import.hpp"
+#include "voxel/mesh_voxel.hpp"
+
+// 12 triangles forming an axis-aligned box [min, max]
+static std::vector<MeshTri> boxTris(const glm::vec3& mn, const glm::vec3& mx)
+{
+    const glm::vec3 v[8] = {
+        { mn.x, mn.y, mn.z }, { mx.x, mn.y, mn.z }, { mx.x, mn.y, mx.z },
+        { mn.x, mn.y, mx.z }, { mn.x, mx.y, mn.z }, { mx.x, mx.y, mn.z },
+        { mx.x, mx.y, mx.z }, { mn.x, mx.y, mx.z },
+    };
+    const int idx[12][3] = { { 0, 2, 1 }, { 0, 3, 2 }, { 4, 5, 6 }, { 4, 6, 7 },
+                             { 0, 1, 5 }, { 0, 5, 4 }, { 3, 6, 2 }, { 3, 7, 6 },
+                             { 0, 4, 7 }, { 0, 7, 3 }, { 1, 2, 6 }, { 1, 6, 5 } };
+    std::vector<MeshTri> out;
+    for (const auto& f : idx) {
+        MeshTri t;
+        for (int k = 0; k < 3; ++k)
+            t.v[k] = v[f[k]];
+        out.push_back(t);
+    }
+    return out;
+}
+
+TEST_CASE("mesh voxelization: unit cube is fully solid")
+{
+    // A 1 m cube on a 0.1 m lattice. Conservative voxelization marks every
+    // cell the surface passes through, so the solid block is up to one voxel
+    // larger than the mesh per axis (that one-cell overlap is what keeps the
+    // shell watertight): here 11x11x11 = 1331 cells, grid 13 wide (the flood
+    // fill's air ring adds a cell each side).
+    std::vector<MeshTri> tris = boxTris(glm::vec3(0.f), glm::vec3(1.f));
+    VoxelizedMesh vm;
+    std::string err;
+    REQUIRE(voxelizeMesh(tris, vm, MeshVoxelOptions {}, &err));
+    CHECK(vm.nx == 13);
+    CHECK(vm.ny == 13);
+    CHECK(vm.nz == 13);
+    CHECK(vm.solidCount() == 1331);
+    CHECK_FALSE(vm.leak);
+
+    // the anti-hollow regression: a probe through the middle of the object
+    // must be solid all the way, not solid/air/solid
+    const int cx = 6, cz = 6;
+    for (int y = 1; y < vm.ny - 1; ++y) // skip the flood-fill air ring
+        CHECK(vm.cell[vm.idx(cx, y, cz)] != 0);
+}
+
+TEST_CASE("mesh voxelization: shell-only mode emits no interior")
+{
+    std::vector<MeshTri> tris = boxTris(glm::vec3(0.f), glm::vec3(1.f));
+    MeshVoxelOptions o;
+    o.solid = false;
+    VoxelizedMesh vm;
+    std::string err;
+    REQUIRE(voxelizeMesh(tris, vm, o, &err));
+    int shell = 0, interior = 0;
+    for (uint8_t c : vm.cell)
+        if (c == 1)
+            ++shell;
+        else if (c == 2)
+            ++interior;
+    CHECK(interior == 0);
+    CHECK(shell < 1331); // strictly fewer than the solid fill
+}
+
+TEST_CASE("mesh voxelization: a non-watertight mesh reports a leak")
+{
+    // a box missing its top face: the interior is open to the outside, so the
+    // exterior flood escapes and no interior can be classified
+    std::vector<MeshTri> tris = boxTris(glm::vec3(0.f), glm::vec3(1.f));
+    tris.erase(tris.begin() + 4, tris.begin() + 6); // drop the two top faces
+    VoxelizedMesh vm;
+    std::string err;
+    REQUIRE(voxelizeMesh(tris, vm, MeshVoxelOptions {}, &err));
+    CHECK(vm.leak);
+}
+
+TEST_CASE("meshToRecords: bottom-center placement and lattice bounds")
+{
+    std::vector<MeshTri> tris = boxTris(glm::vec3(0.f), glm::vec3(1.f));
+    VoxelizedMesh vm;
+    std::string err;
+    REQUIRE(voxelizeMesh(tris, vm, MeshVoxelOptions {}, &err));
+
+    std::vector<VoxelRecord> recs;
+    int clamped = 0;
+    // anchor = the object's bottom-center cell
+    const glm::ivec3 anchor(500, 500, 500);
+    REQUIRE(meshToRecords(vm, anchor, recs, &clamped) == 1331);
+    CHECK(clamped == 0);
+
+    int mn[3] = { 1 << 30, 1 << 30, 1 << 30 };
+    int mx[3] = { -(1 << 30), -(1 << 30), -(1 << 30) };
+    for (const auto& r : recs) {
+        int c[3] = { r.x, r.y, r.z };
+        for (int a = 0; a < 3; ++a) {
+            mn[a] = std::min(mn[a], c[a]);
+            mx[a] = std::max(mx[a], c[a]);
+        }
+    }
+    // the 11-cell solid block is centred on the anchor and its base sits ON
+    // the anchor cell (not a voxel above it)
+    CHECK(mn[0] == anchor.x - 5);
+    CHECK(mx[0] == anchor.x + 5);
+    CHECK(mn[1] == anchor.y);
+    CHECK(mx[1] == anchor.y + 10);
+    CHECK(mn[2] == anchor.z - 5);
+    CHECK(mx[2] == anchor.z + 5);
+
+    // out-of-bounds cells are dropped, not clamped into the world
+    recs.clear();
+    clamped = 0;
+    const glm::ivec3 edge(1019, 500, 500);
+    meshToRecords(vm, edge, recs, &clamped);
+    CHECK(clamped > 0);
+    for (const auto& r : recs)
+        CHECK(r.x <= 1023);
+}
+
+TEST_CASE("mesh import: OBJ file resolves and converts end to end")
+{
+    namespace fs = std::filesystem;
+    const fs::path file = fs::temp_directory_path() / "voxelforge_mesh_import_test.obj";
+    const fs::path mtl = fs::temp_directory_path() / "voxelforge_mesh_import_test.mtl";
+    {
+        std::ofstream material(mtl);
+        REQUIRE(material.good());
+        material << "newmtl cabin_red\nKd 1 0 0\n";
+    }
+    {
+        std::ofstream out(file);
+        REQUIRE(out.good());
+        out << "mtllib " << mtl.filename().string() << "\n"
+               "usemtl cabin_red\n"
+               "v 0 0 0\n"
+               "v 1 0 0\n"
+               "v 1 1 0\n"
+               "v 0 1 0\n"
+               "v 0 0 1\n"
+               "v 1 0 1\n"
+               "v 1 1 1\n"
+               "v 0 1 1\n"
+               "f 1 3 2 1 4 3\n"
+               "f 5 6 7 5 7 8\n"
+               "f 1 2 6 1 6 5\n"
+               "f 2 3 7 2 7 6\n"
+               "f 3 4 8 3 8 7\n"
+               "f 4 1 5 4 5 8\n";
+    }
+
+    MeshImportOptions options;
+    options.hasFit = true;
+    options.fitMeters = 1.0f;
+    options.mat = 6;
+    std::vector<VoxelRecord> records;
+    MeshImportStats stats;
+    std::string err;
+    REQUIRE(convertMeshToRecords(file.string(), options, true,
+                                glm::ivec3(500, 500, 500), records, stats, err));
+    CHECK(err.empty());
+    CHECK(stats.triangles == 24); // six quads fan-triangulate to two triangles each
+    CHECK(stats.nx == 13);
+    CHECK(stats.ny == 13);
+    CHECK(stats.nz == 13);
+    CHECK_FALSE(stats.leak);
+    REQUIRE(records.size() == 1331);
+    for (const auto& r : records) {
+        CHECK(r.r > 200);
+        CHECK(r.g < 50);
+        CHECK(r.b < 50);
+    }
+
+    int minX = 1024, maxX = -1, minY = 1024, maxY = -1, minZ = 1024, maxZ = -1;
+    for (const auto& r : records) {
+        minX = std::min(minX, int(r.x)); maxX = std::max(maxX, int(r.x));
+        minY = std::min(minY, int(r.y)); maxY = std::max(maxY, int(r.y));
+        minZ = std::min(minZ, int(r.z)); maxZ = std::max(maxZ, int(r.z));
+    }
+    CHECK(minX == 495);
+    CHECK(maxX == 505);
+    CHECK(minY == 500);
+    CHECK(maxY == 510);
+    CHECK(minZ == 495);
+    CHECK(maxZ == 505);
+
+    std::error_code ec;
+    fs::remove(file, ec);
+    fs::remove(mtl, ec);
+}

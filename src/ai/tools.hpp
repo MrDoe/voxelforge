@@ -30,7 +30,7 @@ struct NormalizedCall {
 
 inline const char* kValidTools =
     "create_box, create_cylinder, create_ellipsoid, create_stamp, create_voxels, "
-    "write_object, read_object, delete_object, list_world, probe";
+    "write_object, read_object, delete_object, import_mesh, list_world, probe";
 
 // lowercase alnum key with verb prefixes and trailing instance counters stripped:
 // "Add_Rock_2" -> "rock", "create-box" -> "box", "LIST_WORLD" -> "listworld"
@@ -79,6 +79,8 @@ inline std::string canonicalToolName(const std::string& key)
     if (key == "probe")
         return "probe";
     // object-layer file ops (read/modify/write/delete standalone .vxw layers)
+    if (has("import") || has("stl") || has("objfile") || has("convert"))
+        return "import_mesh";
     if (has("read") || has("inspect") || has("getobject") || has("dump"))
         return "read_object";
     if (has("delete") || has("remove") || has("erase"))
@@ -234,6 +236,16 @@ inline bool jsonGetInt(const std::string& json, const char* key, int& out)
     size_t s = c + 1;
     while (s < json.size() && std::isspace((unsigned char)json[s]))
         ++s;
+    // accept JSON booleans too (the MCP tool schema declares some options as
+    // "boolean"; a strict digit scan silently left the caller's default)
+    if (json.compare(s, 4, "true") == 0) {
+        out = 1;
+        return true;
+    }
+    if (json.compare(s, 5, "false") == 0) {
+        out = 0;
+        return true;
+    }
     size_t e = s;
     while (e < json.size() &&
            (std::isdigit((unsigned char)json[e]) || json[e] == '-' || json[e] == '+'))

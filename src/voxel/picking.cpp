@@ -95,7 +95,10 @@ PickHit rayPickT(const FieldT& field, glm::vec3 ro, glm::vec3 rd, float tMax,
                 v = worldToVoxel(probeP);
             }
             out.voxel = v;
-            out.mat = field.sampleWorld(hp).mat;
+            const auto snapped = field.sampleWorld(voxelCenter(v));
+            out.mat = snapped.mat;
+            out.object = snapped.obj;
+            out.layer = snapped.layer;
             out.terrainHeight = terrainTopY(v.x, v.z, v.y);
             return out;
         }

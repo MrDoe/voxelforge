@@ -542,6 +542,7 @@ vec3 shadeFloor(vec3 q, vec3 r)
     vec3 alb = kPalette[mId];
     vec2 rr = kMatRefl[mId];
     alb = detailAlbedo(alb, q, n, mId);
+    n = detailNormal(n, q, mId);
     vec3 V = -r;
     vec3 h = normalize(kSunDir + V);
     float vdh = max(dot(V, h), 0.0);
@@ -563,6 +564,7 @@ vec3 shadeTerrain(vec3 p, vec3 rd, vec3 alb, vec2 rr, vec3 ro)
     uint mId = getMaterialId(p);
     vec3 n = calcNormal(p);
     alb = detailAlbedo(alb, p, n, mId);
+    n = detailNormal(n, p, mId);
     float sh = ((gRenderFlags & 2) != 0) ? softShadow(p + n * 0.35, kSunDir) : 1.0;
 
     float ao = 1.0;
@@ -613,6 +615,9 @@ vec3 shadeTerrain(vec3 p, vec3 rd, vec3 alb, vec2 rr, vec3 ro)
         float depth = kWaterLevel - p.y;
         col *= exp(-depth * vec3(0.35, 0.18, 0.12) * 3.0);
         col = mix(col, vec3(0.05, 0.14, 0.13), clamp(depth * 0.8, 0.0, 0.85));
+        // refracted-sun caustics on the bed (shared with the splat backend)
+        col += kSunCol * causticAt(p.xz, pc.misc.y) * ndl * sh
+               * 0.25 * exp(-depth * 0.55);
     }
     col += (mId >= 9u && mId <= 15u) ? kEmissive[mId] : vec3(0.0);
     return col;

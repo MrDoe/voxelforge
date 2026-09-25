@@ -6,6 +6,10 @@
 #include "voxel/worldfile.hpp"
 #include "voxel/common.hpp"
 #include <doctest/doctest.h>
+#include <algorithm>
+#include <cmath>
+#include <cstdint>
+#include <utility>
 #include <filesystem>
 #include <string>
 #include <vector>
@@ -281,4 +285,239 @@ TEST_CASE("composed object: primitive building blocks + round-trip AABB")
     }
     CHECK(mx[0] - mn[0] > 10); // body+legs span > 1 m along x
     CHECK(mx[1] - mn[1] > 10); // legs (y=200..) to body top span > 1 m
+}
+
+TEST_CASE("carve cylinder opens the whole disk it starts at")
+{
+    TempDir tmp;
+    EditableWorld ed(tmp.str());
+    REQUIRE(ed.load());
+
+    // flat ground beside the river: the pick lands on the surface cell and the
+    // axis is exactly opposite to up - the degenerate branch of
+    // glm::rotation(up, axisDir). An exact surface test dropped half of the
+    // base-plane layer there, and a flat cap also left a one-cell roof over the
+    // +-1 cell of terrain relief around the pick: the scoop never flooded.
+    const glm::ivec3 anchor(512, 508, 512);
+    const float radius = 3.0f, depth = 3.0f;
+    const std::vector<VoxelRecord> recs = ed.makeOrientedCylinder(
+        anchor, glm::vec3(0.f, -1.f, 0.f), radius, depth, 2, /*carve=*/true);
+    REQUIRE(!recs.empty());
+
+    auto has = [&](int x, int y, int z) {
+        for (const VoxelRecord& v : recs)
+            if (int(v.x) == x && int(v.y) == y && int(v.z) == z)
+                return true;
+        return false;
+    };
+
+    // the scoop reaches the surface band above the pick (2 cells) and no more
+    CHECK(has(anchor.x, anchor.y + 2, anchor.z));
+    CHECK(!has(anchor.x, anchor.y + 3, anchor.z));
+    // floor exactly at the picked depth (3 m = 30 cells)
+    CHECK(has(anchor.x, anchor.y - 30, anchor.z));
+    CHECK(!has(anchor.x, anchor.y - 31, anchor.z));
+    // side boundary cells are kept (inclusive surface), one further out is not
+    CHECK(has(anchor.x + 30, anchor.y, anchor.z));
+    CHECK(!has(anchor.x + 31, anchor.y, anchor.z));
+
+    // the top layer covers every column of the disk - not just the half where
+    // the degenerate rotation happened to keep local.y <= 0
+    int expected = 0, found = 0;
+    for (int dz = -31; dz <= 31; ++dz)
+        for (int dx = -31; dx <= 31; ++dx) {
+            if (VOXEL * std::hypot(float(dx), float(dz)) > radius + 1e-4f)
+                continue;
+            ++expected;
+            if (has(anchor.x + dx, anchor.y + 2, anchor.z + dz))
+                ++found;
+        }
+    CHECK(expected > 2700);
+    CHECK(found == expected);
+
+    // the add shell keeps the exact [0, length] extent: no interior volume and
+    // nothing above the base plane beyond the shell band
+    const std::vector<VoxelRecord> shell = ed.makeOrientedCylinder(
+        anchor, glm::vec3(0.f, -1.f, 0.f), radius, depth, 2, /*carve=*/false);
+    auto inShell = [&](int x, int y, int z) {
+        for (const VoxelRecord& v : shell)
+            if (int(v.x) == x && int(v.y) == y && int(v.z) == z)
+                return true;
+        return false;
+    };
+    CHECK(!inShell(anchor.x, anchor.y - 15, anchor.z)); // interior stays empty
+    CHECK(inShell(anchor.x, anchor.y + 2, anchor.z));   // shell cap band
+}
+
+TEST_CASE("per-voxel add and carve touch exactly one cell")
+{
+    TempDir tmp;
+    EditableWorld ed(tmp.str());
+    REQUIRE(ed.load());
+
+    const glm::ivec3 anchor(512, 300, 512);
+
+    // Carve removes the voxel under the cursor, untouched.
+    const std::vector<VoxelRecord> carve =
+        ed.makeSingleVoxel(anchor, glm::vec3(0.f, 1.f, 0.f), 6, /*step=*/false);
+    REQUIRE(carve.size() == 1);
+    CHECK(int(carve[0].x) == anchor.x);
+    CHECK(int(carve[0].y) == anchor.y);
+    CHECK(int(carve[0].z) == anchor.z);
+    CHECK(carve[0].materialId == 6);
+
+    // Add steps one cell OUT along the dominant axis of the normal: the pick
+    // lands on solid material, so adding the picked cell would do nothing.
+    // A floor pick (+Y) stacks on top, a wall pick (-Z) hangs off the face.
+    for (const auto& [n, want] : std::vector<std::pair<glm::vec3, glm::ivec3>>{
+             { glm::vec3(0.f, 1.f, 0.f), glm::ivec3(anchor.x, anchor.y + 1, anchor.z) },
+             { glm::vec3(0.f, -1.f, 0.f), glm::ivec3(anchor.x, anchor.y - 1, anchor.z) },
+             { glm::vec3(0.f, 0.f, -1.f), glm::ivec3(anchor.x, anchor.y, anchor.z - 1) },
+             { glm::vec3(1.f, 0.f, 0.f), glm::ivec3(anchor.x + 1, anchor.y, anchor.z) } }) {
+        const std::vector<VoxelRecord> add =
+            ed.makeSingleVoxel(anchor, n, 3, /*step=*/true);
+        REQUIRE(add.size() == 1);
+        CHECK(glm::ivec3(add[0].x, add[0].y, add[0].z) == want);
+        CHECK(add[0].materialId == 3);
+    }
+
+    // a smoothed corner normal picks ONE axis, not round(n / VOXEL) (which
+    // would step 7 cells on two axes and land nowhere near the surface)
+    const std::vector<VoxelRecord> corner =
+        ed.makeSingleVoxel(anchor, glm::vec3(0.7f, 0.7f, 0.f), 6, true);
+    REQUIRE(corner.size() == 1);
+    const glm::ivec3 ct(corner[0].x, corner[0].y, corner[0].z);
+    CHECK((ct == glm::ivec3(anchor.x, anchor.y + 1, anchor.z) ||
+           ct == glm::ivec3(anchor.x + 1, anchor.y, anchor.z)));
+    CHECK(abs(ct.x - anchor.x) <= 1);
+    CHECK(abs(ct.y - anchor.y) <= 1);
+    CHECK(ct.z == anchor.z);
+
+    // a degenerate normal still steps somewhere sane
+    const std::vector<VoxelRecord> zero =
+        ed.makeSingleVoxel(anchor, glm::vec3(0.f), 6, true);
+    REQUIRE(zero.size() == 1);
+    CHECK(glm::ivec3(zero[0].x, zero[0].y, zero[0].z).y == anchor.y + 1);
+
+    // stepping out of the lattice yields nothing instead of a wrapped cell
+    CHECK(ed.makeSingleVoxel(glm::ivec3(0, 300, 512), glm::vec3(-1.f, 0.f, 0.f),
+                             6, true).empty());
+    CHECK(ed.makeSingleVoxel(glm::ivec3(1023, 300, 512), glm::vec3(1.f, 0.f, 0.f),
+                             6, true).empty());
+    CHECK(ed.makeSingleVoxel(glm::ivec3(0, 0, 0), glm::vec3(0.f, -1.f, 0.f), 6,
+                             true).empty());
+    // ...but the unstepped pick at the origin is still emitted
+    CHECK(ed.makeSingleVoxel(glm::ivec3(0, 0, 0), glm::vec3(0.f, -1.f, 0.f), 6,
+                             false).size() == 1);
+}
+
+TEST_CASE("add dome grows out along the picked surface normal")
+{
+    TempDir tmp;
+    EditableWorld ed(tmp.str());
+    REQUIRE(ed.load());
+
+    auto index = [](const std::vector<VoxelRecord>& v) {
+        std::vector<uint64_t> keys;
+        keys.reserve(v.size());
+        for (const VoxelRecord& r : v)
+            keys.push_back((uint64_t(r.x) << 42) | (uint64_t(r.y) << 21) |
+                           uint64_t(r.z));
+        return keys;
+    };
+    // A vertical wall: the axis is +X, i.e. nothing to do with world up. The
+    // old rasterizer spanned the dome height in world Y, which clipped the
+    // footprint (the plane ACROSS the axis) to y >= anchor.y: on this cell set
+    // the old code emitted 0 of 4612 cells below the pick, so the brush never
+    // thickened the wall - it raised a bulge above the click.
+    const glm::ivec3 anchor(512, 300, 512);
+    const float radius = 1.0f, height = 1.5f;
+    const std::vector<VoxelRecord> wall =
+        ed.makeDome(anchor, glm::vec3(1.f, 0.f, 0.f), radius, height, 6);
+    REQUIRE(!wall.empty());
+    const std::vector<uint64_t> keys = index(wall);
+    auto has = [&](int x, int y, int z) {
+        const uint64_t k = (uint64_t(uint32_t(x)) << 42) |
+                           (uint64_t(uint32_t(y)) << 21) | uint64_t(uint32_t(z));
+        return std::find(keys.begin(), keys.end(), k) != keys.end();
+    };
+
+    // grows the full depth out of the surface along the normal (1.5 m = 15
+    // cells) and no further
+    CHECK(has(anchor.x + 15, anchor.y, anchor.z));
+    CHECK(!has(anchor.x + 16, anchor.y, anchor.z));
+    // the footprint is a full disk in the plane ACROSS the normal: cells a
+    // full radius above and below the hit are covered (world up/down used to
+    // be the only extent the loop spanned, so a wall got nothing)
+    CHECK(has(anchor.x + 5, anchor.y - 10, anchor.z));
+    CHECK(has(anchor.x + 5, anchor.y + 10, anchor.z));
+    CHECK(!has(anchor.x + 5, anchor.y - 11, anchor.z));
+    // the wall thickens over its WHOLE footprint and only the outer lip rounds
+    // over: at the footprint edge (1.0 m off axis) the growth is a full
+    // heightM - c = 1.0 m straight, then the fillet c = 0.5 m closes in
+    CHECK(has(anchor.x + 10, anchor.y + 10, anchor.z));
+    CHECK(!has(anchor.x + 11, anchor.y + 10, anchor.z));
+    // nothing is emitted behind the surface (the picked wall's far side is
+    // never eroded), beyond the one-voxel base layer
+    CHECK(has(anchor.x - 1, anchor.y, anchor.z));
+    CHECK(!has(anchor.x - 5, anchor.y, anchor.z));
+    // the growth follows the axis: +Z is off the wall, -Z too
+    CHECK(!has(anchor.x + 5, anchor.y, anchor.z + 12));
+    CHECK(!has(anchor.x + 5, anchor.y, anchor.z - 12));
+
+    // terrain (axis = +Y) still raises a rounded plateau of the same size
+    const std::vector<VoxelRecord> floor =
+        ed.makeDome(anchor, glm::vec3(0.f, 1.f, 0.f), radius, height, 6);
+    const std::vector<uint64_t> fkeys = index(floor);
+    auto fhas = [&](int x, int y, int z) {
+        const uint64_t k = (uint64_t(uint32_t(x)) << 42) |
+                           (uint64_t(uint32_t(y)) << 21) | uint64_t(uint32_t(z));
+        return std::find(fkeys.begin(), fkeys.end(), k) != fkeys.end();
+    };
+    REQUIRE(!floor.empty());
+    CHECK(fhas(anchor.x, anchor.y + 15, anchor.z));
+    CHECK(!fhas(anchor.x, anchor.y + 16, anchor.z));
+    CHECK(fhas(anchor.x + 10, anchor.y + 5, anchor.z));
+    CHECK(fhas(anchor.x - 10, anchor.y + 5, anchor.z));
+    CHECK(fhas(anchor.x + 10, anchor.y + 10, anchor.z));   // straight side
+    CHECK(!fhas(anchor.x + 10, anchor.y + 12, anchor.z));  // past the fillet
+    CHECK(!fhas(anchor.x, anchor.y - 5, anchor.z));
+
+    // a shallow growth (height < radius) is a wide filleted slab, not a narrow
+    // dome: the whole 4 m footprint is covered and the fillet (c = 0.15 m)
+    // closes the last 0.15 m
+    const std::vector<VoxelRecord> low =
+        ed.makeDome(anchor, glm::vec3(0.f, 0.f, -1.f), 2.0f, 0.3f, 6);
+    const std::vector<uint64_t> lkeys = index(low);
+    auto lhas = [&](int x, int y, int z) {
+        const uint64_t k = (uint64_t(uint32_t(x)) << 42) |
+                           (uint64_t(uint32_t(y)) << 21) | uint64_t(uint32_t(z));
+        return std::find(lkeys.begin(), lkeys.end(), k) != lkeys.end();
+    };
+    REQUIRE(!low.empty());
+    CHECK(lhas(anchor.x, anchor.y, anchor.z - 3));   // 0.3 m = 3 cells: the top
+    CHECK(!lhas(anchor.x, anchor.y, anchor.z - 4));
+    CHECK(lhas(anchor.x + 20, anchor.y, anchor.z));  // footprint edge: 2.0 m
+    CHECK(!lhas(anchor.x + 21, anchor.y, anchor.z));
+    CHECK(lhas(anchor.x, anchor.y + 20, anchor.z));
+    CHECK(!lhas(anchor.x, anchor.y + 21, anchor.z));
+    // the footprint edge is straight for the first 0.15 m, then the fillet
+    CHECK(lhas(anchor.x + 20, anchor.y, anchor.z - 1));
+    CHECK(!lhas(anchor.x + 20, anchor.y, anchor.z - 2));
+    // one voxel behind the surface is part of the volume by design (it seals
+    // the growth against the surface, like the carve scoop's base layer)
+    CHECK(lhas(anchor.x, anchor.y, anchor.z + 1));
+    CHECK(!lhas(anchor.x, anchor.y, anchor.z + 2));
+    // the world bounds never clip the volume: a 2 m radius at the top of the
+    // lattice still yields the full footprint
+    const std::vector<VoxelRecord> high =
+        ed.makeDome(glm::ivec3(512, 1023, 512), glm::vec3(0.f, 1.f, 0.f),
+                    2.0f, 0.3f, 6);
+    const std::vector<uint64_t> hkeys = index(high);
+    auto hhas = [&](int x, int y, int z) {
+        const uint64_t k = (uint64_t(uint32_t(x)) << 42) |
+                           (uint64_t(uint32_t(y)) << 21) | uint64_t(uint32_t(z));
+        return std::find(hkeys.begin(), hkeys.end(), k) != hkeys.end();
+    };
+    CHECK(hhas(512 + 20, 1023, 512));
 }

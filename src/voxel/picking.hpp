@@ -11,6 +11,8 @@ struct PickHit {
     glm::vec3 pos {0.f};      // world hit point
     glm::vec3 normal {0.f,1.f,0.f};
     uint8_t mat = 0;
+    bool object = false;      // snapped cell belongs to an object field
+    uint8_t layer = 0;        // owning .vxw layer (0 = terrain/unowned)
     float dist = 0.f;         // t along ray
     glm::ivec3 voxel {0};     // quantized lattice coord
     float terrainHeight = 0.f;

@@ -24,53 +24,62 @@ public:
     bool init(const Context& ctx);
     void destroy();
 
-    // Upload a fresh surfel set (device idle; called from applyWorldReload).
+    // Bind the optional PNG texture atlas (bindings 22/23) into the forward
+    // and tile descriptor sets. Called once after the atlas loads; the atlas
+    // image/view are stable across world reloads (fixed layer count), so a
+    // reload re-uploads pixels without re-writing descriptors. A null view
+    // binds nothing (the shader's slot table is then all -1 = palette).
+    void setTexAtlas(VkImageView view, VkSampler sampler, VkBuffer tableUbo);
     // waterStart = first index of appended water surfels (== count if none).
     // waterChunkRange optionally buckets the trailing water surfels per chunk
     // (GRID_N^3 + 1 absolute offsets, like chunkRange) so off-screen water is
     // culled per frame; empty = draw all water in one call (legacy).
-    // microStart optionally splits each chunk into [base, micro) (same
+    // edgeStart optionally marks the end of base parents in each chunk; the
+    // following small hard-edge bridges remain in the always-on opaque range.
+    // microStart optionally splits each chunk into [base+edge, micro) (same
     // GRID_N^3 + 1 layout, absolute offsets); empty = no split. Distant
-    // chunks skip their sub-pixel micro range (VF_MICRO_DIST, default 40 m).
+    // chunks skip their sub-pixel micro range (VF_MICRO_DIST, default 20 m).
+    // objectChunks (GRID_N^3 flags: chunk contains object-field surfels)
+    // keeps micros visible farther out for foliage/prop chunks
+    // (VF_MICRO_DIST_OBJ, default 35 m).
     // lod1Range/lod2Range hold the merged-terrain LOD ring runs per chunk
     // (same layout); draw-time selection picks a ring by chunk distance
-    // (VF_LOD1/VF_LOD2, default 20/60 m) with base-range fallback for
+    // (VF_LOD1/VF_LOD2, default 30/90 m) with base-range fallback for
     // object-only chunks.
     void setSurfels(const void* data, size_t bytes, size_t count,
                     const std::vector<uint32_t>& chunkRange, uint32_t waterStart,
                     const std::vector<uint32_t>& waterChunkRange = {},
                     const std::vector<uint32_t>& microStart = {},
+                    const std::vector<uint32_t>& edgeStart = {},
                     const std::vector<uint32_t>& lod1Range = {},
-                    const std::vector<uint32_t>& lod2Range = {});
+                    const std::vector<uint32_t>& lod2Range = {},
+                    const std::vector<uint8_t>& objectChunks = {});
 
     // Live-edit patch: replace one chunk's surfels (e.g. after a voxel edit).
     // The paged layout reserves per-chunk capacity, so the common case is an
     // in-place staging copy; a chunk that outgrows its slot is relocated to
     // the end of the opaque region (growing the buffer if needed). Patched
-    // chunks drop their micro tail and LOD ring until the next full upload.
+    // chunks drop their LOD ring until the next full upload. `microOffset` is
+    // the index where the material micro tail begins inside the patched run;
+    // `edgeCount` is the number of base parents followed by hard-edge bridges.
+    // UINT32_MAX means the corresponding split is unavailable/legacy.
     // Blocking (device idle + immediate submit): call between frames.
     void patchChunkSurfels(uint32_t chunk, const void* data, size_t bytes,
-                           size_t count);
+                           size_t count, uint32_t microOffset = UINT32_MAX,
+                           uint32_t edgeCount = UINT32_MAX);
 
-    // Live-edit flood: replace the trailing water run (the plane splats the
-    // app regenerates when a carve digs columns below the water level, so the
-    // dug volume reads as water instead of a dry hole). `chunkRange` holds
-    // GRID_N^3 + 1 offsets RELATIVE to the run start. Grows the buffer
-    // (shifting the tail) when the run needs more slots; blocking (device idle
-    // + immediate submit), call between frames.
-    void patchWaterSurfels(const void* data, size_t count,
-                           const std::vector<uint32_t>& chunkRange);
-
-    // Copy one chunk's current BASE surfels (micro tail excluded) into `out`
-    // as raw 64 B records. Returns the surfel count. Used by the live editor
-    // to seed its per-chunk cache from what the GPU already renders, so the
-    // first stamp in a chunk does not re-bake the whole chunk.
-    uint32_t readChunkSurfels(uint32_t chunk, std::vector<uint8_t>& out);
+    // Copy one chunk's current base+edge surfels (material micro tail excluded)
+    // into `out` as raw 80 B records. `edgeCount`, when provided, receives the
+    // number of trailing edge bridges so the live editor can preserve the
+    // segment split. Returns the total copied count.
+    uint32_t readChunkSurfels(uint32_t chunk, std::vector<uint8_t>& out,
+                              uint32_t* edgeCount = nullptr);
     // Depth target follows the offscreen extent (D24_UNORM_S8_UINT; the
     // stencil aspect is unused, kept from the removed core/stencil pipes).
     bool recreateDepth(uint32_t w, uint32_t h);
     void updateDescriptors(VkImageView hdrView, VkImageView gposView,
-                           VkImageView heightView, VkImageView objVolView);
+                           VkImageView gnormView, VkImageView heightView,
+                           VkImageView objVolView);
 
     // Kernel tuning: y = Gaussian variance sigma2 (normalized disk units),
     // z = quad half-size. x = buried flag, managed via setBuried (not
@@ -97,12 +106,37 @@ public:
     //   tint   = (rgb, strength; 0 = preview off)
     // Staged on the CPU and flushed into the mapped UBO by record().
     void setBrush(const glm::vec4& volume, const glm::vec4& axis,
-                  const glm::vec4& tint)
+                  const glm::vec4& tint, uint8_t layerId = 0)
     {
         m_brush[0] = volume;
         m_brush[1] = axis;
         m_brush[2] = tint;
+        m_brush[3] = glm::vec4(float(layerId), 0.f, 0.f, 0.f);
     }
+
+    // Live trackball drag preview: rotate only surfels owned by `layerId`.
+    // `rot` maps the layer's current absolute pose to its committed pose and
+    // is applied about the canonical placement pivot. Flushed in record().
+    void setRotatePreview(const glm::vec3& pivot, const glm::mat3& rot, bool on,
+                          uint8_t layerId = 0)
+    {
+        setRotatePreview(pivot, rot, glm::vec3(0.f), on, layerId);
+    }
+
+    // Optional translation lane used by Move mode. Rotation-only callers use
+    // the compatibility overload above and receive an exact zero translation.
+    void setRotatePreview(const glm::vec3& pivot, const glm::mat3& rot,
+                          const glm::vec3& translation, bool on,
+                          uint8_t layerId = 0)
+    {
+        const bool active = on && layerId != 0;
+        m_rot[0] = glm::vec4(active ? 1.f : 0.f, pivot);
+        m_rot[1] = glm::vec4(rot[0], 0.f);
+        m_rot[2] = glm::vec4(rot[1], 0.f);
+        m_rot[3] = glm::vec4(rot[2], float(layerId));
+        m_rot[4] = glm::vec4(translation, 0.f);
+    }
+
 
     // Record sky + opaque chunks + water. Assumes hdr/gpos already in
     // GENERAL and m_depth in DEPTH_ATTACHMENT_OPTIMAL (App transitions).
@@ -199,10 +233,18 @@ private:
     VmaAllocation m_surfelAlloc = VK_NULL_HANDLE;
     Image3D m_depth {};
     Buffer m_paramsBuf {}; // persistently mapped 2xvec4 kernel-tuning UBO
-    // Brush hover preview: persistently mapped 3xvec4 UBO (bind 13), flushed
-    // from m_brush in record() like the params above.
+    // Brush hover preview: persistently mapped 4xvec4 UBO (bind 13). The
+    // metadata lane optionally restricts tint/debug to one owning layer.
     Buffer m_brushBuf {};
-    glm::vec4 m_brush[3] { glm::vec4(0.f), glm::vec4(0.f), glm::vec4(0.f) };
+    glm::vec4 m_brush[4] { glm::vec4(0.f), glm::vec4(0.f), glm::vec4(0.f),
+                           glm::vec4(0.f) };
+    // Live selected-layer transform (bind 14): exact owner rotation plus an
+    // optional world translation for Move mode, shared by forward, cull and
+    // tile paths. The target ID occupies row2.w; row4.xyz is translation.
+    Buffer m_rotBuf {};
+    glm::vec4 m_rot[5] { glm::vec4(0.f), glm::vec4(0.f, 1.f, 0.f, 0.f),
+                         glm::vec4(1.f, 0.f, 0.f, 0.f), glm::vec4(0.f, 0.f, 1.f, 0.f),
+                         glm::vec4(0.f) };
     // ---- occlusion culling (Hi-Z depth pyramid) ----
     static constexpr uint32_t kMaxHiZMips = 16;
     Image3D m_hiz {};
@@ -249,11 +291,14 @@ private:
     uint32_t m_opaqueHigh = 0; // next free relocation slot
     uint32_t m_bufSlots = 0;   // total slots in m_surfelBuf
     std::vector<uint32_t> m_waterChunkRange; // GRID_N^3 + 1 absolute offsets, or empty
-    std::vector<uint32_t> m_microStart;      // per-chunk base/micro split, or empty
+    std::vector<uint32_t> m_edgeStart;       // per-chunk base/edge split, or empty
+    std::vector<uint32_t> m_microStart;      // per-chunk edge/micro split, or empty
+    std::vector<uint8_t> m_objectChunks;     // per-chunk object presence, or empty
     std::vector<uint32_t> m_lod1Range;       // merged-terrain LOD rings, or empty
     std::vector<uint32_t> m_lod2Range;
     VkImageView m_hdrView = VK_NULL_HANDLE;
     VkImageView m_gposView = VK_NULL_HANDLE;
+    VkImageView m_gnormView = VK_NULL_HANDLE;
     VkImageView m_heightView = VK_NULL_HANDLE;
     VkImageView m_objVolView = VK_NULL_HANDLE;
 };

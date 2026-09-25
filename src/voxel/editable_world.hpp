@@ -42,21 +42,47 @@ struct EditableWorld {
     std::vector<VoxelRecord> makeCylinderY(glm::ivec3 anchor, float radiusM, float heightM, uint8_t mat) const;
     std::vector<VoxelRecord> makeStamp(glm::ivec3 anchor, const std::vector<StampCell>& cells) const;
 
+    // A carve scoop reaches this far above the base plane along -axisDir so
+    // the brush opens the ground it starts at: the terrain's top cell wobbles
+    // by +-1 cell of relief around the pick, and a flat cap would leave a
+    // one-cell roof over the dig (a covered void gains no water). The floor
+    // stays exactly at the picked depth. The hover preview uses the same
+    // extent (App::applyEditLive's brush volume).
+    static constexpr float kCarveTopMargin = 2.0f * VOXEL;
+
     // Oriented cylinder stamped along `axisDir` (unit world vector) for `lengthM`,
     // starting at the anchor (base centre). When `carve` is true the FULL solid
-    // volume is emitted (the removed material); otherwise a thin shell band is
-    // emitted (flood-filled to solid by VoxelField::build, like other objects).
+    // volume is emitted (the removed material), reaching kCarveTopMargin above
+    // the base; otherwise a thin shell band is emitted (flood-filled to solid
+    // by VoxelField::build, like other objects) with the exact [0, length] extent.
     std::vector<VoxelRecord> makeOrientedCylinder(glm::ivec3 anchor, glm::vec3 axisDir,
                                                   float radiusM, float lengthM,
                                                   uint8_t mat, bool carve) const;
 
-    // Half-ellipsoid "dome" sitting on the surface, bulging along +axisDir.
-    // emit a solid volume whose top surface follows height(r) = heightM *
-    // sqrt(1 - (r/radiusM)^2): max at the centre, tapering to zero at the rim,
-    // so the terrain raised to its top forms a half-sphere bump. Used by the
-    // "Add" edit tool (role "raise").
+    // "Add" brush volume: the surface GROWS OUT along `axisDir` (the picked
+    // surface normal) from the anchor. The footprint is a disk of radius
+    // `radiusM` in the plane ACROSS the axis, extruded `heightM` along it and
+    // closed by a fillet of radius c = min(radiusM, heightM)/2, so the new
+    // face is flat out to radius (radiusM - c): clicking a wall thickens it by
+    // the full heightM over its whole footprint and only rounds the outer
+    // edge, and the reach is always exactly the brush depth. Nothing is
+    // emitted behind the surface (one voxel of base layer excepted, which
+    // seals the growth against the surface), so clicking a wall never erodes
+    // the far side.
+    // The hover preview tints exactly this set (BrushUBO with w < 0 on the
+    // axis; the shader repeats the extruded-disk + fillet test).
     std::vector<VoxelRecord> makeDome(glm::ivec3 anchor, glm::vec3 axisDir,
                                       float radiusM, float heightM, uint8_t mat) const;
+
+    // Exactly ONE cell - the per-voxel Add/Carve target, used when the brush
+    // width is 1 voxel (the pick is the cell under the cursor, which the hover
+    // outline draws). `stepAlongNormal` moves the target one cell along the
+    // dominant axis of `axisDir` first, which is what Add needs: the pick lands
+    // on solid material, so adding the picked cell would do nothing. Carve
+    // passes false and therefore removes exactly the voxel you hovered.
+    // Empty when the target leaves the lattice.
+    std::vector<VoxelRecord> makeSingleVoxel(glm::ivec3 anchor, glm::vec3 axisDir,
+                                             uint8_t mat, bool stepAlongNormal) const;
 
     // Full solid ball centred on `anchor` (radiusM in meters): every cell whose
     // centre lies inside. The brush volume of the Delete (clear) and Paint

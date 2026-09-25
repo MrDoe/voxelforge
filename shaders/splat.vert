@@ -7,12 +7,7 @@
 // The quad is the surfel disk's in-plane bounding box; the fragment shader
 // does the exact ray/disk intersection, kernel falloff and plane depth.
 
-struct Surfel {
-    vec4 pos_rU;    // xyz = centre (m), w = radiusU (m)
-    vec4 normal_rV; // xyz = geometric normal, w = radiusV (m)
-    vec4 bent_sh;   // xyz = baked bent (AO) normal, w = baked shadow 0..1
-    vec4 mat_ao;    // x = mat id, y = refl*255, z = rough*255, w = baked AO +2 if water
-};
+#include "common_surfel.glsl"
 
 layout(set = 0, binding = 0) readonly buffer Surfels {
     Surfel uSurfels[];
@@ -43,6 +38,18 @@ layout(std140, set = 0, binding = 3) uniform SplatUBO {
     vec4 uSplat2; // x=radius scale (hotkeys [/]), y=opacity, z/w=spare
 } sp;
 
+// Live trackball rotation (drag preview): only surfels whose packed layer ID
+// matches uRotRow2.w move. uRot.x enables the preview; rows 0..2 are the
+// relative old-absolute -> new-absolute transform, and uMove carries the
+// optional Move-mode world translation.
+layout(std140, set = 0, binding = 14) uniform RotUBO {
+    vec4 uRot;        // x = enabled, yzw = pivot (world m)
+    vec4 uRotRow0;    // rotation matrix rows (3x3, row-major)
+    vec4 uRotRow1;
+    vec4 uRotRow2;    // xyz = third matrix column; w = target layer ID
+    vec4 uMove;       // xyz = optional world translation for Move mode
+} rp;
+
 layout(location = 0) out vec3 vCenter;
 layout(location = 1) out vec3 vT;
 layout(location = 2) out vec3 vB;
@@ -52,6 +59,7 @@ layout(location = 5) out vec4 vMat;   // mat, refl, rough, aoB(+2 if water)
 layout(location = 6) out vec3 vView;  // cornerWorld - camPos (ray, perspective-correct)
 layout(location = 7) out float vFace; // dot(n, camPos-c): <0 would-collapse
 layout(location = 8) out vec4 vShade; // xyz = baked bent normal, w = baked shadow
+layout(location = 9) out float vTex;  // per-surfel texture override (0 = material slot)
 
 layout(constant_id = 0) const int SKY_MODE = 0;
 
@@ -67,17 +75,36 @@ void main()
         vCenter = vec3(0.0); vT = vec3(1.0, 0.0, 0.0); vB = vec3(0.0, 0.0, 1.0);
         vN = vec3(0.0, 1.0, 0.0); vRadii = vec2(1.0); vMat = vec4(0.0); vFace = 1.0;
         vShade = vec4(0.0, 1.0, 0.0, 1.0);
+        vTex = 0.0;
         gl_Position = vec4(ndc, 0.5, 1.0);
         return;
     }
     Surfel s = uSurfels[uCompact[gl_InstanceIndex]];
     vec3 c = s.pos_rU.xyz;
     vec3 n = normalize(s.normal_rV.xyz);
-    // footprints are isotropic (rU == rV), so any orthonormal in-plane frame
-    // matches the baked disk; recompute deterministically (tangent_a now
-    // carries the baked bent normal instead)
-    vec3 up = abs(n.y) < 0.99 ? vec3(0.0, 1.0, 0.0) : vec3(1.0, 0.0, 0.0);
-    vec3 t = normalize(cross(n, up));
+
+    // Exact per-layer preview. Other object files, terrain, water and unowned
+    // live geometry share neither the target ID nor the transform.
+    if (rp.uRot.x > 0.5 &&
+        surfelBelongsToLayer(s.mat_ao.w, uint(max(0.0, rp.uRotRow2.w)))) {
+        mat3 R = mat3(rp.uRotRow0.xyz, rp.uRotRow1.xyz, rp.uRotRow2.xyz);
+        c = rp.uRot.yzw + R * (c - rp.uRot.yzw) + rp.uMove.xyz;
+        n = R * n;
+        s.bent_sh.xyz = R * s.bent_sh.xyz;
+        s.tan_aspect.xyz = R * s.tan_aspect.xyz;
+    }
+    // Footprint frame: the bake stores an in-plane tangent for anisotropic
+    // disks (radiusU stretches along it); isotropic surfels store xyz == 0,
+    // for which a derived orthonormal frame is used. Either way the frame
+    // matches the baked disk.
+    vec3 tProj = s.tan_aspect.xyz - n * dot(s.tan_aspect.xyz, n);
+    vec3 t;
+    if (dot(tProj, tProj) < 1e-8) {
+        vec3 up = abs(n.y) < 0.99 ? vec3(0.0, 1.0, 0.0) : vec3(1.0, 0.0, 0.0);
+        t = normalize(cross(n, up));
+    } else {
+        t = normalize(tProj);
+    }
     vec3 b = normalize(cross(n, t));
     // runtime radius scale (hotkeys [/]): grows/shrinks disk AND quad
     // together (vRadii carries the scaled radii so d2 stays consistent)
@@ -111,6 +138,7 @@ void main()
     vMat = s.mat_ao;
     vFace = facing;
     vShade = s.bent_sh;
+    vTex = s.tan_aspect.w; // per-cell texture override (phase 2)
     vView = q - pc.camPos.xyz;
 
     // Manual projection with the shared camera convention. w = view depth

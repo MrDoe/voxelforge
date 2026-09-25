@@ -1,0 +1,110 @@
+#version 460
+#extension GL_GOOGLE_include_directive : require
+// Voxelforge - SSAO apply + denoise.
+//
+// Takes the raw AO term from `ssao.comp` and applies it to the post-tonemap
+// LDR image with a 5x5 cross-bilateral filter: spatial Gaussian x view-depth
+// similarity x normal similarity. The raw kernel is a 36-tap fan (noisy at
+// 1 px scale, and headless shots have no TAA to hide it), so the filter is
+// what makes the effect hold up in stills; it also keeps AO from bleeding
+// across silhouettes. `params.w = 0` disables the filter (A/B knob).
+//
+// Push block: shared RaymarchPush (128 B) + the pass-local vec4.
+//   params.x = debug (0 apply, 1 raw AO view, 2 G-buffer normal view)
+//   params.y = strength (base * (1 - strength * ao))
+//   params.z = far radius (m, consumed by ssao.comp)
+//   params.w = blur toggle
+
+layout(local_size_x = 8, local_size_y = 8, local_size_z = 1) in;
+
+layout(set = 0, binding = 0, rgba16f) uniform readonly image2D uAo;
+layout(set = 0, binding = 1, rgba16f) uniform readonly image2D uGPos;
+layout(set = 0, binding = 2, rgba16f) uniform readonly image2D uGNorm;
+layout(set = 0, binding = 3, rgba16f) uniform readonly image2D uCurrent;
+layout(set = 0, binding = 4, rgba16f) uniform writeonly image2D uOut;
+
+layout(push_constant) uniform PC {
+    vec4 camPos;
+    vec4 camRight;
+    vec4 camUp;
+    vec4 camFwd;
+    vec4 a; // tanHalfFov, aspect, extentX, extentY
+    vec4 b; // worldSize, voxelSize, gridN, frameIdx
+    vec4 sunDir;
+    vec4 misc;
+    vec4 params; // x=debug, y=strength, z=far radius m, w=blur
+} pc;
+
+const float kBlurSigma = 1.6;   // spatial sigma (px)
+const float kDepthRel = 0.03;   // relative view-depth tolerance
+const float kDepthAbs = 0.08;   // absolute view-depth tolerance (m)
+const float kNormalPow = 8.0;   // normal similarity sharpness
+
+void main()
+{
+    ivec2 ext = ivec2(int(pc.a.z), int(pc.a.w));
+    ivec2 pix = ivec2(gl_GlobalInvocationID.xy);
+    if (pix.x >= ext.x || pix.y >= ext.y)
+        return;
+
+    vec4 gp = imageLoad(uGPos, pix);
+    vec3 worldPos = gp.xyz;
+    float hitType = gp.w; // 0 sky, 1 solid, 2 water
+
+    vec3 base = imageLoad(uCurrent, pix).rgb;
+    vec3 n = imageLoad(uGNorm, pix).xyz;
+    float nl = length(n);
+    n = (nl > 1e-4) ? n / nl : vec3(0.0);
+
+    // Debug views bypass the sky/water passthrough so the term is visible
+    // everywhere (sky and water carry AO 0).
+    if (pc.params.x > 1.5) {
+        imageStore(uOut, pix, vec4(n * 0.5 + 0.5, 1.0));
+        return;
+    }
+    if (pc.params.x > 0.5) {
+        imageStore(uOut, pix, vec4(vec3(imageLoad(uAo, pix).r), 1.0));
+        return;
+    }
+
+    if (hitType < 0.5 || hitType > 1.5) {
+        imageStore(uOut, pix, vec4(base, 1.0));
+        return;
+    }
+
+    float zc = dot(worldPos - pc.camPos.xyz, pc.camFwd.xyz);
+    float ao = imageLoad(uAo, pix).r;
+
+    if (pc.params.w > 0.5) {
+        float sum = 0.0;
+        float wsum = 0.0;
+        const float inv2s2 = 1.0 / (2.0 * kBlurSigma * kBlurSigma);
+        for (int dy = -2; dy <= 2; ++dy) {
+            for (int dx = -2; dx <= 2; ++dx) {
+                ivec2 tp = pix + ivec2(dx, dy);
+                if (tp.x < 0 || tp.y < 0 || tp.x >= ext.x || tp.y >= ext.y)
+                    continue;
+                vec4 g2 = imageLoad(uGPos, tp);
+                if (g2.w < 0.5 || g2.w > 1.5)
+                    continue; // sky / water: not part of this surface
+                float z2 = dot(g2.xyz - pc.camPos.xyz, pc.camFwd.xyz);
+                float wz = exp(-abs(z2 - zc) / max(kDepthRel * zc, kDepthAbs));
+                float wn = 1.0;
+                if (nl > 1e-4) {
+                    vec3 n2 = imageLoad(uGNorm, tp).xyz;
+                    float l2 = length(n2);
+                    wn = (l2 > 1e-4) ? pow(max(dot(n, n2 / l2), 0.0), kNormalPow) : 0.0;
+                }
+                float ws = exp(-float(dx * dx + dy * dy) * inv2s2);
+                float w = ws * wz * wn;
+                sum += imageLoad(uAo, tp).r * w;
+                wsum += w;
+            }
+        }
+        if (wsum > 1e-4)
+            ao = sum / wsum;
+    }
+
+    vec3 darkened = base * (1.0 - clamp(pc.params.y, 0.0, 1.0) * ao);
+    imageStore(uOut, pix, vec4(darkened, 1.0));
+}

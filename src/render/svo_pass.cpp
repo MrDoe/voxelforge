@@ -75,7 +75,7 @@ bool SvoPass::init(const Context& ctx)
     // Note: binding 0 is intentionally absent (an unwritten binding in the
     // layout invalidates the whole descriptor set on this driver). uHdr lives
     // at 9, uGPos at 10; the shader no longer references binding 0.
-    VkDescriptorSetLayoutBinding b[11] = {};
+    VkDescriptorSetLayoutBinding b[14] = {};
     int n = 0;
     for (uint32_t i = 1; i < 6; ++i)
         b[n++] = { i, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1,
@@ -86,6 +86,14 @@ bool SvoPass::init(const Context& ctx)
     b[n++] = { 9, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 1, VK_SHADER_STAGE_COMPUTE_BIT, nullptr };
     b[n++] = { 10, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 1, VK_SHADER_STAGE_COMPUTE_BIT, nullptr };
     b[n++] = { 11, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, VK_SHADER_STAGE_COMPUTE_BIT, nullptr };
+    b[n++] = { 12, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 1, VK_SHADER_STAGE_COMPUTE_BIT, nullptr };
+    // texture atlas (sampler) + material table (UBO) - the shared
+    // detailAlbedo() in common_base.glsl references them; binding numbers
+    // match SplatPass so one shader declaration serves both pipelines.
+    b[n++] = { 22, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1,
+               VK_SHADER_STAGE_COMPUTE_BIT, nullptr };
+    b[n++] = { 23, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, 1,
+               VK_SHADER_STAGE_COMPUTE_BIT, nullptr };
 
     VkDescriptorSetLayoutCreateInfo li { VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO };
     li.bindingCount = n;
@@ -123,7 +131,7 @@ bool SvoPass::init(const Context& ctx)
         return false;
     }
 
-    VkDescriptorPoolSize sizes[3] = { { VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 5 },
+    VkDescriptorPoolSize sizes[3] = { { VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 6 },
                                        { VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 6 },
                                        { VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, 1 } };
     VkDescriptorPoolCreateInfo pi { VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO };
@@ -355,17 +363,34 @@ void SvoPass::patchChunk(uint32_t chunk, const voxel::ChunkPool& pool)
 }
 
 void SvoPass::setHeightmapView(VkImageView view) { m_heightView = view; }
+
+void SvoPass::setTexAtlas(VkImageView view, VkSampler sampler, VkBuffer tableUbo)
+{
+    if (!m_ctx || view == VK_NULL_HANDLE || sampler == VK_NULL_HANDLE ||
+        tableUbo == VK_NULL_HANDLE)
+        return;
+    const VkDescriptorImageInfo img { sampler, view, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL };
+    const VkDescriptorBufferInfo buf { tableUbo, 0, VK_WHOLE_SIZE };
+    VkWriteDescriptorSet w[2] = {};
+    w[0] = { VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, nullptr, m_set, 22, 0, 1,
+             VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, &img, nullptr, nullptr };
+    w[1] = { VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, nullptr, m_set, 23, 0, 1,
+             VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, nullptr, &buf, nullptr };
+    vkUpdateDescriptorSets(m_ctx->device(), 2, w, 0, nullptr);
+}
 void SvoPass::setObjVolumeView(VkImageView view) { m_objVolView = view; }
 
-void SvoPass::updateDescriptors(const Image3D& hdrImage, const Image3D& gposImage)
+void SvoPass::updateDescriptors(const Image3D& hdrImage, const Image3D& gposImage,
+                                const Image3D& gnormImage)
 {
     if (!m_set || !m_ctx)
         return;
     VkDescriptorImageInfo ii { VK_NULL_HANDLE, hdrImage.view, VK_IMAGE_LAYOUT_GENERAL };
     VkDescriptorImageInfo gi { VK_NULL_HANDLE, gposImage.view, VK_IMAGE_LAYOUT_GENERAL };
+    VkDescriptorImageInfo ni { VK_NULL_HANDLE, gnormImage.view, VK_IMAGE_LAYOUT_GENERAL };
     VkDescriptorImageInfo hi { VK_NULL_HANDLE, m_heightView, VK_IMAGE_LAYOUT_GENERAL };
     VkDescriptorImageInfo oi { VK_NULL_HANDLE, m_objVolView, VK_IMAGE_LAYOUT_GENERAL };
-    VkWriteDescriptorSet w[4] = {};
+    VkWriteDescriptorSet w[5] = {};
     w[0] = { VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, nullptr, m_set, 6, 0, 1,
              VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, &hi, nullptr, nullptr };
     w[1] = { VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, nullptr, m_set, 7, 0, 1,
@@ -374,7 +399,9 @@ void SvoPass::updateDescriptors(const Image3D& hdrImage, const Image3D& gposImag
              VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, &ii, nullptr, nullptr };
     w[3] = { VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, nullptr, m_set, 10, 0, 1,
              VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, &gi, nullptr, nullptr };
-    vkUpdateDescriptorSets(m_ctx->device(), 4, w, 0, nullptr);
+    w[4] = { VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, nullptr, m_set, 12, 0, 1,
+             VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, &ni, nullptr, nullptr };
+    vkUpdateDescriptorSets(m_ctx->device(), 5, w, 0, nullptr);
 }
 
 void SvoPass::record(VkCommandBuffer cmd, const RaymarchPush& push)

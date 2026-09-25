@@ -58,12 +58,21 @@ It also refuses to run without baked assets.
 | `RMB` + mouse | look |
 | wheel | movement speed (`Shift` boost / `Ctrl` slow) |
 | `Ctrl+LMB` | pick a voxel → becomes the bottom-center anchor for AI builds |
+| `C` → Rotate | select the rotation tool |
+| plain LMB in Rotate | activate the exact object under the cursor |
+| click-drag trackball ring | local Y (outer), local X (wide), or local Z (tall); release stages, then press Apply |
+| `C` → Move | grab the exact object under the cursor |
+| drag in Move | translate along the selected world X/Y/Z handle; release stages, then press Apply |
 | `F` | toggle the renderer: Gaussian surfels (default) ↔ SVO reference |
 | `N` | toggle TAA |
 | `[` / `]` | shrink / grow splat disks |
-| `ESC` | quit |
+| `B` | toggle texture detail normals (render-flag bit 7, default on) |
+| `G` / `H` | toggle SSR / SSAO |
+| `J` / `K` / `L` | toggle volumetric fog / motion blur / depth of field (all opt-in) |
+| `M` | toggle micro-surfel detail — bake-time, so it rebuilds the surfel stream (short stall) |
+| window close button | quit (`Esc` is reserved and does not exit) |
 
-Default camera spawns at `-16, 6.5, -14` looking at the riverside cabin;
+Default camera spawns at `-16, 6.5, -14` looking across the lake at the hamlet;
 default sun is elevation 34°, azimuth 238° (golden hour).
 
 ## The "World layers" panel
@@ -77,6 +86,13 @@ The app starts as a bare valley. The HUD panel lists every `.vxw` file in
   on your `Ctrl+LMB` selection; the copy is appended to `ai_edits.vxw`.
   Layer files store absolute lattice coordinates, so enabling shows the object
   where it was baked while import stamps a moved copy.
+- **Activate trackball** — enter Rotate mode for the selected layer. A plain
+  LMB click on an object activates its exact owner; then click-drag the
+  bounds-centered outer/local-Y, wide/local-X, or tall/local-Z ring. Release
+  stages the selected `.vxw` placement; press **Apply rotation** to persist it.
+- **Move mode** — click an owned object to grab it, then click one of the
+  colored world X/Y/Z handles (or use the axis buttons) and drag. Release
+  stages the translation; press **Apply move** to persist it.
 - **Rescan assets folder** — pick up files dropped into `assets/` while running
   (they also appear automatically on the next reload).
 - The landscape checkbox is always on and disabled — no terrain, no world.

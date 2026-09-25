@@ -18,11 +18,13 @@ Authoritative sources: `shaders/svo_raymarch.comp`, `src/render/svo_pass.{hpp,cp
 | 8 | SelectionUBO | std140, 32 B | `uSel` + `uHover` vec4s: xyz = voxel center world pos, w = active flag |
 | 9 | `uHdr` image2D | rgba16f, writeonly | linear HDR scene radiance |
 | 10 | `uGPos` image2D | rgba16f, writeonly | G-buffer: xyz = world pos, w = hit type (0 sky / 1 solid / 2 water) |
+| 12 | `uGNorm` image2D | rgba16f, writeonly | G-buffer: xyz = shading normal, 0 on sky (water writes the flat plane normal: SSR/SSAO must never see ripple normals) |
 
 The splat pass reuses bindings 6+7 (read-only) with its own set: 0 = surfel
 SSBO (vertex), 1 = `uHeight`, 2 = `uObjVol`, 3 = 16 B params UBO
 (vertex+fragment). HDR/G-buffer are dynamic-rendering attachments there,
-not descriptors.
+not descriptors (three colour targets: `m_hdr`, `m_gpos`, `m_gnorm`; the
+tile compute path writes the same three images through bindings 14/15/21).
 
 ## Handle encoding (`world.hpp`)
 
@@ -124,8 +126,9 @@ exist in GLSL by design**; adding any breaks the data-only invariant.
 
 ## Gaussian-surfel renderer (primary path, `--mode splat`)
 
-One anisotropic 2D Gaussian disk per outer voxel-surface cell, rasterized as
-instanced quads and composited as **opaque surfaces** (no sorting, no
+One anisotropic Gaussian parent per outer voxel-surface cell, plus optional
+small hard-edge crease bridges, rasterized as instanced quads and composited as
+**opaque surfaces** (no sorting, no
 transparency). `--mode svo` keeps the raymarcher above as the pixel
 reference; `F` toggles interactively.
 
@@ -138,6 +141,21 @@ in `App::rebuildSurfels`, ~0.6 s for ~1.3 M surfels):
 - Normal = mean of outward (toward-air) face directions, blended toward the
   analytic two-scale heightfield normal on terrain tops, then one
   neighbourhood-averaging pass. Position = cell centre + n·VOXEL/2.
+- **Hard-edge fit + crease bridges** (`SurfelParams::edgeShrink` /
+  `edgeFill`): only opaque object parents with two non-opposite exposed lattice
+  faces are tightened. Normal disagreement may still shape anisotropy, but it
+  never reduces object coverage; terrain, foliage, emissive materials, and
+  explicit thin footprints keep their watertight radius. Each exposed face pair
+  also emits one smaller tangent-aligned splat on the true face-plane
+  intersection. Bridges inherit the parent's baked AO/shadow/bent normal,
+  material, texture override, and owner ID, so they cost geometry but no extra
+  shadow/AO march. Per chunk the stream is `[base parents | edge bridges |
+  material micros]`; bridges stay in the always-on opaque range and add no draw
+  call, while only the material micro tail is distance-culled. The app exposes
+  **Rendering → Sharp-edge fit** (`0.00–0.80`, default `0.35`) and **Interpolate
+  crease splats** (default on); either change queues `requestWorldReload()` so
+  full-bake and live-store paths rebuild together. `VF_EDGE_SHRINK` and
+  `VF_EDGE_FILL=0/1` are launch overrides.
 - **Baked per-surfel**: binary sun shadow (exact cell-DDA near field +
   sphere-trace far field over `VoxelField::sample`, same verdict as SVO
   `softShadow`, then blurred over face neighbours for a 1-cell penumbra
@@ -147,15 +165,26 @@ in `App::rebuildSurfels`, ~0.6 s for ~1.3 M surfels):
   (the app's `--sun`); a sun change needs a rebuild, same as geometry edits.
 - Water grid (0.25 m) wherever terrain tops sit below `WATER_LEVEL`.
 - Chunk bucketing (16³ + 1 `chunkRange` offsets) for per-chunk draws/culling.
-- **Micro-detail** (`SurfelParams::microDetail`, app default ON via
-  `VF_MICRO=0` to disable, unit-test default OFF): deterministic 0–2 child
+- **Micro-detail** (`SurfelParams::microDetail`, app default ON, `VF_MICRO=0`
+  to disable at launch or the **M** key to toggle at runtime, unit-test default
+  OFF): because the micros are baked into the surfel stream the runtime toggle
+  goes through the world-reload path (`requestWorldReload` -> `applyWorldReload`
+  -> `rebuildSurfels`) and stalls briefly; the HUD reports the state. The
+  launch-time override is read in `initVulkan` *before* the first bake.
+  Deterministic 0–2 child
   disks per base surfel that turn texture texels into real geometry with
   parallax/occlusion — meadow crumbs, soil pebbles, rock chips, bark relief,
   roof moss puffs + underside filler seals, canopy leaflets. Children inherit
   the base cell's chunk, material and baked shadow/AO/bent (no extra marches)
   with a jittered tangent offset + micro-facet normal from a sin-hash of the
   lattice coords, so rebuilds stay bit-identical. All-layers count grows
-  ~1.55 M → ~2.4 M.
+  ~1.55 M → ~2.4 M. The same per-cell emitter (`emitMicroSurfelsForCell` /
+  `buildMicroSurfels`) serves the live store path: `LiveEditor::chunkRun`
+  regenerates a patched chunk's micro tail after every stamp, so live edits
+  never lose micro geometry (the LOD ring still drops until the next reload).
+  Draw-time culling is per chunk: terrain chunks drop micros beyond
+  `VF_MICRO_DIST` (20 m), chunks the bake flagged as containing object
+  surfels (`SurfelSet::objectChunks`) keep them to `VF_MICRO_DIST_OBJ` (35 m).
 - **Photoreal grade** (shared `common_base.glsl`, both backends in sync):
   `skyColor` adds an fbm cloud deck (thin at zenith so the sky probe stays
   blue) + golden-hour horizon warmth that tracks `kSunDir.y`; `detailAlbedo`
@@ -166,13 +195,22 @@ in `App::rebuildSurfels`, ~0.6 s for ~1.3 M surfels):
   sparkle. Foliage translucency/SSS kept modest (0.38/0.40) so canopies stay
   deep green instead of neon.
 
-**Surfel layout** (64 B, 4×vec4, std430): `pos_rU`, `normal_rV`,
-`bent_sh` (bent normal + baked shadow), `mat_ao`
-(mat/refl/rough/AO + 2 for water). Footprints are isotropic (`rU == rV =
-1.4·VOXEL`), so the vertex shader rebuilds the tangent frame from the normal.
+**Surfel layout** (80 B, 5×vec4, std430): `pos_rU` (w = radiusU, along the
+stored tangent), `normal_rV` (w = radiusV, across), `bent_sh` (bent normal +
+baked shadow), `mat_ao` (mat/refl/rough/packed metadata), `tan_aspect` (xyz =
+in-plane unit tangent, w = per-cell texture override; zero tangent =
+isotropic). `mat_ao.w` stores baked AO
+plus either water (`AO + 2`) or a placed object owner
+(`AO + 8 + 16*ownerId`, IDs 1–254). Owner ID 0 is terrain or unowned live
+geometry. The metadata is packed only after AO smoothing; the shared
+`common_surfel.glsl` helpers decode it consistently in the forward, GPU-cull,
+and tile paths. Footprints start isotropic (`rU == rV = 1.4·VOXEL`); the
+anisotropy bake stretches radiusU up to 1.6x along the local crease and stores
+the tangent, and the vertex shader orthonormalizes it against the normal
+(deriving a frame when zero).
 
 **GPU** (`src/render/splat_pass.{hpp,cpp}`, `shaders/splat.{vert,frag}`):
-dynamic rendering into the same `m_hdr`/`m_gpos` targets (plus a
+dynamic rendering into the same `m_hdr`/`m_gpos`/`m_gnorm` targets (plus a
 `D24_UNORM_S8_UINT` depth image), so post/TAA/`--shot` work unchanged.
 Five pipelines sharing one layout (surfel SSBO + `uHeight` + `uObjVol` +
 16 B params UBO):
@@ -248,10 +286,23 @@ drive the same uniform; 0.5–2.0, default 1.0),
 5 facing / 6 albedo / 7 rough / 8 baked-shadow / 9 baked-AO / 10 hf-shadow /
 11 objDist / 12 height-residual / 13 march origin / 14 Gaussian kernel mask /
 15 edit-brush volume: magenta marks surfels whose centre lies inside the
-active brush),
+active brush; 16 owner mask: selected layer green, other object owners red,
+terrain/water dark blue),
 `VF_RENDER_FLAGS`, `VF_SURFEL_SMOOTH`
-/`VF_SURFEL_HFBLEND` (bake variants), `VF_MICRO` (micro-surfel detail),
-`VF_VOLFOG` / `VF_MOTIONBLUR` / `VF_DOF` (headless overrides for the J/K/L toggles).
+/`VF_SURFEL_HFBLEND` (bake variants), `VF_ANISO` (anisotropic footprint bake),
+`VF_EDGE_SHRINK` (hard-edge parent reduction, launch default 0.35; GUI
+**Rendering → Sharp-edge fit**) / `VF_EDGE_FILL=0` (disable derived crease
+bridges), `VF_MICRO` (micro-surfel detail at
+launch; **M** toggles it at runtime),
+`VF_MICRO_DIST` / `VF_MICRO_DIST_OBJ` (per-chunk micro cull distance for
+terrain / object chunks, defaults 20 m / 35 m; the bake exports
+`SurfelSet::objectChunks` so foliage and prop chunks keep their micro
+geometry farther out — hero 720p +1.6 ms),
+`VF_VOLFOG` / `VF_MOTIONBLUR` / `VF_DOF` (headless overrides for the J/K/L toggles),
+`VF_SSAO_STRENGTH` (0..1, default 0.6), `VF_SSAO_RADIUS` (far-band world
+radius in metres, default 0.8; the near crease band is 0.35x that),
+`VF_SSAO_BLUR=0` (skip the cross-bilateral denoise), `VF_SSAO_DEBUG`
+(1 = raw AO view, pre-filter, sky/water read 0; 2 = G-buffer normal view).
 
 ## Photorealism chain (G/H/J/K/L, `App::recordPhotorealism`)
 
@@ -259,12 +310,42 @@ In-place LDR chain on `m_offscreen` after the post pass, shared verbatim by
 the headless and interactive frame paths (interactive runs it before TAA so
 TAA resolves the effected image):
 
+**Defaults**: SSR (bit 5) + SSAO (bit 6) + detail normals (bit 7) are ON by
+default (`m_renderFlags = 255`). Measured cost on the hero view: 6.92 → 7.57 ms
+at 720p, 9.99 → 11.33 ms at 1080p; `visual_check` keeps >15x headroom on the
+black-in-silhouette gate (0.15-0.32 % vs 5 %). Volumetric fog (J), motion
+blur (K) and DoF (L) stay opt-in. The fog was rewritten 2026-09-19: it now
+marches only to the G-buffer hit distance (the old version marched a fixed
+16 m from the camera regardless of the surface and darkened ~42 % of hero
+pixels below luma 20), uses the correct forward-scatter sign with a
+Henyey-Greenstein Mie lobe, bounded Beer-Lambert extinction and a
+sky-ambient term that makes it aerial perspective. `tests/fog_check.py` pins
+all of that; keep J off by default until the gate is green on your scene.
+`VF_RENDER_FLAGS` overrides the whole mask.
+
 1. SSR (`ssr.comp`, G / bit 5): G-buffer march with a proper camera
    projection, fresnel blend, water boosted (min 0.30 reflection).
-2. SSAO (`ssao.comp`, H / bit 6): screen-space depth-difference AO —
-   neighbours above the tangent plane occlude; darkens creases/contacts.
-3. Volumetric fog (`volumetric_fog.comp`, J): low-altitude Rayleigh+Mie
-   march; sky pixels reconstruct the camera ray.
+2. SSAO (`ssao.comp` + `ssao_apply.comp`, H / bit 6): two-band world-scale
+   AO. 6 directions x 3 steps per band march screen-space rays; each tap's
+   world position (from the `m_gpos` G-buffer) is tested against the pixel's
+   tangent plane, and the search radius is projected from metres
+   (`ppm = 0.5*extentY / (tanHalfFov*z)`), so occlusion is measured in world
+   units instead of pixels. Near band = 0.35x the far band (creases/contact),
+   far band = `VF_SSAO_RADIUS` (grounding). Out-of-bounds, sky and water taps
+   dilute the denominator (never occlude), and sky/water pixels pass through,
+   so silhouettes and shorelines stay clean. The raw term goes to the
+   `m_ssaoAo` scratch image; `ssao_apply.comp` then runs a 5x5
+   cross-bilateral filter (view-depth + normal weights) and multiplies
+   `base * (1 - strength*ao)`. Normals come from the `m_gnorm` G-buffer
+   (finite-difference fallback if a backend ever stops writing it). Cost:
+   ~1.2 ms at 720p / ~2.5 ms at 1080p on the hero view (two dispatches).
+3. Volumetric fog (`volumetric_fog.comp`, J): Rayleigh+Mie in-scatter
+   integrated along the view ray, terminated by the `m_gpos` hit distance
+   (sky pixels march a fixed 140 m). Exponential density falloff from the
+   water table × world-locked fbm patchiness, bounded Beer-Lambert
+   extinction, sky-ambient scatter + forward Mie sun lobe. Self-contained:
+   it needs no sky model, heightfield or object volume, so it keeps its
+   3-binding layout (scene/gpos/out). Gate: `tests/fog_check.py`.
 4. Motion blur (`motion_blur.comp`, K): velocity from reprojecting `uGPos`
    with the previous frame's camera (`m_prevCam`, same source TAA uses);
    a still camera is a clean no-op. Extra push constants carry the prev
@@ -277,7 +358,13 @@ Gotchas fixed along the way, don't regress: every photo pass pipeline
 layout's push range must cover its full PC block (a 56 B range with a 128 B
 push silently feeds shaders garbage extents); descriptor-set binding counts
 must match the shader (SSAO declared 2, shader uses 3 — writes vanished);
-effect inputs must be the post-tonemap LDR image, not `m_hdr`.
+effect inputs must be the post-tonemap LDR image, not `m_hdr`. The splat
+pipelines have **three colour attachments** — `createPipelines`, the three
+`VkRenderingAttachmentInfo` blocks in `record`/`recordTile` and
+`colorAttachmentCount` must always agree, or rendering silently breaks.
+Per-frame scratch/target images are transitioned UNDEFINED -> GENERAL at
+frame start (contents discarded); `m_gnorm` and `m_ssaoAo` follow the same
+rule as `m_hdr`/`m_gpos`.
 
 ## TAA resolve (`taa_resolve.comp`)
 
@@ -298,6 +385,69 @@ the binding-8 UBO every frame; the shader edge-highlights those cells. Test
 hooks `VF_TEST_SELECT=x,y,z` / `VF_TEST_HOVER=x,y,z` inject deterministic
 picks for headless screenshot checks.
 
+## Selected-layer rotation preview
+
+Object ownership is provenance, not geometry by overlap. `LayeredWorld` gives
+each enabled placeable `.vxw` a stable non-zero 8-bit ID (retained across
+reloads/toggles, with filename-hash collision probing), tags the winning cell
+in `VoxelField`, returns that ID in `PickHit`, and packs it into every base or
+micro surfel. In Rotate mode, one plain LMB click activates the exact picked
+cell owner; it does not begin a drag. The placed AABB is then used only to
+place the interaction surface: its projected centre is the trackball centre
+and its farthest projected corner sets the radius. The outer circle is local
+Y/yaw, the wide horizontal ellipse is local X/pitch, and the tall vertical
+ellipse is local Z/roll. Press-drag one ring to stage a rotation; the object
+remains active, and the explicit **Apply rotation** button commits it (or
+**Cancel** discards it). The
+screen projection mirrors `splat.vert` view-space math (`rel` dotted with the
+camera basis and divided by forward depth)—never normalize `rel` first, which
+moves the trackball away from the rendered object. Camera movement is applied
+before picking, gizmo projection, and render-push construction so all three use
+the same pose. Use ImGui's logical `DisplaySize` for both picking and gizmo
+coordinates on high-DPI windows; GLFW cursor positions are logical pixels
+while `framebufferSize()` is physical. Ring hit-testing is checked before
+ImGui mouse capture, and the whole editor sidebar is created with
+`ImGuiWindowFlags_NoInputs` while the pointer is on a ring (and faded to 0.30
+background alpha during an active drag), so a ring overlapping the sidebar
+cannot consume the drag or toggle an unrelated control underneath. Entering
+Rotate no longer hides any panel: the editor is a single docked left sidebar
+whose content pane swaps sections instead of opening and closing windows.
+
+The preview pivot is the canonical source bottom-center plus the manifest
+`pos`, not the current AABB centre. Each ring composes a local-axis rotation on
+the right of the current absolute pose (`Rnext = Rcurrent * Rlocal`), then
+converts back to the manifest Euler angles for persistence. If the committed
+absolute placement changes from `Rold` to `Rnew`, the preview transform is:
+
+```
+Rdelta = Rnew * transpose(Rold)
+p' = pivotPlaced + Rdelta * (p - pivotPlaced)
+```
+
+This is the same `Ry(yaw)·Rx(pitch)·Rz(roll)` pose that
+`transformRecords()` will rebuild. Binding 14 (`RotUBO`) carries enabled state,
+pivot, `Rdelta`, target owner ID, and an optional Move-mode translation lane.
+The forward vertex stage, GPU-cull
+compute stage, and tile bin/render stages all apply it only when
+`surfelLayerId(mat_ao.w) == targetId`; terrain, water, unowned live geometry,
+and other files do not move. While previewing, conservative CPU chunk culling
+is bypassed and micro surfels are force-included so source-chunk distance/LOD
+cannot make the selected owner disappear. The final transform remains active
+until `applyWorldReload()` swaps in the committed rebuild.
+
+`VF_TEST_ROTATE_LIVE="yaw,pitch,roll"` plus `VF_ROTATE_LAYER=<file>` is a
+preview-only test hook and never writes the manifest. `VF_SPLAT_DEBUG=16`
+renders owner classes directly: selected green, other objects red,
+terrain/water dark blue. `tests/visual_check.py` renders the mask before and
+after a synthetic cabin rotation and requires the green mask to move while the
+red mask remains fixed. `VF_TEST_ROTATE` is the separate commit/rebuild hook. `VF_TEST_MOVE_LIVE="dx,dy,dz[,layer]"`
+is the matching preview-only translation diagnostic and never writes the
+manifest.
+
+Move mode uses the same selected-owner GPU translation lane: it grabs the exact
+owner, accumulates a delta on the selected world X/Y/Z axis, draws a small axis
+handle, and writes `pos` only when **Apply move** is pressed.
+
 ## Edit-brush hover preview (splat backend)
 
 The edit tool (`C`) previews what the next LMB stamp would affect: while the
@@ -308,41 +458,129 @@ all-zero strength disables).
 
 - volume = the exact cell set the CPU rasterizer will touch: **Carve** = the
   oriented cylinder based at the hit cell, `depth` long along the surface
-  normal; **Delete/Paint** = the ball of `diameter/2` about the hit cell.
+  normal, reaching `EditableWorld::kCarveTopMargin` (0.2 m) above it (that
+  margin is what opens the surface the scoop starts at, so the preview must
+  include it); **Delete/Paint** = the ball of `diameter/2` about the hit cell.
   The volume is grown by a 0.06 m skin so the surfels' `+0.05 m` emitter
-  offset (pos = cell centre + n·0.05) stays inside; **Add** has no affected
-  splats and shows nothing.
-- water-plane splats are never tinted (their `mat_ao.w > 1.5` flag): a carve
-  below the plane *floods* the plane instead of removing it, so showing water
+  offset (pos = cell centre + n·0.05) stays inside; **Add** = the dome itself
+  (see below - the ground patch the dome buries is what tints). **Smooth** has
+  no analytic cell set to draw: the terrain path relaxes column tops and the
+  object path relaxes a surface coordinate in the picked surface's 2D plane,
+  so its blue preview is a conservative ball around that footprint rather than
+  a claim that every visible surfel is edited the same way.
+- water-plane splats are never tinted (their `mat_ao.w > 1.5` flag): the plane
+  is one fixed level that a carve exposes rather than removes, so showing water
   as "about to be cut" would be wrong.
+- **Add** tints the growth footprint green: the volume is the exact extruded disk + rounded lip
+  `makeDome` rasterizes (brush radius in `bVolume.w`, growth depth as a
+  negative `bAxis.w`, with the skin folded into both), so the
+  tinted splats are the ground patch the raised shell buries. The new shell has
+  no splats yet, so the volume itself is the honest preview.
+- **Smooth** calls `ChunkStore::makeSmoothEdits`, which dispatches on the
+  picked store cell and plans the whole batch before the first mutation:
+  - a **terrain** pick snapshots terrain column tops, applies one weighted
+    local-height relaxation with a circular falloff, emits Clear/terrain-Set
+    edits only for columns whose target changes, and protects object-owned
+    columns (and any span that contains an object);
+  - an **object** pick generalises the same relaxation to an arbitrary
+    surface axis. The axis is the picked cell's *one-sided* face (solid on one
+    side, air on the other; the SDF gradient breaks a thin wall's tie), the
+    footprint is the circular disk in the plane perpendicular to it, and each
+    row's surface coordinate relaxes toward the weighted mean of its 8 lateral
+    rows, clamped to their min/max. The move is applied as one contiguous
+    Clear/Set span along the axis, so a bump is removed whole in a single
+    stamp (no unsupported floater), a notch fills, flat faces/walls/posts/
+    staircases are fixed points, and a second stamp is a no-op. A short
+    grounded bump contributes the ground level of its bare 3x3 ring; fills are
+    always object-owned (`terrain = false`), so the terrain height texture and
+    the water bed never change.
+  The normal live path then refreshes the height texture, surfels, SVO pool,
+  undo state, and overlay just like the other brush modes. Smooth refreshes
+  its splats over `LiveEditor::kExactStampMargin` (12, the store's SDF band)
+  instead of the default 3, because the rebuild re-solves normals/AO across
+  that band; undo and overlay restore use the exact margin too.
+- the volume test runs on the surfel *centre*, matching the CPU rasterizer's
+  cell set; the empty run case skips the copy but must still zero the chunk's
+  draw count (see `AGENTS.md` gotchas).
 - binds 13 also backs the debug mask (view 15) and the headless
   `VF_TEST_BRUSH` hook; see `docs/tooling.md` for the env knobs.
 
-## Live-edit water fill (splat backend)
+## Undo and "Clear live edits"
 
-The water surface is a 0.2 m grid of plane splats (`buildWaterSurfels`) emitted
-wherever the baked terrain top sits below `WATER_LEVEL`. Digging below the
-plane in dry ground would leave a dry hole, so a subtractive stamp floods the
-columns it dug below the plane that have no solid left at/above it:
+Every live stamp records the pre-edit state of each cell it touches (first
+occurrence per cell wins) in a per-stroke map; stroke end pushes that map as
+one undo step (`App::finishStroke`, bounded to 250k cells / 32 steps - an
+oversized stroke is dropped rather than becoming a partial undo). Undo
+(`Ctrl+Z` / the panel button) replays those cells as Clear/Set edits through
+`App::commitStoreEdits`, the same store -> LiveEditor -> GPU patch path a stamp
+uses, so the geometry disappears in the same frame; the overlay is re-queued.
+For a lowering stroke, `finishStroke` derives extra height-texture scan
+headroom from the inverse Set cells relative to the post-stamp tops. This is
+what lets undo restore a tall terrain spike, including after several drag
+stamps, without leaving the water/bed texture stale. The refresh is
+terrain-only (`c.solid && !c.obj`), while overlay restore and Clear scan from
+the world top so arbitrary Smooth height changes cannot exceed their headroom.
+A world reload flushes pending overlay writes and invalidates cell-state undo
+history before re-adopting the store. The touched chunks then keep the live
+path's store-derived shading until the next full rebuild (exactly like a
+painted stroke).
 
-- `App::floodNewlyDug` scans the stamp's per-column cleared range
-  (`[plane, cleared top]` plus the first untouched cell above) and, for the open
-  columns, appends `makeWaterSurfel` splats to the app's water run (deduping
-  against the wet grid bitset, so repeated strokes never double up);
-- `SplatPass::patchWaterSurfels` re-uploads that run at its reserved slot range
-  and rebuilds the per-chunk ranges; the run is uploaded with 4096 slots of
-  headroom (`rebuildSurfels`), so only an unusually large flood needs the
-  `growOpaque` relayout. Indirection entries for the water slots are written as
-  identity (the vertex shader indexes `uCompact[gl_InstanceIndex]`).
-- `VF_NO_WATER_FILL=1` skips the flood (A/B for the tests).
+"Clear live edits" is the nuclear option, in place (no reload needed for the
+revert): flush the overlay writer (a pending save could otherwise land after
+the delete and resurrect the file), delete the overlay, re-adopt the store from
+the baked pools (`LayeredWorld::invalidateStore` -> `ChunkStore::adopt`), then
+re-seed the touched chunks (surfels + SVO pool + height-texture window) and
+request a full world reload so the bake's LOD rings and normals return. The
+overlay path honours `VF_OVERLAY_PATH` (tests keep their edits out of
+`assets/`).
+
+Regression it pins: `SplatPass::patchChunkSurfels` used to ignore zero-surfel
+patches (an empty vector's `data()` is null and tripped the `!data` guard), so
+any chunk whose run became empty kept drawing the removed material - undo and
+Clear looked like no-ops while the store was already correct.
+
+## Water (splat backend): one fixed-level plane
+
+The water is a single analytic plane at `kWaterLevel = -0.9` - there is no
+per-column water state anywhere. In the splat backend it is rasterized as a
+**world-wide 0.2 m grid of coplanar surfels** (`buildWaterSurfels`; one quad
+per grid cell, ~263k at 513x513) appended after the opaque run and bucketed per
+chunk for frustum culling:
+
+- the grid is **pure coverage**: the fragment shader intersects the analytic
+  plane per fragment and shades it there (`shadeWaterSplat`), so every water
+  fragment on the plane is identical no matter which cell covered it - no disk
+  borders, no per-cell look;
+- the depth test against the opaque prepass does the clipping: cells standing
+  over dry land, objects or a channel above the level are simply behind the
+  opaque geometry and never shade. A dig below the level therefore shows water
+  **automatically** - there is no flood pass and no water-buffer patching;
+- the SVO backend intersects the same plane analytically, so both backends
+  agree by construction.
+
+What must stay in sync is the **height texture** (`uHeight`, rg32f = top world
+Y + material) the water shading reads for the bed: shore foam, the absorption
+alpha and the reflected-bed march all use `heightAt()`. `App::patchHeightTexture`
+re-derives the edited columns from the runtime store (top solid cell + material)
+and re-uploads just that sub-rect after every stamp and after an overlay
+restore. Stale, a dug channel still read "land above the plane" and shaded as a
+thin foam-washed sheet instead of the water used by the river.
+
+Cost: the water plane's fill is ~0.2-0.45 ms at 640x360 (measured with
+`--smoke` against `VF_SPLAT_NOWATER=1`); the world-wide grid is ~5% of the
+surfel count and the depth test rejects the dry cells before shading.
+`VF_SPLAT_NOWATER=1` skips the water-plane draw (A/B for the tests).
+
 - tint: warm orange (carve), red (delete), the selected palette colour
-  (paint, Material combo in the panel) at ~0.45–0.55 mix strength.
+  (paint, Material combo in the panel), and conservative blue (Smooth
+  terrain/object footprint) at ~0.45–0.55 mix strength.
 - testing a splat's *centre* (not the fragment position) keeps the highlight
   per-splat and matches the rasterizer's per-cell decision; the whole disk
   tints, boundary splats do not clip. Debug view `VF_SPLAT_DEBUG=15` shows
   the volume/mask directly.
-- `VF_TEST_BRUSH="x,y,z,carve|delete|paint"` (+`VF_EDIT_DIAM`/`VF_EDIT_DEPTH`)
-  activates the tool headlessly and renders just the preview, so the
+- `VF_TEST_BRUSH="x,y,z,carve|delete|paint|smooth"` (+`VF_EDIT_DIAM`/`VF_EDIT_DEPTH`
+  and optional `VF_SMOOTH_STRENGTH`) activates the tool headlessly and renders
+  just the preview, so the
   highlight is screenshot-testable (`tests/live_edit_check.py`). The SVO
   backend has no equivalent per-surfel tint; the tile path (`VF_TILE=1`)
   does not implement it yet.

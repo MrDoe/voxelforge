@@ -28,6 +28,83 @@ inline glm::vec3 safeNormalize(glm::vec3 v) {
     return v * (1.0f / std::sqrt(l2));
 }
 
+// A hard edge is the intersection of two exposed, non-opposite lattice faces.
+// Keeping the face pair (rather than a normal-disagreement score) prevents
+// smooth voxel curvature and thin stems from being tightened accidentally.
+struct EdgeInfo {
+    int pairCount = 0;
+    glm::vec3 faces[3] {};
+    glm::vec3 axes[3] {};
+};
+
+EdgeInfo edgeInfoFromMask(unsigned exposedFaces)
+{
+    constexpr int dirs[6][3] = { { 1, 0, 0 }, { -1, 0, 0 }, { 0, 1, 0 },
+                                 { 0, -1, 0 }, { 0, 0, 1 }, { 0, 0, -1 } };
+    EdgeInfo out;
+    glm::vec3 face[6] {};
+    int faces = 0;
+    for (int d = 0; d < 6; ++d) {
+        if (!(exposedFaces & (1u << d)))
+            continue;
+        face[faces++] = glm::vec3(float(dirs[d][0]), float(dirs[d][1]),
+                                  float(dirs[d][2]));
+    }
+    for (int i = 0; i < faces; ++i) {
+        for (int j = i + 1; j < faces; ++j) {
+            // Opposite faces of a thin plate share one axis and do not form
+            // an edge. Distinct exposed axes are orthogonal and always make a
+            // genuine voxel crease.
+            if (glm::dot(face[i], face[j]) < -0.5f)
+                continue;
+            if (out.pairCount >= 3)
+                break;
+            glm::vec3 axis = safeNormalize(glm::cross(face[i], face[j]));
+            // Tangent sign has no visual meaning; canonicalize its first
+            // significant component so full/live bakes stay byte-identical.
+            const float ax = std::fabs(axis.x);
+            const float ay = std::fabs(axis.y);
+            const float az = std::fabs(axis.z);
+            const bool negative = ax > ay && ax > az ? axis.x < 0.0f
+                              : ay > az ? axis.y < 0.0f : axis.z < 0.0f;
+            if (negative)
+                axis = -axis;
+            out.faces[out.pairCount * 2] = face[i];
+            out.faces[out.pairCount * 2 + 1] = face[j];
+            out.axes[out.pairCount++] = axis;
+        }
+    }
+    return out;
+}
+
+// Emit a small, tangent-aligned coverage chain directly on the true face-plane
+// intersection. It inherits all shading/ownership/material data from the
+// parent, so edge quality costs geometry only: no extra shadow or AO march.
+void appendEdgeBridges(glm::vec3 cellCentre, const Surfel& parent,
+                        const EdgeInfo& edge, float baseRadius,
+                        std::vector<Surfel>& out)
+{
+    if (edge.pairCount <= 0)
+        return;
+    for (int p = 0; p < edge.pairCount; ++p) {
+        const glm::vec3 f0 = edge.faces[p * 2];
+        const glm::vec3 f1 = edge.faces[p * 2 + 1];
+        const glm::vec3 creaseN = safeNormalize(f0 + f1);
+        const glm::vec3 pos = cellCentre + 0.5f * VOXEL * (f0 + f1);
+        const float rV = std::min(0.40f * baseRadius,
+                                   std::max(0.25f * VOXEL,
+                                            0.65f * parent.normal_rV.w));
+        const float rU = std::max(0.60f * VOXEL, rV);
+        Surfel bridge = parent;
+        bridge.pos_rU = glm::vec4(pos, rU);
+        bridge.normal_rV = glm::vec4(creaseN, rV);
+        bridge.bent_sh = glm::vec4(
+            safeNormalize(glm::vec3(parent.bent_sh) + creaseN), parent.bent_sh.w);
+        bridge.tan_aspect = glm::vec4(edge.axes[p], parent.tan_aspect.w);
+        out.push_back(bridge);
+    }
+}
+
 inline uint64_t packKey(int x, int y, int z) {
     return (uint64_t(std::uint32_t(x)) << 20) | (uint32_t(y) << 10) | uint32_t(z);
 }
@@ -105,8 +182,17 @@ glm::vec3 heightfieldNormal(const VoxelField& field, glm::vec3 p) {
     return safeNormalize(glm::mix(nFine, nWide, 0.55f));
 }
 
+// Mean outward direction over the 6 face neighbours that are air (field
+// sample d > 0). Returns a ZERO vector when no neighbour is air: the SDF
+// marks enclosed air (building interiors, hollow roof/wall shells, sealed
+// cavities) as solid, so such a cell is buried and invisible from outside.
+// Callers must drop those cells: a fallback normal would (a) tilt the
+// smoothed normals of the real surface cells around them and (b) add dark
+// interior-fill disks that bleed through the depth-resolve band at grazing
+// angles (the "holes" on walls and stepped roofs).
 template <typename FieldT>
-glm::vec3 meanNormal(const FieldT& field, int x, int y, int z) {    const int latN = field.latN();
+glm::vec3 meanNormal(const FieldT& field, int x, int y, int z) {
+    const int latN = field.latN();
     glm::vec3 n(0.0f);
     const int dirs[6][3] = {{1,0,0},{-1,0,0},{0,1,0},{0,-1,0},{0,0,1},{0,0,-1}};
     for (auto &d : dirs) {
@@ -119,7 +205,209 @@ glm::vec3 meanNormal(const FieldT& field, int x, int y, int z) {    const int la
             n += glm::vec3(float(d[0]), float(d[1]), float(d[2]));
     }
     const float len = glm::length(n);
-    return len > 1e-6f ? (n / len) : glm::vec3(0.0f, 1.0f, 0.0f);
+    return len > 1e-6f ? (n / len) : glm::vec3(0.0f);
+}
+
+// Anisotropy from the local normal field: the surface bends toward the
+// neighbours whose normals differ, so the disk stretches along the crease —
+// perpendicular to the accumulated bend. `bendSum` is the sum of
+// (neighbour normal - cell normal) over existing face neighbours; a flat
+// neighbourhood sums to ~zero and stays isotropic. `aspect` scales radiusU
+// (along `tangent`), radiusV (across) keeps the base radius.
+inline void anisotropyFromBend(glm::vec3 bendSum, glm::vec3 n, float& aspect,
+                               glm::vec3& tangent)
+{
+    const glm::vec3 g = bendSum - n * glm::dot(bendSum, n);
+    const float gl = glm::length(g);
+    aspect = 1.0f;
+    tangent = glm::vec3(0.0f);
+    if (gl < 1e-3f)
+        return;
+    tangent = safeNormalize(glm::cross(n, g / gl));
+    aspect = glm::clamp(1.0f + 0.6f * glm::smoothstep(0.2f, 1.2f, gl), 1.0f, 1.6f);
+}
+
+// ---- thin-structure footprints --------------------------------------------
+// A structure that is LONG along one lattice axis and only a few cells THICK
+// across it does not read correctly as a round disk: the disk is far wider
+// than the structure, so it smears a one-cell column into a blob. Such cells
+// get an anisotropic footprint instead - narrowed to the structure's own width
+// and stretched along its long axis - and cells whose surface normal is
+// parallel to that axis (the caps) get a small round footprint of the
+// structure's cross-section. Everything else keeps the round disk.
+//
+// The rule is purely geometric: material, colour and object identity play no
+// part. The same code serves the bake and the runtime store path, so live
+// edits reproduce baked geometry exactly.
+
+// Footprint constants, in cells / baseR units. The across radius is half a
+// cell because the structure is one cell thick, so the disk is exactly as wide
+// as the voxel column it stands for; the along radius is a small multiple of a
+// cell so stacked disks stay a continuous strip without spilling past the ends.
+//
+// SEALING: disk centres sit on a VOXEL grid, so the least-covered point of a
+// face is a grid corner at VOXEL/sqrt(2) ~= 0.707 cells from the four nearest
+// centres. A single-cell column has only one disk per row, so 0.55 cells is
+// enough (and keeps grass blades / reed stems narrow); but a face TWO or more
+// cells wide has a grid of disks whose corners must be covered too. Below the
+// 0.707 floor those pinholes line up into continuous background slots between
+// the disk columns - every vertical post 2..3 cells wide rendered as hollow
+// stripes (invisible on horizontal rails, which sit on terrain and fail
+// kThinMaxCross, so they keep the round disk).
+constexpr float kThinAcrossCells = 0.55f;      // one-cell-thick structures
+constexpr float kThinAcrossSeal = 0.75f;       // faces 2+ cells wide (>1/sqrt2)
+constexpr float kThinTallLo = 1.6f;
+constexpr float kThinTallHi = 2.4f;
+constexpr int kThinProbeCells = 8;   // how far each axis is probed
+constexpr int kThinMaxCross = 3;     // "a few cells" across (the cross-section)
+constexpr int kThinMinRun = 4;       // "long" (cells along the axis, both ways)
+
+// Per-cell variation of the along radius, so a run of cells does not produce a
+// lattice of identical ellipses. Deterministic (survives rebuilds).
+inline float thinAspect(int x, int y, int z, float lo, float hi)
+{
+    return lo + (hi - lo) * microHash(x, y, z, 31);
+}
+
+// How far the solid continues from the cell centre along `dir` (cells).
+template <typename SolidAt>
+inline int solidRunAlong(SolidAt solidAt, glm::vec3 cellCentre, glm::vec3 dir,
+                         int maxCells)
+{
+    int n = 0;
+    for (int i = 1; i <= maxCells; ++i) {
+        if (!solidAt(cellCentre + dir * (VOXEL * float(i))))
+            break;
+        ++n;
+    }
+    return n;
+}
+
+// The footprint decision for one surface cell.
+struct ThinFootprint {
+    bool thin = false;     // true => use along/across below
+    glm::vec3 axis { 0.0f }; // in-plane long axis; zero => cap (round)
+    float along = 0.0f;    // radius along the long axis
+    float across = 0.0f;   // radius across it
+};
+
+// Shared by the bake and the store path. `solidAt(p)` answers whether the
+// world point p is inside solid geometry; `x,y,z` are the cell's lattice
+// coordinates (used only for the deterministic per-cell variation).
+// The thin test, shared by the footprint bake and the face-expansion pass:
+// LONG (>= kThinMinRun cells along some lattice axis, both ways) and only a
+// few cells across on the two others. `run` reports the six probes and `best`
+// the long lattice axis.
+const glm::vec3 kThinAxes[6] = { { 1, 0, 0 },  { -1, 0, 0 }, { 0, 1, 0 },
+                                 { 0, -1, 0 }, { 0, 0, 1 },  { 0, 0, -1 } };
+
+template <typename SolidAt>
+bool thinRunsAt(SolidAt solidAt, glm::vec3 cellCentre, int run[6], int& best)
+{
+    for (int a = 0; a < 6; ++a)
+        run[a] = solidRunAlong(solidAt, cellCentre, kThinAxes[a], kThinProbeCells);
+
+    // The long axis is the lattice axis with the largest total run.
+    int bestSum = 0;
+    best = 0;
+    for (int a = 0; a < 3; ++a) {
+        const int sum = run[2 * a] + run[2 * a + 1];
+        if (sum > bestSum) {
+            bestSum = sum;
+            best = a;
+        }
+    }
+    if (bestSum < kThinMinRun)
+        return false; // not long: a small blob, keep the round disk
+
+    // THIN means the CROSS-SECTION is only a few cells: both axes
+    // perpendicular to the long axis must be short. Measuring the solid depth
+    // along the surface normal instead looks equivalent but is not - on the
+    // CAP of a long column the inward direction runs the length of the column,
+    // so the cap was classified as thick and kept the oversized round disk
+    // (the "plate hovering above the stem" artifact).
+    for (int a = 0; a < 3; ++a) {
+        if (a == best)
+            continue;
+        if (run[2 * a] + run[2 * a + 1] > kThinMaxCross)
+            return false; // thick across: keep the round disk
+    }
+    return true;
+}
+
+template <typename SolidAt>
+bool thinCellAt(SolidAt solidAt, glm::vec3 cellCentre)
+{
+    int run[6];
+    int best = 0;
+    return thinRunsAt(solidAt, cellCentre, run, best);
+}
+
+template <typename SolidAt>
+ThinFootprint thinFootprintAt(SolidAt solidAt, glm::vec3 cellCentre, glm::vec3 n,
+                              int x, int y, int z)
+{
+    ThinFootprint fp;
+    int run[6];
+    int best = 0;
+    if (!thinRunsAt(solidAt, cellCentre, run, best))
+        return fp;
+    fp.thin = true;
+    // The across radius must cover the face. A disk alone cannot: centres sit
+    // VOXEL apart, so between them the least-covered point is VOXEL/sqrt(2)
+    // from the nearest centres and a 0.55-cell radius leaves a pinhole - on a
+    // face of two or more cells those pinholes line up into continuous
+    // background slots (a 2-cell post rendered as hollow stripes). Where the
+    // structure extends sideways, widen the disk past that floor; a genuinely
+    // one-cell stem (grass blade, reed) keeps the narrow radius and stays thin.
+    //
+    // "Extends sideways" is probed over the whole 3x3 neighbourhood in the
+    // plane PERPENDICULAR to the long axis, not along the two lattice axes:
+    // on a diagonal surface (a thin cylinder wall) both axis probes can miss
+    // the neighbour, which left round posts and masts slotted.
+    int acrossNb = 0;
+    {
+        const int au = (best + 1) % 3, av = (best + 2) % 3;
+        for (int du = -1; du <= 1 && !acrossNb; ++du)
+            for (int dv = -1; dv <= 1; ++dv) {
+                if (!du && !dv)
+                    continue;
+                glm::vec3 q = cellCentre;
+                q[au] += VOXEL * float(du);
+                q[av] += VOXEL * float(dv);
+                if (solidAt(q)) {
+                    acrossNb = 1;
+                    break;
+                }
+            }
+    }
+    fp.across = (acrossNb ? kThinAcrossSeal : kThinAcrossCells) * VOXEL;
+
+    // Project the long axis into the disk plane. When it is (nearly) the
+    // surface normal the cell is a cap: its footprint is the structure's own
+    // cross-section, round and small - this is the disk that used to hover
+    // over one-cell columns as an oversized plate.
+    const glm::vec3 axis(kThinAxes[2 * best]);
+    glm::vec3 t = axis - n * glm::dot(axis, n);
+    const float l = glm::length(t);
+    if (l <= 0.25f) {
+        fp.along = fp.across;
+        return fp;
+    }
+    fp.axis = t / l;
+
+    // Clamp the along radius to the structure's own remaining length so the
+    // footprint never reaches past its ends (a splat sticking out into air
+    // reads as a detached blob); the floor keeps neighbouring cells' disks
+    // overlapping, so the run stays continuous. The floor must also be at
+    // least the across radius: the footprint is defined so `along` is the long
+    // axis, and the unit test (and the ellipse invariant) require rU >= rV.
+    const int shortRun = std::min(run[2 * best], run[2 * best + 1]);
+    const float reach = (float(shortRun) + 0.5f) * VOXEL;
+    const float want =
+        1.4f * VOXEL * thinAspect(x, y, z, kThinTallLo, kThinTallHi);
+    fp.along = std::max(fp.across, std::min(want, reach));
+    return fp;
 }
 
 // Binary sun-occlusion march over field.sample: exact Amanatides DDA over
@@ -205,6 +493,136 @@ void aoBake(const FieldT& f, glm::vec3 p, glm::vec3 n, float& ao, glm::vec3& ben
     bent = safeNormalize(bd + glm::vec3(1e-6f, 0.0f, 0.0f));
 }
 
+// Per-cell micro-detail emission: 0-3 deterministic child disks of one base
+// surface cell (moss/soil grain, pebbles, bark relief, leaflets, roof-
+// underside fillers). Hash-driven from the lattice cell + slot, so two builds
+// are bit-identical; children inherit the base cell's material and baked
+// shadow/AO/bent (no extra marches). Shared by the bake (buildSurfels) and
+// the live store path (LiveEditor::chunkRun), so the same cell always yields
+// the same micro geometry.
+void emitMicroSurfelsForCell(int x, int y, int z, const Surfel& b,
+                             std::vector<Surfel>& micros)
+{
+    const int mat = int(b.mat_ao.x + 0.5f);
+    if (mat < 0 || mat >= kPaletteN)
+        return;
+    if (mat >= 9 && mat <= 15)
+        return; // emissive: keep crisp, no fuzz
+    glm::vec3 bn = safeNormalize(glm::vec3(b.normal_rV));
+    const glm::vec3 bp(b.pos_rU);
+    const glm::vec3 up = std::fabs(bn.y) < 0.99f ? glm::vec3(0.0f, 1.0f, 0.0f)
+                                                 : glm::vec3(1.0f, 0.0f, 0.0f);
+    const glm::vec3 t = safeNormalize(glm::cross(bn, up));
+    const glm::vec3 bb = safeNormalize(glm::cross(bn, t));
+    auto emit = [&](float o1, float o2, float lift, float tilt,
+                    float rScale, float aoMul, int slot, float bladeAspect = 1.0f) {
+        const float j1 = microHash(x, y, z, slot * 2 + 101) - 0.5f;
+        const float j2 = microHash(x, y, z, slot * 2 + 102) - 0.5f;
+        const glm::vec3 nn = safeNormalize(bn + (t * j1 + bb * j2) * tilt);
+        const glm::vec3 pp = bp + (t * o1 + bb * o2) + bn * lift;
+        Surfel m;
+        // When the parent is an anisotropic blade/frond, the ACROSS radius is
+        // the structure's true width; using the along radius would re-fatten
+        // the stem the base pass just narrowed.
+        const float pU = b.pos_rU.w, pV = b.normal_rV.w;
+        const float rrBase =
+            std::max((pU > pV * 1.3f ? pV : pU) * rScale, 1e-4f);
+        // Vegetation micros stretch along their own lean, so a grass crumb
+        // becomes a leaning blade instead of a dot (a near-vertical base
+        // normal leaves no usable "up" axis in the disk plane, which is why
+        // this uses the lean rather than the structure's long axis).
+        // radiusU (along the blade) scales, radiusV keeps the base radius -
+        // same convention as the base-surfel anisotropy.
+        float rU = rrBase;
+        glm::vec3 tanDir(0.0f);
+        if (bladeAspect > 1.0f) {
+            glm::vec3 lean = t * j1 + bb * j2;
+            lean -= nn * glm::dot(lean, nn);
+            const float ll = glm::length(lean);
+            if (ll > 1e-4f) {
+                tanDir = lean / ll;
+                rU = rrBase * bladeAspect;
+            }
+        }
+        m.pos_rU = glm::vec4(pp, rU);
+        m.normal_rV = glm::vec4(nn, rrBase);
+        m.bent_sh = glm::vec4(
+            safeNormalize(glm::vec3(b.bent_sh) + (nn - bn) * 0.5f), b.bent_sh.w);
+        // Decode AO before multiplying it, then re-pack the parent's layer
+        // metadata. Clamping the packed word itself used to erase the object
+        // tag, so micro disks stayed behind while their base surfels rotated.
+        const uint8_t parentLayer = surfelLayerId(b.mat_ao.w);
+        const float childAo = surfelBakedAo(b.mat_ao.w) * aoMul;
+        m.mat_ao = glm::vec4(b.mat_ao.x, b.mat_ao.y, b.mat_ao.z,
+                             packSurfelAo(childAo, parentLayer));
+        // xyz = blade tangent (zero = isotropic disk); w INHERITS the parent's
+        // per-cell texture override. Leaving it at 0 made every micro disk
+        // sample the material's own atlas slot, so a bark-tagged trunk rendered
+        // bark base splats with plank micro splats mixed in.
+        m.tan_aspect = glm::vec4(tanDir, b.tan_aspect.w);
+        micros.push_back(m);
+    };
+    const float h0 = microHash(x, y, z, 1);
+    const float h1 = microHash(x, y, z, 2);
+    const float h2 = microHash(x, y, z, 3);
+    const float oA = (h1 - 0.5f) * 0.09f;
+    const float oB = (h2 - 0.5f) * 0.09f;
+    // Micros inherit the parent's footprint: a parent that is a long thin
+    // ellipsoid (a stem) passes its blade stretch on, a round parent keeps
+    // round micros. Purely geometric - no material test.
+    const float bA = (b.pos_rU.w > b.normal_rV.w * 1.3f) ? 1.7f : 1.0f;
+    // micro-grain: small dense children (2-6 cm apparent) so close-ups read
+    // as moss grain, sand, bark fibre and leaflets instead of flat 10 cm
+    // disks. Spawn rates are high on purpose: the renderer distance-culls
+    // micros in far chunks.
+    //
+    // Facet contrast is deliberately LOW for the non-foliage materials: a
+    // micro disk is only a few pixels wide at mid distance, so a strong
+    // normal tilt made each child shade visibly darker/lighter than its base
+    // cell and the surfaces read as speckled/"holed" (worst on large flat
+    // planks and the stepped roof). The parallax relief comes from the
+    // geometry (offset + lift) and survives; the tilt/AO now only modulate it.
+    // Foliage (mat 8) keeps its high tilt: there the facet noise *is* the
+    // canopy volume.
+    if (mat <= 1) { // meadow blades / soil crumbs
+        if (h0 < 0.80f)
+            emit(oA, oB, 0.014f, 0.28f, 0.30f, 0.97f, 1, bA);
+        if (h2 < 0.30f)
+            emit(-oA, -oB, 0.020f, 0.36f, 0.24f, 0.94f, 11, bA);
+    } else if (mat == 2 || mat == 3) { // pebbles / sand grain
+        if (h0 < 0.70f)
+            emit(oA, oB, 0.006f, 0.24f, 0.20f + 0.12f * h1, 0.97f, 2, bA);
+        if (h2 < 0.30f)
+            emit(-oA * 0.7f, -oB * 0.7f, 0.004f, 0.32f, 0.16f, 0.95f, 12, bA);
+    } else if (mat == 4 || mat == 5 || mat == 16) { // rock strata chips
+        if (h0 < 0.65f)
+            emit(oA, oB, 0.008f, 0.30f, 0.34f, 0.94f, 3, bA);
+        if (h2 < 0.25f)
+            emit(-oA, -oB, 0.012f, 0.40f, 0.26f, 0.91f, 13, bA);
+    } else if (mat == 6) { // bark relief along the tangent
+        if (h0 < 0.80f)
+            emit(oA * 1.6f, oB * 0.5f, 0.005f, 0.18f, 0.28f, 0.98f, 4, bA);
+        if (h2 < 0.35f)
+            emit(-oA * 1.2f, oB * 0.8f, 0.004f, 0.26f, 0.22f, 0.96f, 14, bA);
+    } else if (mat == 7) { // roof: seal undersides, moss the tops
+        if (bn.y < -0.2f) {
+            emit(0.0f, 0.0f, -0.005f, 0.0f, 1.15f, 1.0f, 5, bA);
+        } else {
+            if (h0 < 0.85f)
+                emit(oA, oB, 0.011f, 0.35f, 0.38f, 0.95f, 6, bA);
+            if (h2 < 0.40f)
+                emit(-oA, -oB, 0.015f, 0.45f, 0.30f, 0.92f, 16, bA);
+        }
+    } else if (mat == 8) { // canopy leaflets: real volume
+        if (h0 < 0.90f)
+            emit(oA * 1.3f, oB * 1.3f, 0.008f, 1.20f, 0.38f + 0.20f * h1, 0.90f, 7, bA);
+        if (h2 < 0.55f)
+            emit(-oA, -oB, 0.013f, 1.40f, 0.30f, 0.85f, 8, bA);
+        if (microHash(x, y, z, 9) < 0.30f)
+            emit(oB, -oA, 0.018f, 1.10f, 0.26f, 0.88f, 19, bA);
+    }
+}
+
 } // namespace
 
 SurfelSet buildSurfels(const VoxelField& field, const SurfelParams& params) {
@@ -270,13 +688,15 @@ SurfelSet buildSurfels(const VoxelField& field, const SurfelParams& params) {
 
     const float baseR = params.baseRadius;
     const float voxel = 0.1f;
-    const int n = int(keys.size());
+    int n = int(keys.size());
     set.terrainCount = 0;
     set.objectCount = 0;
 
     std::vector<glm::vec3> rawNormals(n);
+    std::vector<EdgeInfo> edgeInfos(n);
     std::vector<Surfel> surfels(n);
-    std::vector<uint8_t> isObj(n); // pass-2 snapshot: object-field winners
+    std::vector<uint8_t> isObj(n);    // pass-2 snapshot: object-field winners
+    std::vector<uint8_t> layerId(n);  // owning .vxw layer, 0 = terrain/unowned
 
     // Pass 1: raw mean normals (sharded). Smoothing lookups below use
     // binary search over the sorted keys (lock-free, no hash build).
@@ -299,6 +719,121 @@ SurfelSet buildSurfels(const VoxelField& field, const SurfelParams& params) {
         for (auto& th : threads)
             th.join();
     }
+
+    // Hard-edge classification is occupancy-based, not curvature-based.
+    // Two exposed faces on different axes form a real crease; opposite faces
+    // of a thin plate do not. Normal disagreement remains available below for
+    // optional anisotropy, but it never tightens the coverage footprint.
+    {
+        constexpr int dirs[6][3] = { { 1, 0, 0 },  { -1, 0, 0 }, { 0, 1, 0 },
+                                     { 0, -1, 0 }, { 0, 0, 1 },  { 0, 0, -1 } };
+        for (int i = 0; i < n; ++i) {
+            int x, y, z;
+            unpackKey(keys[i], x, y, z);
+            if (!field.sample(x, y, z).obj)
+                continue;
+            unsigned exposedFaces = 0;
+            for (int d = 0; d < 6; ++d) {
+                const int nx = x + dirs[d][0];
+                const int ny = y + dirs[d][1];
+                const int nz = z + dirs[d][2];
+                const bool air = nx < 0 || nx >= latN || ny < 0 || ny >= latN ||
+                                 nz < 0 || nz >= latN ||
+                                 field.sample(nx, ny, nz).d > 0.0f;
+                if (air)
+                    exposedFaces |= 1u << d;
+            }
+            edgeInfos[i] = edgeInfoFromMask(exposedFaces);
+        }
+    }
+
+    // Expand degenerate cells instead of dropping them.
+    //
+    // meanNormal() sums the outward directions of the exposed faces, so a cell
+    // whose exposure is symmetric cancels to exactly zero: the middle of a
+    // one-cell-thick column (a reed stem, a thin post) has +/-X and +/-Z air
+    // and +/-Y solid, i.e. sum == 0. The old filter dropped those cells, which
+    // removed the entire BODY of every thin structure and left only its caps -
+    // the "disc hovering above the stem" artifact. Cells with no air neighbour
+    // at all (enclosed air / buried, the case the filter was written for) are
+    // still dropped, because the expansion below emits nothing for them.
+    //
+    // A degenerate cell becomes one entry per exposed face, carrying that
+    // face's axis-aligned normal, so a one-cell column renders as its actual
+    // voxel faces from every direction. `faceEntry` marks those entries so
+    // pass 2 can skip the neighbourhood smoothing (they must stay axis
+    // aligned) and the micro pass can emit one micro set per cell, not per
+    // face.
+    //
+    // The same expansion is needed for THIN structures whose cells have a
+    // DIAGONAL mean normal (two perpendicular exposed faces: every cell of a
+    // two-cell-wide post is such a corner). A 45-degree disk covers the corner
+    // but not the flat face it belongs to - it reaches only rV/sqrt(2) per
+    // axis - and on a two-cell face the two corner disks leave a strip down
+    // the middle: the "hollow post" slots. The perpendicular face cannot cover
+    // it either (it is backfaced when seen head-on), so thin structures must
+    // render their voxel faces. Thick objects keep the mean normal: there the
+    // 45-degree disk is the wanted corner smoothing.
+    std::vector<uint64_t> keys2;
+    std::vector<glm::vec3> normals2;
+    std::vector<EdgeInfo> edgeInfos2;
+    std::vector<uint8_t> faceEntry;
+    keys2.reserve(keys.size() + keys.size() / 8);
+    normals2.reserve(keys.size() + keys.size() / 8);
+    edgeInfos2.reserve(keys.size() + keys.size() / 8);
+    faceEntry.reserve(keys.size() + keys.size() / 8);
+    {
+        const int dirs[6][3] = { { 1, 0, 0 },  { -1, 0, 0 }, { 0, 1, 0 },
+                                 { 0, -1, 0 }, { 0, 0, 1 },  { 0, 0, -1 } };
+        const auto solidW = [&](glm::vec3 q) {
+            return field.sampleWorld(q).d <= 0.0f;
+        };
+        for (size_t i = 0; i < keys.size(); ++i) {
+            int x, y, z;
+            unpackKey(keys[i], x, y, z);
+            const glm::vec3 cellCentre(
+                -51.2f + (x + 0.5f) * voxel, -51.2f + (y + 0.5f) * voxel,
+                -51.2f + (z + 0.5f) * voxel);
+            const bool degenerate =
+                glm::dot(rawNormals[i], rawNormals[i]) < 1e-6f;
+            bool thinCorner = false;
+            if (!degenerate && field.sample(x, y, z).obj) {
+                const glm::vec3 an = glm::abs(rawNormals[i]);
+                const int nonZero = (an.x > 1e-3f) + (an.y > 1e-3f) +
+                                    (an.z > 1e-3f);
+                thinCorner = nonZero >= 2 && thinCellAt(solidW, cellCentre);
+            }
+            if (!degenerate && !thinCorner) {
+                keys2.push_back(keys[i]);
+                normals2.push_back(rawNormals[i]);
+                edgeInfos2.push_back(edgeInfos[i]);
+                faceEntry.push_back(0);
+                continue;
+            }
+            for (int d = 0; d < 6; ++d) {
+                const int nx = x + dirs[d][0], ny = y + dirs[d][1],
+                          nz = z + dirs[d][2];
+                // out-of-lattice counts as air, matching meanNormal()
+                const bool air =
+                    nx < 0 || nx >= latN || ny < 0 || ny >= latN || nz < 0 ||
+                    nz >= latN || field.sample(nx, ny, nz).d > 0.0f;
+                if (!air)
+                    continue;
+                keys2.push_back(keys[i]);
+                normals2.push_back(glm::vec3(float(dirs[d][0]), float(dirs[d][1]),
+                                             float(dirs[d][2])));
+                edgeInfos2.push_back(edgeInfos[i]);
+                faceEntry.push_back(uint8_t(d + 1));
+            }
+        }
+    }
+    keys.swap(keys2);
+    rawNormals.swap(normals2);
+    edgeInfos.swap(edgeInfos2);
+    n = int(keys.size());
+    surfels.resize(size_t(n));
+    isObj.resize(size_t(n));
+    layerId.resize(size_t(n));
 
     // Pass 2: blend, smooth, bake shadow+AO, and emit (also sharded; every
     // index is independent and keys/rawNormals are read-only here).
@@ -337,7 +872,13 @@ SurfelSet buildSurfels(const VoxelField& field, const SurfelParams& params) {
                     // rChaos grows disks where neighbour normals disagree
                     // (wedges that leak); 1.0 on agreed patches.
                     float rChaos = 1.0f;
-                    if (params.smoothNormals) {
+                    float aspect = 1.0f;
+                    glm::vec3 tanDir(0.0f);
+                    // Face-expanded entries (one-cell-thick columns/plates)
+                    // keep their axis-aligned face normal: smoothing them
+                    // against neighbours from other faces would tilt them off
+                    // the voxel face they stand for.
+                    if (params.smoothNormals && faceEntry[i] == 0) {
                         glm::vec3 acc = n;
                         float wsum = 1.0f;
                         const int faceDirs[6][3] = { { 1, 0, 0 }, { -1, 0, 0 },
@@ -345,6 +886,7 @@ SurfelSet buildSurfels(const VoxelField& field, const SurfelParams& params) {
                                                      { 0, 0, 1 }, { 0, 0, -1 } };
                         glm::vec3 agr = rawNormals[i];
                         float agrN = 1.0f;
+                        glm::vec3 bendSum(0.0f);
                         for (auto& d : faceDirs) {
                             const uint64_t nk = packKey(x + d[0], y + d[1], z + d[2]);
                             auto it = std::lower_bound(keys.begin(), keys.end(), nk);
@@ -354,14 +896,21 @@ SurfelSet buildSurfels(const VoxelField& field, const SurfelParams& params) {
                                 ++wsum;
                                 agr += nn;
                                 ++agrN;
+                                bendSum += nn - rawNormals[i];
                             }
                         }
                         n = safeNormalize(acc / wsum);
-                        // local chaos: agreed flat patches keep tight disks,
-                        // disagreeing neighbourhoods (wedges that leak) grow
+                        // Curvature may guide the optional footprint tangent,
+                        // but it is not a coverage test. Terrain and foliage
+                        // retain their historical disagreement growth; opaque
+                        // object parents keep their full radius unless the
+                        // occupancy classifier below finds a genuine hard edge.
                         const float agreement =
                             glm::clamp(glm::length(agr) / agrN, 0.0f, 1.0f);
-                        rChaos = 1.0f + 0.8f * (1.0f - agreement);
+                        const float dis = 1.0f - agreement;
+                        if (params.anisotropy)
+                            anisotropyFromBend(bendSum, n, aspect, tanDir);
+                        rChaos = s.obj ? 1.0f : 1.0f + 0.8f * dis;
                     }
 
                     const glm::vec3 cellCentre =
@@ -383,20 +932,77 @@ SurfelSet buildSurfels(const VoxelField& field, const SurfelParams& params) {
                     aoBake(field, pos + n * 0.02f, n, ao, bent);
 
                     const uint8_t mat = s.mat;
-                    const float refl = kMaterialReflection[std::min(int(mat), 16)].x;
-                    const float rough = kMaterialReflection[std::min(int(mat), 16)].y;
+                    const float refl = kMaterialReflection[std::min(int(mat), kPaletteN - 1)].x;
+                    const float rough = kMaterialReflection[std::min(int(mat), kPaletteN - 1)].y;
 
-                    // foliage reads as volume (chaotic normals already grow
-                    // it via rChaos); cap the combined multiplier
+                    // Vegetation/structure shape. The rule is purely GEOMETRIC
+                    // - the material is irrelevant:
+                    //
+                    //  - LONG and only a few voxels thick (grass blades, reed
+                    //    stems, thin posts and branches: <= 3 cells across,
+                    //    >= 4 cells tall) become LONG VERTICAL ELLIPSOIDS. Both
+                    //    radii matter: the across radius must SHRINK to roughly
+                    //    the structure's own width, otherwise the chaos-grown
+                    //    disk swamps a one-cell column and the splat reads as a
+                    //    fat blob however far it is stretched.
+                    //  - everything else - thick masses AND small blobs that
+                    //    are thin but not long - keeps the round disk.
+                    const ThinFootprint fp =
+                        params.anisotropy
+                            ? thinFootprintAt(
+                                  [&](glm::vec3 q) { return field.sampleWorld(q).d <= 0.0f; },
+                                  cellCentre, n, x, y, z)
+                            : ThinFootprint {};
+
+                    // Foliage growth (2x) exists to SEAL sparse terrain canopy:
+                    // grass cards and bushes are represented by splats alone,
+                    // so the disks must overlap. Object foliage is real
+                    // geometry (leaf clusters, canopy blobs); growing those
+                    // makes neighbouring clusters merge into one mass and
+                    // swallow the branches between them, so object foliage
+                    // keeps the base radius and the voxel silhouette.
+                    const float foliageGrow = (mat == 8 && !s.obj) ? 2.0f : 1.0f;
+                    // Only a genuine lattice hard edge tightens an opaque
+                    // object parent. Explicit thin footprints already encode
+                    // their true width and must not be reduced a second time.
+                    const bool hardEdge =
+                        s.obj && mat != 8 && !(mat >= 9 && mat <= 15) &&
+                        edgeInfos[i].pairCount > 0 && !fp.thin;
+                    const float edgeFactor =
+                        hardEdge
+                            ? 1.0f - glm::clamp(params.edgeShrink, 0.0f, 1.0f)
+                            : 1.0f;
                     const float rr =
-                        baseR * std::min((mat == 8 ? 2.0f : 1.0f) * rChaos, 2.2f);
+                        baseR * std::min(foliageGrow * rChaos * edgeFactor, 2.2f);
+                    float rU = rr, rV = rr;
+                    glm::vec3 tanOut(0.0f);
+                    if (fp.thin) {
+                        rU = fp.along;
+                        rV = fp.across;
+                        tanOut = fp.axis;
+                    } else if (hardEdge) {
+                        // The bridge carries the edge-aligned elongation. Keep
+                        // the tightened parent isotropic so its full diameter,
+                        // rather than just one axis, is reduced.
+                        aspect = 1.0f;
+                        tanDir = glm::vec3(0.0f);
+                    } else if (params.anisotropy && aspect > 1.0f) {
+                        rU = rr * aspect;
+                        tanOut = tanDir;
+                    }
                     Surfel sl;
-                    sl.pos_rU = glm::vec4(pos, rr);
-                    sl.normal_rV = glm::vec4(n, rr);
+                    sl.pos_rU = glm::vec4(pos, rU);
+                    sl.normal_rV = glm::vec4(n, rV);
                     sl.bent_sh = glm::vec4(bent, shadow);
                     sl.mat_ao = glm::vec4(float(mat), refl, rough, ao);
+                    // w = per-cell texture override (0 = use the material's
+                    // atlas slot): phase-2 per-object textures ride the
+                    // otherwise spare channel. Raw integer 0..255; the shader
+                    // tests > 0.5 so an unset (0) override never fires
+                    sl.tan_aspect = glm::vec4(tanOut, float(s.tex));
                     surfels[i] = sl;
                     isObj[i] = s.obj ? 1 : 0;
+                    layerId[i] = s.obj ? s.layer : uint8_t(0);
                     if (s.obj)
                         ++locObject;
                     else
@@ -458,6 +1064,15 @@ SurfelSet buildSurfels(const VoxelField& field, const SurfelParams& params) {
             th.join();
     }
 
+    // Pack the exact owning layer AFTER AO smoothing, which averages w across
+    // face neighbours and would otherwise mix ownership IDs together. The
+    // shader contract is shared with common_surfel.glsl: AO + 8 + 16*layerId.
+    // Unowned object geometry remains layer 0 and is intentionally excluded
+    // from layer rotation (notably newly added live-edit cells).
+    for (int i = 0; i < n; ++i)
+        surfels[i].mat_ao.w = packSurfelAo(surfelBakedAo(surfels[i].mat_ao.w),
+                                            layerId[i]);
+
     std::vector<uint64_t> order(n);
     std::iota(order.begin(), order.end(), 0u);
     // precompute chunk ids once: the comparator runs O(n log n) times and
@@ -492,6 +1107,50 @@ SurfelSet buildSurfels(const VoxelField& field, const SurfelParams& params) {
     for (int c = 1; c <= kSurfGridN * kSurfGridN * kSurfGridN; ++c)
         set.chunkRange[c] += set.chunkRange[c - 1];
 
+    // Per-chunk object presence (draw-time micro-distance selection): object
+    // chunks keep their micro detail farther out than terrain-only chunks.
+    set.objectChunks.assign(kChunks, 0);
+    for (int i = 0; i < n; ++i)
+        if (isObj[order[i]])
+            set.objectChunks[chunkOf[order[i]]] = 1;
+
+    // ---- hard-edge bridges -------------------------------------------------
+    // One small, tangent-aligned splat per exposed face pair. They inherit the
+    // parent's baked shading and owner, so this adds no CPU field marches and
+    // no fragment-shader work. Keep them per chunk for the LOD/object path and
+    // the later [base | edge | micro] interleave.
+    std::vector<std::vector<Surfel>> edgeByChunk(kChunks);
+    if (params.edgeFill && params.edgeShrink > 0.0f) {
+        for (int i = 0; i < n; ++i) {
+            const int source = order[i];
+            // Face-expanded thin cells have several parent entries with the
+            // same key. Their explicit footprints are not tightened, and one
+            // bridge set per lattice cell is sufficient.
+            if (i > 0 && keys[source] == keys[order[i - 1]])
+                continue;
+            if (!isObj[source] || edgeInfos[source].pairCount <= 0)
+                continue;
+            const int mat = int(surfels[i].mat_ao.x + 0.5f);
+            if (mat == 8 || (mat >= 9 && mat <= 15))
+                continue;
+            int x, y, z;
+            unpackKey(keys[source], x, y, z);
+            const glm::vec3 cellCentre(-51.2f + (x + 0.5f) * voxel,
+                                       -51.2f + (y + 0.5f) * voxel,
+                                       -51.2f + (z + 0.5f) * voxel);
+            std::vector<Surfel>& out = edgeByChunk[chunkOf[i]];
+            const size_t before = out.size();
+            appendEdgeBridges(cellCentre, surfels[i], edgeInfos[source],
+                              baseR, out);
+            if (out.size() != before) {
+                ++set.edgeParentCount;
+                const size_t added = out.size() - before;
+                set.edgeBridgeCount += added;
+                set.objectCount += added;
+            }
+        }
+    }
+
     // ---- LOD rings: merged-terrain surfels per chunk (terrain cells only,
     // object-field winners keep their own base surfels). Blocks of
     // 2x2x2 (LOD1) / 4x4x4 (LOD2) lattice cells merge the already-shaded
@@ -506,15 +1165,18 @@ SurfelSet buildSurfels(const VoxelField& field, const SurfelParams& params) {
         auto buildRing = [&](int shift, std::vector<std::vector<Surfel>>& byChunk) {
             const int blocksPerAxis = 64 >> shift; // 32 (2x) / 16 (4x)
             const float coverBase = shift == 1 ? 0.20f : 0.30f;
-            struct LodAcc {
+            struct LodGroup {
                 glm::vec3 posSum { 0.0f };
-                glm::vec3 posMin { 0.0f, 0.0f, 0.0f };
-                glm::vec3 posMax { 0.0f, 0.0f, 0.0f };
+                glm::vec3 posMin { 0.0f };
+                glm::vec3 posMax { 0.0f };
                 glm::vec3 nSum { 0.0f };
                 glm::vec3 bentSum { 0.0f };
-                int matCounts[17] {};
                 float shSum = 0.0f, aoSum = 0.0f, rSum = 0.0f;
                 int count = 0;
+            };
+            struct LodAcc {
+                LodGroup mat[kPaletteN];
+                int total = 0;
             };
             std::atomic<int> next{ 0 };
             unsigned hc = std::max(1u, std::thread::hardware_concurrency());
@@ -545,35 +1207,37 @@ SurfelSet buildSurfels(const VoxelField& field, const SurfelParams& params) {
                                 (((x & 63) >> shift) * blocksPerAxis +
                                  ((y & 63) >> shift)) * blocksPerAxis +
                                 ((z & 63) >> shift);
+                            const int m = glm::clamp(
+                                int(surfels[i].mat_ao.x + 0.5f), 0, kPaletteN - 1);
                             auto it = acc.find(bid);
-                            if (it == acc.end()) {
-                                LodAcc a;
-                                const glm::vec3 p(surfels[i].pos_rU);
-                                a.posSum = p;
-                                a.posMin = a.posMax = p;
-                                a.nSum = glm::vec3(surfels[i].normal_rV);
-                                a.bentSum = glm::vec3(surfels[i].bent_sh);
-                                a.matCounts[int(surfels[i].mat_ao.x + 0.5f)] = 1;
-                                a.shSum = surfels[i].bent_sh.w;
-                                a.aoSum = surfels[i].mat_ao.w;
-                                a.rSum = surfels[i].pos_rU.w;
-                                a.count = 1;
-                                acc.emplace(bid, a);
+                            if (it == acc.end())
+                                it = acc.emplace(bid, LodAcc {}).first;
+                            LodAcc& a = it->second;
+                            LodGroup& g = a.mat[m];
+                            const glm::vec3 p(surfels[i].pos_rU);
+                            if (g.count == 0) {
+                                g.posSum = p;
+                                g.posMin = g.posMax = p;
                             } else {
-                                LodAcc& a = it->second;
-                                const glm::vec3 p(surfels[i].pos_rU);
-                                a.posSum += p;
-                                a.posMin = glm::min(a.posMin, p);
-                                a.posMax = glm::max(a.posMax, p);
-                                a.nSum += glm::vec3(surfels[i].normal_rV);
-                                a.bentSum += glm::vec3(surfels[i].bent_sh);
-                                a.matCounts[int(surfels[i].mat_ao.x + 0.5f)]++;
-                                a.shSum += surfels[i].bent_sh.w;
-                                a.aoSum += surfels[i].mat_ao.w;
-                                a.rSum += surfels[i].pos_rU.w;
-                                ++a.count;
+                                g.posSum += p;
+                                g.posMin = glm::min(g.posMin, p);
+                                g.posMax = glm::max(g.posMax, p);
                             }
+                            g.nSum += glm::vec3(surfels[i].normal_rV);
+                            g.bentSum += glm::vec3(surfels[i].bent_sh);
+                            g.shSum += surfels[i].bent_sh.w;
+                            g.aoSum += surfels[i].mat_ao.w;
+                            g.rSum += surfels[i].pos_rU.w;
+                            ++g.count;
+                            ++a.total;
                         }
+                        // Object parents ride along unmerged in every ring;
+                        // their derived hard-edge bridges must ride with them
+                        // or distant chunks would lose the coverage repair.
+                        if (!edgeByChunk[c].empty())
+                            byChunk[c].insert(byChunk[c].end(),
+                                               edgeByChunk[c].begin(),
+                                               edgeByChunk[c].end());
                         if (acc.empty())
                             continue;
                         // deterministic emission: sorted block ids
@@ -584,30 +1248,51 @@ SurfelSet buildSurfels(const VoxelField& field, const SurfelParams& params) {
                         std::sort(bids.begin(), bids.end());
                         for (uint32_t bid : bids) {
                             const LodAcc& a = acc[bid];
-                            const float fc = float(a.count);
-                            const glm::vec3 pos = a.posSum / fc;
-                            const glm::vec3 nn = safeNormalize(a.nSum);
-                            int mat = 0, best = 0;
-                            for (int m = 0; m <= 16; ++m)
-                                if (a.matCounts[m] > best) {
-                                    best = a.matCounts[m];
-                                    mat = m;
+                            int first = -1, second = -1;
+                            for (int m = 0; m < kPaletteN; ++m) {
+                                if (!a.mat[m].count)
+                                    continue;
+                                if (first < 0 ||
+                                    a.mat[m].count > a.mat[first].count) {
+                                    second = first;
+                                    first = m;
+                                } else if (second < 0 ||
+                                           a.mat[m].count > a.mat[second].count) {
+                                    second = m;
                                 }
-                            const float meanR = a.rSum / fc;
-                            const float spread =
-                                0.5f * glm::length(a.posMax - a.posMin);
-                            const float r = glm::min(
-                                0.5f, std::max(coverBase, spread + meanR));
-                            Surfel sl;
-                            sl.pos_rU = glm::vec4(pos, r);
-                            sl.normal_rV = glm::vec4(nn, r);
-                            sl.bent_sh = glm::vec4(
-                                safeNormalize(a.bentSum), a.shSum / fc);
-                            sl.mat_ao =
-                                glm::vec4(float(mat), kMaterialReflection[mat].x,
-                                          kMaterialReflection[mat].y,
-                                          glm::clamp(a.aoSum / fc, 0.0f, 1.0f));
-                            byChunk[c].push_back(sl);
+                            }
+                            auto emitGroup = [&](int m) {
+                                const LodGroup& g = a.mat[m];
+                                const float fc = float(g.count);
+                                const glm::vec3 pos = g.posSum / fc;
+                                const glm::vec3 nn = safeNormalize(g.nSum);
+                                const float meanR = g.rSum / fc;
+                                const float spread =
+                                    0.5f * glm::length(g.posMax - g.posMin);
+                                const float r = glm::min(
+                                    0.5f, std::max(coverBase, spread + meanR));
+                                Surfel sl;
+                                sl.pos_rU = glm::vec4(pos, r);
+                                sl.normal_rV = glm::vec4(nn, r);
+                                sl.bent_sh = glm::vec4(
+                                    safeNormalize(g.bentSum), g.shSum / fc);
+                                sl.mat_ao =
+                                    glm::vec4(float(m), kMaterialReflection[m].x,
+                                              kMaterialReflection[m].y,
+                                              glm::clamp(g.aoSum / fc, 0.0f, 1.0f));
+                                sl.tan_aspect = glm::vec4(0.0f); // merged: isotropic
+                                byChunk[c].push_back(sl);
+                            };
+                            if (first >= 0)
+                                emitGroup(first);
+                            // The dominant minority group gets its own disk so
+                            // material borders (shorelines, snow/rock lines)
+                            // stay readable after the merge; it sits on that
+                            // group's own mean, not the block centre.
+                            if (params.lodMaterialSplit && second >= 0 &&
+                                a.mat[second].count >= 2 &&
+                                a.mat[second].count * 4 >= a.total)
+                                emitGroup(second);
                         }
                     }
                 });
@@ -628,135 +1313,90 @@ SurfelSet buildSurfels(const VoxelField& field, const SurfelParams& params) {
     }
 
     // ---- micro-detail: texture texels become real micro-surfel geometry ----
-    // Deterministic children of the sorted base set (same material, inherited
-    // baked shadow/AO/bent so no extra marches): moss puffs, pebbles, bark
-    // relief, leaflets and roof-underside fillers that seal the stepped-slab
-    // slits seen from below. Micros inherit the base cell's chunk, and
-    // because the base loop below walks chunk by chunk the micro stream is
-    // already chunk-grouped for the final interleave. Single-threaded and
-    // hash-driven: two builds are bit-identical.
+    // Deterministic children of the sorted BASE parents. This runs before the
+    // base+edge interleave below, so `surfels[i]` still matches `order[i]`.
+    std::vector<Surfel> micros;
+    std::vector<uint32_t> microCounts(kChunks, 0);
     size_t microTerrain = 0, microObject = 0;
     if (params.microDetail && n > 0) {
-        std::vector<Surfel> micros;
         micros.reserve(size_t(n) / 2);
-        std::vector<uint32_t> microCounts(kChunks, 0);
         for (int i = 0; i < n; ++i) {
+            // Face-expanded cells occupy several consecutive entries with the
+            // same key; their micros are emitted once, from the first entry.
+            if (i > 0 && keys[order[i]] == keys[order[i - 1]])
+                continue;
             int x, y, z;
             unpackKey(keys[order[i]], x, y, z);
-            const Surfel& b = surfels[i];
-            const int mat = int(b.mat_ao.x + 0.5f);
-            if (mat < 0 || mat > 16)
-                continue;
-            if (mat >= 9 && mat <= 15)
-                continue; // emissive: keep crisp, no fuzz
-            glm::vec3 bn(b.normal_rV);
-            bn = safeNormalize(bn);
-            glm::vec3 bp(b.pos_rU);
-            const uint32_t bc = chunkOf[order[i]];
-            const bool isObj = field.sample(x, y, z).obj;
-            glm::vec3 up = std::fabs(bn.y) < 0.99f ? glm::vec3(0.0f, 1.0f, 0.0f)
-                                                   : glm::vec3(1.0f, 0.0f, 0.0f);
-            glm::vec3 t = safeNormalize(glm::cross(bn, up));
-            glm::vec3 bb = safeNormalize(glm::cross(bn, t));
-            auto emit = [&](float o1, float o2, float lift, float tilt,
-                            float rScale, float aoMul, int slot) {
-                float j1 = microHash(x, y, z, slot * 2 + 101) - 0.5f;
-                float j2 = microHash(x, y, z, slot * 2 + 102) - 0.5f;
-                glm::vec3 nn = safeNormalize(bn + (t * j1 + bb * j2) * tilt);
-                glm::vec3 pp = bp + (t * o1 + bb * o2) + bn * lift;
-                Surfel m;
-                const float rr = std::max(b.pos_rU.w * rScale, 1e-4f);
-                m.pos_rU = glm::vec4(pp, rr);
-                m.normal_rV = glm::vec4(nn, rr);
-                m.bent_sh = glm::vec4(safeNormalize(glm::vec3(b.bent_sh) + (nn - bn) * 0.5f),
-                                      b.bent_sh.w);
-                m.mat_ao = glm::vec4(b.mat_ao.x, b.mat_ao.y, b.mat_ao.z,
-                                     glm::clamp(b.mat_ao.w * aoMul, 0.0f, 1.0f));
-                micros.push_back(m);
-                ++microCounts[bc];
-                if (isObj)
-                    ++microObject;
+            const size_t before = micros.size();
+            emitMicroSurfelsForCell(x, y, z, surfels[i], micros);
+            const size_t added = micros.size() - before;
+            if (added > 0) {
+                microCounts[chunkOf[order[i]]] += uint32_t(added);
+                if (field.sample(x, y, z).obj)
+                    microObject += added;
                 else
-                    ++microTerrain;
-            };
-            const float h0 = microHash(x, y, z, 1);
-            const float h1 = microHash(x, y, z, 2);
-            const float h2 = microHash(x, y, z, 3);
-            const float oA = (h1 - 0.5f) * 0.09f;
-            const float oB = (h2 - 0.5f) * 0.09f;
-            // micro-grain: small dense children (2-6 cm apparent) so
-            // close-ups read as moss grain, sand, bark fibre and leaflets
-            // instead of flat 10 cm disks. Spawn rates are high on purpose:
-            // the renderer distance-culls micros in far chunks.
-            if (mat <= 1) { // meadow blades / soil crumbs
-                if (h0 < 0.80f)
-                    emit(oA, oB, 0.014f, 0.55f, 0.30f, 0.92f, 1);
-                if (h2 < 0.30f)
-                    emit(-oA, -oB, 0.020f, 0.70f, 0.24f, 0.88f, 11);
-            } else if (mat == 2 || mat == 3) { // pebbles / sand grain
-                if (h0 < 0.70f)
-                    emit(oA, oB, 0.006f, 0.45f, 0.20f + 0.12f * h1, 0.93f, 2);
-                if (h2 < 0.30f)
-                    emit(-oA * 0.7f, -oB * 0.7f, 0.004f, 0.60f, 0.16f, 0.90f, 12);
-            } else if (mat == 4 || mat == 5 || mat == 16) { // rock strata chips
-                if (h0 < 0.65f)
-                    emit(oA, oB, 0.008f, 0.60f, 0.34f, 0.88f, 3);
-                if (h2 < 0.25f)
-                    emit(-oA, -oB, 0.012f, 0.80f, 0.26f, 0.85f, 13);
-            } else if (mat == 6) { // bark relief along the tangent
-                if (h0 < 0.80f)
-                    emit(oA * 1.6f, oB * 0.5f, 0.005f, 0.35f, 0.28f, 0.95f, 4);
-                if (h2 < 0.35f)
-                    emit(-oA * 1.2f, oB * 0.8f, 0.004f, 0.50f, 0.22f, 0.93f, 14);
-            } else if (mat == 7) { // roof: seal undersides, moss the tops
-                if (bn.y < -0.2f) {
-                    emit(0.0f, 0.0f, -0.005f, 0.0f, 1.15f, 1.0f, 5);
-                } else {
-                    if (h0 < 0.85f)
-                        emit(oA, oB, 0.011f, 0.70f, 0.38f, 0.90f, 6);
-                    if (h2 < 0.40f)
-                        emit(-oA, -oB, 0.015f, 0.90f, 0.30f, 0.86f, 16);
-                }
-            } else if (mat == 8) { // canopy leaflets: real volume
-                if (h0 < 0.90f)
-                    emit(oA * 1.3f, oB * 1.3f, 0.008f, 1.20f, 0.38f + 0.20f * h1, 0.90f, 7);
-                if (h2 < 0.55f)
-                    emit(-oA, -oB, 0.013f, 1.40f, 0.30f, 0.85f, 8);
-                if (microHash(x, y, z, 9) < 0.30f)
-                    emit(oB, -oA, 0.018f, 1.10f, 0.26f, 0.88f, 19);
+                    microTerrain += added;
             }
         }
-        if (!micros.empty()) {
-            // interleave: base chunk range first, then that chunk's micros
-            // (micros were emitted in base-sorted order, hence chunk-grouped).
-            std::vector<Surfel> combined;
-            combined.reserve(size_t(n) + micros.size());
-            std::vector<uint32_t> newRange(kChunks + 1, 0);
-            std::vector<uint32_t> microStart(kChunks + 1, 0);
-            size_t mCur = 0;
-            size_t mOff = 0;
-            // micro chunk boundaries: recount in emission order per chunk
-            std::vector<uint32_t> mStarts(kChunks + 1, 0);
-            for (uint32_t c = 0; c < kChunks; ++c)
-                mStarts[c + 1] = mStarts[c] + microCounts[c];
-            for (uint32_t c = 0; c < kChunks; ++c) {
-                const uint32_t b0 = set.chunkRange[c], b1 = set.chunkRange[c + 1];
-                for (uint32_t i = b0; i < b1; ++i)
-                    combined.push_back(surfels[i]);
-                microStart[c] = uint32_t(combined.size()); // base end == micro begin
-                const uint32_t m0 = mStarts[c], m1 = mStarts[c + 1];
-                for (uint32_t i = m0; i < m1; ++i)
-                    combined.push_back(micros[i]);
-                newRange[c + 1] = uint32_t(combined.size());
-                (void)mCur; (void)mOff;
-            }
-            microStart[kChunks] = uint32_t(combined.size());
-            surfels = std::move(combined);
-            set.chunkRange = std::move(newRange);
-            set.microStart = std::move(microStart);
-            set.terrainCount += microTerrain;
-            set.objectCount += microObject;
+    }
+
+    // ---- interleave base parents and always-on hard-edge bridges ----------
+    // Both segments stay in chunkRange, so the renderer keeps one contiguous
+    // opaque draw and adds no per-edge draw call. edgeStart is metadata used by
+    // live GPU seeding/patching; ordinary rendering only needs microStart.
+    {
+        std::vector<Surfel> combined;
+        size_t edgeTotal = 0;
+        for (const auto& v : edgeByChunk)
+            edgeTotal += v.size();
+        combined.reserve(surfels.size() + edgeTotal);
+        std::vector<uint32_t> newRange(kChunks + 1, 0);
+        std::vector<uint32_t> newEdgeStart(kChunks + 1, 0);
+        for (uint32_t c = 0; c < kChunks; ++c) {
+            const uint32_t b0 = set.chunkRange[c];
+            const uint32_t b1 = set.chunkRange[c + 1];
+            for (uint32_t i = b0; i < b1; ++i)
+                combined.push_back(surfels[i]);
+            newEdgeStart[c] = uint32_t(combined.size());
+            combined.insert(combined.end(), edgeByChunk[c].begin(),
+                            edgeByChunk[c].end());
+            newRange[c + 1] = uint32_t(combined.size());
         }
+        newEdgeStart[kChunks] = uint32_t(combined.size());
+        surfels = std::move(combined);
+        set.chunkRange = std::move(newRange);
+        set.edgeStart = std::move(newEdgeStart);
+    }
+
+    if (!micros.empty()) {
+        // Final per-chunk layout is [base | edge bridges | material micros].
+        std::vector<Surfel> combined;
+        combined.reserve(surfels.size() + micros.size());
+        std::vector<uint32_t> newRange(kChunks + 1, 0);
+        std::vector<uint32_t> newEdgeStart(kChunks + 1, 0);
+        std::vector<uint32_t> microStart(kChunks + 1, 0);
+        std::vector<uint32_t> mStarts(kChunks + 1, 0);
+        for (uint32_t c = 0; c < kChunks; ++c)
+            mStarts[c + 1] = mStarts[c] + microCounts[c];
+        for (uint32_t c = 0; c < kChunks; ++c) {
+            const uint32_t b0 = set.chunkRange[c], b1 = set.chunkRange[c + 1];
+            for (uint32_t i = b0; i < b1; ++i)
+                combined.push_back(surfels[i]);
+            newEdgeStart[c] = uint32_t(combined.size());
+            microStart[c] = uint32_t(combined.size());
+            const uint32_t m0 = mStarts[c], m1 = mStarts[c + 1];
+            for (uint32_t i = m0; i < m1; ++i)
+                combined.push_back(micros[i]);
+            newRange[c + 1] = uint32_t(combined.size());
+        }
+        newEdgeStart[kChunks] = uint32_t(combined.size());
+        microStart[kChunks] = uint32_t(combined.size());
+        surfels = std::move(combined);
+        set.chunkRange = std::move(newRange);
+        set.edgeStart = std::move(newEdgeStart);
+        set.microStart = std::move(microStart);
+        set.terrainCount += microTerrain;
+        set.objectCount += microObject;
     }
 
     // ---- append LOD rings after the base+micro stream (absolute offsets) --
@@ -780,18 +1420,16 @@ SurfelSet buildSurfels(const VoxelField& field, const SurfelParams& params) {
         }
         set.lod2Range[kChunks] = uint32_t(surfels.size());
     }
-
-    set.surfels = std::move(surfels);
-    const auto t1 = std::chrono::steady_clock::now();
+    set.surfels = std::move(surfels);    const auto t1 = std::chrono::steady_clock::now();
     auto ms = [](const auto& a, const auto& b) {
         return std::chrono::duration_cast<std::chrono::milliseconds>(b - a).count();
     };
     set.buildMs = float(ms(t0, t1));
-    spdlog::info("surfelize: {} surfels ({} terrain, {} object, lod1 {} lod2 {}), {} ms "
-                 "(enum+surface {} ms, shade+bucket {} ms)",
+    spdlog::info("surfelize: {} surfels ({} terrain, {} object, edge {} / {}, "
+                 "lod1 {} lod2 {}), {} ms (enum+surface {} ms, shade+bucket {} ms)",
                  set.surfels.size(), set.terrainCount, set.objectCount,
-                 set.lod1Count, set.lod2Count, set.buildMs, ms(t0, tEnum),
-                 ms(tEnum, t1));
+                 set.edgeBridgeCount, set.edgeParentCount, set.lod1Count,
+                 set.lod2Count, set.buildMs, ms(t0, tEnum), ms(tEnum, t1));
     return set;
 }
 
@@ -803,7 +1441,77 @@ struct SurfelCand {
     glm::vec3 pos;
     glm::vec3 n;
     StoreCell cell;
+    float aspect = 1.0f;  // 1 = isotropic; >1 stretches along `tan`
+    glm::vec3 tan { 0.0f };
+    // Thin-structure footprint (see thinFootprintAt): explicit radii replace
+    // the crease `aspect` rule when thinTall > 0.
+    float thinTall = 0.0f;
+    float thinNarrow = 0.0f;
+    uint8_t layer = 0; // source .vxw owner, resolved by ChunkStore provenance
+    EdgeInfo edge;      // exposed-face hard-edge pairs only
 };
+
+// Store-space twins of solidDepthCells/solidRunCells: same world-space probe
+// points, resolved through ChunkStore::cellAt (which is bounds-safe and
+// returns air outside the lattice).
+inline bool storeSolidAt(const ChunkStore& store, glm::vec3 p)
+{
+    const int cx = int(std::floor((p.x + 0.5f * WORLD) / VOXEL));
+    const int cy = int(std::floor((p.y + 0.5f * WORLD) / VOXEL));
+    const int cz = int(std::floor((p.z + 0.5f * WORLD) / VOXEL));
+    return store.cellAt(cx, cy, cz).solid;
+}
+
+// Store-space neighbour pass: compute the edge metric used by
+// `SurfelParams::edgeShrink` and, when enabled, the same anisotropy/thin-
+// footprint rule as the bake. The 6 lattice neighbours are found by binary
+// search over the key-sorted candidate list; edge detection remains active
+// when anisotropy is disabled, while the thin probe is skipped.
+void computeCandidateAnisotropy(const ChunkStore& store,
+                                std::vector<SurfelCand>& cands, bool enabled)
+{
+    if (cands.empty())
+        return;
+    const int dirs[6][3] = { { 1, 0, 0 },  { -1, 0, 0 }, { 0, 1, 0 },
+                             { 0, -1, 0 }, { 0, 0, 1 },  { 0, 0, -1 } };
+    for (SurfelCand& cd : cands) {
+        int x, y, z;
+        unpackKey(cd.key, x, y, z);
+        glm::vec3 bendSum(0.0f);
+        unsigned exposedFaces = 0;
+        for (int d = 0; d < 6; ++d) {
+            const int nx = x + dirs[d][0], ny = y + dirs[d][1],
+                      nz = z + dirs[d][2];
+            if (cd.cell.obj && store.cellAt(nx, ny, nz).sdfRaw > 0)
+                exposedFaces |= 1u << d;
+            const uint64_t nk = packKey(nx, ny, nz);
+            auto it = std::lower_bound(
+                cands.begin(), cands.end(), nk,
+                [](const SurfelCand& c, uint64_t k) { return c.key < k; });
+            if (it != cands.end() && it->key == nk)
+                bendSum += it->n - cd.n;
+        }
+        cd.edge = cd.cell.obj ? edgeInfoFromMask(exposedFaces) : EdgeInfo {};
+        if (enabled) {
+            anisotropyFromBend(bendSum, cd.n, cd.aspect, cd.tan);
+
+            // Same long-thin rule as the bake, so a live edit inside a reed bed
+            // matches the surrounding baked geometry (probed from the CELL
+            // CENTRE, never the normal-offset surfel position).
+            const glm::vec3 cellCentre(-51.2f + (x + 0.5f) * VOXEL,
+                                       -51.2f + (y + 0.5f) * VOXEL,
+                                       -51.2f + (z + 0.5f) * VOXEL);
+            const ThinFootprint fp = thinFootprintAt(
+                [&](glm::vec3 q) { return storeSolidAt(store, q); },
+                cellCentre, cd.n, x, y, z);
+            if (fp.thin) {
+                cd.thinTall = fp.along;
+                cd.thinNarrow = fp.across;
+                cd.tan = fp.axis;
+            }
+        }
+    }
+}
 
 std::vector<SurfelCand> collectChunkCandidates(const ChunkStore& store, int chunk,
                                                glm::ivec3 lo, glm::ivec3 hi)
@@ -851,7 +1559,10 @@ std::vector<SurfelCand> collectChunkCandidates(const ChunkStore& store, int chun
                     n = glm::vec3(0.0f, 1.0f, 0.0f);
                 else
                     n = glm::normalize(n);
-                cands.push_back({ packKey(x, y, z), wp, n, c });
+                const VoxelField::Sample provenance = store.sample(x, y, z);
+                cands.push_back({ packKey(x, y, z), wp, n, c, 1.0f,
+                                  glm::vec3(0.0f), 0.0f, 0.0f,
+                                  provenance.obj ? provenance.layer : uint8_t(0) });
             }
     std::sort(cands.begin(), cands.end(),
               [](const SurfelCand& a, const SurfelCand& b) { return a.key < b.key; });
@@ -875,15 +1586,64 @@ void shadeCandidates(const ChunkStore& store, const std::vector<SurfelCand>& can
         aoBake(store, pos + cd.n * 0.02f, cd.n, ao, bent);
 
         const uint8_t mat = cd.cell.mat;
-        const float refl = kMaterialReflection[std::min(int(mat), 16)].x;
-        const float rough = kMaterialReflection[std::min(int(mat), 16)].y;
-        const float r = baseR * (mat == 8 ? 2.0f : 1.0f);
+        const float refl = kMaterialReflection[std::min(int(mat), kPaletteN - 1)].x;
+        const float rough = kMaterialReflection[std::min(int(mat), kPaletteN - 1)].y;
+        // Same foliage-growth rule as the bake: terrain canopy grows to seal
+        // sparse coverage, object foliage keeps the base radius so clusters
+        // stay separate and the branches between them stay visible.
+        const float foliageGrow = (mat == 8 && !cd.cell.obj) ? 2.0f : 1.0f;
+        // Match the full bake: only genuine hard-edge, non-thin opaque object
+        // parents tighten. Smooth curvature and explicit thin footprints keep
+        // their coverage radius.
+        const bool hardEdge =
+            cd.cell.obj && mat != 8 && !(mat >= 9 && mat <= 15) &&
+            cd.edge.pairCount > 0 && cd.thinTall <= 0.0f;
+        const float edgeFactor =
+            hardEdge ? 1.0f - glm::clamp(params.edgeShrink, 0.0f, 1.0f)
+                     : 1.0f;
+        const float r = baseR * foliageGrow * edgeFactor;
+        // Long-thin structures carry explicit radii (tall and narrow); the
+        // crease rule only applies when they are absent. Hard-edge parents
+        // stay isotropic; their separate bridges carry the elongation.
+        float rU = r, rV = r;
+        glm::vec3 tanOut(0.0f);
+        if (cd.thinTall > 0.0f) {
+            rU = cd.thinTall;
+            rV = cd.thinNarrow;
+            tanOut = cd.tan;
+        } else if (!hardEdge && params.anisotropy && cd.aspect > 1.0f) {
+            rU = r * cd.aspect;
+            tanOut = cd.tan;
+        }
         Surfel sl;
-        sl.pos_rU = glm::vec4(pos, r);
-        sl.normal_rV = glm::vec4(cd.n, r);
+        sl.pos_rU = glm::vec4(pos, rU);
+        sl.normal_rV = glm::vec4(cd.n, rV);
         sl.bent_sh = glm::vec4(bent, shadow);
-        sl.mat_ao = glm::vec4(float(mat), refl, rough, ao);
+        sl.mat_ao = glm::vec4(float(mat), refl, rough, packSurfelAo(ao, cd.layer));
+        sl.tan_aspect = glm::vec4(tanOut, float(cd.cell.tags));
         out[i] = sl;
+    }
+}
+
+void appendCandidateEdgeBridges(const std::vector<SurfelCand>& cands,
+                                const std::vector<Surfel>& base,
+                                const SurfelParams& params,
+                                std::vector<uint64_t>& edgeKeys,
+                                std::vector<Surfel>& edges)
+{
+    if (!params.edgeFill || params.edgeShrink <= 0.0f)
+        return;
+    for (size_t i = 0; i < cands.size(); ++i) {
+        const SurfelCand& cd = cands[i];
+        if (!cd.cell.obj || cd.edge.pairCount <= 0)
+            continue;
+        const int mat = int(base[i].mat_ao.x + 0.5f);
+        if (mat == 8 || (mat >= 9 && mat <= 15))
+            continue;
+        const size_t before = edges.size();
+        appendEdgeBridges(cd.pos, base[i], cd.edge, params.baseRadius, edges);
+        for (size_t j = before; j < edges.size(); ++j)
+            edgeKeys.push_back(cd.key);
     }
 }
 
@@ -907,8 +1667,11 @@ SurfelRange buildChunkSurfelsRange(const ChunkStore& store, int chunk, glm::ivec
     out.keys.reserve(cands.size());
     for (const SurfelCand& c : cands)
         out.keys.push_back(c.key);
+    computeCandidateAnisotropy(store, cands, params.anisotropy);
     out.surfels.resize(cands.size());
     shadeCandidates(store, cands, params, out.surfels, 0, cands.size());
+    appendCandidateEdgeBridges(cands, out.surfels, params,
+                               out.edgeKeys, out.edgeSurfels);
     return out;
 }
 
@@ -952,6 +1715,11 @@ std::vector<std::vector<Surfel>> buildChunksSurfels(
             th.join();
     }
 
+    // Phase 1.5: per-chunk anisotropy (same rule as the bake). Cheap and
+    // sequential; the list is already key-sorted per chunk.
+    for (size_t c = 0; c < cands.size(); ++c)
+        computeCandidateAnisotropy(store, cands[c], params.anisotropy);
+
     // Phase 2: shade a flat (chunk, slice) task list: no nested pools, every
     // index writes exactly one output element (deterministic per chunk).
     struct Task {
@@ -993,38 +1761,42 @@ Surfel makeWaterSurfel(float wx, float wz, float spacing)
     s.normal_rV = glm::vec4(0.0f, 1.0f, 0.0f, r);
     s.bent_sh = glm::vec4(0.0f, 1.0f, 0.0f, 1.0f); // unshadowed water
     s.mat_ao = glm::vec4(0.0f, 40.0f, 200.0f, 3.0f); // ao=1 +2 = water
+    s.tan_aspect = glm::vec4(0.0f);                  // isotropic plane splat
     return s;
 }
 
-std::vector<Surfel> buildWaterSurfels(const VoxelField& field, float spacing)
+std::vector<Surfel> buildWaterSurfels(float spacing)
 {
     std::vector<Surfel> out;
-    const int latN = field.latN();
-    if (latN <= 0 || spacing <= 0.0f)
+    if (spacing <= 0.0f)
         return out;
     const float half = 0.5f * WORLD;
     const int steps = int(WORLD / spacing);
-    out.reserve(8192);
-    for (int j = 0; j <= steps; ++j) {
-        const float wz = -half + (j + 0.5f) * spacing;
-        if (wz < -half || wz > half)
-            continue;
-        int cz = int((wz + half) / VOXEL);
-        if (cz < 0 || cz >= latN)
-            continue;
-        for (int i = 0; i <= steps; ++i) {
-            const float wx = -half + (i + 0.5f) * spacing;
-            if (wx < -half || wx > half)
-                continue;
-            int cx = int((wx + half) / VOXEL);
-            if (cx < 0 || cx >= latN)
-                continue;
-            if (field.terrainTopY(cx, cz) > WATER_LEVEL - 0.02f)
-                continue;
-            out.push_back(makeWaterSurfel(wx, wz, spacing));
-        }
-    }
+    out.reserve(size_t(steps + 1) * size_t(steps + 1));
+    for (int j = 0; j <= steps; ++j)
+        for (int i = 0; i <= steps; ++i)
+            out.push_back(makeWaterSurfel(-half + (i + 0.5f) * spacing,
+                                          -half + (j + 0.5f) * spacing, spacing));
     return out;
+}
+
+std::vector<Surfel> buildMicroSurfels(const std::vector<uint64_t>& keys,
+                                      const std::vector<Surfel>& base,
+                                      const uint8_t* obj, size_t* objCount)
+{
+    std::vector<Surfel> micros;
+    if (keys.size() != base.size() || base.empty())
+        return micros;
+    micros.reserve(base.size() / 2);
+    for (size_t i = 0; i < base.size(); ++i) {
+        int x, y, z;
+        unpackKey(keys[i], x, y, z);
+        const size_t before = micros.size();
+        emitMicroSurfelsForCell(x, y, z, base[i], micros);
+        if (objCount && obj && obj[i] && micros.size() > before)
+            *objCount += micros.size() - before;
+    }
+    return micros;
 }
 
 } // namespace vf::voxel

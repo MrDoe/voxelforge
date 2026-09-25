@@ -69,8 +69,9 @@
 - **Hand-rolled PNG writer** in heightmap_gen: stored-deflate,
   `rowBytes = 1 + w*2`.
 - **Manifest key is `"rot"`** even though the struct field is `rotDeg`;
-  `pos`/`rotDeg` are informational bake-time metadata, never applied at
-  runtime.
+  `pos`/`rot`/`rotX`/`rotZ` are applied at runtime via the selected-layer
+  trackball and live placement panel — they are bake-time defaults only
+  when all zero.
 - **Layer priority** is manifest array order (first wins a cell); `ai_edits`
   sits first among objects. Landscape changes force full rebuilds; other
   layers rebuild only their dirty chunk range (+2 margin).
@@ -88,7 +89,8 @@
 4. Widen clamps: `std::clamp(mat, 0, 8)` in `src/ai/mcp_server.cpp`,
    `std::min(int(mat), 8)` index guards, and `injectToolDefaults` name→mat map.
 5. Consider `materialFromBands()` if terrain should ever select it.
-6. Run the full gate chain ([testing.md](testing.md)).
+6. Run the focused test group(s) affected by the material change
+   ([testing.md](testing.md)); never run an all-tests command.
 
 ### Add an MCP tool
 
@@ -110,16 +112,23 @@ Authoring loop (layer-by-layer, verify each step):
    band if tall); run `ninja -C build world`.
 3. Verify per layer: `./build/vf_slice --axis z --center X Y Z --span 10`
    and `./build/voxelforge --probe X Y Z` (no GPU needed).
-4. Final acceptance: close-up `--shot`s judged via ascii_view.py + full ctest.
-   See `.opencode/skills/voxel-object/SKILL.md` for the detailed loop.
+4. Final acceptance: close-up `--shot`s judged via ascii_view.py plus the
+   relevant `test-world`/`test-visual` group. See
+   `.opencode/skills/voxel-object/SKILL.md` for the detailed loop.
 
 Data-only variants: drop/edit a `.vxw` layer directly, or place copies at the
-picked anchor via the GUI Import button / `EditableWorld::importLayer`.
+picked anchor via the GUI Import button / `EditableWorld::importLayer`. For
+triangle assets, use the sidebar's **Mesh** section (or `vf_mesh2vox` for a
+reproducible offline write): the GUI resolves `.stl`/`.obj` files, exposes
+fit/scale/axis/winding/material/solid options, and writes the named layer.
+When replacing a placed layer, keep its `world.json` pose untouched; the
+importer only replaces the record file.
 
 ### Change world constants
 
-Follow invariant #3's checklist, then regenerate assets and re-run every
-gate. Expect test fixture updates (probes use absolute coordinates).
+Follow invariant #3's checklist, then regenerate assets and run the groups
+covering the affected world, SVO, surfel, and visual paths. Expect test
+fixture updates (probes use absolute coordinates).
 
 ### Touch the reload path
 
@@ -131,7 +140,9 @@ Any new GPU-side derived data must be refreshed there too.
 
 - [ ] Invariants above respected (records-only, data-only shaders)
 - [ ] `ninja -C build` clean
-- [ ] `ctest --test-dir build` green (unit + visual_check)
-- [ ] `--selftest` green after shader/world changes
+- [ ] Relevant focused group(s) green (`test-surfel`, `test-live-edit`,
+      `test-visual`, etc.; never a bare all-tests command)
+- [ ] GPU `--selftest` green through `test-visual`/`test-surfel` after
+      shader/world changes
 - [ ] New behavior covered by a unit test where practical (header-only logic is cheap to test)
 - [ ] Docs updated when contracts changed (this directory + AGENTS.md + README)

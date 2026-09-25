@@ -14,6 +14,11 @@ layout(local_size_x = 8, local_size_y = 8, local_size_z = 1) in;
 // post-processing off the ray-march lets us do HDR bloom cheaply.
 layout(set = 0, binding = 9, rgba16f) uniform writeonly image2D uHdr;
 layout(set = 0, binding = 10, rgba16f) uniform writeonly image2D uGPos;
+// G-buffer shading normal (xyz, 0 on sky). Consumed by SSAO and SSR; water
+// writes the FLAT plane normal so SSR's water reflection stays plane-stable
+// (the ripple normal is a shading-only detail). SplatPass writes the same
+// image as its 3rd colour attachment.
+layout(set = 0, binding = 12, rgba16f) uniform writeonly image2D uGNorm;
 
 layout(std430, set = 0, binding = 1) readonly buffer ChunkGrid { int uGrid[]; };
 layout(std430, set = 0, binding = 2) readonly buffer ChildBase { uint uChildBase[]; };
@@ -139,6 +144,11 @@ void main()
                 float fp = vnoise(pw.xz * 3.7 + vec2(pc.misc.y * 0.35, -pc.misc.y * 0.22));
                 fp = smoothstep(0.66, 0.90, fp + 0.28 * shoreF - 0.20);
                 col = mix(col, vec3(0.92, 0.94, 0.95), fp * shoreF * 0.50);
+                // refracted-sun caustic web at the surface; same formula and
+                // scale as the splat backend's shadeWaterSplat, so the two
+                // backends stay in sync (the bed is hidden past ~0.7 m by the
+                // absorption alpha, so the web has to be composited here)
+                col += kSunCol * causticAt(pw.xz, pc.misc.y) * 0.85 * exp(-max(kWaterLevel - bedH, 0.0) * 0.45);
                 col = mix(col, fogColor(rd, pw), 1.0-exp(-tWater*0.004));
             } else {
                 col = shadeTerrain(p, rd, brickAlbedo(p), brickReflectivity(p), ro);
@@ -173,4 +183,13 @@ void main()
     //   hitType: 0 = sky, 1 = solid surface, 2 = water surface (set above)
     imageStore(uHdr, pix, vec4(col, 1.0));
     imageStore(uGPos, pix, vec4(gWorld, gHitType));
+    // Shading normal for the screen-space effects: exact SDF-gradient normal
+    // on solids, the flat plane normal on water (SSR plane-stability), zero on
+    // sky. SSAO/SSR fall back to finite differences if this is ever zeroed.
+    vec3 gNorm = vec3(0.0);
+    if (gHitType > 1.5)
+        gNorm = vec3(0.0, 1.0, 0.0);
+    else if (gHitType > 0.5)
+        gNorm = calcNormal(gWorld);
+    imageStore(uGNorm, pix, vec4(gNorm, 0.0));
 }

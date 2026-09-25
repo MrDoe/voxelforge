@@ -2,9 +2,18 @@ build/
 build-*/
 .cache/
 compile_commands.json
-assets/*.png
-assets/*.vxw
 imgui.ini
-assets/world.json
 opencode-rag.json
 .opencode
+# The maintained wiki is project knowledge and must remain git-trackable.
+# Keep the rest of .opencode local; unignore only the placement page updated here.
+!/.opencode/
+!/.opencode/wiki/
+!/.opencode/wiki/concepts/
+!/.opencode/wiki/concepts/layer-placement.md
+
+# assets/ IS tracked (textures, layer .vxw files, world.json - the authored
+# scene is the source of truth and must be versioned). The only exception is
+# the live-edit session overlay: the app rewrites it on every brush stroke and
+# restores it at startup, so it is state, not content.
+assets/runtime_edits.vxw

@@ -121,10 +121,14 @@ void main()
             }
         }
         if (uHover.w > 0.5) {
-            vec3 d = abs(worldPos - uSel.xyz);
+            // The hovered VOXEL, not the selected one: this used to be centred
+            // on uSel.xyz, so with nothing selected the outline was drawn at
+            // the world origin (invisible) and with a selection it outlined
+            // the wrong cell - the per-voxel brush has no visible target.
+            vec3 d = abs(worldPos - uHover.xyz);
             float mQ = max(d.x, max(d.y, d.z));
             if (mQ <= pc.b.y * 0.62) {
-                vec3 lp = (worldPos - uSel.xyz) / pc.b.y;
+                vec3 lp = (worldPos - uHover.xyz) / pc.b.y;
                 vec3 fd = 0.5 - abs(lp);
                 float edge = min(fd.x, min(fd.y, fd.z));
                 if (edge < 0.10)

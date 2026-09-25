@@ -33,9 +33,23 @@ void destroyImage3D(const Context& ctx, Image3D& im);
 Image3D makeImage2D(const Context& ctx, uint32_t w, uint32_t h,
                      VkFormat format, VkImageUsageFlags usage,
                      VkImageAspectFlags aspect = VK_IMAGE_ASPECT_COLOR_BIT);
+// 2D texture array (layers in `d`) with a mip chain, for sampler2DArray.
+// `mipLevels` > 1 requires TRANSFER_SRC in `usage` if the caller blits the
+// chain on-device. View type is VK_IMAGE_VIEW_TYPE_2D_ARRAY.
+Image3D makeTexture2DArray(const Context& ctx, uint32_t w, uint32_t h, uint32_t layers,
+                           uint32_t mipLevels, VkFormat format,
+                           VkImageUsageFlags usage);
 
 // Staging-buffer upload; leaves image in VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL.
 bool uploadToImage3D(const Context& ctx, Image3D& im, const void* data, size_t bytes);
+
+// Sub-rect upload (tightly packed w x h x 1, `bytesPerTexel` each) for images
+// the app keeps in GENERAL layout and patches incrementally (e.g. the terrain
+// height texture after a live edit). Transitions GENERAL -> TRANSFER_DST ->
+// GENERAL and leaves the image in GENERAL.
+bool uploadSubImage3D(const Context& ctx, Image3D& im, const void* data,
+                      uint32_t x0, uint32_t y0, uint32_t w, uint32_t h,
+                      uint32_t bytesPerTexel);
 
 // Copies a 2D region of `src` (currently in GENERAL layout) into `out` (row-major, tightly packed).
 bool readbackImage2D(const Context& ctx, VkImage src, uint32_t w, uint32_t h,
