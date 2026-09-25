@@ -37,13 +37,15 @@
 - [[concepts/per-cell-texture]] — phase-2 per-cell overrides: the record `reserved` byte's full path to the shader (and the four places it was silently lost)
 - [[concepts/oriented-brush-rasterizer]] — rules for the axis-oriented brush stamps (Carve cylinder / Add growth): project the loop reach on `axisDir` (never world Y, or the brush no-ops on walls), make the profile branches meet at the switch plane instead of branching on a sign, and keep the CPU volume and the `BrushUBO` GPU preview as one shape
 - [[concepts/x11-input-injection]] — driving the real window to test what `--shot` cannot see: python-xlib/XTEST mechanics, the 32-byte keymap indexing trap, ambiguous `Voxelforge` window lookup, and why ffmpeg `blackframe` is not a diff metric
-- [[concepts/demo-capture]] — producing demo frames: `--shotlist` (one world load for N cameras, deterministic, but no ImGui HUD), where the hamlet actually is in world coords, and `tools/record_demo.py` + its voxel/splat A/B variant matrix
+- [[concepts/demo-capture]] — producing demo frames: `--shotlist` (one world load for N cameras, deterministic, but no ImGui HUD), where the hamlet actually is in world coords, and `tools/record_demo.py` + its voxel/splat A/B variant matrix. `--mode dual` is verified for a complete **single**-backend pass; the two-backend concatenation is **not** produced end to end
+- [[concepts/measurement-discipline]] — a result is not evidence until the instrument can produce it: positive controls, silence ≠ healthy, switch vs cause vs mitigation, and never freeze a content name in a test
 
 ## How to navigate
 - Rendering: [[entities/svo-render]] (reference backend) + [[concepts/shading-model]]; the primary backend is the Gaussian-surfel rasterizer (`--mode splat`, default) — see `docs/rendering.md`. Screen-space effects + the normal G-buffer: [[concepts/ssao-gbuffer]].
 - Detail quality / tuning: [[concepts/detail-pipeline]] + [[concepts/edge-aware-surfel-radius]] + [[concepts/detail-normals]]; atmosphere: [[concepts/volumetric-fog]].
 - Textures: [[concepts/texture-atlas]] (binding), [[concepts/texture-resolution]] (how much it buys), [[concepts/texture-conformance]] (the drop-in gate + repair tools).
-- Live editing: [[entities/live-edit-brush]] (brush, per-voxel mode, undo/Clear, overlay) + [[concepts/oriented-brush-rasterizer]] (the axis-oriented stamp rules) + [[concepts/smooth-terrain-brush]] (terrain + object relaxation); water: [[concepts/water-plane]].
+- Live editing: [[entities/live-edit-brush]] (brush, per-voxel mode, click-vs-drag gate, undo/Clear, overlay) + [[concepts/oriented-brush-rasterizer]] (the axis-oriented stamp rules) + [[concepts/smooth-terrain-brush]] (terrain + object relaxation); water: [[concepts/water-plane]].
+- Before trusting a measurement, a "clean run", or a test-only fix: [[concepts/measurement-discipline]].
 - Suite/startup speed: [[concepts/load-time-field-build]]; test selection: [[concepts/focused-test-groups]].
 - Verifying the GUI or live input (invisible to headless `--shot`): [[concepts/x11-input-injection]] + `tools/test_inject_iso.py`.
 - Producing demo frames or stills: [[concepts/demo-capture]] + `tools/record_demo.py`.
