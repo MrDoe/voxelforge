@@ -31,6 +31,13 @@ plausible value, and the value was believed without a positive control.
   In a shared-workspace repo with several sessions running, "a window exists
   and is bright" is not evidence about *your* process. Check the PID, not the
   title.
+- **The shared build and display.** Other sessions relink `build/voxelforge` and
+  take the GPU/display with no warning, so a result that looks impossible is
+  usually **cross-session state** rather than a bug you just caused. Before
+  believing a wild number, check `git status --short -- src/ shaders/` (someone
+  may have rebuilt under you) and `./build/voxelforge --selftest`. This repo
+  runs several concurrent sessions by design, so "the binary I am measuring" is
+  itself an assumption that needs confirming.
 - **A capture-target guard of the author's own** that blocked four runs —
   twice on benign window-manager windows, and twice on its own bugs, one of
   them a swallowed exception that reported a false obstruction. An
@@ -58,6 +65,139 @@ Concretely, in this repo:
   behaviour with no headless seam (see the click-vs-drag gate in
   [[entities/live-edit-brush]], which reads `glfwGetMouseButton` directly) is
   **manual-verify only**, and a green suite is not evidence about it.
+
+## A NEW log field is a NEW instrument — and its first reading is the least trustworthy
+
+The sharpened form of "confirm the instrument can produce it", earned the hard
+way: **the first reading from a newly added field deserves no more trust than
+any other reading.** A field that has never been calibrated against anything
+produces the *least* reliable data in the system — and gets read with the
+*most* confidence, because it is the newest and it appears to answer exactly the
+question being asked.
+
+Observed exactly this way: a `pick object` / `pick terrain` field was added to
+the stamp log, read `terrain` off a cell that was in fact a cabin cell, and
+believed **over a world that had already been measured and mapped**. The
+eleven-hour-old rule ("a null from a broken instrument is not evidence of
+absence") was cited by the person making the error and did not prevent it,
+because the error was not a null — it was a confident, plausible, *wrong* value
+from an uncalibrated source. The reader was broken, not the world: the headless
+hook built its pick by hand and never set the field, so every headless run
+reported the same class regardless of what it actually touched.
+
+**Calibration needs a case where the new field and an independent source must
+disagree.** That is what exposed the hook here: two cells that were obviously
+wood logging `terrain`. No amount of re-reading the code that produced the
+field would have shown it, because the code was self-consistent.
+
+**Corollary — a broken instrument does not always spoil the number.** In that
+same episode the headline figures (a run-split count and a whole-frame pixel
+diff) were produced by paths that never touched the broken field, so they were
+never in question; only the *label* attached to them was. Reflexively
+distrusting a number because a nearby instrument is broken throws away good
+data. Say precisely which measurement the broken instrument was *in*.
+
+## "Never taken" is worse than "behind an unset guard" — and it looks fine in the source
+
+An upgrade to the rule above, earned by a hook that **fired zero times** while
+reading perfectly correctly in review. The forced-failure probe was first placed
+beside `vkQueuePresentKHR`. It never ran — because **a headless render never
+acquires or presents the swapchain at all**: it submits its command buffer and
+reads back the *offscreen* image (`headless submitted`). So:
+
+> **"Has this run?" has to mean "can it run in the configuration the tests
+> use?"** — a stronger question than whether a guard is set.
+
+This is the worst failure shape in this file, because every static signal lies.
+The lines are **covered** (they compile, they are in the binary, coverage counts
+them) while the code **never executes**. No coverage number shows it. Reviewing
+the source shows nothing wrong. The only thing that finds it is running it — and
+running it requires *knowing* it is unreachable, which is the thing you cannot
+see. Fix pattern worth reusing: when a diagnostic is only reachable from a
+windowed path, give it a synthetic driver **and call it from the headless frame
+body**, not only at the real call site.
+
+Corollary for test design: a check's own docstring can preserve the *pre-fix*
+reasoning and quietly send the next person to undo the fix. Prefer comments that
+state the current invariant ("reachable because the headless body calls it") over
+ones that narrate the bug hunt.
+
+## Assert every string surgery
+
+Cheapest lesson of the review, and it cost a full build. A scripted
+search-and-replace patch **silently did nothing** because the anchor had the
+wrong leading whitespace, and nothing complained. The compiler caught it — but
+only by accident, and a text edit to a *docstring* or a log line has no compiler
+at all.
+
+> After any programmatic string edit, assert the replacement actually happened
+> (count occurrences before and after). A no-op edit is the most expensive kind
+> of silent failure, because it looks exactly like success.
+
+## A comment that records *why* is a claim with an expiry date
+
+The same failure with a different trigger, and the pair belongs together. A
+comment saying "X is unreachable from every test, so the hook lives here" was true
+when written; a later change made it false; the stale sentence then read as a
+**live constraint** and would have invited the next person to move the hook back
+and re-break it. Nobody flagged it, because **reading a comment feels like
+reading code.**
+
+The unifying rule, and the reason both cost real time:
+
+> **The expensive silent failures are the ones with no compiler behind them — a
+> no-op edit and a stale comment are both silent, and both look exactly like
+> success. The defence is the same for both: _assert it_, or _date it_.**
+
+Either state the invariant in the present tense ("reachable **because** the
+headless body calls it", not "unreachable from the real loop, as we found"), or
+mark the comment as history ("the first version shipped this way, firing zero
+times"). A justification in the present tense will eventually be a lie, and it
+will be believed, because prose has no type checker.
+
+A related trap in the same family: a justification that was true can become
+*irrelevant* while a weaker one takes over. A check kept using `--smoke` for a
+reason that had quietly changed from **reachability** (both headless modes work)
+to **statistical power** (3 frames cannot distinguish a working latch from a
+broken one). Merging the two reasons into one sentence is how the stale version
+survived.
+
+## Opposite failures, one cause: the mistake is almost always in the reading
+
+Two mistakes in one night, in opposite directions, with the same root:
+
+- A **new log field read a plausible CONSTANT** — `terrain` on every cell,
+  because the hook that fed it never set it. Believed over a world already
+  mapped.
+- A **correct tool read as BROKEN** — `vf_slice --axis z` appeared to render a
+  blank plane. It does not. The output had been piped through `sed -n '4,26p'`
+  to "trim" it, and those rows are simply **above** the terrain: the grid prints
+  **row 0 as the top of the span with rows descending** (50 of 102 rows have
+  content, including rock and soil). The tool **says so in its own header line**
+  (`(cols: … asc, rows: … desc)`, `tools/scene_slice.cpp:77`) and again in the
+  loop comment at `:85`. The instrument told you; the reading missed it.
+
+Re-reading the producing code found **neither** fault, because in both cases the
+code was self-consistent and correct. **A plausible constant and a plausible
+blank are not evidence.** They are the two shapes a reading takes when nobody has
+checked whether the instrument can produce the thing being looked for.
+
+So the rule, in the form that would actually have caught both:
+
+> Before believing **or** condemning a reading: look at the **whole** output, not
+> a convenient slice of it, and cross-check it against a source that **cannot
+> share the failure mode**.
+
+The second half is what makes it a check rather than a habit. The world has a
+second way to ask what material is at a cell (`--probe`, and the glyph legend
+in the slice header), so a disagreement is available for the price of one extra
+command. An instrument cross-checked against something that shares its code, or
+shares its author's assumptions, is not a cross-check.
+
+Corollary for pipelines: a `sed`/`head`/`tail` window over a tool's output is a
+**new instrument** with its own failure modes, and it is added casually. Prefer
+reading the tool's full output, or its documented conventions, before shaping
+it.
 
 ## Granularity of claim: switch vs cause
 

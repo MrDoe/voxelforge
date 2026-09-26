@@ -11,7 +11,7 @@
 ### Entities
 - [[entities/hamlet-scene]] — the runtime-authored default world (lakeside hamlet: 9 `hamlet_*` layers, authoring conventions, regen behaviour)
 - [[entities/svo-render]] — chunked-SVO raymarch + the Gaussian-surfel backend contract *(pre-splat-rework wording)*
-- [[entities/live-edit-brush]] — the Carve/Add/Delete/Paint/Smooth brush sized in voxels (1 voxel = per-voxel, exactly one cell), the click-vs-drag stamp gate (one click = one edit, with its dead-disc limit and manual-verify-only gap), plus click-activated, bounds-centered yaw/pitch/roll trackball: store stamps, GPU patching, hover tint/outline, overlay persistence
+- [[entities/live-edit-brush]] — the Carve/Add/Delete/Paint/Smooth brush sized in voxels (1 voxel = per-voxel, exactly one cell), the click-vs-drag stamp gate (stack suppressed by cell identity, jitter by 6 px travel, plus the reverted net-from-press design and its residual), the resolved Undo margin bug, and click-activated, bounds-centered yaw/pitch/roll trackball: store stamps, GPU patching, hover tint/outline, overlay persistence
 - [[entities/mesh-to-voxel]] — STL/OBJ -> .vxw converter (`vf_mesh2vox` CLI + `import_mesh` MCP + GUI workspace): solid-fill voxelization, leak detection, orientation-preserving replacement, and why shell-only is a footgun
 - [[entities/hud-sidebar]] — the single opaque, flush left editor panel with an icon rail, one content pane, fixed footer, and user-draggable horizontal splitter
 
@@ -46,7 +46,7 @@
 - Textures: [[concepts/texture-atlas]] (binding), [[concepts/texture-resolution]] (how much it buys), [[concepts/texture-conformance]] (the drop-in gate + repair tools).
 - Live editing: [[entities/live-edit-brush]] (brush, per-voxel mode, click-vs-drag gate, undo/Clear, overlay) + [[concepts/oriented-brush-rasterizer]] (the axis-oriented stamp rules) + [[concepts/smooth-terrain-brush]] (terrain + object relaxation); water: [[concepts/water-plane]].
 - Before trusting a measurement, a "clean run", or a test-only fix: [[concepts/measurement-discipline]].
-- Suite/startup speed: [[concepts/load-time-field-build]]; test selection: [[concepts/focused-test-groups]].
+- Suite/startup speed: [[concepts/load-time-field-build]]; test selection and the terrain-only live-edit coverage gap: [[concepts/focused-test-groups]].
 - Verifying the GUI or live input (invisible to headless `--shot`): [[concepts/x11-input-injection]] + `tools/test_inject_iso.py`.
 - Producing demo frames or stills: [[concepts/demo-capture]] + `tools/record_demo.py`.
 - To add or edit world objects, follow [[concepts/voxel-object-authoring]] and the `voxel-object` skill.

@@ -188,17 +188,24 @@ enum class MoveAxis : uint8_t { None, X, Y, Z };
 
 // Click-vs-drag for the edit brush. The stamp trigger is a DISTANCE test (the
 // hover must cross a voxel), which has no notion of a click: the same press
-// stamps again as soon as the hovered cell differs from the stamped one. A
-// click can produce that on its own - ordinary cursor jitter, or, worse, the
-// Add changing what the ray hits, so the next pick is the top face of the
-// voxel just created and a held click stacks one on top of another. A second
-// stamp therefore requires the pointer to have moved NET DISPLACEMENT since
-// the PRESS, not since the last stamp: a hand that wobbles while held returns
-// near its press point and never crosses the threshold, while a real drag
-// only increases its distance from it. The gate can only delay a stamp, never
-// add one, and lmbEdge still sets the first stamp directly, so no click is
-// ever lost.
-constexpr float kDragTravelPx = 14.0f; // net screen px from the press point
+// stamps again as soon as the hovered cell differs from the stamped one. Two
+// different things must be suppressed and they want DIFFERENT rules.
+//
+//  1. The stack. An Add changes what the ray hits, so the next pick is the top
+//     face of the voxel just created and a held click builds a tower. That has
+//     an exact signature - the new pick IS the cell the last Add wrote - so it
+//     is suppressed by identity, with no threshold to tune.
+//  2. Jitter. A click whose hand wobbles far enough to cross a voxel. Here a
+//     screen threshold is the only available signal, measured SINCE THE LAST
+//     STAMP rather than from the press point: a small circular drag never gets
+//     far from where it started but does keep moving, and a press-relative
+//     test silently disables that entirely.
+//
+// So a held, still click is one edit (both rules), a small drag still paints,
+// and the residual is a jittery click landing one neighbour - which the user
+// is told about rather than promised away. The gate can only DELAY a stamp;
+// lmbEdge still sets the first stamp of a press directly, so no click is lost.
+constexpr float kDragTravelPx = 6.0f; // screen px of travel since the last stamp
 
 // The editor has exactly one panel: a docked left sidebar whose icon rail
 // picks which of these sections fills the content pane. There are no floating
@@ -841,9 +848,28 @@ private:
     // inverse edits + the height-texture rise the replay needs. A stroke too
     // large to record is dropped wholesale instead of becoming a partial undo.
     std::unordered_map<uint64_t, vf::voxel::StoreEdit> m_undoPending;
-    std::vector<std::pair<std::vector<vf::voxel::StoreEdit>, int>> m_undo;
+    // per stroke: the inverse edits, the height-texture rise they need, and
+    // the refresh margin the stroke itself used. The margin must be replayed
+    // or the undo re-derives far more geometry than the stroke touched.
+    struct UndoStep {
+        std::vector<vf::voxel::StoreEdit> edits;
+        int rise = 2;
+        int margin = vf::voxel::LiveEditor::kStampMargin;
+    };
+    std::vector<UndoStep> m_undo;
     int m_strokeRiseCells = 2; // forward height-texture headroom; finishStroke
                                 // derives the inverse/undo headroom separately
+    int m_strokeMargin = vf::voxel::LiveEditor::kStampMargin; // margin the
+                                // in-flight stroke stamps with
+    // Ownership class of the pick the current stamp came from: -1 no pick, 0
+    // terrain, 1 object. Logged with the stamp because a live edit that landed
+    // on terrain when the user aimed at an object is worth seeing in the log
+    // whether or not a test reads it, and it is the one signal that tells
+    // 'tested the object class' from 'tested terrain again'. Set where the
+    // hover is known (applyEditLive) and read at the log site, so
+    // commitStoreEdits' signature stays untouched across its many call sites.
+    // An undo line reports the class of the pick its stroke was made from.
+    int m_lastPickObject = -1;
     bool m_undoOverflow = false;
     double m_clearConfirmUntil = 0.0; // two-click destructive action
     static constexpr size_t kUndoMaxCells = 250000;
@@ -860,12 +886,21 @@ private:
     bool m_hasStamp = false;
     bool m_dragging = false;
     glm::ivec3 m_lastStampVoxel { 0 };
-    // Where the pointer was when the current stroke STARTED, so a held click
-    // (which wanders but does not go anywhere) is told from a drag (which
-    // keeps increasing its net distance from this point).
-    glm::vec2 m_stampPressMouse { 0.f };
+    // Where the pointer was at the last stamp, and which cell that stamp
+    // WROTE. The first tells a drag from jitter; the second is the exact
+    // signature of a held click stacking voxels, which no threshold separates
+    // as cleanly as identity does.
+    glm::vec2 m_lastStampMouse { 0.f };
+    glm::ivec3 m_lastStampWroteCell { -1, -1, -1 };
 
     void applyEditLive();
+    // Fill the ownership class of a HOOK-BUILT pick. An interactive pick gets
+    // it from the camera ray (rayPickStore); a headless hook that builds the
+    // pick straight from a lattice cell must ask the load-time oracle instead,
+    // or everything reading the pick's class - the stamp log, the tests - reads
+    // "terrain" for a cabin wall, which is a false statement in a log line
+    // rather than a missing field.
+    void adoptPickOwnership(glm::ivec3 v);
     // Trackball rotate: activate the picked voxel's exact owner, then map a
     // yaw/pitch/roll ring drag to its manifest placement.
     std::string rotateTargetLayer(const vf::voxel::PickHit& hit) const;
@@ -988,34 +1023,131 @@ bool App::createOffscreen(uint32_t w, uint32_t h)
 // This deliberately does NOT make device-lost exit: that is a behaviour
 // decision, not a logging side effect.
 namespace {
+// One table, two directions: the probe prints a code, and a test asks for a
+// code BY NAME so the request reads as the failure it wants rather than as a
+// magic number. A switch with only a forward direction is what forced the
+// forced-error hook to be spelled as a raw int.
+struct VkResultName { VkResult r; const char* name; };
+constexpr VkResultName kVkResults[] = {
+    { VK_SUCCESS, "VK_SUCCESS" },
+    { VK_SUBOPTIMAL_KHR, "VK_SUBOPTIMAL_KHR" },
+    { VK_ERROR_OUT_OF_DATE_KHR, "VK_ERROR_OUT_OF_DATE_KHR" },
+    { VK_ERROR_OUT_OF_HOST_MEMORY, "VK_ERROR_OUT_OF_HOST_MEMORY" },
+    { VK_ERROR_DEVICE_LOST, "VK_ERROR_DEVICE_LOST" },
+    { VK_ERROR_FULL_SCREEN_EXCLUSIVE_MODE_LOST_EXT,
+      "VK_ERROR_FULL_SCREEN_EXCLUSIVE_MODE_LOST_EXT" },
+    { VK_ERROR_SURFACE_LOST_KHR, "VK_ERROR_SURFACE_LOST_KHR" },
+    { VK_ERROR_NATIVE_WINDOW_IN_USE_KHR, "VK_ERROR_NATIVE_WINDOW_IN_USE_KHR" },
+};
+
 const char* vkResultName(VkResult r)
 {
-    switch (r) {
-    case VK_SUCCESS: return "VK_SUCCESS";
-    case VK_SUBOPTIMAL_KHR: return "VK_SUBOPTIMAL_KHR";
-    case VK_ERROR_OUT_OF_DATE_KHR: return "VK_ERROR_OUT_OF_DATE_KHR";
-    case VK_ERROR_OUT_OF_HOST_MEMORY: return "VK_ERROR_OUT_OF_HOST_MEMORY";
-    case VK_ERROR_DEVICE_LOST: return "VK_ERROR_DEVICE_LOST";
-    case VK_ERROR_FULL_SCREEN_EXCLUSIVE_MODE_LOST_EXT:
-        return "VK_ERROR_FULL_SCREEN_EXCLUSIVE_MODE_LOST_EXT";
-    case VK_ERROR_SURFACE_LOST_KHR: return "VK_ERROR_SURFACE_LOST_KHR";
-    case VK_ERROR_NATIVE_WINDOW_IN_USE_KHR:
-        return "VK_ERROR_NATIVE_WINDOW_IN_USE_KHR";
-    default: return "other";
-    }
+    for (const VkResultName& e : kVkResults)
+        if (e.r == r)
+            return e.name;
+    return "other";
+}
+
+// Inverse lookup for VF_TEST_FORCE_PRESENT_ERR. Returns false on an unknown
+// name so the caller can say so instead of silently probing VK_SUCCESS.
+bool vkResultFromName(const char* name, VkResult& out)
+{
+    for (const VkResultName& e : kVkResults)
+        if (std::strcmp(e.name, name) == 0) {
+            out = e.r;
+            return true;
+        }
+    return false;
 }
 
 // true the first time this result is seen, so a spinning failure logs once.
+//
+// A SET of codes per slot, not one remembered code. With a single remembered
+// code the latch means "log whenever the code CHANGES", so two failures
+// alternating (device-lost, surface-lost, device-lost, ...) log EVERY frame -
+// measured, via VF_TEST_FORCE_PRESENT_ERR - which is exactly the flood the
+// latch exists to prevent, and it hid because a real persistent failure
+// repeats one code and behaves correctly. Bounded, and it saturates rather
+// than wrapping, so a caller cannot make it forget and start re-logging.
 bool firstSight(VkResult r, const char* what)
 {
     if (!getenv("VF_TRACE"))
         return false;
-    static int seen[2] = { 0, 0 };
+    constexpr int kMaxCodes = 8;
+    static int seen[2][kMaxCodes] = {};
+    static int nSeen[2] = {};
     const int slot = what[0] == 'a' ? 0 : 1;
-    if (seen[slot] == int(r))
-        return false;
-    seen[slot] = int(r);
+    const int code = int(r);
+    for (int i = 0; i < nSeen[slot]; ++i)
+        if (seen[slot][i] == code)
+            return false;
+    if (nSeen[slot] < kMaxCodes)
+        seen[slot][nSeen[slot]++] = code;
     return true;
+}
+
+// The probe itself, split out of the frame loop so a test can drive it
+// directly. Reporting is separated from the Vulkan call ON PURPOSE: the forced
+// -error hook feeds a synthetic result through THIS function, so the name, the
+// severity choice and the log-once latch are all exercised for real while the
+// actual present/acquire the frame depends on is never touched. A test that
+// broke the present to test the present logger would be a worse test than none.
+void reportFrameResult(VkResult r, const char* what, unsigned long long frame)
+{
+    if (!firstSight(r, what))
+        return;
+    const bool fatal = r == VK_ERROR_DEVICE_LOST ||
+                       r == VK_ERROR_OUT_OF_HOST_MEMORY;
+    if (what[0] == 'a')
+        spdlog::log(fatal ? spdlog::level::err : spdlog::level::warn,
+                    "acquire returned {} at frame {} - the frame body will be "
+                    "skipped each frame (the loop keeps spinning)",
+                    vkResultName(r), frame);
+    else
+        spdlog::log(fatal ? spdlog::level::err : spdlog::level::warn,
+                    "present returned {} at frame {}", vkResultName(r), frame);
+}
+
+// VF_TEST_FORCE_PRESENT_ERR="CODE[,CODE...]" (a VkResult name or an int): drive
+// the probe with SYNTHETIC results, once per frame, so its reporting has a
+// positive firing test. Unset, this costs one getenv and changes nothing; the
+// real present is never touched, because the thing under test is the logger,
+// not the swapchain.
+//
+// It is called from the HEADLESS frame body as well as after the real present,
+// and that is not redundancy: a headless render never acquires or presents the
+// swapchain at all (it submits, then reads back offscreen), so a hook placed
+// only beside vkQueuePresentKHR is unreachable from every test in the repo -
+// the first version of this was, and it fired zero times. Repeating a code in
+// the list is deliberate: the log-once latch is what stops a spinning failure
+// from emitting thousands of lines per second, and it is only observable if
+// something asks more than once.
+void forceFrameResults(unsigned long long frame)
+{
+    const char* forced = getenv("VF_TEST_FORCE_PRESENT_ERR");
+    if (!forced || !*forced)
+        return;
+    std::string rest(forced);
+    for (size_t at = 0; at <= rest.size();) {
+        const size_t comma = rest.find(',', at);
+        const std::string tok = rest.substr(
+            at, comma == std::string::npos ? std::string::npos : comma - at);
+        at = comma == std::string::npos ? rest.size() + 1 : comma + 1;
+        if (tok.empty())
+            continue;
+        VkResult r = VK_SUCCESS;
+        if (vkResultFromName(tok.c_str(), r)) {
+            reportFrameResult(r, "present", frame);
+            continue;
+        }
+        char* end = nullptr;
+        const long v = std::strtol(tok.c_str(), &end, 0);
+        if (end && *end == '\0')
+            reportFrameResult(VkResult(v), "present", frame);
+        else
+            spdlog::error("VF_TEST_FORCE_PRESENT_ERR: '{}' is neither a known "
+                          "VkResult name nor an int", tok);
+    }
 }
 } // namespace
 
@@ -1942,10 +2074,20 @@ void App::cancelMove()
     m_moveLastMouse = {};
 }
 
+void App::adoptPickOwnership(glm::ivec3 v)
+{
+    if (!m_layers.loaded())
+        return;
+    const auto smp = m_layers.field().sampleWorld(vf::voxel::voxelCenter(v));
+    m_hoverHit.object = smp.obj;
+    m_hoverHit.layer = smp.layer;
+}
+
 void App::applyEditLive()
 {
     if (!m_hoverHit.hit)
         return;
+    m_lastPickObject = m_hoverHit.object ? 1 : 0;
     glm::vec3 n = m_hoverHit.normal;
     if (glm::length(n) < 1e-3f)
         n = glm::vec3(0.f, 1.f, 0.f);
@@ -1994,6 +2136,11 @@ void App::applyEditLive()
             // places the one just outside the surface along the normal.
             recs = m_add.makeSingleVoxel(m_hoverHit.voxel, n, m_editMat,
                                          m_editBrush == EditBrush::Add);
+            // remember the cell this stamp WROTE: a held click then re-picks it
+            // (the new voxel's own top face) and the stamp trigger suppresses
+            // that by identity instead of guessing at a distance threshold.
+            if (recs.size() == 1)
+                m_lastStampWroteCell = glm::ivec3(recs[0].x, recs[0].y, recs[0].z);
         } else {
             switch (m_editBrush) {
             case EditBrush::Carve:
@@ -2120,13 +2267,25 @@ void App::commitStoreEdits(std::vector<vf::voxel::StoreEdit>& edits, int riseCel
     sp.anisotropy = true;
     if (const char* e = getenv("VF_ANISO"))
         sp.anisotropy = atoi(e) != 0;
+    m_strokeMargin = margin; // undo must replay the same region
     std::vector<int> changed = m_liveEditor.stamp(edits, sp, margin);
     const auto t1 = std::chrono::steady_clock::now();
 
-    size_t nRunSurfels = 0;
+    size_t nRunSurfels = 0, nRunParents = 0, nRunEdges = 0, nRunMicros = 0;
     for (int ci : changed) {
         const std::vector<vf::voxel::Surfel>& surfels = m_liveEditor.chunkRun(ci, sp);
         nRunSurfels += surfels.size();
+        {
+            // split the run by segment: a live edit that inflates a chunk shows
+            // up here as parents/edges drifting apart from the baked counts
+            const uint32_t ms = m_liveEditor.microStartOf(ci);
+            const uint32_t ec = m_liveEditor.edgeCountOf(ci);
+            const uint32_t n = uint32_t(surfels.size());
+            const uint32_t parents = std::min(n, ms >= ec ? ms - ec : 0u);
+            nRunParents += parents;
+            nRunEdges += std::min(n, ec);
+            nRunMicros += n - std::min(n, ms);
+        }
         if (!getenv("VF_LIVE_NOSPLAT"))
             m_splatPass.patchChunkSurfels(uint32_t(ci), surfels.data(),
                                           surfels.size() * sizeof(vf::voxel::Surfel),
@@ -2158,10 +2317,14 @@ void App::commitStoreEdits(std::vector<vf::voxel::StoreEdit>& edits, int riseCel
     m_lastEditMs = float(ms(t0, t2));
     m_lastEditSurfels = nRunSurfels;
     if (!m_dragging || getenv("VF_TRACE"))
-        spdlog::info("live edit{}: {} cells, {} chunks, {} run surfels, {:.1f} ms "
-                     "(stamp {:.1f}, gpu {:.1f})",
-                     what, edits.size(), changed.size(), nRunSurfels, m_lastEditMs,
-                     ms(t0, t1), ms(t1, t2));
+        spdlog::info("live edit{}: {} cells, {} chunks, {} run surfels "
+                     "({} parents + {} edges + {} micros), pick {}, "
+                     "{:.1f} ms (stamp {:.1f}, gpu {:.1f})",
+                     what, edits.size(), changed.size(), nRunSurfels,
+                     nRunParents, nRunEdges, nRunMicros,
+                     m_lastPickObject < 0 ? "none"
+                                          : (m_lastPickObject ? "object" : "terrain"),
+                     m_lastEditMs, ms(t0, t1), ms(t1, t2));
 }
 
 // Stroke end: collapse the stroke's recorded cells into one undo step so
@@ -2210,17 +2373,19 @@ void App::finishStroke()
         } else {
             undoRise = std::max(undoRise, latN + 2);
         }
-        m_undo.emplace_back(std::move(inv), undoRise);
+        m_undo.push_back({std::move(inv), undoRise, m_strokeMargin});
         if (m_undo.size() > kUndoDepth)
             m_undo.erase(m_undo.begin());
         spdlog::info("undo: stroke recorded ({} cells: {} clear, {} restore, "
                      "{} steps available, height rise {})",
-                     m_undo.back().first.size(), nClear,
-                     m_undo.back().first.size() - nClear, m_undo.size(),
-                     m_undo.back().second);
+                     m_undo.back().edits.size(), nClear,
+                     m_undo.back().edits.size() - nClear, m_undo.size(),
+                     m_undo.back().rise);
     }
     m_undoPending.clear();
     m_strokeRiseCells = 2;
+    m_strokeMargin = vf::voxel::LiveEditor::kStampMargin;
+    m_lastStampWroteCell = glm::ivec3(-1, -1, -1);
     m_undoOverflow = false;
 }
 
@@ -2230,16 +2395,20 @@ void App::undoEdit()
         spdlog::info("undo: nothing to undo");
         return;
     }
-    std::vector<vf::voxel::StoreEdit> inv = std::move(m_undo.back().first);
-    const int rise = m_undo.back().second;
+    std::vector<vf::voxel::StoreEdit> inv = std::move(m_undo.back().edits);
+    const int rise = m_undo.back().rise;
+    const int margin = m_undo.back().margin;
     m_undo.pop_back();
     // Replay the recorded pre-stroke cells through the same store/GPU path a
     // stamp uses, then persist the reverted state like a stroke end does.
-    // Restore over the exact store band: an undone Smooth stroke changed
-    // normals/AO further than the cheap margin covers, so +-3 would leave
-    // stale splats behind.
-    commitStoreEdits(inv, rise, " undo",
-                     vf::voxel::LiveEditor::kExactStampMargin);
+    // Replay over the SAME margin the stroke stamped with, not the widest one:
+    // a Smooth stroke needs the exact band (it changed normals/AO further than
+    // the cheap margin covers), but forcing it on every undo re-derived a 25^3
+    // box of geometry for a one-voxel edit, and on an object chunk the
+    // store-derived surface does not match the bake (599 edge bridges in that
+    // box against 52 in the whole chunk) - which hollowed geometry the user
+    // never touched. Undo is now exactly as surgical as the edit it reverts.
+    commitStoreEdits(inv, rise, " undo", margin);
     // Persist the reverted state (no full rebuild here: undo must stay
     // instant; the touched chunks keep the live path's store-derived shading
     // until the next reload, exactly like a painted stroke).
@@ -3879,6 +4048,7 @@ int App::run(const Args& args)
             m_hoverHit.hit = true;
             m_hoverHit.voxel = v;
             m_hoverHit.normal = storeNormalAt(v);
+            adoptPickOwnership(v);
             applyEditLive();
             spdlog::info("VF_TEST_EDIT {} {} {} {}", v.x, v.y, v.z,
                          brushName(m_editBrush));
@@ -3914,6 +4084,7 @@ int App::run(const Args& args)
                 m_hoverHit.hit = true;
                 m_hoverHit.voxel = p;
                 m_hoverHit.normal = storeNormalAt(p);
+                adoptPickOwnership(p);
                 const auto t0 = std::chrono::steady_clock::now();
                 m_dragging = true;
                 applyEditLive();
@@ -4304,21 +4475,23 @@ int App::run(const Args& args)
                 if (!m_hasStamp ||
                     glm::distance(vf::voxel::voxelCenter(m_hoverHit.voxel),
                                   vf::voxel::voxelCenter(m_lastStampVoxel)) >= spacing) {
-                    // ...and a click is ONE edit. Measured from the PRESS point,
-                    // so a held click whose own output became the next pick
-                    // (the new voxel's top face) stays put and does not stack.
+                    // ...and a click is ONE edit. Suppress (a) the cell the
+                    // last Add wrote - the stack - and (b) a candidate the
+                    // pointer has not travelled to since the last stamp, which
+                    // is jitter. A drag does neither, so it keeps painting.
                     const ImVec2 mp = ImGui::GetIO().MousePos;
-                    const float travel = std::hypot(mp.x - m_stampPressMouse.x,
-                                                    mp.y - m_stampPressMouse.y);
-                    if (!m_hasStamp || travel >= kDragTravelPx)
+                    const float travel = std::hypot(mp.x - m_lastStampMouse.x,
+                                                    mp.y - m_lastStampMouse.y);
+                    const bool stack = m_hoverHit.voxel == m_lastStampWroteCell;
+                    if (!m_hasStamp || (!stack && travel >= kDragTravelPx))
                         doStamp = true;
                 }
             }
             if (doStamp && m_hoverHit.hit) {
                 m_lastStampVoxel = m_hoverHit.voxel;
-                if (!m_hasStamp) {
+                {
                     const ImVec2 mp = ImGui::GetIO().MousePos;
-                    m_stampPressMouse = glm::vec2(mp.x, mp.y);
+                    m_lastStampMouse = glm::vec2(mp.x, mp.y);
                 }
                 m_hasStamp = true;
                 m_dragging = editLmb;
@@ -4615,6 +4788,7 @@ int App::run(const Args& args)
                 m_hoverHit.voxel = v;
                 if (m_editActive)
                     m_hoverHit.normal = storeNormalAt(v);
+                adoptPickOwnership(v);
             }
         }
 
@@ -5190,6 +5364,7 @@ int App::run(const Args& args)
             ++m_frameIdx;
             if (getenv("VF_TRACE"))
                 fprintf(stderr, "[f%llu] headless submitted\n", (unsigned long long)m_frameIdx);
+            forceFrameResults(m_frameIdx);
             if ((args.selftest) && m_frameIdx == 30)
                 return runSelftest() ? 0 : 1;
             if (shotMode && m_frameIdx == 3) {
@@ -5241,17 +5416,10 @@ int App::run(const Args& args)
                                              &imgIdx);
         m_nextAcquire = imgIdx; // its semaphore is reused when this image comes back
         if (getenv("VF_TRACE")) fprintf(stderr, "[f%llu] acquired %u\n", (unsigned long long)m_frameIdx, imgIdx);
-        if (firstSight(acq, "acquire")) {
-            // a persistent failure here skips the rest of the frame body every
-            // iteration, so the app keeps running and keeps consuming input
-            // while nothing is ever drawn
-            const bool fatal = acq == VK_ERROR_DEVICE_LOST ||
-                               acq == VK_ERROR_OUT_OF_HOST_MEMORY;
-            spdlog::log(fatal ? spdlog::level::err : spdlog::level::warn,
-                        "acquire returned {} at frame {} - the frame body will "
-                        "be skipped each frame (the loop keeps spinning)",
-                        vkResultName(acq), m_frameIdx);
-        }
+        // a persistent failure here skips the rest of the frame body every
+        // iteration, so the app keeps running and keeps consuming input while
+        // nothing is ever drawn
+        reportFrameResult(acq, "acquire", m_frameIdx);
         if (acq == VK_ERROR_OUT_OF_DATE_KHR) {
             handleResize();
             continue;
@@ -5585,13 +5753,8 @@ int App::run(const Args& args)
         pi.pSwapchains = m_swapchain.handlePtr();
         pi.pImageIndices = &imgIdx;
         VkResult pres = vkQueuePresentKHR(m_ctx.graphicsQueue(), &pi);
-        if (firstSight(pres, "present")) {
-            const bool fatal = pres == VK_ERROR_DEVICE_LOST ||
-                               pres == VK_ERROR_OUT_OF_HOST_MEMORY;
-            spdlog::log(fatal ? spdlog::level::err : spdlog::level::warn,
-                        "present returned {} at frame {}", vkResultName(pres),
-                        m_frameIdx);
-        }
+        reportFrameResult(pres, "present", m_frameIdx);
+        forceFrameResults(m_frameIdx);
         if (pres == VK_ERROR_OUT_OF_DATE_KHR || pres == VK_SUBOPTIMAL_KHR)
             handleResize();
 

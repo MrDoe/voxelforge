@@ -1,4 +1,5 @@
 #include "voxel/live_editor.hpp"
+#include <spdlog/spdlog.h>
 #include <algorithm>
 #include <numeric>
 #include <utility>
@@ -148,7 +149,16 @@ bool LiveEditor::refreshRegion(int chunk, glm::ivec3 lo, glm::ivec3 hi,
     };
     retainOutside(c.keys, c.surfels);
     retainOutside(c.edgeKeys, c.edgeSurfels);
-    splice(chunk, buildChunkSurfelsRange(*m_store, chunk, lo, hi, params));
+    {
+        SurfelRange rg = buildChunkSurfelsRange(*m_store, chunk, lo, hi, params);
+        if (getenv("VF_TRACE"))
+            spdlog::info("live refresh chunk {} box {}x{}x{}: {} parents, {} "
+                         "edge bridges -> run now {} parents + {} edges",
+                         chunk, hi.x - lo.x, hi.y - lo.y, hi.z - lo.z,
+                         rg.surfels.size(), rg.edgeSurfels.size(),
+                         c.surfels.size(), c.edgeSurfels.size());
+        splice(chunk, std::move(rg));
+    }
     return true;
 }
 

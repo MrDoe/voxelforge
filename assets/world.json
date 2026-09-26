@@ -7,14 +7,15 @@
     { "file": "hamlet_hall.vxw", "role": "object", "name": "hamlet_hall", "pos": [0.00, 0.00, 0.00], "rot": 0.0, "rotX": 0.0, "rotZ": 0.0, "enabled": false },
     { "file": "hamlet_tower.vxw", "role": "object", "name": "hamlet_tower", "pos": [0.00, 0.00, 0.00], "rot": 0.0, "rotX": 0.0, "rotZ": 0.0, "enabled": true },
     { "file": "hamlet_pier.vxw", "role": "object", "name": "hamlet_pier", "pos": [0.00, 0.00, 0.00], "rot": 0.0, "rotX": 0.0, "rotZ": 0.0, "enabled": false },
-    { "file": "hamlet_boat.vxw", "role": "object", "name": "hamlet_boat", "pos": [0.00, 0.00, 0.00], "rot": 0.0, "rotX": 0.0, "rotZ": 0.0, "enabled": true },
+    { "file": "hamlet_boat.vxw", "role": "object", "name": "hamlet_boat", "pos": [0.00, 0.00, 0.00], "rot": -83.7, "rotX": -1.5, "rotZ": -1.2, "enabled": true },
     { "file": "hamlet_well.vxw", "role": "object", "name": "hamlet_well", "pos": [0.00, 0.00, 0.00], "rot": 0.0, "rotX": 0.0, "rotZ": 0.0, "enabled": false },
     { "file": "hamlet_market.vxw", "role": "object", "name": "hamlet_market", "pos": [0.00, 0.00, 0.00], "rot": 0.0, "rotX": 0.0, "rotZ": 0.0, "enabled": false },
     { "file": "hamlet_garden.vxw", "role": "object", "name": "hamlet_garden", "pos": [0.00, 0.00, 0.00], "rot": 0.0, "rotX": 0.0, "rotZ": 0.0, "enabled": true },
     { "file": "hamlet_trees.vxw", "role": "object", "name": "hamlet_trees", "pos": [0.00, 0.00, 0.00], "rot": 0.0, "rotX": 0.0, "rotZ": 0.0, "enabled": true },
     { "file": "hamlet_props.vxw", "role": "object", "name": "hamlet_props", "pos": [0.00, 0.00, 0.00], "rot": 0.0, "rotX": 0.0, "rotZ": 0.0, "enabled": false },
     { "file": "hamlet_reeds.vxw", "role": "object", "name": "hamlet_reeds", "pos": [0.00, 0.00, 0.00], "rot": 0.0, "rotX": 0.0, "rotZ": 0.0, "enabled": true },
-    { "file": "hamlet_reeds_far.vxw", "role": "object", "name": "hamlet_reeds_far", "pos": [0.00, 0.00, 0.00], "rot": 0.0, "rotX": 0.0, "rotZ": 0.0, "enabled": true }
+    { "file": "hamlet_reeds_far.vxw", "role": "object", "name": "hamlet_reeds_far", "pos": [0.00, 0.00, 0.00], "rot": 0.0, "rotX": 0.0, "rotZ": 0.0, "enabled": true },
+    { "file": "runtime_edits.vxw", "role": "object", "name": "runtime_edits", "pos": [0.00, 0.00, 0.00], "rot": 0.0, "rotX": 0.0, "rotZ": 0.0, "enabled": true }
   ],
   "textures": [
     { "file": "textures/grass_dark.png", "mat": 0, "scale": 2.60 },

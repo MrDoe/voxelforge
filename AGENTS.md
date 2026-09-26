@@ -418,6 +418,16 @@ one costs a whole turn, because the bad call is rejected before any work runs.
   uses the fixed-function gl_Position depth (no gl_FragDepth writes).
 - GPU timestamp profiler: HUD "GPU ms" line + `VF_TRACE` log (`geo/post/fx/
   taa/tail`), 6 marks × 3 frame slots, readback after each slot's fence wait.
+- `VF_TEST_FORCE_PRESENT_ERR="CODE[,CODE…]"` (a `VkResult` name or an int)
+  drives the acquire/present result probe with **synthetic** results so its
+  reporting has a positive firing test — device-lost/out-of-host-memory log at
+  error, everything else at warning, **once per distinct code** (repeat a code
+  in the list to see the latch work). It reports through the logger only and
+  never touches the real present. It is called from the **headless** frame body
+  as well as after the real present, because a headless render never acquires
+  or presents the swapchain (it submits, then reads back offscreen) — a hook
+  placed only beside `vkQueuePresentKHR` is unreachable from every test.
+  Gated: `visual_check.py:check_present_probe`.
 - Chat backend: Ollama defaults or any OpenAI-compatible server via
   `VF_LLM_URL=http://host:8080/v1 VF_LLM_MODEL=… ./build/voxelforge`.
   MCP: `./build/vf_mcp` (stdio), registered in `.opencode/opencode.json`.

@@ -1116,3 +1116,581 @@ sibling failures remain and are *not* this class:
 `test_surfelize.cpp` `edgeStart[i] <= chunkRange[i]` (~440 assertions), both
 proven independent of the live-edit work by rebuilding with only
 `editable_world.cpp` reverted to HEAD.
+
+## 2026-09-26 review | verified the live-edit-brush session's changes; corrected a stale brush page
+Reviewed the one running session's work while it held `src/app/main.cpp`, read-only
+(leasing a file another session is actively editing would block the only session making
+progress). Its settled claims were re-derived from source rather than relayed — the
+`edgeStart` story reached me second-hand through two sessions, so I read the producer.
+
+**Verified correct.**
+- `shaders/post.comp` hover outline now reads `uHover`, not `uSel`. Confirmed two
+  separate branches survive (`uSel` at :109 for the selection, `uHover` at :123 for the
+  faint preview), so the fix did not delete the selected-cell outline. Matches the
+  AGENTS.md "keep the two feeds separate" rule.
+- `tests/test_surfelize.cpp` `edgeStart` bracket: **confirmed a test bug, not a
+  renderer bug**, by reading the two interleave blocks in `surfelize.cpp`. The producer
+  writes `newEdgeStart[c]` = base-parent range end and then appends bridges before
+  `newRange[c+1]`, so `chunkRange[c] <= edgeStart[c] <= microStart[c] <= chunkRange[c+1]`
+  holds, with `edgeStart[kChunks] == microStart[kChunks] == total`. The old
+  `edgeStart[i] <= chunkRange[i]` therefore contradicted the `>=` on the preceding line
+  and was satisfiable only for a bridge-less chunk — failing ~440 times, once per chunk
+  that *had* bridges. The last-index bound is also real: both arrays are `+1` with the
+  last entry = total, not `chunkRange[i+1]`. The consumer in `splat_pass.cpp` clamps into
+  `[start, end]`, so it would render a wrong sub-range rather than crash — which is
+  exactly how a producer bug could hide here. Filed the contract on
+  [[concepts/detail-pipeline]].
+- `tests/test_picking.cpp` second case (`selects an object layer voxel by material`) is a
+  genuine **strengthening**: it now exercises the *placed* pose (`pos` + `rot/rotX/rotZ`),
+  asserts the pivot contract (`placedPivot == sourceBottomCenter + pos`), round-trips
+  ownership (`h.layer == layerId(file)` → `layerFile(h.layer)`), and replaces a ±3 lattice
+  window with the placed AABB. All four `LayeredWorld` accessors exist.
+- The stamp gate's safety property: `doStamp` is initialised to `lmbEdge && editLmb` and
+  the gate block only ever *sets* it true, so a press's first stamp is unconditional and
+  the gate can only delay. `m_hasStamp` clears on release and on reload, and reload
+  re-syncs `m_lmbWasDown` from the physical button so a held click across a reload cannot
+  manufacture a fresh edge.
+
+**Corrected on the page.** [[entities/live-edit-brush]] said travel is measured "since
+the last [stamp]". It is measured as **net displacement from the PRESS point** — that is
+the whole design rationale, and the old wording described a gate that would fail on a
+wobbling hand. Also corrected 10 px → **14 px** (the constant moved after the 00:38 entry
+was written), and recorded the consequence I found in the code: a **dead disc of radius
+`kDragTravelPx`** — a genuine small circular drag paints nothing. Deliberate, but a real
+limit, and the reason a time debounce must not come back.
+
+**Findings raised with the owning session.**
+- The gate has **no headless seam** (trigger reads `glfwGetMouseButton`), and
+  `check_per_voxel` pins cell count per stamp, not click-vs-drag — so this is
+  manual-verify-only and can regress with a fully green suite. That is also how 14 px
+  shipped unchallenged.
+- `test_picking.cpp` case 1 is now *named* "hits terrain" but accepts an object hit
+  (`if (!h.object)` guards the up-normal check), so in the live world it may assert
+  nothing about terrain. The `PickHit::object` guard is the right predicate, but the fix
+  relaxed the assertion instead of re-aiming the ray at a known terrain column.
+- Surfel count bound loosened 2.5M → 8M. Defensible (micro detail on + hamlet re-author
+  legitimately exceeds 2.5M), but 8M is ~2.4× the expected value.
+- The `VF_TRACE` present/acquire probe is **unverified in the firing direction**: a quiet
+  default run cannot distinguish a healthy path from a path never reached.
+
+**Superseded, not propagated.** The implementer session's log entry ended by blaming a
+"pre-existing `tests/test_surfelize.cpp:213` edge-bridge assertion". Both that failure and
+the picking one were **test-only** fixes by the live-edit-brush session, now resolved
+(95/95 cases, 34,289,445/34,289,445 assertions, known-red list empty). Annotated rather
+than copied forward.
+
+**Deliberately NOT recorded.** The owning session is actively diagnosing a second,
+*undiagnosed* report — Undo appearing to rewrite surfels in untouched parts of a chunk,
+narrowed to the live-edit seed/splice path with **no root cause yet**. No page, no AGENTS
+entry, no "known issue": a guess here would be the third wrong instrument in a day. It
+belongs in the wiki only when a measured cause arrives. `log.md` remains a four-session
+merge point, not one author's history.
+
+Filed [[concepts/measurement-discipline]] — the confirm-the-instrument lesson, requested
+by the tooling-docs session, which recurred five times in one session (hand-decoded PNG
+disagreeing with `--probe`; ffmpeg missing `-y` returning a stale frame six times; a
+`pgrep` wait-loop matching its own command line; a "bright" reading latched onto another
+session's window; and the author's own capture guard reporting a false obstruction). The
+load-bearing rule: **silence is not a clean bill of health** — a probe only ever seen
+quiet is untested, not passing.
+
+## 2026-09-26 lint | the uncommitted multi-author tree is now committed under a tooling-only message
+Two commits landed at 00:50 while this review was in flight (author: the user, not a
+session). `git status -- src tests shaders tools` is now **empty** — the entire
+previously-uncommitted mixed-author tree is in git history.
+
+**Attribution is now actively misleading, so do not do archaeology with `git log`.**
+`75f4a03` is titled "Add input automation and voxel layer dumping tools" and its message
+describes only `vf_input.py` (XTEST input simulation), `vf_tour.py` and `vxw_dump.py` —
+but it also swept in the whole of `src/`, `shaders/` and `tests/`: the implementer's
+object-surface Smooth work, the live-edit-brush session's per-voxel + Add-dome work, the
+texture/detail pipeline, and the render-pass changes. Someone bisecting or reading that
+message will conclude the wrong thing about what changed and why. `5ffe80c` then touched
+`index.md` alone.
+
+Consequences worth carrying:
+
+- Every peer session reported "nothing committed, commit HOLD by multi-session
+  consensus" as of this morning. That is now **stale** — the consensus hold was
+  overridden. Sessions must not assume `git diff` still shows their work, and must not
+  treat "it's uncommitted" as a safety property.
+- **The wiki is now the authoritative record of what changed and why**, which is the
+  whole point of this layer. When a commit message and a page disagree, the page wins.
+- This is itself an instance of [[concepts/measurement-discipline]]: the commit message
+  is an instrument for attribution, and it was never measured against what the commit
+  contained.
+- These entries were themselves committed inside the sweep, which is harmless but worth
+  knowing if a diff of a wiki page looks like it came with a renderer change.
+
+## 2026-09-26 ingest | the click gate's "no seam" is an in-app-only limit — XTEST already reaches it
+Correcting my own review entry above, which recommended "an env-injected press point +
+travel offset" for the click-vs-drag gate. The trigger reading `glfwGetMouseButton`
+directly blocks a *unit* seam, but the repo already ships an **out-of-app** one:
+`tools/vf_input.py` has `_send_button()` and `click(button=LMB, hold=0.08, settle=0.10)`
+driving a real XTEST `ButtonPress`/`ButtonRelease`, which reaches the same GLFW state
+([[concepts/x11-input-injection]]). So the gate is testable **today with no app change**,
+and adding an env var first would be building a second seam next to a working one.
+
+The discriminating assertion is the reported bug itself: `click(hold=2.0)` with no pointer
+movement must still yield exactly one edit. That separates the travel gate from the
+rejected time debounce (which fails it), so it is a real test rather than a snapshot of
+current behaviour. Caveats: needs a real X display, so `test-visual`-shaped rather than a
+ctest unit test; and the recipe is **unvalidated** — a proposed test, not a working one.
+Filed on [[entities/live-edit-brush]].
+
+## 2026-09-26 ingest | Undo/"hollow cabin" filed as UNDER INVESTIGATION; the real finding is a test coverage gap
+The live-edit-brush session reported a second, **undiagnosed** defect — Undo appearing
+to rewrite surfels in regions nobody touched (hollow cabin in splat mode) — and asked
+explicitly that it be recorded as under investigation, never as a cause. Filed that way
+on [[entities/live-edit-brush]], with a standing warning not to "fix" the named paths.
+
+It also reported what it had **ruled out by reading**, which is the expensive half of a
+search and worth keeping: `readChunkSurfels` clamps correctly to `microStart` and derives
+`edgeCount` from `edgeStart`; the seed lambda's parents/edges split is arithmetically
+consistent with that; `rebuildRun` assembles `[parents | edges | micros]` with a matching
+`microStart`; `patchChunkSurfels` keeps `m_chunkCount`/`m_edgeStart`/`m_microStart`
+consistent including after a relocation. Next session should not re-walk those.
+
+**The durable finding is a coverage gap, not a mechanism.**
+`tests/live_edit_check.py` only ever edits **terrain** — it has **no case that edits an
+object chunk at all**. The cabin is object geometry, and the GPU-seed path's weakest
+assumption is there: `keyFromSurfel` recovers a cell by stepping back `0.5 * VOXEL` along
+the normal, sound for a base parent but questionable for an **edge bridge**, which sits on
+a crease *between* two cells and has no single owning cell. That is a **hypothesis under
+test**, explicitly not a finding, and the page says so. The next step is a test (a
+headless repro on the cabin wall: baseline, one per-voxel add, undo, compare), not a code
+change — terrain-only coverage is the reason this reached a user at all. Noted the gap on
+[[concepts/focused-test-groups]] too, since that is the page a session reads when choosing
+what to run.
+
+Also filed the shared-resource hazard on [[concepts/measurement-discipline]]: other
+sessions relink `build/voxelforge` and take the GPU/display without warning, so an
+impossible-looking number is usually cross-session state — check `git status --short --
+src/ shaders/` and `--selftest` before believing it. Sixth instance of the same lesson,
+and the cheapest to guard against.
+
+## 2026-09-26 lint | CORRECTION: the 8M surfel bound is not the live-edit session's
+My review entry above listed "surfel count bound loosened 2.5M → 8M" as a finding
+**against the live-edit-brush session**. That attribution is **wrong** and is
+superseded here. Its only change in `tests/test_surfelize.cpp` was the two
+`edgeStart` bracket lines; `<= 8000000u` predates that session. I inferred
+authorship from a `git diff` against a commit three generations back — which
+shows *that* a line is new since then, never *who* added it. Exactly the
+unearned-inference pattern both of us have been calling out, committed by me.
+
+The number may still deserve a decision — 8M is loose against today's ~1.37M
+surfels — but it is **not that session's patch to tighten**, and tightening it on
+an inherited hunch is the same error. Whoever set it should be identified first,
+and the call should be made knowingly.
+
+## 2026-09-26 ingest | dead-disc finding caused a revert; Undo bug now has a measured signature
+Two updates, one of them a design reversal.
+
+**(1) The dead-disc note reversed the click-gate design.** The net-from-press rule
+is being **reverted to travel-since-last-stamp**. Kept on
+[[entities/live-edit-brush]] as an in-flight block, because the *reason* is the
+lesson and outlives the code: the held-click stack has two candidate causes —
+hand jitter, and the dominant one, that **the Add changes what the ray hits** so
+the next pick is the top face of the voxel just created. Net-from-press fixed
+both but was specific to neither, trading a narrow breakage (jitter) for a wider
+one (any genuine small drag). The stacking case has a signature jitter does not —
+*the new pick is the cell the previous Add created* — so suppressing exactly that
+is deterministic, keeps small drags, and needs **no threshold**. Accepted trade-off
+to state to the user: a held click can still land one extra neighbour if the hand
+moves the threshold distance while held. The class is narrowed, not eliminated.
+Marked PENDING in the page because `main.cpp` still held the old form at last
+check — the code is the truth, not the page.
+
+**(2) The Undo/"hollow cabin" bug is now reproduced, with numbers.** Previously
+filed as undiagnosed with no data; the owning session now has a headless repro on
+the cabin wall (`562,524,607`): a 1-voxel add in an **object** chunk moves
+0.18 % of pixels and the undo moves **2.57 %**, while the same test on a terrain
+cell moves 0.02 %. The undo moves ~an order of magnitude more than the edit it
+reverses — a corruption signature, measured. It also puts the earlier coverage-gap
+finding on a number instead of an argument. Surfels-per-chunk before/after was
+still being measured. **Still no cause**; the page says so and lists the four
+things already ruled out by reading.
+
+## 2026-09-26 ingest | Undo root cause MEASURED: a refresh-margin bug, and wider is not safer
+The undiagnosed Undo/"hollow cabin" report is now **resolved with a measured cause**, so
+the earlier "no cause yet" filing on [[entities/live-edit-brush]] is superseded by a
+RESOLVED section.
+
+**Root cause.** `undoEdit` forced `kExactStampMargin` (12 cells) on **every** undo,
+because Smooth needs the exact band. So a **one-voxel Add was undone by re-deriving a
+25^3 box**. On terrain that is merely wasteful; on an **object** chunk it is *wrong* —
+the store's object surface/crease classification does not match the bake's, so the wide
+re-derivation produced **1310 parents + 599 edge bridges inside that box against 52
+bridges in the whole chunk**. Fix: the undo step records the margin the stroke used
+(`m_undo.back().margin`) and replays with it; `kExactStampMargin` is now escalated only
+on the Smooth object-surface path. Verified in the source, not just the report:
+`undoEdit` reads `m_undo.back().margin` and passes it to `commitStoreEdits`.
+
+**Measured on the cabin wall** (`562,524,607`), add-then-undo vs the untouched baseline:
+pixels differing fell **2.571 % → 0.185 %**, and the run split returned to
+**4298 + 52**, identical to the add-only state — undo is now a true inverse. The full
+`test-live-edit` gate was still running when this was filed.
+
+**The lesson worth more than the bug: a wider re-derivation is not a safer one.** The
+instinct that a bigger refresh margin is more thorough is *wrong on object chunks* —
+because the store-derived surface disagrees with the bake, widening the region does not
+converge on the baked answer, it **diverges** from it. Any future path re-deriving
+object geometry from the store over more than the edited region needs the same scrutiny.
+
+Note where the bug actually was: the four paths everyone suspected
+(`readChunkSurfels`' clamp, the seed lambda's split, `rebuildRun`, `patchChunkSurfels`)
+were all correct. It was one layer up, in *which margin the caller asked for* — a good
+argument for checking call arguments before auditing the callee.
+
+Also re-synced the click-gate page, which had been left describing the reverted design:
+the landed form is **two independent suppressions** — the stack refused by **identity**
+(`m_hoverHit.voxel == m_lastStampWroteCell`, no threshold at all) plus a 6 px
+travel-since-last-stamp gate for jitter only. `m_stampPressMouse` is gone, replaced by
+`m_lastStampMouse` (refreshed per stamp). The 14 px constant was **deleted, not
+retuned**, because only the jitter case is left to tune. Residual, as stated in the code:
+a jittery click whose hand moves 6 px can still land one extra neighbour.
+
+Picking coverage was restored by **adding a ray, not renaming**: a second ray straight
+down from the hero position must be terrain (`object == false`), `normal.y > 0.9`, and
+solid — so terrain direction is pinned unconditionally, and the case is renamed "rayPick
+hits the hero camera, and terrain faces up" so the name no longer promises what the hero
+ray stopped guaranteeing. 3/3 rayPick cases pass.
+
+## 2026-09-26 lint | margin class now gated — but the gate can pass while testing nothing
+`check_object_undo_surgical` landed in `tests/live_edit_check.py` and is wired into
+the **full** path (not the fast profile). Verified in the source, including that it is
+registered alongside `check_per_voxel` / `check_water_fill` / `check_undo_and_clear`
+and not in the `FAST` branch.
+
+It bounds the margin class on **two independent signals**, so neither can mask the
+other: the run split must report ≤ 200 edge bridges (measured **52** healthy, **599**
+with a wide margin — content-independent), and an undo must not move more than **0.5 %**
+of pixels (measured **0.184 %** after the fix, **2.571 %** before). Thresholds are well
+clear of the measured values, and the reasoning lives in the check's docstring so it
+travels with the assertion — the right place for it, since a future editor will not read
+this wiki first. Credit where due: the thresholds were taken from what the pre-fix run
+actually produced, not from a guess.
+
+**Correction to my own reading of the 0.184 %:** I initially could not tell whether a
+non-zero post-undo diff meant undo was incomplete. It does not — touched chunks keep
+live **store-derived shading** until the next full reload, so a small residual against
+the untouched baseline is inherent. The invariant that actually proves undo is a true
+inverse is the **run split returning to the bake's own 4298 + 52**, identical to the
+add-only state. Recorded, because "0.184 % ≠ 0" invites exactly the wrong conclusion.
+
+**The weakness worth acting on.** The wall cell `562,524,607` is a hardcoded constant.
+The robustness argument is correct as stated — it **cannot false-alarm** on a
+re-authored hamlet — but that is only half the risk. It can also degrade **silently
+into an inert check**: if the cell stops being solid/editable the add never happens,
+both signals stay low, and the check passes having verified nothing. That is worse than
+a false alarm, because a green check gets trusted. Two cheap closes, both offered to the
+owning session: assert the stamp actually happened before asserting its outcome (the
+in-file `check_per_voxel` "1 cells" pattern is the precedent), or resolve a real object
+cell at runtime as `visual_check.ownership_layer()` already does. Filed on
+[[entities/live-edit-brush]] and [[concepts/focused-test-groups]] — the latter's
+coverage-gap note was corrected from "no case edits an object chunk" (now false) to
+"found and closed, with this residual weakness".
+
+The session also parked two honest gaps it is not doing unasked, and the reasons are
+worth recording: a click-vs-drag injection seam (needs a mouse-position/LMB path into
+GLFW input) and a forced-failure hook giving the `VF_TRACE` probe a positive firing
+test. Both are real, neither is cheap, neither blocks a user-visible bug. Queued, not
+discarded.
+
+## 2026-09-26 lint | a frozen test constant has TWO vacuity paths, not one
+Follow-up to the gate entry above. The owning session accepted the precondition
+assert and, in doing so, named the residual I had missed — which is the more
+interesting half of the record.
+
+**"Cannot false-alarm" is only half of a robustness argument.** The other half is
+that a check can pass **vacuously**, and that is worse: a false alarm gets
+investigated, a vacuous pass gets trusted. Two distinct paths, needing different
+fixes:
+
+1. **Cell stops being solid/editable** → no add, both signals stay low, green
+   having verified nothing. **Closed** by asserting the `live edit: N cells` log
+   *before* judging any outcome — the `check_per_voxel` pattern, same file. No
+   threshold changes.
+2. **Cell drifts onto TERRAIN, still solid** → the stamp *succeeds*, so the
+   precondition passes, and the run-split/pixel signals are terrain-small, so the
+   check goes green **while testing the one class that provably cannot catch this
+   bug** (0.02 % — the terrain number from the entry above). This is a weaker
+   guard, not a disabled one, and the page states it as a limitation rather than
+   leaving it a hidden assumption. **Open.**
+
+**Path 2's cheap close, identified in the source:** the generic stamp log
+(`live edit{what}: N cells, M chunks, R run surfels (P parents + E edges + U
+micros), …`) carries counts and timings but **not the ownership class of the
+picked cell** — only the Smooth path logs that (`smooth object:` /
+`smooth terrain:`). The hover hit's `object`/`layer` is already in scope at that
+call site, so adding one field to that existing line would let the check assert it
+landed on an object cell, closing path 2 without the probe machinery. Offered as
+the proportionate option; runtime object-cell resolution remains the thorough one
+and was deliberately deferred. Noted on [[entities/live-edit-brush]].
+
+Worth keeping from the same exchange: the edit was **held until the running gate
+finished**, because that gate executes the file being changed — the discipline the
+session had been asking others to follow all night, applied to itself. Editing a
+file mid-gate would have produced a measurement of two different revisions.
+
+## 2026-09-26 lint | my assertion caught the reviewer's own false premise — and the fix is better than mine
+**I was wrong, and my suggested assertion is what proved it.** I proposed
+asserting that the stamp landed on an **object** cell. It failed immediately:
+cell `562,524,607` logs **`pick terrain`**. So "a solid cell on the hamlet cabin's
+outer face" — a phrase I read in a check docstring and **repeated onto the wiki
+page as fact** — was never true. A docstring is a claim, not an instrument, and I
+filed it without measuring it. The "hollow cabin" reading was the reporter's
+inference from a GUI view, not a measurement; the page now says what was actually
+measured: the chunk's baked surfels were replaced by store-derived ones across a
+region that *includes* object geometry, and **the corruption is chunk-level, not
+at the picked cell**. The 2.571 % / 599-vs-52 numbers are untouched — they came
+from the chunk's run split and a whole-frame diff, neither of which depends on the
+picked cell being an object.
+
+**The replacement assertion is stronger than the one I proposed**, and needs no
+ownership knowledge at all: the **post-undo run split must EQUAL the add-only run
+split** (4298 + 52 == 4298 + 52; the bug gives 4157 + 602). Threshold-free, immune
+to content drift on re-author, and it closes the terrain-drift path I had called
+the weak one — if post-undo equals add-only, undo is exact regardless of what was
+picked. A lesson in review: my finding was directionally right and
+mechanically wrong, and the thing that caught it was a concrete assertion rather
+than more reading.
+
+**A negative control found a weakness none of us reasoned our way to.** Running
+the check against an **air** coordinate showed that a headless stamp happily
+writes a voxel into open air, so a stale coordinate still logs `1 cells` and then
+fails the comparisons **for the wrong reason** (it blames the undo: "1+1 vs
+0+0"). Hence a fourth premise assert: the region must hold real baked geometry (a
+3-digit parent count), so an air control fails naming the stale coordinate instead
+of comparing two empty regions. Reasoning about whether a check can pass vacuously
+did not find this; a deliberately broken input did. Recorded as the method note on
+[[entities/live-edit-brush]] — audit tests with negative controls, not arguments.
+
+The check is now four asserts (stamp happened, region holds real geometry,
+post-undo run == add-only run) plus two secondaries (edges ≤ 200, diff ≤ 0.5 %).
+The `pick` field stays in the log for diagnostics and is only **printed**, not
+asserted. **Not filing the green** until the full gate reports.
+
+Provenance quarantine: the 0.18 % figure on `concepts/focused-test-groups` is now
+marked as "a one-voxel add on this cell" rather than an object-class number,
+since the cell it came from logs a terrain pick. Someone should re-measure at a
+cell that genuinely logs an object pick before that contrast is relied on.
+
+I did not independently re-probe the cell: `--probe` would contend for the GPU
+with a gate that is running, and a measurement taken across another session's run
+is not a measurement.
+
+## 2026-09-26 lint | RE-CORRECTION: the cell is object, the reader was broken, and a new log field is a new instrument
+Supersedes the previous two entries on this bug. The sequence is the record, and it
+is kept whole because the second wrong turn was more instructive than the first
+right one.
+
+**The cabin-wall premise was right.** Cell `562,524,607` logs **`pick object`** and
+always did. The intermediate correction — that it was a terrain cell — was **wrong**,
+and so was my publishing it.
+
+**Root cause of the wrong turn: a broken *reader*, not a wrong world.** The headless
+stroke hook built `m_hoverHit` by hand — `m_hoverHit = {}; hit = true; voxel = p;
+normal = storeNormalAt(p)` — and never set `object`/`layer`, so a default-constructed
+`PickHit` (`object = false`) made **every** headless run report terrain no matter what
+it stamped. Verified in source. Fixed by `adoptPickOwnership()`, which resolves the
+owner from the **load-time oracle** (`m_layers.field().sampleWorld`) and is called at
+all three hook sites. Post-fix: `546,527,642` → object, `562,524,607` → object,
+`432,509,452` → terrain with **0** edges against the object cell's **52**.
+
+**My assertion was vindicated, and my correction was the error.** I proposed asserting
+`pick object`; it "failed" for a reason that was itself a bug in the instrument
+reading it. Filed on [[entities/live-edit-brush]] as a history note, with the cabin
+framing restored and the three vacuity paths now closed.
+
+**The terrain-drift path was real, and the control proves it.** Terrain cell
+`432,509,452` passes the true-inverse comparison **silently** — `5875+0 == 5875+0`,
+diff 0.011 % — and only the `pick object` premise fails it. So the true-inverse
+assertion is *necessary but not sufficient*, which is the opposite of what I wrote
+when I claimed it closed that path on its own. Three premise asserts now run before
+any outcome: stamp happened, region holds real baked geometry, pick is an object
+cell. Primary assertion unchanged and still threshold-free: post-undo run ==
+add-only run (4298+52 == 4298+52 against 4157+602).
+
+**The numbers never moved, and that is the transferable part.** 2.571 % and 599-vs-52
+came from the chunk run split and a whole-frame pixel diff, neither of which ever
+touched the pick hook. The broken instrument invalidated the **label** attached to the
+measurement, not the measurement. A broken instrument does not always spoil the
+number, and reflexively distrusting a number because a nearby instrument is broken
+throws away good data — say precisely which measurement the broken instrument was
+*in*. The 0.18 %-object vs 0.02 %-terrain contrast I had quarantined is established
+and the quarantine is retracted.
+
+**The lesson that actually generalises, now on
+[[concepts/measurement-discipline]].** Not "check the instrument" — that was said all
+night and did not prevent this, by the person citing it. The sharper form: **a NEW log
+field is a NEW instrument, and its first reading deserves no more trust than any
+other.** An uncalibrated field produces the least reliable data in the system and
+gets read with the most confidence, because it is newest and appears to answer
+exactly the question being asked; here that meant believing a one-hour-old field over
+a world already measured and mapped. **Calibration needs a case where the new field
+and an independent source must disagree** — two obviously-wood cells logging terrain
+is what exposed the hook, and no amount of re-reading the code that produced it would
+have, because that code was self-consistent.
+
+**Not filing the green** until the gate reports.
+
+## 2026-09-26 ingest | vf_slice was never broken: opposite failures, one cause — the mistake is in the reading
+A retraction of the retraction, and the pair is the most useful thing this review
+produced. **vf_slice is NOT broken.** Its `--axis z` plane was declared "blank" because
+the output had been piped through `sed -n '4,26p'` — and those rows are **above the
+terrain**, because the grid prints **row 0 as the top of the span with rows
+descending** (50 of 102 rows carry content, including rock and soil). The tool
+**announces this in its own header** (`cols: … asc, rows: … desc`,
+`tools/scene_slice.cpp:77`) and again in the loop comment at `:85`. Verified in source.
+The instrument told you; the reading missed it. Filed as a practical gotcha on
+[[concepts/voxel-object-authoring]].
+
+**Opposite failures, one cause.** The `pick` field read a plausible **constant**
+(`terrain` everywhere, from a hook that never set it) and was believed over an
+already-mapped world. `vf_slice` read as plausibly **blank** from a partial view.
+Re-reading the producing code found neither fault, because in both cases the code was
+self-consistent and correct — **both mistakes were in the reading, not the code**.
+
+So the rule on [[concepts/measurement-discipline]] is no longer "check the
+instrument", which was already on the page and demonstrably did not prevent either
+error. It is: **before believing *or* condemning a reading, look at the WHOLE output
+rather than a convenient slice, and cross-check against a source that cannot share
+the failure mode.** The second half is what makes it a check and not a habit — the
+world has a second way to ask what material is at a cell, so a disagreement costs one
+command. A cross-check against something sharing the code or the author's assumptions
+is not a cross-check. Corollary recorded: a `sed`/`head`/`tail` window over a tool's
+output is itself a *new instrument* with its own failure modes, added casually.
+
+**Watch item raised by the owning session, and it is not a log-only change.**
+`adoptPickOwnership()` sets `object`/`layer` on **synthetic** headless picks where they
+were previously `false`, and more than the log branches on that field:
+`m_hoverHit.object` feeds the selected-owner label (`main.cpp:3001`,
+`layerFile(m_hoverHit.layer)`) and the hover-owner path at `:3335`, plus
+`m_lastPickObject` at `:1993`. So headless runs that previously took the *terrain*
+branch now take the *object* branch — a real behaviour change in the rotate/move and
+owner-label paths, not merely a better log line. `test-live-edit` is 3/3 green
+(`unit_store_tests`, `live_edit_check`, `fast_live_edit_check`); `test-visual` is being
+run before it is called done, which is the right gate for this class of change.
+**Green not filed** from either side.
+
+## 2026-09-26 lint | FINAL: both crossed groups green; I declined test-surfel, and here is the evidence for that
+`test-live-edit` 3/3 and `test-visual` 3/3. Filed as green on
+[[entities/live-edit-brush]] with the **coverage argument**, not just the tick marks.
+
+**The group-selection call was delegated to me; I declined `test-surfel`, on
+evidence rather than agreement.** The only edit outside `App` is the
+`getenv("VF_TRACE")`-gated region log in `live_editor.cpp:154-160` — a log plus a
+move of a temporary, which cannot change the run. The question that decides it is
+not "is it inert" but **"has that code ever executed"**, and a guarded block that
+no test enables is untested code regardless of how inert it looks. Checked:
+`tests/live_edit_check.py` sets `VF_TRACE=1` in three places (lines 250, 254,
+722), so those lines **do** run under the green live-edit group. The claim held
+up, so the group is not needed. `test-surfel` would re-cover surfel extraction,
+which neither change touches.
+
+Worth generalising, because it is the same instrument question as everything else
+tonight: **"this code cannot matter" and "this code has run" are different
+claims, and only the second one is evidence.** A branch behind an env guard with
+no test enabling it is the classic untested path, and it is invisible in a
+coverage number that counts lines rather than paths taken.
+
+**One coupling now recorded:** the check parses the run split out of that
+`VF_TRACE` diagnostic line, so the gate depends on a **log** existing. The failure
+direction is right — a missing or reworded line fails loudly ("no run-split log to
+bound the refresh") rather than passing quietly — but a cosmetic edit to that
+`spdlog` line is now a test change. That is a fair trade for failing loudly, and it
+should be a conscious one.
+
+**Final state of the branch.** Undo replays the margin the stroke used; the click
+rule suppresses the stack by cell identity and jitter by 6 px of travel since the
+last stamp; the canary is gated by a threshold-free true-inverse comparison behind
+three premise asserts, with an air-cell and a terrain-cell negative control both
+failing loudly and correctly. Two gaps remain, and remain honestly gaps rather than
+resolved-by-omission: **no headless seam for click-vs-drag**, and **no
+forced-failure hook for the `VF_TRACE` present/acquire probe** — the second is
+also what would give the `live_editor.cpp` guard a *positive* firing test, so it
+earns its place twice.
+
+## 2026-09-26 ingest | the forced-failure test found a real bug; and "never taken" beats "behind an unset guard"
+The queued forced-failure hook landed (`VF_TEST_FORCE_PRESENT_ERR`, documented in
+AGENTS.md) and immediately earned its place twice.
+
+**It found a live bug in the existing probe.** The log-once latch remembered only
+the **last** code, so it meant "log whenever the code *changes*", not the
+"log-once per distinct code" its comment claimed. Two failures **alternating**
+produced 60 lines in 30 frames — exactly the flood the latch exists to prevent. It
+survived review because a real *persistent* failure repeats one code and so behaves
+correctly: the bug is invisible to the only failure mode anyone reasoned about.
+Now a bounded, saturating per-slot set (`seen[2][8]`, `live_editor`-independent, in
+`main.cpp:1072`), with `check_present_probe` asserting both severity
+(device-lost / out-of-host-memory at `error`, rest at `warning`) and one line per
+distinct code, using a **repeated code in the list** to make the latch observable.
+Verified in source. This is the whole *silence is not a clean bill of health* thread
+paying out: the one diagnostic nobody could test turned out to be broken.
+
+**My principle, corrected upward — and the correction is the valuable part.** I had
+written that "a path behind an unset guard is invisible to coverage". Stronger and
+worse: the hook was first placed beside `vkQueuePresentKHR` and **fired zero times
+while looking perfectly correct in source**, because a headless render never
+acquires or presents the swapchain at all — it submits its command buffer and reads
+back the **offscreen** image. So the lines were **covered** (they compile, they are in
+the binary, coverage counts them) while the code **never executed**. No coverage
+number shows that and no source review finds it.
+**"Has this run?" has to mean "can it run in the configuration the tests use?"** —
+a strictly stronger question than whether a guard is set. Filed on
+[[concepts/measurement-discipline]] with the fix pattern: give a windowed-only
+diagnostic a synthetic driver **and call it from the headless frame body**, not only
+at the real call site.
+
+**Also filed — cheapest lesson of the night, and it cost a build.** A scripted
+string-replace patch **silently did nothing** because the anchor had wrong leading
+whitespace and nothing complained. The compiler caught it by accident; a docstring or
+log-line edit has no compiler at all. Rule: assert the replacement happened (count
+before and after). A no-op edit looks exactly like success.
+
+**One stale comment found in review, for the owning session.**
+`check_present_probe`'s docstring still says *"Needs `--smoke`, not `--shot` … so the
+probe is only reachable from the real frame loop."* That is the **pre-fix** reasoning
+and it is wrong twice over: `forceFrameResults()` is called from the **headless** frame
+body (right after `headless submitted`, `main.cpp:5367`), so the probe is reachable
+from headless *because* of the fix, and `--shot` shares that same headless path so it
+reaches it too. Left as-is, that comment invites the next person to move the hook
+back. Filed on [[concepts/focused-test-groups]].
+
+**Unchanged honest gap:** no headless seam for click-vs-drag — still the only way that
+class of bug gets caught without a human clicking.
+
+## 2026-09-26 ingest | paired lesson: the expensive silent failures are the ones with no compiler behind them
+Supersedes the "stale comment to fix" finding in the entry above — the docstring is
+fixed and `test-visual` is 3/3 on it. What is worth keeping is *why it was wrong in a
+way that mattered*, and it is the same failure as the no-op edit with a different
+trigger.
+
+**A comment that records _why_ is a claim with an expiry date.** "X is unreachable
+from every test, so the hook lives here" was true when written; a later change made
+it false; the stale sentence then read as a **live constraint** and would have
+invited the next person to move the hook back to `vkQueuePresentKHR` and re-break it.
+Nobody flagged it because **reading a comment feels like reading code** — prose has no
+type checker, and a justification in the present tense will eventually be a lie that
+gets believed. Hence the rule now on [[concepts/measurement-discipline]], covering
+both cases: **the expensive silent failures are the ones with no compiler behind them
+— a no-op edit and a stale comment are both silent and both look exactly like success,
+so the defence is the same for each: _assert it_, or _date it_.** Either state the
+invariant in the present tense ("reachable **because** the headless body calls it") or
+mark it as history ("the first version shipped this way, firing zero times").
+
+**A second-order trap in the same family, worth keeping separately.** The justification
+had quietly changed *identity* rather than just truth value: the check kept using
+`--smoke` for a reason that was no longer reachability (both headless modes reach the
+probe; `--shot` measured 1 line, correctly latched) but **statistical power** — over
+`--shot`'s three frames the latch would pass *even if it were broken*. Switching to
+`--shot` would look identical in the source and silently destroy the property the
+check exists to pin. **Merging two live justifications into one sentence is how the
+stale version survives**, because a reader can only check the sentence, not the two
+reasons behind it. Verified the corrected docstring now separates them and attributes
+the reachability half to the bug history.
+
+That closes this thread. The one honest gap is unchanged: no headless seam for
+click-vs-drag, which remains the only way that class gets caught without a human
+clicking.

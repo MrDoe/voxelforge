@@ -17,6 +17,9 @@ Renders the close-up view several times and asserts:
   - the carve hover preview tints warm and the add preview tints the growth's
     footprint green (VF_TEST_BRUSH, no edit applied; splat backend only),
   - a 1-voxel Add/Carve stamps EXACTLY one cell (the per-voxel sculpt mode),
+  - Undo is a TRUE INVERSE of the edit - the post-undo surfel run must equal
+    the add-only run - on a chunk carrying object geometry (terrain-only edits
+    cannot catch a too-wide refresh),
   - undo and "Clear live edits" remove live geometry again (an undone stroke
     and a cleared world must stop rendering the removed material, and the
     cleared overlay file must be gone).
@@ -206,6 +209,129 @@ def check_per_voxel(binary, tmp, failures):
         if s["black"] > 0.09:
             failures.append(f"per-voxel {mode}: black-in-silhouette "
                             f"{s['black']*100:.2f}%")
+
+
+def check_object_undo_surgical(binary, tmp, failures):
+    """Undo must be a TRUE INVERSE of the edit, checked on a chunk that carries
+    object geometry - which the terrain-only checks above cannot catch.
+
+    Regression: undoEdit forced the wide kExactStampMargin (+-12) on every undo
+    because Smooth needs it, so undoing a ONE-voxel edit re-derived a 25^3 box
+    from the store - 1310 parents + 599 edge bridges, against 52 bridges in the
+    whole chunk from the bake. The store's object surface/crease classification
+    does not match the bake's, so widening the region DIVERGES instead of
+    converging: the chunk lost its baked surfels and nearby structure read
+    hollow with splats in the wrong place. Measured 2.571% of pixels vs 0.185%
+    for the add itself; the same edit on terrain moved 0.02%, which is why a
+    terrain-only suite can never fail on it.
+
+    The primary assertion is CONTENT-FREE and needs no threshold: the run split
+    after add+undo must EQUAL the run split after the add alone. That is what
+    makes the undo a true inverse, it cannot drift with a re-authored hamlet,
+    and the bug fails it outright (4157+602 against 4298+52). The edge bound and
+    the pixel diff are kept as secondaries because they fail louder and earlier.
+
+    CELL is a solid, object-owned cell (hamlet structure). It is asserted, not
+    assumed: three premise asserts run before any outcome is judged - the stamp
+    happened, the region holds real baked geometry, and the pick is an object -
+    because a check that silently stops testing is worse than one that misfires.
+    The true-inverse comparison is content-free and cannot drift when the hamlet
+    is re-authored; these three only have to notice that it went inert.
+    """
+    wall = "562,524,607"
+    cam = ["5", "2.6", "2.0", "5", "1.8", "10"]
+    base = os.path.join(tmp, "objundo_base.ppm")
+    added = os.path.join(tmp, "objundo_added.ppm")
+    shot = os.path.join(tmp, "objundo.ppm")
+    render(binary, base, {"VF_MICRO": "0"}, cam=cam)
+    # VF_TRACE so the forward stamp's line is not suppressed while "dragging";
+    # the undo line prints either way.
+    r = render(binary, added, {
+        "VF_MICRO": "0", "VF_TRACE": "1",
+        "VF_TEST_STROKE": f"{wall},1,add", "VF_EDIT_DIAM": "0.1",
+    }, cam=cam)
+    r2 = render(binary, shot, {
+        "VF_MICRO": "0", "VF_TRACE": "1",
+        "VF_TEST_STROKE": f"{wall},1,add",   # same run: undo the in-run stroke
+        "VF_EDIT_DIAM": "0.1",               # one voxel
+        "VF_TEST_UNDO": "1",
+    }, cam=cam)
+    logs = (r.stdout or "") + (r.stderr or "") + (r2.stdout or "") + (r2.stderr or "")
+    if r.returncode != 0 or r2.returncode != 0 or not os.path.exists(shot):
+        failures.append("object undo: render failed")
+        return
+
+    def split(who):
+        m = re.search(r"live edit" + who + r": .*?run surfels "
+                      r"\((\d+) parents \+ (\d+) edges", logs, re.S)
+        return (int(m.group(1)), int(m.group(2))) if m else None
+
+    # NON-VACUITY FIRST: a check that silently stops testing is worse than one
+    # that misfires, because a false alarm gets investigated and a vacuous
+    # pass gets trusted. If CELL stops being solid the add never happens, both
+    # splits vanish or stay tiny, and without this the check would go green
+    # having verified nothing at all. Same "1 cells" pattern as check_per_voxel.
+    ms = re.search(r"live edit undo: (\d+) cells", logs)
+    if not ms:
+        failures.append(f"object undo: no stamp in the log - CELL {wall} is "
+                        "stale (not solid or not editable); update the "
+                        "coordinate in check_object_undo_surgical")
+        return
+    if int(ms.group(1)) != 1:
+        failures.append(f"object undo: expected a 1-voxel stamp, log says "
+                        f"{ms.group(1)} cells")
+    # It must land on an OBJECT cell, or the check silently degrades to the
+    # terrain class that provably cannot catch this bug (0.02% there vs 0.18%
+    # here, on the same one-voxel add). This is only trustworthy because the
+    # headless hook now resolves pick ownership from the load-time oracle: it
+    # used to leave object=false, so this assertion read "terrain" for a cabin
+    # wall and would have been permanently red for the wrong reason.
+    pick = re.search(r"live edit undo: .*?pick (\w+)", logs, re.S)
+    print(f"[object-undo] pick: {pick.group(1) if pick else '?'}")
+    if not pick or pick.group(1) != "object":
+        failures.append(f"object undo: the stamp did not land on an OBJECT cell "
+                        f"(pick={pick.group(1) if pick else '?'}) - CELL {wall} "
+                        "is not object-owned, so this check would be testing the "
+                        "terrain class, which cannot catch this bug")
+    # The stamp succeeding is not enough: a headless stamp happily writes a
+    # voxel into OPEN AIR, so a stale coordinate still reports "1 cells" and
+    # would then fail the comparisons below for the wrong reason (measured: an
+    # air coordinate gave 1+1 vs 0+0 and blamed the undo). Require the region
+    # to hold real baked geometry - there is nothing for the inverse to
+    # preserve otherwise, so the comparison cannot mean anything. A genuine
+    # object chunk has thousands.
+    if not re.search(r"run surfels \(\d{3,} parents", logs):
+        failures.append(f"object undo: the edited chunk has almost no baked "
+                        "surfels - CELL is stale or in open air, so this check "
+                        "would compare two empty regions and pass vacuously")
+        return
+
+    before, after = split(""), split(" undo")
+    if before is None or after is None:
+        failures.append("object undo: no run-split log to compare")
+        return
+    print(f"[object-undo] run after add {before[0]} parents + {before[1]} edges; "
+          f"after add+undo {after[0]} parents + {after[1]} edges")
+    if after != before:
+        failures.append(f"object undo: run split {after[0]}+{after[1]} does not "
+                        f"match the add-only split {before[0]}+{before[1]} - the "
+                        "undo re-derived geometry the edit never touched (a "
+                        "wider margin DIVERGES from the bake, it does not "
+                        "converge on it)")
+    # secondary: a wide refresh re-derives hundreds of edge bridges where the
+    # chunk legitimately has ~52. Pixel-independent, so it still fires when the
+    # misplacement happens to be subtle.
+    if after[1] > 200:
+        failures.append(f"object undo: {after[1]} edge bridges for a one-voxel "
+                        "undo - a wide margin re-derived object geometry that "
+                        "does not match the bake")
+    w, h, a = read_ppm(base)
+    _, _, b = read_ppm(shot)
+    d = diff_stats(w, h, a, w, h, b)[0]
+    print(f"[object-undo] post-undo diff vs untouched {d*100:.3f}%")
+    if d > 0.005:
+        failures.append(f"object undo: changed {d*100:.2f}% of pixels that the "
+                        "edit never touched")
 
 
 def check_water_fill(binary, tmp, failures):
@@ -607,6 +733,7 @@ def main():
         check_preview(binary, tmp, failures,
                       os.path.join(tmp, "splat_base.ppm"))
         check_per_voxel(binary, tmp, failures)
+        check_object_undo_surgical(binary, tmp, failures)
         # a dug volume below the water level reads as the fixed-level plane
         check_water_fill(binary, tmp, failures)
         # undo + "Clear live edits" must remove live geometry (and the overlay)

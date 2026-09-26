@@ -197,6 +197,64 @@ def ownership_layer(manifest_path, failures):
     return None
 
 
+def check_present_probe(binary, tmp, env, failures):
+    """The acquire/present result probe must FIRE and must fire once.
+
+    This is a diagnostic for the failure that is otherwise invisible - a window
+    that goes dark, an app that spins without drawing - and until now it had no
+    positive firing test, so "it logs" was a claim nobody could check. The
+    forced-result hook makes it testable WITHOUT touching the real swapchain:
+    the hook feeds synthetic VkResults to the reporter, and the thing under test
+    is the logger, not the present.
+
+    Two properties are asserted, and the second is the one that was actually
+    broken. (1) Severity: device-lost and out-of-host-memory are errors, the
+    rest are warnings. (2) Log-once PER DISTINCT CODE. The latch remembered only
+    the last code, so two failures alternating logged EVERY frame - measured, 30
+    frames produced 60 lines - which is the flood the latch exists to prevent.
+    It hid because a real persistent failure repeats one code and behaves. The
+    repeated code in the list below is what makes that property observable.
+
+    Uses --smoke rather than --shot for ONE reason, and it is not reachability:
+    the probe is reachable from headless BECAUSE forceFrameResults() is called
+    from the headless frame body (--shot shares that path and reaches it too -
+    measured). --smoke simply runs enough frames for "once per distinct code" to
+    MEAN something; over --shot's three frames the latch would pass even if it
+    were broken. The reachability fact is why the hook has that second call
+    site at all: a headless render never acquires or presents the swapchain (it
+    submits, then reads back offscreen), so a hook living only beside
+    vkQueuePresentKHR is unreachable from every test in the repo - which is
+    exactly how the first version of this hook shipped, firing zero times.
+    """
+    codes = "VK_ERROR_DEVICE_LOST,VK_ERROR_SURFACE_LOST_KHR,VK_ERROR_DEVICE_LOST"
+    probe_env = dict(env, VF_TRACE="1", VF_TEST_FORCE_PRESENT_ERR=codes)
+    run = subprocess.run(
+        [binary, "--smoke", "30", "--width", "64", "--height", "36"],
+        capture_output=True, text=True, timeout=900, env=probe_env,
+    )
+    log = (run.stdout or "") + "\n" + (run.stderr or "")
+    if run.returncode != 0:
+        failures.append("present probe: smoke run failed")
+        return
+    expectations = [
+        ("VK_ERROR_DEVICE_LOST", "error", 1),
+        ("VK_ERROR_SURFACE_LOST_KHR", "warning", 1),
+    ]
+    for name, level, want in expectations:
+        # the level tag is part of the same line, so a wrong severity fails
+        found = len(re.findall(r"\[%s\].*present returned %s" % (level, name), log))
+        any_level = len(re.findall(r"present returned %s" % name, log))
+        if any_level == 0:
+            failures.append(f"present probe: {name} was never reported - the "
+                            "probe did not fire")
+        elif found != want:
+            sev = "wrong severity" if any_level == want else \
+                  f"reported {any_level}x, expected {want} (log-once broken)"
+            failures.append(f"present probe: {name} {sev}")
+        else:
+            print(f"[present probe] {name}: 1 line at {level}")
+
+
 def main():
     if len(sys.argv) != 2:
         print(__doc__)
@@ -421,6 +479,8 @@ def main():
                     )
                 else:
                     print("[move probe] X/Y/Z handles independently selectable")
+        if not FAST:
+            check_present_probe(binary, tmp, env, failures)
         if manifest_before is not None:
             with open(manifest_path, "rb") as manifest_file:
                 manifest_after = manifest_file.read()

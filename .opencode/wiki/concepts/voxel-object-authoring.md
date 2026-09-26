@@ -43,6 +43,17 @@ generator emitting C++ `StampCell` arrays back into `common.hpp`, keeping
 | Object done | 2-3 `--shot` renders judged via `ascii_view.py` glyph maps/stats (bundled in skill `scripts/`; never vision models) | needs bake + display |
 | Done | `ctest --test-dir build` | ~30 s |
 
+
+**Reading `vf_slice` output — the row order is the trap.** The grid prints
+**row 0 as the top of the span and rows descend**; columns ascend. The header
+line states this (`cols: … asc, rows: … desc`) and the loop repeats it in a
+comment (`tools/scene_slice.cpp:85`). Trimming the output with
+`sed -n 'A,Bp'` therefore selects rows from the **top** of the span, which above
+the terrain is **empty** — so a perfectly good cross-section reads as a blank
+plane. Only ~half the rows of a full-span slice carry content. Read the whole
+output, or pass a `--center`/`--span` that brackets the feature, before
+concluding the tool is broken. Related: [[concepts/measurement-discipline]].
+
 Key insight: `--probe` exits before Vulkan init (see `src/app/main.cpp`,
 `App::run`) and `vf_slice` reads the baked field directly, so the whole layer
 iteration loop runs without any render pass. Renders stay reserved for what

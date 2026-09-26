@@ -38,7 +38,7 @@ struct TempLayer {
 };
 } // namespace
 
-TEST_CASE("rayPick hits terrain from the hero camera")
+TEST_CASE("rayPick hits the hero camera, and terrain faces up")
 {
     LayeredWorld lw;
     REQUIRE(lw.load(std::string(VOXELFORGE_ASSET_DIR) + "/world.json"));
@@ -70,6 +70,17 @@ TEST_CASE("rayPick hits terrain from the hero camera")
     // rays into the sky must not hit
     PickHit sky = rayPick(f, {-16.f, 6.5f, -14.f}, {0.f, 1.f, 0.f});
     CHECK_FALSE(sky.hit);
+
+    // The hero ray above no longer guarantees a TERRAIN hit (the enabled layer
+    // set changed with the hamlet re-author, so it can land on structure), so
+    // the up-normal contract is pinned on a ray that must be terrain: straight
+    // down from above the hero position. Without this the case name promised
+    // terrain coverage it no longer had.
+    PickHit down = rayPick(f, {-16.f, 6.5f, -14.f}, {0.f, -1.f, 0.f});
+    REQUIRE(down.hit);
+    CHECK_FALSE(down.object);
+    CHECK(down.normal.y > 0.9f);
+    CHECK(f.sampleWorld(voxelCenter(down.voxel)).d <= 0.f);
 }
 
 TEST_CASE("rayPick straight down matches the field's own top solid cell")
