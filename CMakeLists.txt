@@ -318,6 +318,16 @@ add_test(NAME fog_check
 add_test(NAME gpu_selftest
     COMMAND ${Python3_EXECUTABLE} ${GROUP_GATE} visual,surfel
             $<TARGET_FILE:voxelforge> --selftest --width 640 --height 360)
+# A headless run reads AND re-writes assets/runtime_edits.vxw unless it is told
+# not to: loadStoreOverlay re-derives chunks through LiveEditor::refreshRegion,
+# which flags them `edited`, and the overlay writer then re-serializes just that
+# subset - so a scratch run silently shrinks a real live-edit session (observed:
+# 4 chunks/42969 surfels -> 1 chunk/9631). The file is gitignored, so the damage
+# leaves no trace in git. The python harnesses already default to
+# VF_NO_OVERLAY=1; this bare --selftest entry did not, and must.
+set_tests_properties(gpu_selftest
+    PROPERTIES LABELS "visual;surfel" SKIP_RETURN_CODE 77
+                 ENVIRONMENT "VF_NO_OVERLAY=1")
 
 # Every registered test is group-gated by tests/group_gate.py. A bare CTest
 # invocation therefore skips the checks instead of starting an accidental
@@ -351,8 +361,6 @@ set_tests_properties(texture_check
     PROPERTIES LABELS "textures" SKIP_RETURN_CODE 77)
 set_tests_properties(fog_check
     PROPERTIES LABELS "fog" SKIP_RETURN_CODE 77)
-set_tests_properties(gpu_selftest
-    PROPERTIES LABELS "visual;surfel" SKIP_RETURN_CODE 77)
 
 add_test(NAME fast_unit_tests
     COMMAND ${Python3_EXECUTABLE} ${GROUP_GATE} unit,camera,smoke
