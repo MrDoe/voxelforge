@@ -137,7 +137,7 @@ All of these exit cleanly without a window manager (details in
 | `assets/world.json missing - run 'ninja -C build world'` | bake assets once (see above). Deleting anything under `assets/` re-requires this. |
 | App exits/crashes on present, NVIDIA + X11 | default present mode is IMMEDIATE because MAILBOX deadlocks on this stack. Override `VF_PRESENT=immediate\|mailbox`. |
 | UI panels missing / off-screen | `imgui.ini` persists window layouts; the AI Chat window self-heals each frame, others don't. Delete `imgui.ini` to reset all panels. |
-| Whole UI renders nothing | ImGui uses `UseDynamicRendering`; the app must wrap `ImGui_ImplVulkan_RenderDrawData` in its own `vkCmdBeginRendering/EndRendering`. If you touched the frame loop, check `src/app/main.cpp`. |
+| Whole UI renders nothing | ImGui uses `UseDynamicRendering`; the app must wrap `ImGui_ImplVulkan_RenderDrawData` in its own `vkCmdBeginRendering/EndRendering`. If you touched the frame loop, check `src/app/frame/`. |
 | Chat says backend unreachable | probe `curl $VF_LLM_URL/models` (OpenAI shape) or `curl http://127.0.0.1:11434/api/tags` (Ollama). `start.sh` diagnostics help isolate llama-server issues. |
 | Edits not appearing | edits land on disk; the app polls every ~0.5 s. Check that `ai_edits` shows enabled in the layers panel (`EditableWorld::enableInManifest` flips it on first edit). |
 | Shader changed but nothing happens | shaders compile to `build/shaders/*.spv` via ninja — rebuild instead of running a stale binary. |

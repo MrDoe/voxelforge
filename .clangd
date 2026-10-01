@@ -5,7 +5,21 @@ CompileFlags:
 Diagnostics:
   ClangTidy:
     Add: [modernize*, performance*, readability*]
-    Remove: [modernize-use-trailing-return-type]
+    # These conflict with the house style this codebase documents in AGENTS.md,
+    # so the broad readability*/modernize* globs above flagged ~1900 style hits
+    # per handful of files and buried real errors. Measured counts in brackets.
+    Remove: [modernize-use-trailing-return-type,
+             readability-identifier-length,        # 434: short names are the convention (lx/ly/lz, cp/sp)
+             readability-uppercase-literal-suffix, # 406: lowercase `f` suffix throughout
+             readability-magic-numbers,            # 302: numeric constants ARE the design (VOXEL=0.1, 0.62, 1.26)
+             readability-braces-around-statements, # 241: braces omitted on purpose in hot paths
+             readability-implicit-bool-conversion, # 68
+             readability-isolate-declaration,      # 38
+             readability-inconsistent-declaration-parameter-name,
+             readability-function-cognitive-complexity, # frame loop is 1405 statements by design
+             readability-function-size,
+             readability-convert-member-functions-to-static,
+             modernize-avoid-c-arrays]             # 23: C arrays are load-bearing in Vulkan push blocks
 
 InlayHints:
   Enabled: No

@@ -80,9 +80,25 @@ Consequences worth internalizing:
 
 ### `src/app/` — the program
 
-- `main.cpp` — window, frame loop, camera/input, HUD ("World layers" panel),
-  `Ctrl+LMB` picking, headless modes (`--selftest/--smoke/--shot/--probe`),
-  swapchain blit + ImGui dynamic-rendering wrap, env-var test hooks.
+One directory per subsystem, with `app.hpp` as the root header and
+`frame/run.cpp` as the only file that knows the frame-loop order (the call
+sequence there *is* the ordering contract — input before the preview tint,
+because the preview consumes what input wrote). `main.cpp` is the entry point.
+
+- `cli/` — the command line and the `--shotlist` view list (`parseArgs`).
+- `rhi/` — window/swapchain bring-up, the offscreen targets and teardown;
+  `present_probe.*` is the one place a swapchain `VkResult` is reported.
+- `world/` — the layered world: layer list, terrain/objvol uploads, the reload
+  path, the runtime-edit overlay, the surfel stream.
+- `textures/` — the material atlas binding table and its hot-swap poll.
+- `edit/` — the live-edit brush (stamps, undo, clear) and the object
+  rotate/move pose commit, the only writers of `world.json`'s placement.
+- `mesh/` — STL/OBJ import; the GUI section and the headless hook share it.
+- `ui/` — the one docked sidebar: chrome, the six sections, the scene
+  overlays, and `gizmo_math.*` (the shared projection/hit-test contract).
+- `frame/` — startup, the frame loop and its slices, the headless and
+  interactive recording paths, the photorealism chain, `--selftest`, the GPU
+  timestamp profiler. `frame.hpp` holds the per-frame state the slices share.
 - `chat_ui.{cpp,hpp}` — ImGui chat window; worker thread for LLM requests,
   tool dispatch into `EditableWorld`, immediate reload trigger, unknown-tool
   self-correction retry.

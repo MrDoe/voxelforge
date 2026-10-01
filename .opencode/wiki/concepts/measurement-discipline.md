@@ -13,7 +13,7 @@ in one session, each time producing a number that was confidently reported and
 wrong. Every instance had the same shape: the measurement ran, produced a
 plausible value, and the value was believed without a positive control.
 
-## The five instances (each one nearly filed as a finding)
+## The eight instances (each one nearly filed as a finding)
 
 - **Hand-decoding `assets/heightmap.png`** to recover terrain heights, which
   disagreed with what `--probe` reported from the real field. Two instruments,
@@ -43,6 +43,18 @@ plausible value, and the value was believed without a positive control.
   them a swallowed exception that reported a false obstruction. An
   instrumentation failure that reports confidently is worse than no
   instrumentation.
+- **`clang-tidy … 2>/dev/null | grep -c warning:`** — clang-tidy writes its
+  findings to **stderr**, so this reports a confident, wrong `0` and reads as a
+  clean bill of health. It produced a real contradiction during the clang LSP
+  setup: the same files measured `0` this way while the language server, over an
+  identical check set, reported 32 and 1161. Same family as the ffmpeg `-y`
+  instance above — the measurement never touched the data it claimed to read.
+- **`clangd --check`'s "All checks completed, N errors"** is not a diagnostic
+  count. It counts log lines emitted at ERROR level, and the `ExtractFunction`
+  refactoring probes log at ERROR whenever they do not apply. A file with zero
+  real diagnostics reported `19 errors`. A summary field that counts the wrong
+  thing is a measurement bug wearing a diagnostic's clothes — check what the
+  number is a count *of*.
 
 ## Consequence: silence is not a clean bill of health
 
@@ -161,6 +173,180 @@ reason that had quietly changed from **reachability** (both headless modes work)
 to **statistical power** (3 frames cannot distinguish a working latch from a
 broken one). Merging the two reasons into one sentence is how the stale version
 survived.
+
+## A verification method's blind spot is determined by what it compares
+
+The sharpest lesson of the `src/app` split, and it is a **code** trap rather than a
+measurement one — so no amount of framing would have surfaced it.
+
+Promoting the frame loop's local `shots` to the member `m_shots` by word-boundary
+rename turned
+
+```cpp
+std::vector<ShotSpec> shots = args.shots;   // into: a local that SHADOWS the member
+```
+
+It **compiled clean**, the function body stayed **byte-identical** so the slice
+verification correctly passed it — and `--shot` hung forever. Fixed as an assignment
+(`m_shots = args.shots;`, `frame/run_startup.cpp`).
+
+Two things to keep:
+
+- **Body-diffing cannot see declaration-level changes.** The method's great strength
+  here — proving no *logic* moved — is precisely what made the bug invisible, because
+  the bug lived in a declaration. The artefact it protects and the class of bug it
+  cannot see are the same axis. "Byte-identical body" is the strongest evidence of a
+  *pure move* and is **not** evidence that a move was pure.
+- **So keep at least one signal from a different class.** Here it was wall-clock: the
+  render went from ~11 s to ~600 s. No diff, no hash and no byte-comparison would have
+  flagged it; a *timing* regression did. Whenever a verification passes, the useful
+  question is what that method is structurally incapable of seeing — and then whether
+  any surviving signal covers that class.
+
+## A gate result is evidence about the gate, not about the change
+
+The same session reported sending three peers *"builds clean, gates pass"* on the
+strength of a green compile plus a `--selftest` — on a change whose entire surface was
+**shot capture**, which `--selftest` never exercises. The sentence was true of the
+signals that were run and false as a claim about the change, and nothing in the
+artefacts would let a reviewer detect it by re-running anything.
+
+Corollary: *"2/2 green"* is a statement about a named group on a named revision. It is
+not a statement about the change unless the group provably covers the change's surface.
+Check the coverage argument before repeating the result — and if the change's surface
+is a stage the gate does not reach, say that instead of reporting the green.
+
+## A gate that has never failed is not yet known to fire
+
+A brand-new `test-app` group landed 34 cases / 192 assertions over the app's pure leaf
+logic (gizmo screen maths, `parseArgs`, sidebar vocabulary) — all of it **untestable
+before** the `src/app` split, because those units shared a translation unit with
+`main()`. **Three of the new gizmo cases failed on first run, and the expectations
+were wrong, not the code:**
+
+- assumed forward is `-Z` at yaw 0 — it is **`+X`** (forward is `-Z` at yaw −90°);
+- assumed a point at a ring's **centre** has distance 0 — it is **one radius** away;
+- assumed `+X` along the pitch ring is unambiguous — the pitch ring is **nearer** there
+  in normalised terms.
+
+Each was **measured with a throwaway binary before a line of the test was changed.**
+That is the correct outcome for a new gate, and it is worth stating plainly because the
+instinct treats a first-run red as a problem with the code: a gate that has never
+failed has not yet demonstrated it can distinguish right from wrong, and three
+same-day failures are the cheapest possible proof that it can.
+
+The corollary for reviewing new tests: **ask what the gate's failure mode is before
+asking whether it passes.** A green brand-new test is weak evidence; a red one that
+turns out to be a wrong *expectation* is strong evidence, because it means the author
+checked the code's answer instead of asserting their own.
+
+## A green signal that does not cover the change is not weak evidence — it is none
+
+The preceding section is about a gate that has never *fired*. This is the
+stronger and more common form of the mistake: reporting a verification that
+**passed**, where the thing that passed does not exercise what changed.
+
+Seen on 2026-09-26, twice in one day, by a session that was otherwise careful.
+During the `src/app` split, stages 2/3 were reported as "builds clean, gates
+pass" on the strength of a green compile plus `--selftest`. But the change was
+the frame loop's shot-capture path, and **`--selftest` never renders a shot** —
+it structurally cannot observe that path. `test-visual` *does* render `--shot`
+and would have failed in about a minute. It did fail, shortly after, for an
+unrelated reason that a byte-exact body comparison had correctly passed over: a
+word-boundary rename had turned the frame loop's local `shots` declaration into
+`std::vector<ShotSpec> m_shots = args.shots;`, which **shadows** the member
+instead of assigning it. `m_shots` stayed empty, so `shotMode` (defined as
+`!m_shots.empty()`) was never true and `--shot` looped forever without writing a
+PPM. Clean compile, no crash, no wrong pixels, byte-identical body — see
+[[entities/app-subsystems]] for the full mechanism.
+
+The rule, stated so it is usable next time:
+
+- Before reporting a gate as verification, **name the behaviour it exercises and
+  check that the change touched it.** A gate that does not cover the change is
+  not a weak signal, it is an absent one.
+- `--selftest` is a sky probe plus coverage. It is **not** a shot renderer and
+  **not** a behavioural gate. Reaching for it by default because it is the
+  cheapest is how a claim ends up resting on the wrong instrument.
+- Cheap-and-always-runnable is a virtue for *smoke*, not for *verification*.
+  When the two conflict, the group that renders the thing wins.
+- A byte-exact comparison of a moved function's **body** is the correct tool for
+  a pure move and provably blind to a changed **declaration**. Know which
+  question your instrument can answer.
+
+The general shape is the same as everywhere else in this file: the failure is
+never "the measurement was imprecise", it is "the measurement was about
+something else, and nobody checked".
+
+## A red with no change attached points at the environment, not the code
+
+Several sessions share this working tree, the GPU and the display, so a result can
+change without anything being edited. The rule that generalises is **not** "a number
+that looks impossible is probably someone else's" — that asks the reader to judge
+*impossibility*, which is subjective and gets argued about. The mechanical version:
+
+> **If a gate goes red and nothing has changed since the last known-good, suspect the
+> environment before the code. Re-run it alone.**
+
+Observed exactly: `test-live-edit` failed in ctest with `live_edit_check` named, on a
+change that had not touched it. Cause was four test instances contending for one GPU —
+`test-visual` and the store/world batch launched concurrently. The script passed
+standalone and 3/3 on a re-run with nothing else running. The discriminator was not the
+failure's severity but its **provenance**: a red with no diff attached. The correct
+response was to re-run it alone — *not* to trust the red, and *not* to go hunting a
+regression in code nobody had changed.
+
+**Run groups sequentially whenever the GPU is shared.** Concurrency makes a render or
+GPU-bound gate red for reasons entirely orthogonal to the diff, and the failure names a
+test that is innocent.
+
+## Both failure modes on one change in one day
+
+The sharpest statement of why this page exists, and it came free from the same
+session. On a single refactor, in one day:
+
+- a gate went **red with nothing changed** — the *result* was wrong (GPU contention);
+- a gate reported a **difference on an unchanged binary** — the *instrument* was wrong
+  (a `sha256` render gate on a splat backend that is not bit-reproducible).
+
+Result-wrong and instrument-wrong, same change, same day. Neither is visible by
+re-running the same gate harder, and each would have been filed as a code defect by a
+reviewer who trusted the artefact. **When both the result and the instrument are
+suspect, suspect the instrument first** — it is the only one of the two that is
+usually wrong for reasons outside the change.
+
+Other shared-state cases, all measured:
+
+- **The test suite writes into `assets/`.** `tests/test_world.cpp` and
+  `tests/test_authoring.cpp` set `dir = VOXELFORGE_ASSET_DIR` and write
+  `dir + "/world_all.json"`, so `test-world` / `test-unit` / `test-surfel` **rewrite a
+  tracked file in the versioned asset directory**. A concurrent reference-render
+  verification can therefore be perturbed by another session's test run, and "treat
+  `assets/**` as read-only" is a request rather than an enforced property. The write is
+  also a bare `std::ofstream` with **no temp+rename**, so an interrupted run leaves a
+  truncated manifest and every content test fails on it — the overlay writer in this
+  codebase already uses temp+rename, so the pattern to copy is in-tree.
+- **Four concurrent test instances on one GPU produced a red that was contention, not
+  a regression.** A `test-live-edit` failure traced to four instances competing for the
+  device; re-run alone it was 3/3. The tell is available in advance: run groups
+  **sequentially** when the GPU is shared, and treat a red that appears only under
+  concurrency as a contention hypothesis until proven otherwise.
+- **Three tracked assets were deleted outright** (`world.json`, `heightmap.png`,
+  `landscape.vxw`) while another session was mid-gate, breaking it. Those three are
+  *exactly* `heightmap_gen`'s output set, which is what made the suspect set small —
+  and the cause turned out to be the reporter's own `ninja -C build -t clean`, since
+  the authored scene is **registered as build outputs**. See
+  [[concepts/authored-assets-are-build-outputs]]. The general lesson is the one worth
+  keeping: when a versioned input vanishes, the question is not "who deleted it" but
+  "what in this build system believes it owns that file" — and an exact count of
+  surviving registered outputs is what confirmed the mechanism instead of merely
+  suggesting it.
+
+Rule of thumb: before blaming a surprising number on the code, ask **who else could
+have written the thing being measured**, and check `git status --porcelain` plus the
+mtime of the input. And when a session reports "I did not do this", make the answer
+*checkable* — an exact list of files written, and the exact commands run — rather than
+asking anyone to take it on trust.
 
 ## Opposite failures, one cause: the mistake is almost always in the reading
 

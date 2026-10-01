@@ -2,7 +2,7 @@
 
 ## `voxelforge` CLI
 
-Parsed in `src/app/main.cpp` (`parseArgs`). Defaults: window 1600×900,
+Parsed in `src/app/cli/args.cpp` (`parseArgs`). Defaults: window 1600×900,
 sun elevation 34° / azimuth 238°, animtime 0.
 
 | flag | effect |
@@ -197,6 +197,51 @@ ninja -C build test-visual       # focused visual group
 ./build/vf_mcp                   # MCP stdio server
 ./build/voxelforge               # the app
 ```
+
+## C++ language server (clangd)
+
+`clangd` 18.1.3 provides completion, navigation and diagnostics. It needs
+**nothing from the source tree** — all four pieces are already wired:
+
+| Piece | Where |
+|---|---|
+| server argv | `.opencode/opencode.json` → `lsp.clangd` (for OpenCode) |
+| project config | `.clangd` — points clangd at `build/` and sets the ClangTidy checks |
+| compile database | `build/compile_commands.json`, from `CMAKE_EXPORT_COMPILE_COMMANDS ON` |
+| convenience symlink | `compile_commands.json` → `build/compile_commands.json` (gitignored) |
+
+The build dir must therefore be configured **once** (`cmake -S . -B build -G
+Ninja`) before an editor has flags to work from; the symlink is the fallback for
+tools that only look in the project root. Any build regenerates the database, so
+it tracks source changes — but note the `voxelforge` target's source list is
+explicit (no `GLOB`), so a new `.cpp` is invisible to the build *and* to the
+language server until it is listed in `CMakeLists.txt`.
+
+`--clang-tidy` is passed in the argv, and clangd finds `clang-tidy` as a sibling
+binary in `/usr/lib/llvm-18/bin/` — installing `clangd` alone is **not**
+sufficient, and clangd reports no error if it is missing, the checks just never
+run. Package it as `clangd-18` + `clang-tidy-18` (plus the unversioned `clangd`
+/ `clang-tidy` metapackages if other tooling shells out to the unversioned
+names).
+
+The `.clangd` ClangTidy globs (`modernize*`, `performance*`, `readability*`)
+are deliberately trimmed by a commented `Remove:` list, because the broad
+`readability*` rules conflict with conventions this codebase uses on purpose
+(short `lx/ly/lz` names, lowercase `f` suffixes, numeric constants like
+`VOXEL=0.1`, unbraced hot-path statements, C arrays in Vulkan push blocks). Undo
+individual entries there if you disagree with a specific suppression.
+
+If a diagnostic looks wrong — "no member named X" on code that compiles — the
+database is usually stale; **the compiler is the authority**. Confirm with
+`ninja -C build` instead of chasing the squiggles. More detail, including how to
+verify the setup with a scripted LSP handshake:
+[`.opencode/wiki/concepts/clang-lsp-setup.md`](../.opencode/wiki/concepts/clang-lsp-setup.md).
+
+> **Never run `ninja -t clean` in this repo.** `assets/heightmap.png`,
+> `assets/world.json` and `assets/landscape.vxw` are declared as *outputs* of
+> the `heightmap_gen` custom command but live in the versioned source tree, so a
+> clean deletes tracked files (and the compile database with them). Touch a
+> source file to force a recompile.
 
 Build trees: `build` (primary), `build-dbg`, `build-asan`. No validation
 layers are installed on the dev machine — correctness gates are selftest /
