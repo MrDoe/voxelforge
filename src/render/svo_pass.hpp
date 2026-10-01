@@ -49,6 +49,18 @@ public:
     // xyz = voxel center (world), w = active flag.
     void setSelection(const glm::vec4& sel) { m_selFeed = sel; }
     void setHover(const glm::vec4& hov) { m_hovFeed = hov; }
+    // Brush hover preview (binding 13), mirroring SplatPass::setBrush exactly so
+    // both backends show the same volume. SVO previously had no preview at all,
+    // so in --mode svo every brush size/depth change was invisible. Layout is
+    // identical to the splat BrushUBO: volume/axis/tint/meta.
+    void setBrush(const glm::vec4& volume, const glm::vec4& axis,
+                  const glm::vec4& tint, uint8_t layerId = 0)
+    {
+        m_brush[0] = volume;
+        m_brush[1] = axis;
+        m_brush[2] = tint;
+        m_brush[3] = glm::vec4(float(layerId), 0.f, 0.f, 0.f);
+    }
     void record(VkCommandBuffer cmd, const RaymarchPush& push);
 
 private:
@@ -88,5 +100,10 @@ private:
     Buffer m_selection {};
     glm::vec4 m_selFeed { 0.f }; // staged on CPU, flushed in record()
     glm::vec4 m_hovFeed { 0.f };
+    // Brush preview volume (binding 13), 64 B, flushed in record() like the
+    // selection feeds. Zero-initialised: bTint.a == 0 disables the preview.
+    Buffer m_brushBuf {};
+    glm::vec4 m_brush[4] { glm::vec4(0.f), glm::vec4(0.f), glm::vec4(0.f),
+                           glm::vec4(0.f) };
 };
 } // namespace vf

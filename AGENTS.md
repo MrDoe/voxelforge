@@ -432,17 +432,34 @@ one costs a whole turn, because the bad call is rejected before any work runs.
   `VF_LLM_URL=http://host:8080/v1 VF_LLM_MODEL=… ./build/voxelforge`.
   MCP: `./build/vf_mcp` (stdio), registered in `.opencode/opencode.json`.
 - Present quirk: default IMMEDIATE on NVIDIA+X11 (`VF_PRESENT=immediate|mailbox`),
-  per-swapchain-image acquire semaphores (`src/app/main.cpp`: `m_acquireSems`
-  at :148, created in `ensureAcquireSemaphores()` at :177, used at :923).
+  per-swapchain-image acquire semaphores (`App::m_acquireSems`, created in
+  `App::ensureAcquireSemaphores()`, consumed in
+  `App::recordInteractiveFrame()` — all in `src/app/rhi/surface.cpp` and
+  `src/app/frame/record_interactive.cpp`).
 
 ## Tests & verification — group-only
 - Build first with `ninja -C build`, then run only the focused group(s) that
-  cover the changed files: `ninja -C build test-unit`, `test-surfel`,
+  cover the changed files: `ninja -C build test-unit`, `test-app`, `test-surfel`,
   `test-store`, `test-world`, `test-live-edit`, `test-visual`, `test-effects`,
-  `test-textures`, `test-fog`, or `test-smoke` (`test-fast` is an alias).
+  `test-textures`, `test-fog`, `test-preview`, or `test-smoke` (`test-fast` is
+  an alias).
   **Never run bare `ctest --test-dir build` or an all-tests target.** All CTest
   entries are guarded by `tests/group_gate.py`; without an explicitly enabled
   group they return CTest's skip code.
+- **`test-preview` is the narrow one.** Any change to the brush hover preview —
+  `frame/run_brush_preview.cpp`, the BrushUBO feeds, `inBrushVolume` in
+  `shaders/common_surfel.glsl`, the tint in `splat.frag`/`svo_raymarch.comp`, or
+  the depth marker in `shaders/post.comp` — runs `test-preview`, not the whole
+  `test-live-edit` matrix: `live_edit_check.py --only preview` renders its own
+  baseline and checks the tint hue per mode, that the **Depth** slider moves the
+  frame above the ~1.25% TAA noise floor, and that `--mode svo` shows the tint
+  too. Add `test-live-edit` only when the change also touches stamping, undo,
+  the store or the overlay. See `.opencode/wiki/concepts/brush-preview-visibility.md`.
+- `test-app` covers the app's *pure leaf* logic — the gizmo screen maths
+  (`ui/gizmo_math.*`), the command line (`cli/args.*`) and the sidebar
+  vocabulary (`ui/ui_primitives.*`, `ui/ui_types.hpp`). Those were unreachable
+  from a test while they shared a translation unit with `main()`; they are also
+  inside `test-unit`, so the existing entry point still covers them.
 - Use the smallest relevant group: surfel/radius changes use `test-surfel`;
   ChunkStore/brush/live-patch changes use `test-store` or `test-live-edit`;
   camera/shader/scene changes use `test-visual`; SSAO, texture, and fog
@@ -465,7 +482,10 @@ one costs a whole turn, because the bad call is rejected before any work runs.
   (splat + `--mode svo`) for Add, plus the splat-only Delete/Paint store modes
   (micro detail off so the diff is geometry, not micro-disk noise; a separate
   check pins that a patched chunk keeps its micro tail), the
-  carve/add hover tints (warm vs green) and the water plane (a dug pit must
+  carve/add hover tints (warm vs green), the **Depth** slider and the SVO
+  preview (both new: `check_depth_sensitivity` demands the frame change by more
+  than the ~1.25% TAA noise floor, and `check_svo_preview` demands `--mode svo`
+  show the tint red-dominantly — it had no preview at all), and the water plane (a dug pit must
   read as water-plane pixels — A/B against `VF_SPLAT_NOWATER=1` — and a carved
   channel that reaches the river must match the open water's colour within
   12/255 per channel; no subtractive preview tints the water plane); undo and
@@ -545,7 +565,11 @@ one costs a whole turn, because the bad call is rejected before any work runs.
   world reload (`rebuildSurfels`). Full and store paths preserve `Sample::layer`
   into the surfel's packed owner metadata, including deterministic edge and
   micro children. The store path adds `buildChunkSurfels`/`buildChunksSurfels`
-  (SDF-gradient normals, parallel shading) for live edits.
+  (the BAKE's normal pipeline — exposed-face mean, per-face expansion for
+  thin/cancelling cells, face-neighbour smoothing — plus parallel shading) for
+  live edits. It must never grow a normal rule of its own: a stamp re-derives
+  the edit AABB ± margin, so a divergent rule re-aims untouched splats. See
+  `.opencode/wiki/concepts/live-edit-surfel-parity.md`.
 - `src/voxel/heightmap.{hpp,cpp}` — terrain source of truth: 16-bit grayscale
   PNG (`kHmSize=2048`, meters `[-8,24]`); bilinear `sample()` + `gradient()`.
 - `src/voxel/worldfile.{hpp,cpp}` — VXW v1 binary reader/writer (header + SVO
@@ -554,7 +578,17 @@ one costs a whole turn, because the bad call is rejected before any work runs.
   `VoxelField` for `Ctrl+LMB` selection. `PickHit::layer` is the exact winning
   owner from the picked cell and drives the editor/AI owner label; never infer
   selection from layer AABBs.
-- `src/app/main.cpp` — window/swapchain/frame loop/HUD/picking wiring.
+- `src/app/` — the application, one directory per subsystem; `src/app/app.hpp`
+  is the root header and `src/app/frame/run.cpp` is the only file that knows
+  the frame-loop order. The map is in the header comment of `app.hpp`: `cli/`
+  (command line), `rhi/` (surface bring-up + the present probe), `world/`
+  (layered world, terrain/objvol uploads, runtime-edit overlay, surfel stream),
+  `textures/` (the atlas binding table), `edit/` (live-edit brush, rotate/move
+  commit), `mesh/` (STL/OBJ import), `ui/` (the one docked sidebar, its six
+  sections, the gizmo screen maths), `frame/` (startup, the frame loop and its
+  slices, both recording paths, selftest, profiler). `main.cpp` is the entry
+  point only. CMakeLists lists every `.cpp` explicitly — a new file that is not
+  listed there does not build.
 - `src/app/chat_ui.cpp`, `src/ai/*` — chat UI, LLM client/tool parsing, MCP
   server (`vf_mcp`: add_box/cylinder/ellipsoid/stamp, add_voxels, write_object,
   read_object, delete_object, list_layers, enable_layer, probe, ground,
@@ -660,7 +694,8 @@ one costs a whole turn, because the bad call is rejected before any work runs.
 - Push block `RaymarchPush` (128 B, `svo_pass.hpp`): camPos/Right/Up/Fwd,
   `a=(tanHalfFov,aspect,extentX,extentY)`, `b=(worldSize,voxelSize,gridN,_),
   sunDir` toward sun, **`misc.y=animTime_s`** (the struct comment claims
-  `misc.x` — the shader and main.cpp actually use `misc.y`). Don't reuse
+  `misc.x` — the shader and `App::recordInteractiveFrame` actually use
+  `misc.y`). Don't reuse
   `a.w`. See `docs/rendering.md`.
 
 ## Gotchas
@@ -679,8 +714,8 @@ one costs a whole turn, because the bad call is rejected before any work runs.
   (rail 46 px + pane ≈ 256 px, footer 52 px).
 - ImGui uses `UseDynamicRendering`: the app must wrap `ImGui_ImplVulkan_RenderDrawData`
   in its own `vkCmdBeginRendering/vkCmdEndRendering` against the swapchain view
-  (`main.cpp`, LOAD op keeps the blitted world). Omit it and the whole UI
-  silently renders nothing - no error anywhere.
+  (`frame/record_interactive.cpp`, LOAD op keeps the blitted world). Omit it and
+  the whole UI silently renders nothing - no error anywhere.
 - `imgui.ini` persists window positions across sessions; a layout saved by a
   wider display can push panels off-screen. The sidebar is immune: it is
   created `NoSavedSettings` with `ImGuiCond_Always` position/size, so a stale
@@ -758,14 +793,14 @@ one costs a whole turn, because the bad call is rejected before any work runs.
 Other OpenCode sessions in this workspace are reachable through the
 `opencode-crosstalk` plugin: `crosstalk_status`, `crosstalk_peers`,
 `crosstalk_send`, `crosstalk_inbox`, `crosstalk_claim`, `crosstalk_wait`.
-Talk to each other, but keep working — only stop for coordination that prevents
+Talk to each other briefly, but keep working — only stop for coordination that prevents
 a real collision.
 
-- **Declare once, then keep moving.** `crosstalk_status` sets your role and goal;
+- **Declare once - precisely and concisely - then keep moving.** `crosstalk_status` sets your role and goal;
   `crosstalk_peers` shows active sessions and their leases. Work that does not
   overlap theirs needs no coordination.
 - **Talk before you collide.** If you need something a peer holds, `crosstalk_send`
-  a short ask and continue elsewhere; replies are injected into live turns (use
+  a short precise ask and continue elsewhere; replies are injected into live turns (use
   `crosstalk_inbox` to catch up). Never force a claim.
 - **Lease what you are editing now.** `crosstalk_claim` takes an exclusive expiring
   lease on exact paths — no globs (`resources`, `note`, `ttlSeconds`). `renew` if the
@@ -773,7 +808,5 @@ a real collision.
 - **Identity is automatic** — never pass a "who am I". Blocking calls are capped by
   `maxWaitMs` and may return early; that is normal.
 
-Installed globally (`npm run setup` in `/home/christoph/code/opencode-crosstalk`);
-`opencode api get /api/plugin` shows `opencode.crosstalk` active. Disable per
-workspace with `"plugins": ["-opencode.crosstalk"]`; no permission rule is required.
+Installed globally - `opencode api get /api/plugin` shows if `opencode.crosstalk` is active.
 <!-- opencode-crosstalk:end -->

@@ -1694,3 +1694,664 @@ the reachability half to the bug history.
 That closes this thread. The one honest gap is unchanged: no headless seam for
 click-vs-drag, which remains the only way that class gets caught without a human
 clicking.
+
+## 2026-09-26 lint | src/app was split per subsystem: every main.cpp line number in this wiki is now stale
+A `refactorer` session split `src/app/main.cpp` (was ~5470 lines, **now 15**) into
+per-subsystem files plus a shared `src/app/app.hpp` (499 lines):
+
+```
+src/app/cli/       args.{cpp,hpp}
+src/app/rhi/       present_probe.{cpp,hpp} surface.cpp
+src/app/world/     store_overlay surfel_stream world_layers world_textures
+src/app/textures/  texture_bindings.cpp
+src/app/edit/      live_edit.cpp transform.cpp
+src/app/mesh/      mesh_import.cpp
+src/app/ui/        sidebar, panel_{ai,edit,mesh,render,textures,world}, gizmo_math,
+                   ui_primitives, scene_overlays, theme, ui_types
+src/app/frame/     run.cpp run_input run_hooks run_hotkeys run_startup run_capture
+                   run_brush_preview profiler record_fx selftest frame.hpp
+```
+
+> **SUPERSEDED — see the correction entry below.** This entry documented the
+> new layout as "verified, not guessed" and listed single call sites. Both were
+> wrong: the tree **does not compile at this moment** (`run.cpp` is mid-rewrite,
+> stages 2+3 in flight), and the call-site lists were incomplete. Kept unedited
+> below as the record of the mistake.
+
+**Consequence for this wiki: every `main.cpp:<line>` reference filed during the
+review is now wrong**, and a stale line number is worse than no line number because
+it looks checkable. Where the symbols documented here went (verified, not guessed):
+
+| symbol | new home |
+|---|---|
+| `firstSight`, `reportFrameResult`, `forceFrameResults` | `src/app/rhi/present_probe.cpp` |
+| `adoptPickOwnership` | `src/app/edit/live_edit.cpp` (called from `frame/run_hooks.cpp`) |
+| `undoEdit` | `src/app/edit/live_edit.cpp` (called from `frame/run_hotkeys.cpp`) |
+| `kDragTravelPx`, `m_lastStampWroteCell` (click gate) | `src/app/frame/run_input.cpp` (constant also in `ui/ui_types.hpp`) |
+| `m_lastPickObject`, hover-owner label | `src/app/frame/run.cpp`, `src/app/ui/` |
+
+**The fix is to stop citing line numbers at all.** This is the same lesson as the
+stale-docstring thread one entry up, in a different costume: a line number is a claim
+with an expiry date and a symbol name is not, so the refactor is the moment to convert
+every anchor on [[entities/live-edit-brush]] and [[concepts/focused-test-groups]] to
+symbols. Deliberately **not** done speculatively while the split is still being
+verified against reference renders — the layout may yet move, and a confidently
+re-anchored page is worse than one that admits it is mid-migration. Those pages carry a
+marker until the refactorer reports the split settled.
+
+**What I owe the refactorer: nothing.** This session made **zero** edits outside
+`.opencode/wiki/**` — no `src/`, no `tests/`, no `CMakeLists.txt`, no `AGENTS.md`, no
+relink. Their collision checklist (`tests/` is theirs for new files, `CMakeLists.txt`
+has an explicit source list with no GLOB, do not relink `build/voxelforge` mid-gate)
+is noted and respected.
+
+## 2026-09-26 lint | CORRECTION: I documented a mid-flight layout as verified, and dropped call sites I already had
+Correcting the entry above, which made two mistakes worth keeping.
+
+**(1) I filed a moving target as fact.** The refactorer reports the tree **does not
+compile right now** — stage 1 (members out of `main.cpp`) is done and *verified*
+(builds, `--selftest` PASSED, hero render inside the original binary's own run-to-run
+noise floor, p50 delta 0.004–0.022 against a 0.03 floor), but stages 2+3 are splitting
+`App::run` into per-frame slices and `run.cpp` is **not yet rewritten**. The page
+marker I added therefore said the split "was" done and handed out new file locations as
+current. It is intent, not settled fact. The refactorer's own words are the right
+standard: a wrong-but-plausible location is worse than a flagged one.
+
+**(2) I compressed a multi-file grep into one "primary" caller and lost data I
+already had.** My grep returned `adoptPickOwnership` in **five** files and `undoEdit`
+in **seven**; I wrote "called from `frame/run_hooks.cpp`" and "called from
+`frame/run_hotkeys.cpp`" respectively. The missing call sites were *in my own output*
+and I dropped them. Corrected counts: `adoptPickOwnership` has **three** call sites
+(`VF_TEST_EDIT` and `VF_TEST_STROKE` startup hooks in `frame/run_startup.cpp`, plus
+`VF_TEST_HOVER` in `frame/run_hooks.cpp`); `undoEdit` has **three** callers (the Undo
+button in `ui/panel_edit.cpp`, the `VF_TEST_UNDO` startup hook, and Ctrl+Z in
+`frame/run_hotkeys.cpp`). This is the "never summarise a measurement into something
+smaller" rule failing in the direction I least expected: not a wrong number, but a
+correct number with the evidence dropped.
+
+**What is actually stable, and worth keeping.** The directory-per-subsystem **shape**
+is settled and will not move again. From the verified stage 1, the **definitions** are
+safe to cite: `adoptPickOwnership` and `undoEdit` in `src/app/edit/live_edit.cpp`;
+`firstSight` / `reportFrameResult` in `src/app/rhi/present_probe.cpp`;
+`kDragTravelPx` **declared** in `src/app/ui/ui_types.hpp`. **Call sites are in flight
+and must not be cited until the refactorer reports the gates green.**
+
+Three structural facts worth carrying, because they explain *why* the layout is what
+it is rather than just where things are:
+- `kDragTravelPx` is declared with the **UI vocabulary** but **used at exactly one
+  site**, the click gate. That single-use property is the reason it lives in
+  `ui_types.hpp` instead of next to its only reader.
+- `m_lastStampWroteCell` **straddles the split on purpose**: written by
+  `edit/live_edit.cpp` (`applyEditLive`, `undoEdit`) and read by `frame/run_input.cpp`
+  for the identity test. A page describing the click gate without noting that the
+  write and read sides live in different subsystems will mislead the next reader.
+- The refactorer is anchoring their own `AGENTS.md` edits to **symbols rather than
+  line numbers** — the same conclusion this wiki reached independently, and the reason
+  the anchor conversion is the right fix rather than cosmetic tidying.
+
+**Gate note worth recording:** the refactorer rejected a sha256 render gate because
+the splat backend is **not bit-reproducible**, and gated on statistics-within-tolerance
+against a noise floor measured from the original binary instead. A hash gate would have
+been an *instrument* that cannot fire — the exact class of thing this wiki keeps
+flagging. Page markers now say the layout is mid-migration instead of naming locations
+as current.
+
+## 2026-09-26 lint | incident: tracked assets/ files deleted mid-gate, and assets/ is not read-only anyway
+A `refactorer` session reported that three **tracked** files were deleted from the
+working tree between ~08:10 and ~08:27 — `assets/world.json`, `assets/heightmap.png`,
+`assets/landscape.vxw` — which broke its gate run (the app and tests refuse to start
+without `world.json`). It restored them with `git checkout --`; `git status -- assets/`
+is now empty, so the restore is complete.
+
+**Not this session.** Zero writes outside `.opencode/wiki/**`; no `ninja`, no binary
+run, no test run, no `heightmap_gen`; every git command read-only (`status`, `log`,
+`diff`, `show`, `ls-files`, `check-ignore`, `branch`) with no `checkout`/`stash`/
+`clean`/`reset`/`commit`. Independently checkable via `git status --porcelain`.
+
+**Narrowing the suspect set (measured).** Those three files are **exactly**
+`heightmap_gen`'s complete output set: `assets/heightmap.png` is its default output
+path (`tools/heightmap_gen.cpp:235`), `landscape.vxw` is the terrain shell it emits,
+and `world.json` goes through `writeManifest` (`:446`). So the candidate set is small —
+anything invoking `ninja -C build world` / `vf_heightmap`, or a directory-level
+operation over `assets/`. It is **not** the `world_all.json` writer below.
+
+**The standing hazard, which matters more than the incident: `assets/` is not
+read-only while tests run.** `tests/test_world.cpp:26` and `tests/test_authoring.cpp:21`
+set `dir = VOXELFORGE_ASSET_DIR` and then write `dir + "/world_all.json"` — so
+`test-world`, `test-unit` and `test-surfel` **rewrite a tracked file inside `assets/`**.
+Two consequences for concurrent sessions: a reference-render verification can be
+perturbed by another session's test run, and the write is a bare
+`std::ofstream(path) << j` with **no temp+rename**, so an interrupted run leaves a
+**truncated** `world_all.json` and every content test then fails on it. The overlay
+writer in this codebase already uses temp+rename for exactly this reason, so the fix
+pattern exists in-tree. Filed on [[concepts/measurement-discipline]] as a shared-state
+hazard.
+
+**Not the cause of the incident** — that would be an unearned inference — but it is the
+reason "treat `assets/**` as read-only" is not currently a property the repo enforces
+rather than a request.
+
+## [2026-09-26] ingest | clang-lsp-setup — clangd LSP for OpenCode (installed, verified, tuned)
+Installed the missing pieces and verified the whole chain end to end. `clangd-18`
+18.1.3 was already present; added the `clangd` and `clang-tidy` metapackages (symlinks,
+~16 kB each) and `clang-tidy-18`. Headline find: `--clang-tidy` in
+`.opencode/opencode.json` plus the `Diagnostics: ClangTidy` block in `.clangd` were
+**inert** — clang-tidy was never installed, and clangd accepts the flag with no warning.
+`clangd --check` cannot detect this (it never runs ClangTidy), and measuring clang-tidy
+directly is a trap: it writes to **stderr**, so `2>/dev/null | grep` yields a confident
+wrong `0`. With the engine finally present, the configured
+`modernize*,performance*,readability*` globs produced **2343 diagnostics over 4 files**
+(1161 run.cpp, 1039 chunk_store.cpp) and **zero real compiler errors** — pure
+house-style conflict against `AGENTS.md` conventions, which buried real errors. Tuned
+`.clangd` with a commented, measured `Remove:` list. Verified with a real LSP handshake
+using the exact opencode.json argv, plus a positive control. Filed
+[[concepts/clang-lsp-setup]]; logged quirks for the inert `--clang-tidy`, the `--check`
+error-count misread, the stderr trap, and `ninja -t clean` deleting the authored scene.
+
+## 2026-09-26 lint | RESOLVED: the assets deletion was `ninja -t clean`, and the documented recovery is itself a regen
+The refactorer session found the cause of the incident above and retracted the
+"third session did it" line: **it was itself.** `ninja -C build -t clean` at ~08:20,
+run to force a recompile. Verified in the build system: `CMakeLists.txt:130-132` sets
+`VF_HEIGHTMAP_PNG` / `VF_WORLD_LAYERS` to **source-tree** paths, and
+`build/build.ninja:1143` registers them — plus the legacy layer family — as OUTPUTS of
+the `heightmap_gen` custom command. **The build system believes it owns the authored
+scene.**
+
+**Why exactly three files, and it is the nicest piece of arithmetic in this log.** The
+registered output list is *stale*: it still names `house.vxw`, `tree1..6.vxw`,
+`rock1..3.vxw`, `bushes.vxw`, `alpaca.vxw`, `fence1.vxw`, all removed when the baked
+object sweeps were dropped. A clean can only delete what exists, so
+deletions = registered outputs ∩ files on disk = the three survivors. That count is
+what **confirmed** the mechanism rather than merely suggesting it, and it independently
+validated the tighter "exactly heightmap_gen's output set" analysis.
+
+**The part that matters more than the incident: `AGENTS.md`'s recovery advice is not a
+no-op.** It says the fix is `ninja -C build world`. That fixes the symptom and is
+itself a **regeneration** — it re-bakes the terrain shell from `terrainHeightAt()` and
+rewrites `world.json`. A regenerated scene can differ from the committed one, and the
+result is a working, plausible, *different* scene rather than an error. Bounded by
+what survives: `writeManifest` preserves foreign entries whose `.vxw` still exists, so
+the runtime-authored `hamlet_*` layers are kept — but the committed
+`heightmap.png` / `landscape.vxw` bytes are not preserved. **So the correct recovery
+order is `git checkout -- assets/` first**, and `ninja -C build world` only when the
+files are genuinely absent from git.
+
+Filed as [[concepts/authored-assets-are-build-outputs]] with the rules: never
+`ninja -t clean` here (delete `build/` instead — that directory owns nothing in
+`assets/`); identify the mechanism before restoring, because `git checkout` fixes the
+symptom while only the mechanism tells you it will recur; and the structural fix if
+`assets/` is ever re-plumbed is to stop registering versioned content as outputs.
+
+Also noted: both sessions' audits cleared them, and the reason this closed in one step
+instead of a witch hunt is that each could **enumerate its writes** rather than assert
+"not me". That is now the recommended form of a denial on
+[[concepts/measurement-discipline]] — make it checkable.
+
+## [2026-09-26] lint | build-dir hazard corrected, wiki link check
+- **Correction filed after cross-session verification.** A peer reported that
+  `ninja -C build world` would recreate 12 stale `.vxw` files and inject phantom
+  layers. Checked and **refuted** before it reached the user: `heightmap_gen.cpp:342-343`
+  builds only `landscape.vxw`, `ai_edits.vxw` is consumed and never written
+  (:406-411), and `writeManifest` gates every preserved layer on an `fopen`
+  existence check before pushing it. A regen writes exactly heightmap.png +
+  landscape.vxw + world.json and cannot change the hamlet. The real hazard is
+  narrower: `ninja -t clean` deletes the 3 tracked assets (verified — 3 declared
+  outputs exist, 3 files went missing), and also removes the clangd database.
+  The 12 dead `VF_WORLD_LAYERS` names are cosmetic.
+- **Lint:** one pre-existing broken wiki link, `[[concepts/water-flooding]]` in
+  `log.md` (no such page). Not introduced here; left for its owner.
+- Generalised two measurement traps into [[concepts/measurement-discipline]]
+  (now eight instances): clang-tidy writes findings to **stderr**, and
+  `clangd --check`'s "N errors" counts ERROR-level *log lines* — including
+  non-applicable `ExtractFunction` probes — not diagnostics.
+
+## 2026-09-26 ingest | app split verified: wiki re-anchored to symbols, and a new gate proved it can fire
+The refactorer reports the split **complete and verified**: tree builds clean, layout
+final, no more movement. Time to convert the wiki's line-number anchors, which is the
+conversion the two of us independently agreed was the right fix rather than cosmetic
+tidying.
+
+**Re-anchoring done.** All `main.cpp:<line>` references on live pages are gone —
+`grep` now returns **zero** across `entities/` and `concepts/`. They are replaced by
+symbol anchors: `undoEdit` and `adoptPickOwnership` in `edit/live_edit.cpp`,
+`reportFrameResult` / `forceFrameResults` in `rhi/present_probe.cpp`, `kDragTravelPx`
+declared in `ui/ui_types.hpp` and used once in `frame/run_input.cpp`. New page
+[[entities/app-subsystems]] carries the verified map so future anchors have somewhere
+to point.
+
+**Three things I verified rather than transcribed**, each of which corrected my
+earlier notes:
+- `tanHalfFov60()` is read at **five** sites, not the two implied by "gizmo + push":
+  `record_interactive`, `record_headless`, `run_brush_preview`, `run_input`. It is the
+  enabler behind the gizmo-hits-agree-with-push-agreements invariant, because it used to
+  be a local in `App::run` — which is *why* the UI slices could not reach it.
+- The `m_lastStampWroteCell` **straddle is real and load-bearing**: written in
+  `edit/live_edit.cpp` (`applyEditLive`), cleared there in `undoEdit`, read in
+  `frame/run_input.cpp` for the identity test. State belongs to the edit path, the
+  decision to the input path.
+- The `frame/` file list **changed again** since my earlier note — `run_capture.cpp` is
+  now `record_headless.cpp` + `record_interactive.cpp`, and `run_poll.cpp` is new. A
+  hand-maintained file list in a wiki page is a claim with an expiry date, so the page
+  links the subsystem rather than pretending to be an inventory.
+
+**Gates, and the part worth keeping.** `--selftest` PASSED at 75.9 % coverage identical
+to the pristine-HEAD control; hero render inside the control's noise floor; the three
+headless hooks emitting **identical log lines** to the control; `--mode svo` still
+running. And the new `test-app` group — 34 cases / 192 assertions over gizmo maths,
+`parseArgs` and the sidebar vocabulary, i.e. logic that was **untestable** while it
+shared a translation unit with `main()`.
+
+**Three of those new gizmo cases failed on first run, and the expectations were wrong
+rather than the code**: forward is `+X` at yaw 0 (not `-Z`, which is yaw −90°); a point
+at a ring's centre is **one radius** away (not 0); and `+X` on the pitch ring is *nearer*
+in normalised terms, so it is not the unambiguous pick. Each was measured with a
+throwaway binary before a line of the test changed. Filed on
+[[concepts/measurement-discipline]] as **a gate that has never failed is not yet known
+to fire** — three same-day reds are the cheapest available proof that a new gate can
+tell right from wrong, and a first-run red is the *good* outcome, not the problem.
+
+## 2026-09-26 lint | I counted a definition as a call site, and the frame loop's one real change
+Two corrections, one of them mine and small, which is the point of recording it.
+
+**I was wrong about the FOV call-site count.** I wrote "five call sites" for
+`tanHalfFov60()`; it is **four** — I counted the *definition* line in `frame/frame.hpp`
+as a caller. The refactorer measured four and conceded their own "two". Re-measured
+with `grep -v 'inline float'`: four callers (`record_interactive`, `record_headless`,
+`run_brush_preview`, `run_input`), all in `frame/`. Their framing of "three
+subsystems" is also off — all four are in one subsystem — so the page now says what is
+true and why it matters: the gizmo/input hit-test, both recording paths and the brush
+preview read **one** function rather than each keeping a copy. A number error inside
+the page about numeric discipline, which is exactly the species this log has been
+tracking. Cheap to fix, cheaper to record than to leave.
+
+**The one substantive change in the split, now on
+[[entities/app-subsystems]].** The frame loop's `continue`/`break` became two sentinels,
+`kFrameDone` (frame handled, go again) and `kFrameExit` (leave, run the shutdown
+epilogue, return 0) — `frame/frame.hpp:24-25`, dispatched in `frame/run.cpp:130-132`.
+The asymmetry being preserved is the non-obvious part and it was **already broken in the
+original**: a `break` ran the ImGui/device shutdown epilogue, but a `return` from inside
+the loop did not, so a failed submit or a written HUD shot skipped cleanup. Returning a
+non-negative status would have collapsed the two cases, because both are non-negative;
+the distinct sentinel is what keeps cleanup reachable. Anyone adding an early return to
+either recording path must return `kFrameDone`, never a bare `0`.
+
+## [2026-09-26] verify | clang-lsp-setup — tuning confirmed by real LSP session
+Replaced the pending claim in [[concepts/clang-lsp-setup]] with a measured result,
+using a real `clangd` LSP session on the exact `opencode.json` argv:
+
+| file | before | after |
+|---|---|---|
+| `src/core/camera.cpp` | 32 | **0** |
+| `src/voxel/chunk_store.cpp` | 1039 | **11** |
+
+The 11 survivors are `modernize-use-auto` (7), `readability-use-anyofallof` (2),
+`unused-includes` (2). That those two **kept** checks still fire is the load-bearing
+part: a *rejected* `.clangd` also yields zero, so "quiet" alone would have proven
+nothing. All removed checks are gone. `.clangd` takes plain names in `Remove:`
+(no `-`; clangd adds it) — unlike the `clang-tidy` command line, where the same
+suppression needs the `-` prefix and a spec built without it silently re-enables
+everything.
+
+Instrument bugs found and fixed while measuring (all three produced confident
+wrong readings): a probe waiting for a *non-empty* `publishDiagnostics` never
+terminates on a correctly tuned file; breaking on the *first* publish instead
+reports EMPTY because clangd publishes `[]` during the preamble phase; and a
+`-checks` spec assembled without `-` prefixes makes BEFORE and AFTER identical.
+Each was caught only by running a positive control.
+
+## [2026-09-26] ingest | m_shots shadowing + "green signal that does not cover the change"
+- **[[entities/app-subsystems]]**: the `src/app` split's worst trap, reported by the
+  refactoring session. A word-boundary rename promoting a local to a member turned
+  `std::vector<ShotSpec> shots = args.shots;` into `std::vector<ShotSpec> m_shots =
+  args.shots;`, which *constructs* the member and leaves the local name shadowed.
+  `App::m_shots` stayed empty, so `shotMode` (`!m_shots.empty()`) was never true and
+  `--shot` looped forever without writing a PPM — clean compile, no crash, no wrong
+  pixels, and a **byte-exact body comparison correctly passed** because only the
+  declaration differed.
+- **[[concepts/measurement-discipline]]**: new section, "A green signal that does not
+  cover the change is not weak evidence — it is none". Same incident, process half:
+  stages were reported "builds clean, gates pass" on a green compile plus
+  `--selftest`, which **never renders a shot**, for a change in the shot-capture
+  path. `test-visual` does render `--shot` and would have failed in ~1 minute.
+  Complements (does not duplicate) the existing "gate that has never failed" section.
+- **De-duplicated**: the `ninja -t clean` hazard now lives in exactly one place,
+  [[concepts/authored-assets-are-build-outputs]] (written by another session, and the
+  better home). [[concepts/clang-lsp-setup]] keeps only the LSP-specific coupling — a
+  clean also removes `build/compile_commands.json`, i.e. the language server's flags.
+- Filed quirks for the shadowing mechanism and the non-covering-gate claim.
+
+## 2026-09-26 ingest | the split's one real bug, and what the verification was structurally unable to see
+The `src/app` split is **frozen and fully gated**. All groups green when run
+**sequentially**: `test-app` 1/1, `test-unit` 8/8, `test-store` 2/2, `test-world` 2/2,
+`test-surfel` 4/4, `test-smoke` 7/7, `test-visual` 3/3, `test-live-edit` 3/3; hero shot
+within the pristine-HEAD control's noise floor; clean build, zero new warnings;
+`assets/` pristine (the test runs rewrite the tracked `assets/world_all.json` — the
+hazard filed earlier, and the reason it needed restoring again).
+
+**The headline is a bug the split's own verification could not see.** Promoting the
+loop local `shots` to the member `m_shots` by word-boundary rename turned
+`std::vector<ShotSpec> shots = args.shots;` into **a local that shadows the member**. It
+compiled clean; the body stayed **byte-identical** so the slice verification correctly
+passed it; `--shot` hung forever. Fixed as an assignment (`m_shots = args.shots;`,
+`frame/run_startup.cpp` — verified). Filed as its own principle on
+[[concepts/measurement-discipline]], because it is the cleanest statement of the
+problem this whole log has been circling:
+
+> **A verification method's blind spot is determined by what it compares.** The
+> artefact it protects and the class of bug it cannot see are the *same axis* — so
+> "byte-identical body" is the strongest evidence of a pure move and is **not** evidence
+> that the move was pure. The signal that caught it was a **different class**:
+> wall-clock, ~11 s → ~600 s. No diff, hash or byte-comparison would have flagged it.
+
+**The second error generalises just as well, and the phrasing is the refactorer's:**
+it sent three peers *"builds clean, gates pass"* on a green compile plus `--selftest` —
+on a change whose entire surface is **shot capture**, which `--selftest` never renders.
+"The sentence was true of the signals I ran and false as a claim about the change."
+Filed as **a gate result is evidence about the gate, not about the change**: "2/2 green"
+is a claim about a named group on a named revision, and repeating it honestly requires
+the coverage argument, not just the tick marks. Both errors are invisible in the
+artefacts — a reviewer re-running anything would not detect them.
+
+**Also filed:** the `sha256` render gate that could not fire (the splat backend is not
+bit-reproducible — same binary, two runs, different hashes), replaced by
+statistics-within-a-floor against a pristine-HEAD control built for the purpose; the
+measured split of which statistics are stable (**mean RGB and p99 exact**, p50 of
+per-pixel diff varying −0.009…+0.022 against a 0.03 floor), which is reusable for
+writing the next render gate; and the `test-live-edit` red that was **four concurrent
+instances contending for the GPU** rather than a regression (3/3 alone) — hence "run
+groups sequentially on a shared GPU" and "a red that appears only under concurrency is a
+contention hypothesis until proven otherwise".
+
+**Explicitly not claimed as verification**, and worth honouring: the clangd diagnostic
+reduction (style, not correctness — the compiler was always the authority) and the
+byte-exact slice tooling, which protects *bodies* and demonstrably did not protect a
+*declaration*. Frozen layout recorded on [[entities/app-subsystems]] with reproducible
+commands: 36 `.cpp` under `src/app`, largest 441 (`edit/live_edit.cpp`), largest header
+539 (`app.hpp`), `frame/run.cpp` a 153-line orchestrator.
+
+## 2026-09-26 lint | the LSP session was right and my rule was the weaker one
+An observation forwarded from the `LSP` session (which deliberately did not edit the
+page, correctly — an under-credit is a note for the maintainer, not a licence to write).
+Taking it, because the sharpened rule is genuinely better than the one I had.
+
+**What I had written:** "other sessions take the GPU/display with no warning, so a
+result that **looks impossible** is usually cross-session state." What the instance
+actually teaches is different and more mechanical: the discriminator was **not** the
+failure's severity, it was its **provenance** — the red arrived with **no diff
+attached**. "Looks impossible" asks the reader to judge impossibility, which is
+subjective and gets argued about; "red with no change attached" is checkable.
+
+So the rule on [[concepts/measurement-discipline]] is now:
+
+> **If a gate goes red and nothing has changed since the last known-good, suspect the
+> environment before the code — re-run it alone.** Not: trust the red. And not: go
+> hunting a regression in code nobody changed.
+
+**The pairing is the best argument for the page, and it was free.** On the *same*
+refactor, in the *same* day, both failure modes appeared: a gate went **red with
+nothing changed** (the *result* was wrong — four instances contending for one GPU), and
+a gate reported a **difference on an unchanged binary** (the *instrument* was wrong —
+`sha256` on a splat backend that is not bit-reproducible). Neither is detectable by
+re-running the same gate harder, and a reviewer trusting either artefact would have
+filed a code defect that did not exist. Hence the operational half: **when both the
+result and the instrument are suspect, suspect the instrument first** — it is the only
+one of the two that is usually wrong for reasons *outside* the change.
+
+Worth noting the coordination itself worked: the observation reached the maintainer
+without either session editing a page it does not own, and without evaporating when
+the session ended. That is the intended division of labour and it is now demonstrated
+rather than assumed.
+
+## 2026-09-26 lint | full link/orphan check after the split re-anchor: clean, one known-benign dangling ref
+Run after converting every `main.cpp:<line>` anchor on live pages to symbols.
+
+- **Dangling links: 1** — `concepts/water-flooding`, referenced only from three
+  **historical log entries** for a page that was later replaced. This is a record of
+  the past, not a live cross-reference, so the correct treatment is to leave it and
+  stop re-investigating it (noted twice before in this log). No action.
+- **Pages missing from `index.md`: 0.** The two pages added this session
+  ([[entities/app-subsystems]], [[concepts/authored-assets-are-build-outputs]]) are
+  both indexed *and* carry a navigation line.
+- **Orphans (no inbound link): 0.** Every page is reachable, so the cross-links are
+  doing real work rather than decorating each other.
+- **`lastReviewed` corrected** on `concepts/focused-test-groups` (said 2026-09-25
+  despite substantial edits this session — the staleness lint exists precisely to
+  catch that class, and it did).
+
+The one thing a link check cannot judge is whether a page is *true*; that is what the
+review trail above is for, and the three self-reported defects this session are
+recorded with their sources rather than smoothed over.
+
+## [2026-09-26] ingest | live-edit surfel parity
+
+**Report.** Editing objects in voxel mode (add / delete / smooth) changed the
+splat directions of voxels the brush never highlighted — the cabin's wall disks
+near the door all came out pointing upwards.
+
+**Root cause (measured, not inferred).** `LiveEditor::refreshRegion` drops and
+re-derives *every* cached parent in the edit AABB ± margin, so untouched cells
+are re-aimed by the store path's rule while their neighbours keep the bake's.
+The store path derived normals from a central difference of the byte-quantised,
+nearest-sampled brick SDF; deep inside a thick body `d(x+2) == d(x-1)` exactly,
+the gradient cancelled to zero, and the `n = (0,1,0)` fallback fabricated a
+straight-up normal. Cabin object surfels vs the bake's final normals:
+**27.8 % more than 30° off, mean 22.4°, 1191 fabricated straight-up.**
+
+**Fix.** `collectChunkCandidates` now runs the bake's pipeline on store data:
+exposed-face mean (never a fabricated direction) → per-face expansion for
+cancelling and thin-corner cells → face-neighbour smoothing over raw normals.
+`SurfelCand` gained `rawN` / `exposedFaces` / `faceEntry`; `buildMicroSurfels`
+skips repeated keys so a cell still yields one micro set. After: **0.08 %,
+mean 0.57°, zero fabricated-up, zero wrong entry counts** (thick cells).
+Stamp latency unchanged (33.2 ms vs a 33.0/34.2 ms baseline, 10×add, Ø2 m).
+
+**Guard** — `tests/test_store.cpp` "live surfel normals follow the bake, never a
+fabricated up": bake parity for a whole object chunk plus a live stamp 2 cells
+out from a wall, asserting the wall's normal is bit-identical after a refresh
+that provably re-derived it. Confirmed to fail on the pre-fix code (40
+fabricated-up, mean 47.3°, live `dot == 0`).
+
+**Files.** `src/voxel/surfelize.{cpp,hpp}`, `tests/test_store.cpp`,
+`AGENTS.md`, `docs/rendering.md`, new page
+`concepts/live-edit-surfel-parity`.
+
+**Left standing, deliberately.** The brick's `raw == 0` truncation makes a
+small-positive-distance cell read as solid in the store while `VoxelField` calls
+it air (0.77 % of cabin cells, one-sided). That is a storage-format property the
+SVO DDA depends on (`raw <= 0` = solid), so the guard's angular comparison
+excludes those cells rather than "fixing" them. Thin-cell *entry counts* still
+differ from the bake on those cells.
+
+**Gates.** test-unit, test-app, test-world, test-store, test-surfel,
+test-live-edit (incl. the 269 s `live_edit_check`) — all pass.
+
+## 2026-10-01 ingest | clang LSP status, and a log signal that outlived its binary
+Asked whether clang LSP is active. Answer: **configured and healthy, but not
+spawned** — no `clangd` process, and no LSP tool in the session toolset, even
+after opening a `.cpp` through the read path.
+
+**The setup is fine** (all re-measured): `.opencode/opencode.json` argv
+`clangd-18 --background-index --clang-tidy … --compile-commands-dir=build`;
+`clangd-18` → LLVM 18.1.3; `build/compile_commands.json` present; `.clangd`
+tuned ClangTidy list; and the Trap-1 fix holds — the sibling
+`/usr/lib/llvm-18/bin/clang-tidy` is installed, so `--clang-tidy` is live
+rather than silently inert. A `--check` run with the exact argv parsed
+`src/voxel/picking.cpp` cleanly (0 compile diagnostics; the one reported "error"
+is clangd's internal `ExpandDeducedType` tweak, not a source diagnostic).
+Note `--check` still does **not** exercise ClangTidy, so it can never verify
+Trap 1 — only the sibling binary's existence can.
+
+**The wiki was carrying a dead signal.** [[concepts/clang-lsp-setup]] cited
+`enabled LSP servers … clangd` in `opencode.log` as proof the config block was
+being read. `enabled LSP servers`, `serverIds` and `all LSPs are disabled` are
+**absent from the v2.0.21 binary** (`bytes.find()` → −1 for all three): those
+log lines came from an older build. So their disappearance from a current log
+proves nothing, and their historical presence never proved a server spawned.
+Corrected on the page, with the replacement check named.
+
+**Two measurement traps hit while answering, both worth the detour:**
+1. `grep "[c]langd"` matched **my own command line** — the bracket trick only
+   defeats self-matching when the *pattern* is the only literal; an echoed
+   `clangd` in the same command re-arms it. Match on `comm`, not the full
+   command.
+2. Counting `enabled LSP servers` per-day reported a hit for today that was
+   **my own grep command echoed into the log**. Any log statistic computed with
+   `grep` over a file the same session writes to must exclude the searching
+   process's own lines — the same shape as
+   [[concepts/measurement-discipline]]'s "green signal that does not cover the
+   change".
+
+Deliberately **not** concluded: why clangd is not spawned. OpenCode v2 spawns
+LSP servers lazily per project, and this session has not opened a C++ file
+through a path that triggers it, so absent-process remains ambiguous — the
+page's original "an absent process is not a fault" still stands. Untested and
+worth a follow-up: whether v2 needs `lsp` re-enabled in the TUI, and whether
+`.opencode/`-directory configs still feed the LSP block in v2.
+
+## 2026-10-01 ingest | Brush preview visibility (depth inert, preview blinked out under sidebar hover, SVO had none)
+
+Reported as "size adjustment of brush not always visible in 3d view". Measured
+first, and the measurement reframed it: the **noise floor is ~1.25 %** of pixels
+for two runs of an *identical* `--shot` (TAA jitter), and three of the four A/Bs
+I expected to be signal were inside it.
+
+Three independent causes, all now fixed and gated:
+
+1. **Depth was structurally invisible.** The tint recolours *existing surfels*
+   inside the volume, so it can only mark geometry already in the scene. A
+   Carve's extra depth goes below the surface into solid material; an Add dome
+   grows into empty air. Debug view 15 measured Carve's affected-surfel mask as
+   **bit-identical at 2920 px** across depths 0.1/0.5/2.0/12.0 m. Width, which
+   spreads across the surface, was fine all along (68–72 %).
+2. **The preview vanished exactly while resizing.** Hover picking is gated on
+   `!io.WantCaptureMouse` (correct — a slider click must not stamp), but the
+   preview read the same gated `m_hoverHit`, so grabbing the Width slider
+   erased the highlight for the duration of the drag. Fixed with a
+   preview-only `m_latchedHover`; `applyEditLive` still needs a live hit, so a
+   latched preview cannot stamp.
+3. **SVO had no preview at all** — `setBrush` fed only `m_splatPass`. The
+   BrushUBO is now bound at 13 in the SVO pipeline with an identical std140
+   layout, and `inBrushVolume` moved to `shaders/common_surfel.glsl` so one
+   definition serves both. SVO tests the raymarch hit point, a closer match to
+   the CPU cell set than the splat per-surfel approximation.
+
+The instructive part is the **failed first attempt** at the depth marker: drawn
+as a world-space band inside the `hitType > 0.5` visible-surface block, it
+reached only 1.7 % at depth 12 m, because a Carve's segment runs *into* the
+ground and the only fragments it can mark are the sliver at the top. Screen
+space, drawn on every fragment, is what the axis needed: depth 0.5→6 m now
+moves 8.6 % (Carve) / 10.2 % (Add).
+
+Two instrument traps worth not repeating: debug view 15's magenta is
+tonemap+TAA-shifted, so a tight `(255,0,255)` threshold reads a real 2900-px
+mask as **zero**; and a **top-down camera foreshortens a vertical depth line to
+a point**, which made a working marker read as 0.7 % until re-shot obliquely.
+
+Also fixed in passing: the SVO descriptor pool was sized for 1 uniform buffer
+against 3 bindings, with no `COMBINED_IMAGE_SAMPLER` entry at all — it only
+worked by driver leniency.
+
+New page: [[concepts/brush-preview-visibility]]. New gates in
+`tests/live_edit_check.py`: `check_depth_sensitivity`, `check_svo_preview`.
+Not yet re-run: the full `test-live-edit` / `test-visual` groups.
+
+## 2026-10-01 ingest | Narrow `test-preview` group so a preview change stops implying the whole live-edit matrix
+
+Follow-up to the same session. Verification granularity was the complaint, and
+it was fair: the preview fix touches `post.comp`, `svo_raymarch.comp`,
+`common_surfel.glsl` and the frame's preview plumbing, which by the group table
+meant `test-live-edit` *or* `test-visual` — both dominated by ~13 s per-run
+world loads for what is really one frame per assertion.
+
+`live_edit_check.py --only preview` now runs `check_preview` +
+`check_depth_sensitivity` + `check_svo_preview` against a baseline it renders
+itself, wired as CTest `preview_check` behind the same `group_gate.py`
+(`SKIP_RETURN_CODE 77`, verified: skipped when the group is off) and exposed as
+`ninja -C build test-preview`. It is deliberately **not** folded into any other
+group: `test-live-edit` still runs everything, preview checks included, so this
+adds a cheap entry point without weakening the existing gate.
+
+**A measurement I had to throw away, and why it matters.** The first
+`test-unit` run reported `fast_placement_tests` FAILED — but the same test
+passes standalone. Cause: I ran `ninja -C build` *while* `test-unit` was
+executing `vf_tests`, so the binary was replaced underneath a running test. That
+is the "never edit a file a running process is executing" rule from AGENTS.md
+reaching into the build directory: a concurrent `ninja` against a shared `build/`
+invalidates any test result in flight. Re-ran clean and chained, and treated
+the red as noise rather than debugging a test that was never broken.
+
+Also noted: `src/app/**` is currently **untracked** — the app split landed in the
+working tree but was never committed, so `git diff` cannot review changes to
+`app.hpp` / `run_input.cpp` / `run_brush_preview.cpp`. Worth committing before
+the next session piles more on top.
+
+## 2026-10-01 ingest | The new depth gate caught a too-faint marker, and caught me measuring it wrong
+
+`test-preview`'s first run failed exactly as a new gate should: `depth(carve)`
+reported 0.90 % against my hand-measurement of 8.60 %. Two things were true at
+once.
+
+**The gate was right; the marker was too faint.** `diff_stats()` defaults to
+`thresh=10` — a pixel counts only if some channel moved by *more than* 10
+codes — while my ad-hoc A/B used exact byte inequality. My original marker was a
+wide `smoothstep` falloff, which changes a large area by 1–10 codes: generous
+under an exact diff, invisible under any per-channel threshold, and too washed
+out to read on screen. Changed to a 1.5 px fully-opaque core with a 5 px halo.
+The general lesson, now in the marker comment: **a thin UI overlay wants a small
+opaque core plus a short halo; a broad soft gradient covers lots of pixels and
+still reads as nothing.**
+
+**My measurement was the sloppy half.** When hand-checking something a gate also
+checks, use the gate's own diff function and threshold. A stricter ad-hoc
+comparison does not give more confidence — it gives a different number that
+looks like a regression, and the tempting move is to "fix" passing code. Worth
+stating plainly because the instinct on a red gate is to distrust the gate.
+
+`test-unit` passed clean on the re-run (287 s), confirming the earlier
+`fast_placement_tests` red was the concurrent-`ninja` artefact and not a real
+defect. Also removed a `m_hoverLatched` bool that was written but never read —
+`m_latchedHover.hit` is the single source of truth, and a parallel flag is
+just a second thing to drift.
+
+## 2026-10-01 lint | Closing out the brush-preview session
+
+All three preview causes fixed and gated; `test-unit`, `test-live-edit` (488 s,
+including the two new checks) and `test-preview` (111 s) green.
+
+The depth marker took **three** attempts, and the gate earned its keep by
+catching the first two:
+
+1. **World-space extent inside the `hitType > 0.5` visible-surface block** —
+   1.7 % at depth 12 m. The segment runs *into* the ground, so everything past
+   the top sliver is occluded by the very geometry being edited.
+2. **Screen-space line, unclamped** — better in principle, and 0.90 % → 0.67 %
+   after I "strengthened" it. The frames were byte-identical to the eye. A deep
+   brush's far end is metres *below* the surface; with the camera on a shallow
+   downward angle that point projects far outside the frustum, so the line left
+   the frame within a few pixels and every depth drew the same stub. Clamping
+   both projected ends into the viewport fixed it.
+3. **Opaque 1.5 px core + 5 px halo** — a wide soft gradient moves most pixels
+   by 1–10 codes and is invisible to `diff_stats`' `thresh=10`.
+
+And the constant I set by *guessing* was the fourth failure, hidden behind the
+first three: `NOISE_FLOOR = 0.02` came from the unfiltered exact-diff noise
+(2.64 %) instead of the `thresh=10` noise (**0.008 %**). It was rejecting a
+signal **217× above the real floor**. Measuring the floor with the gate's own
+instrument — rather than a stricter ad-hoc one — is what exposed it.
+
+So the honest tally is four wrong turns, three of them caught only because the
+gate used a threshold and an instrument I had not been measuring with. A
+useful reminder for this codebase: a "focused" test that reuses the hand-rolled
+`diff_stats` is only focused if you also calibrate *it*.
+
+Depth now: **1.74 %** between 0.5 m and 6.0 m, against a 0.008 % floor. Verified
+by eye as well — a vision pass on both frames reports a clearly visible orange
+brush indicator, so the gate is not passing on a sub-visible artefact.
+
+Not done / worth a follow-up:
+- `src/app/**` is still **untracked**, so these changes cannot be reviewed with
+  `git diff`.
+- The depth indicator saturates once the far end pins to a viewport edge — a
+  screen-space line cannot exceed the frame. Honest, but it means very large
+  depths look alike; a numeric HUD readout would be the next step if that
+  matters.

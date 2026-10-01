@@ -73,53 +73,13 @@ layout(constant_id = 1) const int PASS_MODE = 0;
 const float kWaterLevel = -0.9;
 
 // Brush hover preview volume test (bind 13): is `p` inside the brush volume?
-// w == 0 on the axis => ball, w > 0 => oriented cylinder (half length w),
-// w < 0 => add dome: the surface grows out along the axis - a ball of radius
-// r centred (|w| - r) up the axis, clipped to the half space in front of the
-// base plane, exactly the set EditableWorld::makeDome emits, so the tinted
-// splats are the surface patch the growth will bury. Used by the hover tint
-// and by debug view 15 (brush mask). r == 0 with a nonzero axis =>
-// box: the axis xyz are the half extents (the trackball rotate preview tints
-// the whole target layer AABB).
+// The shape lives in common_surfel.glsl so the SVO reference backend tints the
+// same volume - it had no preview at all until then. See that header for the
+// ball / oriented cylinder / dome / box cases.
 bool inBrushVolume(vec3 p, float packedAo)
 {
-    if (uBrush.bTint.a <= 0.0)
-        return false;
-    const uint layer = uint(max(0.0, uBrush.bMeta.x));
-    if (layer > 0u && !surfelBelongsToLayer(packedAo, layer))
-        return false;
-    vec3 rel = p - uBrush.bVolume.xyz;
-    const float r2 = uBrush.bVolume.w * uBrush.bVolume.w;
-    if (uBrush.bVolume.w == 0.0) {
-        // box: rel within the half extents on every axis (the skin is
-        // folded into the extents by the caller)
-        vec3 he = uBrush.bAxis.xyz;
-        return all(lessThanEqual(abs(rel), he));
-    }
-    if (uBrush.bAxis.w == 0.0)
-        return dot(rel, rel) <= r2;
-    const float along = dot(rel, uBrush.bAxis.xyz);
-    const vec3 perp = rel - uBrush.bAxis.xyz * along;
-    if (uBrush.bAxis.w < 0.0) {
-        // dome: the footprint disk (radius r) extruded |w| up the axis, closed
-        // by a fillet of radius min(r, |w|) / 2 - exactly the set
-        // EditableWorld::makeDome emits. The base layer counts (makeDome's
-        // -voxelSize epsilon), and the two profile branches meet at t = lipY.
-        const float h = -uBrush.bAxis.w;
-        const float r = uBrush.bVolume.w;
-        if (along < -pc.b.y)
-            return false;
-        const float c = 0.5 * min(r, h);
-        const float lipY = h - c;
-        if (along <= lipY)
-            return dot(perp, perp) <= r2;
-        const float k = along - lipY;
-        if (k > c)
-            return false;
-        const float rr = (r - c) + sqrt(max(0.0, c * c - k * k));
-        return dot(perp, perp) <= rr * rr;
-    }
-    return abs(along) <= uBrush.bAxis.w && dot(perp, perp) <= r2;
+    return sharedInBrushVolume(p, packedAo, uBrush.bVolume, uBrush.bAxis,
+                               uBrush.bTint, uBrush.bMeta, pc.b.y);
 }
 
 #include "common_base.glsl"

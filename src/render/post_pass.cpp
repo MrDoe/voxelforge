@@ -83,12 +83,13 @@ bool PostPass::init(const Context& ctx)
     if (vkAllocateDescriptorSets(dev, &ai, &m_set) != VK_SUCCESS)
         return false;
 
-    m_selection = makeBuffer(ctx, 2 * sizeof(glm::vec4),
+    m_selection = makeBuffer(ctx, 6 * sizeof(glm::vec4),
                              VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT,
                              VMA_MEMORY_USAGE_AUTO_PREFER_HOST, true);
     if (!m_selection.buf || !m_selection.mapped)
         return false;
-    glm::vec4 init[2] = { m_selFeed, m_hovFeed };
+    glm::vec4 init[6] = { m_selFeed, m_hovFeed, m_depthHit, m_depthFar,
+                          m_depthNear, m_depthTint };
     memcpy(m_selection.mapped, init, sizeof(init));
     VkDescriptorBufferInfo selInfo { m_selection.buf, 0, VK_WHOLE_SIZE };
     VkWriteDescriptorSet w { VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, nullptr, m_set, 3, 0, 1,
@@ -117,7 +118,8 @@ void PostPass::updateDescriptors(VkImageView hdrView, VkImageView gposView, VkIm
 void PostPass::record(VkCommandBuffer cmd, const RaymarchPush& push) const
 {
     if (m_selection.mapped) {
-        glm::vec4 feeds[2] = { m_selFeed, m_hovFeed };
+        glm::vec4 feeds[6] = { m_selFeed, m_hovFeed, m_depthHit, m_depthFar,
+                               m_depthNear, m_depthTint };
         memcpy(m_selection.mapped, feeds, sizeof(feeds));
     }
     vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, m_pipeline);

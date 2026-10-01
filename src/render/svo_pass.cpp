@@ -75,7 +75,7 @@ bool SvoPass::init(const Context& ctx)
     // Note: binding 0 is intentionally absent (an unwritten binding in the
     // layout invalidates the whole descriptor set on this driver). uHdr lives
     // at 9, uGPos at 10; the shader no longer references binding 0.
-    VkDescriptorSetLayoutBinding b[14] = {};
+    VkDescriptorSetLayoutBinding b[15] = {};
     int n = 0;
     for (uint32_t i = 1; i < 6; ++i)
         b[n++] = { i, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1,
@@ -93,6 +93,11 @@ bool SvoPass::init(const Context& ctx)
     b[n++] = { 22, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1,
                VK_SHADER_STAGE_COMPUTE_BIT, nullptr };
     b[n++] = { 23, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, 1,
+               VK_SHADER_STAGE_COMPUTE_BIT, nullptr };
+    // brush hover preview UBO - the same binding number and the same std140
+    // layout as SplatPass's binding 13, so one declaration in the shared
+    // header serves both pipelines.
+    b[n++] = { 13, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, 1,
                VK_SHADER_STAGE_COMPUTE_BIT, nullptr };
 
     VkDescriptorSetLayoutCreateInfo li { VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO };
@@ -131,12 +136,19 @@ bool SvoPass::init(const Context& ctx)
         return false;
     }
 
-    VkDescriptorPoolSize sizes[3] = { { VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 6 },
+    // Pool sizes must cover every binding in the set layout above:
+    // STORAGE_IMAGE 6/7/9/10/12 (5), STORAGE_BUFFER 1-5/11 (6),
+    // UNIFORM_BUFFER 8 (selection) + 13 (brush preview) + 23 (atlas table)
+    // (3), COMBINED_IMAGE_SAMPLER 22 (1). The uniform count and the missing
+    // sampler were both under-specified; the allocation happened to succeed on
+    // this driver, but a spec-conforming pool must be able to back the set.
+    VkDescriptorPoolSize sizes[4] = { { VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 6 },
                                        { VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 6 },
-                                       { VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, 1 } };
+                                       { VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, 3 },
+                                       { VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1 } };
     VkDescriptorPoolCreateInfo pi { VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO };
     pi.maxSets = 1;
-    pi.poolSizeCount = 3;
+    pi.poolSizeCount = 4;
     pi.pPoolSizes = sizes;
     if (vkCreateDescriptorPool(dev, &pi, nullptr, &m_pool) != VK_SUCCESS)
         return false;
@@ -160,6 +172,20 @@ bool SvoPass::init(const Context& ctx)
     VkWriteDescriptorSet w { VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, nullptr, m_set, 8, 0, 1,
                              VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, nullptr, &selInfo, nullptr };
     vkUpdateDescriptorSets(dev, 1, &w, 0, nullptr);
+
+    // Brush hover preview UBO (binding 13): a host-visible uniform carrying the
+    // same four vec4s as the splat BrushUBO, so the SVO reference backend tints
+    // the same volume instead of showing no preview at all.
+    m_brushBuf = makeBuffer(ctx, sizeof(m_brush),
+                            VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT,
+                            VMA_MEMORY_USAGE_AUTO_PREFER_HOST, true);
+    if (!m_brushBuf.buf || !m_brushBuf.mapped)
+        return false;
+    memcpy(m_brushBuf.mapped, m_brush, sizeof(m_brush));
+    VkDescriptorBufferInfo brushInfo { m_brushBuf.buf, 0, VK_WHOLE_SIZE };
+    VkWriteDescriptorSet wb { VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, nullptr, m_set, 13, 0, 1,
+                              VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, nullptr, &brushInfo, nullptr };
+    vkUpdateDescriptorSets(dev, 1, &wb, 0, nullptr);
     return true;
 }
 
@@ -411,6 +437,10 @@ void SvoPass::record(VkCommandBuffer cmd, const RaymarchPush& push)
         glm::vec4 feeds[2] = { m_selFeed, m_hovFeed };
         memcpy(m_selection.mapped, feeds, sizeof(feeds));
     }
+    // ...and the brush preview volume, so the SVO backend shows the same tint
+    // the splat backend does (bTint.a == 0 disables it).
+    if (m_brushBuf.mapped)
+        memcpy(m_brushBuf.mapped, m_brush, sizeof(m_brush));
     vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, m_pipeline);
     vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, m_layout, 0, 1, &m_set, 0,
                             nullptr);
@@ -431,6 +461,8 @@ void SvoPass::destroy()
     destroySsbo(m_chunkInfo);
     if (m_selection.buf)
         destroyBuffer(*m_ctx, m_selection);
+    if (m_brushBuf.buf)
+        destroyBuffer(*m_ctx, m_brushBuf);
     if (m_pool)
         vkDestroyDescriptorPool(dev, m_pool, nullptr);
     if (m_setLayout)

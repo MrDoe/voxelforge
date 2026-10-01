@@ -2,8 +2,14 @@
 title: Focused test groups
 tags: [testing, ctest, cmake, workflow]
 sourceRefs: [CMakeLists.txt, tests/group_gate.py, docs/testing.md, AGENTS.md]
-lastReviewed: 2026-09-25
+lastReviewed: 2026-09-26
 ---
+
+> **Post-split (2026-09-26).** `src/app` was split per subsystem; `main.cpp` is
+> now a 16-line entry point. All `main.cpp:<line>` references formerly on this page
+> have been re-anchored to **symbols**. Use [[entities/app-subsystems]] for the map and
+> for the two invariants that straddle files — the click gate's write side is in
+> `edit/live_edit.cpp` and its read side in `frame/run_input.cpp`.
 
 # Focused test groups
 
@@ -26,6 +32,22 @@ skip code unless its group is enabled.
 | `test-textures` | atlas/material texture checks and fast variant |
 | `test-fog` | volumetric fog checks and fast variant |
 | `test-smoke` | all fast variants; `test-fast` is a compatibility alias |
+| `test-preview` | brush preview only: tint hue, Depth sensitivity, SVO parity (`--only preview`) |
+
+**`test-preview` exists because "focused" was not focused enough (2026-10-01).**
+The brush-preview visibility fix touched `shaders/post.comp`,
+`shaders/svo_raymarch.comp`, `common_surfel.glsl` and the frame's preview
+plumbing, which by the table above meant `test-live-edit` *or* `test-visual` —
+both dominated by per-run world loads (~13 s each) for checks that are really
+one frame each. `live_edit_check.py --only preview` renders its own baseline and
+runs just `check_preview` + `check_depth_sensitivity` + `check_svo_preview`, so
+a preview or post-pass tweak no longer implies the whole live-edit matrix. It
+stays behind the same `group_gate.py` (`SKIP_RETURN_CODE 77`) and is *not* part
+of any other group: `test-live-edit` still runs the full suite, preview checks
+included, so the split adds a cheap entry point without weakening the gate.
+
+The general lesson matches the coverage-gap note below: a gate that can only be
+run expensively tends to simply not be run after a small change.
 
 **Coverage gap FOUND and now CLOSED (2026-09-26).** The live-edit checks used to
 edit **terrain only** — no case touched an object chunk at all. That is how a
@@ -90,7 +112,8 @@ is invisible to coverage while looking correct in source.
 docstring said *"needs `--smoke`, not `--shot` … the probe is only reachable from
 the real frame loop"* — the **pre-fix** reasoning, restated as a live requirement,
 and wrong twice: `forceFrameResults()` is called from the **headless** frame body
-(`main.cpp:5367`), so the probe is reachable from headless *because* of the fix,
+(in `frame/run.cpp`, right after the `headless submitted` trace), so the probe is
+reachable from headless *because* of the fix,
 and `--shot` shares that path so it reaches it too (measured: 1 line, correctly
 latched across its 3 frames). Now that it reads correctly, the interesting part
 is *why `--smoke` is still used*, and it is **not** reachability: `--smoke` runs
@@ -100,6 +123,31 @@ to `--shot` would look identical in the source and silently destroy the property
 the check exists to pin. Both facts are in the comment, and the reachability one
 is attributed to the bug history rather than presented as a constraint. Generalised
 on [[concepts/measurement-discipline]].
+
+### Building a render gate that can actually fire
+
+The splat backend is **not bit-reproducible**: the same unchanged binary rendered
+twice gives different hashes, so a `sha256` render gate is an instrument that can never
+pass or fail. The working shape is **statistics within a measured noise floor**,
+calibrated against a **pristine-HEAD control binary built specifically so the
+comparison is not assumed**.
+
+What the noise actually looks like, measured on a 640×360 hero shot (reusable when
+writing the next render gate):
+
+| statistic | behaviour across runs |
+|---|---|
+| mean RGB | **exact** |
+| p99 | **exact** |
+| p50 of per-pixel diff | **varies** — observed −0.009 … +0.022 against a floor of 0.03 |
+
+So the instability is confined to the *distribution* of per-pixel differences, not to
+the summary statistics — pick a gate statistic accordingly, and calibrate the floor
+from the control rather than picking a round number.
+
+**Run groups sequentially on a shared GPU.** A `test-live-edit` red was traced to four
+concurrent instances competing for the device; alone it was 3/3. A red that appears
+only under concurrency is a contention hypothesis until proven otherwise.
 
 The CMake target sets `VOXELFORGE_TEST_GROUPS=<group>` and selects the matching
 CTest label. Individual entries retain `ctest -N`/`ctest -L` discoverability,

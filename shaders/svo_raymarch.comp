@@ -31,6 +31,21 @@ layout(std430, set = 0, binding = 11) readonly buffer ChunkInfo { uvec4 uChunkIn
 layout(set = 0, binding = 6, rg32f) uniform readonly highp image2D uHeight;
 layout(set = 0, binding = 7, r8_snorm) uniform readonly highp image3D uObjVol;
 
+// Brush hover preview (bind 13): the SAME std140 block and binding number as
+// the splat fragment pipeline's BrushUBO, so one declaration in
+// common_surfel.glsl serves both backends and the app fills it from a single
+// App::updateBrushPreview call (SvoPass::setBrush / SplatPass::setBrush).
+// The SVO backend had no preview at all before this, so in --mode svo every
+// brush size and depth change was invisible. SVO tests the volume against the
+// raymarch HIT POINT, which is a closer match to the CPU cell set than the
+// splat backend's per-surfel-centre approximation.
+layout(std140, set = 0, binding = 13) uniform BrushUBO {
+    vec4 bVolume; // xyz = centre (world), w = radius m
+    vec4 bAxis;   // xyz = unit axis, w = half length m (0 = ball, <0 = dome)
+    vec4 bTint;   // rgb = tint colour, a = strength (0 disables)
+    vec4 bMeta;   // x = optional owning layer ID; 0 = spatial volume only
+} uBrush;
+
 layout(push_constant) uniform PC {
     vec4 camPos;
     vec4 camRight;
@@ -49,6 +64,7 @@ const int BRICK_WORDS = BRICK_N * BRICK_N * BRICK_N * 2; // rgb+sdf | a+refl+rou
 const float kWaterLevel = -0.9;
 #include "common_base.glsl"
 #include "common_svo.glsl"
+#include "common_surfel.glsl"
 
 void main()
 {
@@ -175,6 +191,18 @@ void main()
             }
         }
     }
+
+    // Brush hover preview: tint the surface the next stamp would affect, as a
+    // flat overlay after shading and fog so it reads on dark and bright
+    // surfaces alike - the same placement and the same shared volume test the
+    // splat backend uses (see common_surfel.glsl). Water is skipped: the plane
+    // is one fixed level a carve floods rather than removes, so it is not a
+    // surface a stamp can act on. Tested against the hit point, which is
+    // exactly the geometry the CPU rasterizer's cell set describes.
+    if (solidHit && gHitType < 1.5 &&
+        sharedInBrushVolume(gWorld, 0.0, uBrush.bVolume, uBrush.bAxis,
+                            uBrush.bTint, uBrush.bMeta, pc.b.y))
+        col = mix(col, uBrush.bTint.rgb, uBrush.bTint.a);
 
     // Deferred output: linear HDR scene radiance (pre-tonemap). The post pass
     // applies exposure, AgX tonemapping, bloom and the selection outline.

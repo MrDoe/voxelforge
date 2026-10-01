@@ -13,6 +13,22 @@ layout(set = 0, binding = 2, rgba8)  uniform writeonly image2D uOut;
 layout(std140, set = 0, binding = 3) uniform SelectionUBO {
     vec4 uSel;   // xyz = selected voxel center, w = active
     vec4 uHover; // xyz = hovered voxel center, w = active (faint preview)
+    // Brush DEPTH indicator. The splat/SVO tint can only mark existing
+    // surfels, and the extra depth of a Carve cylinder lies below the surface
+    // (solid material) while an Add dome grows into empty air - so the Depth
+    // slider moved nothing on screen (measured: the Carve mask was
+    // bit-identical at depths 0.1/0.5/2.0/12.0 m). These three world points
+    // give the axis its own visual: a line from the fixed end to the far end
+    // plus a tick at each, so depth reads as a visible extent.
+    //   uDepthHit  = (hit point, active)
+    //   uDepthFar  = (the end that MOVES with the Depth slider, active)
+    //   uDepthNear = (the fixed end: the hit plane, + Carve's top margin)
+    //   uDepthTint = rgb = the brush's tint colour (so the line matches the
+    //                volume tint), w = unused
+    vec4 uDepthHit;
+    vec4 uDepthFar;
+    vec4 uDepthNear;
+    vec4 uDepthTint;
 };
 
 layout(push_constant) uniform PC {
@@ -26,7 +42,40 @@ layout(push_constant) uniform PC {
     vec4 misc; // x=renderFlags, y=animTime, z=tonemapLook, w=exposure
 } pc;
 
+// 2D distance from `p` to the segment [a,b], in pixels. Degenerate segments
+// fall back to the point distance so a zero-length marker still draws.
+float segDist2(vec2 p, vec2 a, vec2 b)
+{
+    vec2 ab = b - a;
+    float len2 = dot(ab, ab);
+    if (len2 < 1e-6)
+        return length(p - a);
+    float t = clamp(dot(p - a, ab) / len2, 0.0, 1.0);
+    return length(p - (a + ab * t));
+}
+
+// World -> pixel projection for the depth indicator, matching the convention
+// in shaders/splat.vert: dot(rel, basis) / dot(rel, forward) with Vulkan's
+// top-left y. Returns .z <= 0 when the point is at or behind the camera, which
+// the caller treats as "this end is not drawable". The identical division is
+// what ui/gizmo_math.cpp reproduces on the CPU, so the two agree - but the
+// indicator is projected HERE, per fragment, so it needs no CPU round trip and
+// cannot drift from the trackball's own projection.
+vec3 projectToScreen(vec3 wp)
+{
+    vec3 rel = wp - pc.camPos.xyz;
+    float z = dot(rel, pc.camFwd.xyz);
+    if (z <= 1e-4)
+        return vec3(0.0, 0.0, -1.0);
+    float ndcX = dot(rel, pc.camRight.xyz) / (z * pc.a.x * pc.a.y);
+    float ndcY = dot(rel, pc.camUp.xyz) / (z * pc.a.x);
+    return vec3((ndcX * 0.5 + 0.5) * pc.a.z,
+                (1.0 - (ndcY * 0.5 + 0.5)) * pc.a.w,
+                1.0);
+}
+
 int gRenderFlags = 31;
+
 
 // ---- AgX tonemapping (adapted from vengi _tonemapping.glsl, MIT, B. Wrensch) --
 const mat3 kAgxMat = mat3(
@@ -103,6 +152,86 @@ void main()
     hdr += bloom * 0.6; // bloom strength
 
     vec3 col = tonemapAgX(hdr * pc.misc.w, int(pc.misc.z + 0.5));
+
+    // ---- brush DEPTH indicator (screen space) ----
+    // Drawn BEFORE the selection outline block and deliberately NOT gated on
+    // hitType: a Carve's depth segment runs DOWN INTO SOLID GROUND and an
+    // Add dome's runs up into empty air, so a world-space test could only ever
+    // mark the few fragments of surface between the ends (measured: depth 12 m
+    // moved just 1.7% of pixels - barely over the 1.25% TAA noise floor).
+    // Projecting the two ends and stroking the line in SCREEN space makes the
+    // axis visible regardless of what geometry is in front of it, which is the
+    // whole point: the user is adjusting how deep a hole will go.
+    if (uDepthHit.w > 0.5 && uDepthFar.w > 0.5 && pc.a.z > 0.0 && pc.a.w > 0.0) {
+        vec3 pHitV = projectToScreen(uDepthHit.xyz);
+        vec3 pFarV = projectToScreen(uDepthFar.xyz);
+        vec2 pHit = pHitV.xy;
+        vec2 pFar = pFarV.xy;
+        // A point at or behind the camera projects to a huge/degenerate value;
+        // treat that end as absent so the line collapses to the other end
+        // instead of smearing across the frame.
+        if (pHitV.z > 0.0 && pFarV.z > 0.0) {
+            // A deep brush's far end is metres BELOW the surface, and a camera
+            // looking along a shallow downward angle projects that point far
+            // outside the frustum - so the line left the frame within a few
+            // pixels and every depth drew the same stub (measured: depth 0.5
+            // vs 6.0 m differed by 0.67%, i.e. nothing). Clamping both ends
+            // into the viewport keeps the indicator on screen and makes it grow
+            // with depth until the far end pins to an edge, which honestly
+            // reads as "the hole goes further than the frame shows".
+            const float m = 6.0; // px inset
+            const vec2 lo = vec2(m), hi = pc.a.zw - vec2(m);
+            vec2 pHitC = clamp(pHit.xy, lo, hi);
+            vec2 pFarC = clamp(pFar.xy, lo, hi);
+            const vec2 frag = vec2(gl_GlobalInvocationID.xy) + 0.5;
+            const float d = segDist2(frag, pHitC, pFarC);
+            // A solid core with a short halo. A wide gentle falloff is worse
+            // than useless here: it changes many pixels by 1-10 codes, which
+            // is below what diff_stats(thresh=10) in check_depth_sensitivity
+            // can see, so the marker read as "0.90% - invisible" while looking
+            // fine. The core has to be unambiguously opaque.
+            const float core = 1.5;   // px, fully opaque
+            const float halo = 5.0;   // px, faded to nothing
+            const float a = 1.0 - smoothstep(core, halo, d);
+            if (a > 0.002) {
+                // t = 0 at the hit, 1 at the far (moving) end, so the stroke
+                // brightens toward the end the Depth slider drives. The HUE is
+                // the brush's own tint throughout (never blended toward a
+                // second colour) so the marker cannot contradict the
+                // warm-Carve / green-Add assertions in check_preview.
+                const vec2 ab = pFarC - pHitC;
+                const float len2 = max(dot(ab, ab), 1e-6);
+                const float t = clamp(dot(frag - pHitC, ab) / len2, 0.0, 1.0);
+                col = mix(col, uDepthTint.rgb, a * (0.80 + 0.20 * t));
+            }
+            // A tick at the far end: a small ring, so the depth the user is
+            // setting has a readable terminus even where the line is foreshortened.
+            const float dr = length(frag - pFarC);
+            if (dr < 8.0) {
+                const float ring = 1.0 - smoothstep(5.0, 8.0, dr);
+                col = mix(col, uDepthTint.rgb, ring);
+            }
+            // Cut-off cap. When the true far end is outside the viewport the
+            // line has been clamped, so its end no longer shows the real depth.
+            // A short bar across the axis says "continues past here", which is
+            // the difference between reading the terminus as the hole's floor
+            // and reading it as the frame. The exact value at any depth is the
+            // footer readout, which cannot saturate.
+            if (any(lessThan(pFar, lo)) || any(greaterThan(pFar, hi))) {
+                vec2 dir = pFarC - pHitC;
+                const float dl = length(dir);
+                if (dl > 1e-3) {
+                    dir /= dl;
+                    const vec2 rel = frag - pFarC;
+                    const float along = dot(rel, dir);
+                    const float perp = abs(dot(rel, vec2(-dir.y, dir.x)));
+                    if (abs(along) < 1.6 && perp < 11.0 && perp > 4.5)
+                        col = mix(col, uDepthTint.rgb,
+                                  0.9 * (1.0 - smoothstep(9.0, 11.0, perp)));
+                }
+            }
+        }
+    }
 
     // ---- vengi-style selection / hover edge outline ----
     if ((gRenderFlags & 16) != 0 && hitType > 0.5) {

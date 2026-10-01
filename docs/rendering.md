@@ -81,7 +81,7 @@ Defined in `src/render/svo_pass.hpp`; mirrored by the GLSL `PC` block.
 | `misc` | 0 (unused) | **animation time (seconds)** | 0 | 0 |
 
 ⚠️ The comment in `RaymarchPush` says "x = animation time" but the actual
-contract — set in `main.cpp` and consumed everywhere in the shader — is
+contract — set in `src/app/frame/record_*.cpp` and consumed everywhere in the shader — is
 **`misc.y`** (wind-sheared grass, blade streaks, water ripples, foam pulse).
 Don't "fix" either side casually; keep them in sync.
 
@@ -164,6 +164,22 @@ in `App::rebuildSurfels`, ~0.6 s for ~1.3 M surfels):
   gaps. Sun comes from `SurfelParams::sunDir`
   (the app's `--sun`); a sun change needs a rebuild, same as geometry edits.
 - Water grid (0.25 m) wherever terrain tops sit below `WATER_LEVEL`.
+- **Normals have exactly one rule.** A live stamp re-derives the edit AABB plus
+  a margin, so any difference between the full bake and the store path is
+  applied to cells the user never touched. `collectChunkCandidates` therefore
+  runs the bake's own pipeline on store data: the raw normal is the mean of the
+  outward directions of the *exposed* faces (`meanNormal`'s rule, out-of-lattice
+  counting as air); a cell whose directions cancel to zero, or a thin corner of
+  a thin object, is expanded into one axis-aligned entry per exposed face; every
+  other entry averages its own normal with the raw normals of the face
+  neighbours in range (`smoothNormals`). The store path must not derive a
+  normal from a local SDF gradient: the brick SDF is byte-quantised and
+  nearest-sampled, so a central difference cancels to exactly zero deep inside a
+  thick body, and the old `+Y` fallback for that case pointed untouched walls
+  straight up after an edit beside them. Measured on the cabin: 27.8 % of
+  object surfels more than 30° off the bake (mean 22.4°, 1191 fabricated
+  straight-up) before, 0.08 % (mean 0.57°, none) after. Gate:
+  `tests/test_store.cpp` "live surfel normals follow the bake".
 - Chunk bucketing (16³ + 1 `chunkRange` offsets) for per-chunk draws/culling.
 - **Micro-detail** (`SurfelParams::microDetail`, app default ON, `VF_MICRO=0`
   to disable at launch or the **M** key to toggle at runtime, unit-test default
@@ -448,13 +464,44 @@ Move mode uses the same selected-owner GPU translation lane: it grabs the exact
 owner, accumulates a delta on the selected world X/Y/Z axis, draws a small axis
 handle, and writes `pos` only when **Apply move** is pressed.
 
-## Edit-brush hover preview (splat backend)
+## Edit-brush hover preview
 
 The edit tool (`C`) previews what the next LMB stamp would affect: while the
-tool is active and a surface is hovered, every splat whose **centre** lies
-inside the brush volume is tinted flat in the fragment shader (bind 13
-`BrushUBO`: volume centre + radius, axis + half length, tint rgb + strength;
-all-zero strength disables).
+tool is active and a surface is hovered, every surface sample inside the brush
+volume is tinted flat in the fragment/compute shader (bind 13 `BrushUBO`:
+volume centre + radius, axis + half length, tint rgb + strength; all-zero
+strength disables).
+
+`inBrushVolume` lives in `shaders/common_surfel.glsl` and is bound at the
+**same binding 13 with the same std140 layout in both backends**, so one
+declaration serves both pipelines. The splat path tests it against the
+**surfel centre**; the SVO reference tests it against the **raymarch hit
+point**, which is a closer match to the CPU rasterizer's cell set.
+
+The preview follows the live pick when the pointer is in the scene and
+otherwise falls back to the last scene pick (`App::m_latchedHover`), so
+reaching for a sidebar slider does not make the preview blink out. It is a
+preview-only feed: `applyEditLive` still requires a live hit, so a latched
+preview can never stamp.
+
+**Depth has its own marker, because the tint cannot show it.** The tint only
+marks geometry *already in the scene*, and a Carve's extra depth lies below
+the surface (solid material) while an Add dome grows into empty air — neither
+has a surfel. Measured: the Carve affected-surfel mask was bit-identical
+(2920 px) at depths 0.1/0.5/2.0/12.0 m. So `shaders/post.comp` projects the
+hit and the volume's far end to screen space (same `dot(rel, basis) /
+dot(rel, forward)` convention as `splat.vert`), strokes a line between them
+and puts a ring on the far end. It is drawn on **every** fragment, not gated
+on the visible-surface G-buffer, and both ends are clamped into the viewport:
+a deep brush's far end is metres below the surface and would otherwise project
+far outside the frustum. Depth 0.5 → 6 m now moves 1.75 % of the frame against
+a 0.008 % noise floor. Because a screen-space line is bounded by the frame, the
+clamped end keeps moving along the edge as depth grows and a short **cut-off
+cap** is drawn across the axis whenever the true far end is off-screen, so 6 m
+and 12 m stay distinguishable (3.0 %) instead of pinning to the same picture.
+The sidebar footer also prints the depth numerically (`carve 15vox 1.5m`); a
+number cannot saturate, so it is the readout that stays exact at every depth. The marker's hue is always the brush's own tint, so it
+never contradicts the warm-Carve / green-Add assertions.
 
 - volume = the exact cell set the CPU rasterizer will touch: **Carve** = the
   oriented cylinder based at the hit cell, `depth` long along the surface

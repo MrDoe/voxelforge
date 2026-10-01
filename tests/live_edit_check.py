@@ -15,7 +15,8 @@ Renders the close-up view several times and asserts:
   - a live-patched chunk keeps its deterministic micro-detail tail (run surfel
     count with VF_MICRO on >> off for the same edit),
   - the carve hover preview tints warm and the add preview tints the growth's
-    footprint green (VF_TEST_BRUSH, no edit applied; splat backend only),
+    footprint green (VF_TEST_BRUSH, no edit applied), the Depth slider being
+    visible at all and the SVO backend showing the same preview,
   - a 1-voxel Add/Carve stamps EXACTLY one cell (the per-voxel sculpt mode),
   - Undo is a TRUE INVERSE of the edit - the post-undo surfel run must equal
     the add-only run - on a chunk carrying object geometry (terrain-only edits
@@ -471,9 +472,17 @@ def check_micro_persistence(binary, tmp, failures, splat_log=None):
 def check_preview(binary, tmp, failures, baseline):
     """Hover previews: VF_TEST_BRUSH activates the edit tool with a brush
     volume but applies NO edit, so the only frame difference is the tint over
-    the splats the brush would affect (splat backend only). Carve tints warm,
+    the splats the brush would affect. Carve tints warm,
     Add tints the growth footprint green (the volume the raised shell buries),
-    and Smooth tints its conservative terrain footprint blue."""
+    and Smooth tints its conservative terrain footprint blue.
+
+    Renders its own untouched baseline when one is not already on disk, so this
+    function is runnable standalone via `--only preview`."""
+    if not os.path.exists(baseline):
+        r0 = render(binary, baseline, {"VF_NO_OVERLAY": "1"}, mode=None)
+        if r0.returncode != 0 or not os.path.exists(baseline):
+            failures.append("preview: baseline render failed")
+            return
     w, h, a = read_ppm(baseline)
 
     def preview(tag, env, warm=None, green=None, blue=None):
@@ -506,6 +515,104 @@ def check_preview(binary, tmp, failures, baseline):
                     "VF_EDIT_DEPTH": "1.0"}, green=True)
     preview("smooth", {"VF_TEST_BRUSH": f"{CELL},smooth", "VF_EDIT_DIAM": "1.5",
                        "VF_SMOOTH_STRENGTH": "0.8"}, blue=True)
+    check_depth_sensitivity(binary, tmp, failures)
+
+
+# Noise floor for the depth A/B, measured with diff_stats at its default
+# thresh=10 on these 480x270 preview frames (two renders of an IDENTICAL
+# --shot config, TAA jitter): 0.008%. The same pair at thresh=0 differs by
+# 2.6%, which is the number to NOT use - the per-channel threshold is what
+# removes the jitter, so comparing a thresh=10 signal against an unfiltered
+# noise floor overstates the noise by ~300x and rejects real signal.
+# 0.5% leaves a 60x margin over the measured floor and ~3.5x under the
+# observed depth signal (1.74% for Carve 0.5 -> 6.0 m).
+NOISE_FLOOR = 0.005
+
+
+def check_depth_sensitivity(binary, tmp, failures):
+    """The Depth slider must change the frame.
+
+    Regression gate. The preview tint can only mark EXISTING surfels, and the
+    extra depth of a Carve cylinder lies BELOW the surface (solid material)
+    while an Add dome grows into empty air - neither has a surfel to tint. So
+    the tint alone could never show depth, and measured on this exact cell the
+    Carve affected-surfel mask was bit-identical (2920 px) at depths
+    0.1/0.5/2.0/12.0 m: the slider moved nothing at all.
+
+    Depth now has its own screen-space marker in the post pass (a line from the
+    hit to the volume's far end plus a tick there). Two things the first version
+    got wrong, both caught by this gate:
+      - drawn as a wide soft gradient, which moves most pixels by only 1-10
+        codes and is therefore invisible to diff_stats at its default thresh=10;
+      - unclamped, a deep brush's far end projects metres OUTSIDE the frustum
+        (it lies below the surface, and the camera looks along a shallow angle),
+        so the line left the frame within a few pixels and every depth drew the
+        same stub - 0.67% between 0.5 and 6.0 m.
+    Now an opaque 1.5 px core with a 5 px halo and both ends clamped into the
+    viewport: 1.74% for Carve 0.5 -> 6.0 m against a 0.008% noise floor.
+    """
+    def depth_pair(tag, mode, d_lo, d_hi):
+        lo = os.path.join(tmp, f"depth_{tag}_lo.ppm")
+        hi = os.path.join(tmp, f"depth_{tag}_hi.ppm")
+        base = {"VF_TEST_BRUSH": f"{CELL},{mode}", "VF_EDIT_DIAM": "1.5"}
+        for out, dep in ((lo, d_lo), (hi, d_hi)):
+            env = dict(base, VF_EDIT_DEPTH=str(dep))
+            r = render(binary, out, env, mode=None)
+            if r.returncode != 0 or not os.path.exists(out):
+                failures.append(f"depth({tag}): render failed at depth {dep}")
+                return
+        w, h, a = read_ppm(lo)
+        _, _, b = read_ppm(hi)
+        d = diff_stats(w, h, a, w, h, b)[0]
+        print(f"[depth] {tag} {d_lo} m vs {d_hi} m: pixel diff {d*100:.2f}%")
+        if d < NOISE_FLOOR:
+            failures.append(
+                f"depth({tag}): Depth slider is invisible ({d*100:.2f}% <= "
+                f"{NOISE_FLOOR*100:.0f}% noise floor) - the depth marker is "
+                f"missing or occluded")
+
+    depth_pair("carve", "carve", 0.5, 6.0)
+    depth_pair("add", "add", 0.5, 6.0)
+    # The large-depth pair is the anti-saturation case. A screen-space line is
+    # bounded by the frame, so once the volume's far end leaves the viewport the
+    # clamped line used to pin to an edge and 6 m looked exactly like 12 m. The
+    # cut-off cap plus the moving clamped end keep them apart (measured 3.0%).
+    depth_pair("carve_deep", "carve", 6.0, 12.0)
+    check_svo_preview(binary, tmp, failures)
+
+
+def check_svo_preview(binary, tmp, failures):
+    """The SVO reference backend must show the brush preview too.
+
+    Regression gate. setBrush fed only SplatPass, so in --mode svo the brush
+    had no preview whatsoever and every size/depth change was invisible. The
+    BrushUBO is now bound at 13 in the SVO pipeline with the same std140
+    layout, tested against the raymarch hit point.
+    """
+    base = os.path.join(tmp, "svo_preview_base.ppm")
+    prev = os.path.join(tmp, "svo_preview_on.ppm")
+    r0 = render(binary, base, {"VF_NO_OVERLAY": "1"}, mode="svo")
+    if r0.returncode != 0 or not os.path.exists(base):
+        failures.append("svo preview: baseline render failed")
+        return
+    r1 = render(binary, prev,
+                {"VF_TEST_BRUSH": f"{CELL},delete", "VF_EDIT_DIAM": "6.0"},
+                mode="svo")
+    if r1.returncode != 0 or not os.path.exists(prev):
+        failures.append("svo preview: preview render failed")
+        return
+    w, h, a = read_ppm(base)
+    _, _, b = read_ppm(prev)
+    d, wr, wb, wg = diff_stats(w, h, a, w, h, b)
+    print(f"[svo preview] tint on hover: pixel diff {d*100:.2f}%  "
+          f"brighter R/G/B {wr}/{wg}/{wb}")
+    if d < 0.01:
+        failures.append(
+            f"svo preview: SVO backend shows no brush preview ({d*100:.2f}%)")
+    # Delete tints red, so the changed pixels must be red-dominant - that also
+    # proves it is the TINT and not a broken frame or a lighting change.
+    if not (wr > wb and wr > 0):
+        failures.append("svo preview: SVO preview is not red (Delete tint)")
 
 
 def region_mean(img, w, x0, y0, x1, y1):
@@ -663,11 +770,39 @@ def check_pair(binary, tmp, tag, mode, failures, min_diff=0.02, max_diff=0.60,
 
 
 def main():
-    if len(sys.argv) != 2:
+    # `--only <name>` runs a single self-contained check group and renders its
+    # own baselines, so a preview-only change is verifiable without paying for
+    # the whole live-edit matrix (whose wall time is dominated by per-run world
+    # loads). `preview` is the selector behind the `test-preview` group.
+    only = None
+    args = sys.argv[1:]
+    if "--only" in args:
+        i = args.index("--only")
+        if i + 1 >= len(args):
+            print("--only needs a group name")
+            return 2
+        only = args[i + 1]
+        args = args[:i] + args[i + 2:]
+    if len(args) != 1:
         print(__doc__)
         return 2
-    binary = os.path.abspath(sys.argv[1])
+    binary = os.path.abspath(args[0])
     failures = []
+
+    if only is not None:
+        if only != "preview":
+            print(f"unknown --only group {only!r} (known: preview)")
+            return 2
+        with tempfile.TemporaryDirectory() as tmp:
+            check_preview(binary, tmp, failures,
+                          os.path.join(tmp, "splat_base.ppm"))
+        if failures:
+            for f in failures:
+                print("FAIL:", f)
+            return 1
+        print("preview_check PASSED")
+        return 0
+
     if FAST:
         # Fast iteration profile: retain the core live-store patch assertion,
         # but defer the exhaustive backend/water/undo matrix to the full gate.

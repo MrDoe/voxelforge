@@ -12,6 +12,7 @@ ninja -C build test-visual       # render/camera/shader visual acceptance
 ninja -C build test-store        # store foundations and rebuild invariants
 ninja -C build test-world        # layered world / SVO / records
 ninja -C build test-unit         # broad CPU-only change; still not all render gates
+ninja -C build test-preview      # brush hover preview only (fastest useful gate)
 ```
 
 Additional focused groups are `test-effects` (SSAO), `test-textures`,
@@ -160,6 +161,7 @@ Env knobs: `VF_SSAO_STRENGTH` / `VF_SSAO_RADIUS` / `VF_SSAO_BLUR` /
 | `test-store` | `ChunkStore`, edits, rebuilds | chunk doctests + fast live edit |
 | `test-world` | layered world, SVO, VXW records | world/worldfile doctests |
 | `test-live-edit` | brushes, live patches, undo/clear | store doctests + full live-edit check + fast variant |
+| `test-preview` | brush hover preview: tint hue, Depth marker, SVO parity | `live_edit_check.py --only preview` (renders its own baseline) |
 | `test-visual` | camera, shaders, scene geometry | full visual check + fast variant + GPU selftest |
 | `test-effects` | SSAO/post effects | full SSAO check + fast variant |
 | `test-textures` | atlas/material textures | full texture check + fast variant |
@@ -195,4 +197,4 @@ Judge screenshots by pixel evidence only — never by asking a vision model.
 | visual_check black-in-silhouette spike | hollow objects / brick SDF regression — check recent synthesis or shader changes; slice the object |
 | selftest coverage out of range | camera sees all-sky or no-terrain: layer enable state or heightfield breakage |
 | determinism hash drift under VF_TRACE | unordered iteration crept into synthesis — chunk order must stay deterministic |
-| ImGui renders nothing | dynamic-rendering wrap lost in main.cpp frame loop |
+| ImGui renders nothing | dynamic-rendering wrap lost in `frame/record_interactive.cpp` |

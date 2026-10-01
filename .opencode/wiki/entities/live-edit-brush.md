@@ -7,6 +7,12 @@ lastReviewed: 2026-09-26
 
 # Live-edit brush
 
+> **Post-split (2026-09-26).** `src/app` was split per subsystem; `main.cpp` is
+> now a 16-line entry point. All `main.cpp:<line>` references formerly on this page
+> have been re-anchored to **symbols**. Use [[entities/app-subsystems]] for the map and
+> for the two invariants that straddle files — the click gate's write side is in
+> `edit/live_edit.cpp` and its read side in `frame/run_input.cpp`.
+
 The `C` edit panel selects a voxel brush at the hovered surface point. Carve,
 Add, Delete, and Paint stamp analytic volumes; Smooth instead relaxes a
 surface position (terrain column tops, or an object surface along its own
@@ -108,6 +114,16 @@ Properties that matter:
   genuine **small circular drag is never disabled**. That was a real defect of
   the net-from-press design and is the reason it was reverted; see the history
   note below before reintroducing anything like it.
+
+**Two structural facts about the gate that a line-number citation hides.**
+`kDragTravelPx` is *declared* in `src/app/ui/ui_types.hpp` but **used at exactly one
+site** — the click gate. That single-use property is why it lives with the UI
+vocabulary rather than beside its only reader. And `m_lastStampWroteCell`
+**straddles the `src/app` subsystem split deliberately**: it is *written* by
+`edit/live_edit.cpp` (`applyEditLive`, and cleared in `undoEdit`) and *read* by
+`frame/run_input.cpp` for the identity test. A description of the gate that omits this
+will send the next reader looking for the write in the frame code, or the read in the
+edit code, and finding neither.
 
 **Residual limit, stated plainly:** a jittery click whose hand moves 6 px
 while held can still land one extra neighbour. The stack case is eliminated by
@@ -404,6 +420,11 @@ file (the zero-surfel patch regression above). Gate wall time is dominated by
 the per-run world load, not by these renders — see
 [[concepts/load-time-field-build]].
 
+The preview has its own invariants and its own two gates
+(`check_depth_sensitivity`, `check_svo_preview`) — why a size or depth change
+can be invisible, and the ~1.25 % noise floor any such gate has to clear, is in
+[[concepts/brush-preview-visibility]].
+
 `tests/visual_check.py` also probes the selected-layer screen centre and all
 three ring hit classes during the ownership renders, independently projects
 the logged AABB/camera pose, and bounds terrain/water ownership motion. The
@@ -464,7 +485,8 @@ coverage argument, not just the green: the change is in `App`'s pick plumbing
 (`adoptPickOwnership`), and the two groups that read it are live-edit — where
 `check_object_undo_surgical` asserts the pick class **directly**, so a regression
 is red rather than silent — and visual, which covers the rotate/move/owner-label
-paths that branch on `m_hoverHit.object` (`main.cpp:1993`, `:3001`, `:3335`).
+paths that branch on `m_hoverHit.object` (`frame/run.cpp` for `m_lastPickObject`,
+`ui/` for the owner label, `frame/run_input.cpp` for the hover-owner path).
 `test-surfel` and `test-store` were deliberately not run: the only edit outside
 `App` is the `getenv("VF_TRACE")`-gated region log in `live_editor.cpp:154`,
 which is a log plus a move of a temporary and does not change the run — and
