@@ -2355,3 +2355,48 @@ Not done / worth a follow-up:
   screen-space line cannot exceed the frame. Honest, but it means very large
   depths look alike; a numeric HUD readout would be the next step if that
   matters.
+
+## 2026-10-01 ingest | Both follow-ups closed: depth no longer saturates, and the tree is committed
+
+**Depth saturation.** A screen-space line cannot be longer than the frame, so
+once a deep brush's far end clamped to a viewport edge, 6 m and 12 m drew the
+same picture. Two channels now cover it:
+
+- in the viewport, the clamped end keeps *moving along the edge* as depth grows,
+  and a short **cut-off cap** is drawn across the axis whenever the true far end
+  is off-screen — so a clamped terminus never reads as "the hole ends here".
+  6 m vs 12 m went from indistinguishable to **3.0 %**, and is gated by a new
+  `depth_pair("carve_deep", 6.0, 12.0)`.
+- the **sidebar footer** prints the depth numerically (`carve 15vox 1.5m`). A
+  number cannot saturate, and it is the readout still visible while the pointer
+  is over the panel — where the 3D preview is running on the latched hover.
+
+**The untracked tree is committed** (`0c1449c`, `b1e04f3`, `e6ea1e0`).
+`src/app/**` had never been in history, so `git diff` could not review changes to
+`app.hpp` / `run_input.cpp` / `run_brush_preview.cpp`. Two honest caveats
+recorded in the commit messages rather than papered over:
+
+- the app-split commit necessarily carries this session's app-side edits
+  (hover latch, depth feed, footer readout), because they live inside files
+  that were never committed and cannot be separated without rewriting history;
+- `CMakeLists.txt` carries the `test-preview` entry for the same reason — it
+  could not be split out of the source listings by hand.
+
+Three more wiki pages (authored-assets, clang-lsp, live-edit-surfel-parity)
+were committed because the already-committed `AGENTS.md` and index referenced
+them — the history had dangling links until now.
+
+**Left alone deliberately**, after checking with the peer session rather than
+guessing ownership: `surfelize.cpp/hpp`, `tests/test_store.cpp` (mtimes show
+another session has them open *right now*), `.clangd`, `docs/architecture.md`,
+`docs/getting-started.md`, `docs/tooling.md`, and `.tmp_hole/` (the peer's
+scratch). Verified the committed `CMakeLists.txt` references 110 paths and all
+110 exist in the committed tree.
+
+**Overlay warning worth keeping.** A peer session reported that headless
+`--shot` runs silently overwrote the user's live-edit session: without
+`VF_NO_OVERLAY=1` or `VF_OVERLAY_PATH=<tmp>` a run loads `runtime_edits.vxw`,
+`loadStoreOverlay` re-derives chunks and flags them edited, and the writer then
+re-serializes only that subset. My own renders all set `VF_NO_OVERLAY=1`, but
+`gpu_selftest` in CMakeLists runs `--selftest` with neither guard set — worth
+hardening that entry.
