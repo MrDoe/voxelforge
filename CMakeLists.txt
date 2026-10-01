@@ -195,7 +195,44 @@ endforeach()
 add_custom_target(vf_shaders ALL DEPENDS ${VF_SHADER_SPVS})
 
 # ---- app ------------------------------------------------------------------------
-add_executable(voxelforge src/app/main.cpp src/app/chat_ui.cpp)
+add_executable(voxelforge
+    src/app/main.cpp
+    src/app/chat_ui.cpp
+    # One translation unit per subsystem; see src/app/app.hpp for the map.
+    src/app/cli/args.cpp
+    src/app/rhi/surface.cpp
+    src/app/rhi/present_probe.cpp
+    src/app/world/world_layers.cpp
+    src/app/world/world_textures.cpp
+    src/app/world/store_overlay.cpp
+    src/app/world/surfel_stream.cpp
+    src/app/textures/texture_bindings.cpp
+    src/app/edit/live_edit.cpp
+    src/app/edit/transform.cpp
+    src/app/mesh/mesh_import.cpp
+    src/app/ui/ui_primitives.cpp
+    src/app/ui/gizmo_math.cpp
+    src/app/ui/theme.cpp
+    src/app/ui/sidebar.cpp
+    src/app/ui/panel_edit.cpp
+    src/app/ui/panel_world.cpp
+    src/app/ui/panel_render.cpp
+    src/app/ui/panel_textures.cpp
+    src/app/ui/panel_mesh.cpp
+    src/app/ui/panel_ai.cpp
+    src/app/ui/scene_overlays.cpp
+    src/app/frame/run.cpp
+    src/app/frame/run_startup.cpp
+    src/app/frame/run_poll.cpp
+    src/app/frame/run_input.cpp
+    src/app/frame/run_hooks.cpp
+    src/app/frame/run_brush_preview.cpp
+    src/app/frame/run_hotkeys.cpp
+    src/app/frame/record_headless.cpp
+    src/app/frame/record_interactive.cpp
+    src/app/frame/record_fx.cpp
+    src/app/frame/selftest.cpp
+    src/app/frame/profiler.cpp)
 target_compile_definitions(voxelforge PRIVATE
     VOXELFORGE_SHADER_DIR="${CMAKE_CURRENT_BINARY_DIR}/shaders")
 target_link_libraries(voxelforge PRIVATE vf_render vf_core imgui_core)
@@ -209,8 +246,15 @@ add_executable(vf_tests tests/main.cpp tests/test_camera.cpp
                         tests/test_authoring.cpp tests/test_chat_tools.cpp
                         tests/test_picking.cpp tests/test_editable.cpp
                         tests/test_surfelize.cpp tests/test_store.cpp
+                        tests/test_app_gizmo.cpp tests/test_app_cli_ui.cpp
+                        # The app's pure leaf logic, compiled in directly: before
+                        # the src/app split these lived in the same translation
+                        # unit as main() and could not be reached from a test.
+                        src/app/cli/args.cpp
+                        src/app/ui/gizmo_math.cpp
+                        src/app/ui/ui_primitives.cpp
                         src/ai/ollama_client.cpp)
-target_link_libraries(vf_tests PRIVATE vf_core vf_doctest)
+target_link_libraries(vf_tests PRIVATE vf_core vf_doctest imgui_core)
 target_compile_definitions(vf_tests PRIVATE DOCTEST_CONFIG_NO_MULTITHREADING)
 find_package(Python3 COMPONENTS Interpreter REQUIRED)
 set(GROUP_GATE ${CMAKE_CURRENT_SOURCE_DIR}/tests/group_gate.py)
@@ -229,6 +273,12 @@ add_test(NAME unit_world_tests
 add_test(NAME unit_worldfile_tests
     COMMAND ${Python3_EXECUTABLE} ${GROUP_GATE} unit,world,worldfile
             $<TARGET_FILE:vf_tests> --test-case=*worldfile*)
+# The app's pure leaf logic (gizmo screen maths, the command line, the sidebar
+# vocabulary). Selected by source file because the cases are named after the
+# behaviour they pin, not after a subsystem prefix.
+add_test(NAME unit_app_tests
+    COMMAND ${Python3_EXECUTABLE} ${GROUP_GATE} unit,app
+            $<TARGET_FILE:vf_tests> --source-file=*test_app_*)
 
 # ---- material textures ----------------------------------------------------------
 # The shipped photo set comes from tools/fetch_textures.py (ambientCG, CC0,
@@ -245,6 +295,14 @@ add_test(NAME live_edit_check
     COMMAND ${Python3_EXECUTABLE} ${GROUP_GATE} live-edit
             ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/tests/live_edit_check.py
             $<TARGET_FILE:voxelforge>)
+# Brush-preview visibility only (tint hue, Depth sensitivity, SVO parity).
+# Split out of live_edit_check so a preview/shader tweak is verifiable with
+# `ninja -C build test-preview` instead of the whole live-edit matrix, whose
+# wall time is dominated by per-run world loads.
+add_test(NAME preview_check
+    COMMAND ${Python3_EXECUTABLE} ${GROUP_GATE} preview
+            ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/tests/live_edit_check.py
+            $<TARGET_FILE:voxelforge> --only preview)
 add_test(NAME ssao_check
     COMMAND ${Python3_EXECUTABLE} ${GROUP_GATE} effects
             ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/tests/ssao_check.py
@@ -275,10 +333,18 @@ set_tests_properties(unit_world_tests
     PROPERTIES LABELS "unit;world" SKIP_RETURN_CODE 77)
 set_tests_properties(unit_worldfile_tests
     PROPERTIES LABELS "unit;world;worldfile" SKIP_RETURN_CODE 77)
+# The app's pure leaf logic (gizmo screen maths, the command line, the sidebar
+# vocabulary). Selected by source file because the cases are named after the
+# behaviour they pin, not after a subsystem prefix. Also inside `unit`, so the
+# existing entry point keeps covering them.
+set_tests_properties(unit_app_tests
+    PROPERTIES LABELS "unit;app" SKIP_RETURN_CODE 77)
 set_tests_properties(visual_check
     PROPERTIES LABELS "visual" SKIP_RETURN_CODE 77)
 set_tests_properties(live_edit_check
     PROPERTIES LABELS "live-edit" SKIP_RETURN_CODE 77)
+set_tests_properties(preview_check
+    PROPERTIES LABELS "preview" SKIP_RETURN_CODE 77)
 set_tests_properties(ssao_check
     PROPERTIES LABELS "effects;ssao" SKIP_RETURN_CODE 77)
 set_tests_properties(texture_check
@@ -349,10 +415,13 @@ endfunction()
 # Focused groups are the only supported test entry points. There is deliberately
 # no test-all target: select the smallest group that covers the change.
 vf_add_test_group(unit vf_tests)
+vf_add_test_group(app vf_tests)
 vf_add_test_group(surfel vf_tests voxelforge)
 vf_add_test_group(store vf_tests voxelforge)
 vf_add_test_group(world vf_tests)
 vf_add_test_group(live-edit vf_tests voxelforge)
+# Brush preview only (no unit binary needed - it is all rendered frames).
+vf_add_test_group(preview voxelforge)
 vf_add_test_group(visual voxelforge)
 vf_add_test_group(effects voxelforge)
 vf_add_test_group(textures voxelforge)
