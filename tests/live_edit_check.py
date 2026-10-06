@@ -143,6 +143,21 @@ def render(binary, out, extra_env=None, mode=None, cam=None, overlay=False):
         env["VF_NO_OVERLAY"] = "1"
     if extra_env:
         env.update(extra_env)
+    # A guard that is only applied at SOME call sites is not a guard: a
+    # stamping run (VF_TEST_EDIT/STROKE/BRUSH) re-serialises the overlay even
+    # with VF_NO_OVERLAY=1, because that flag suppresses only the LOAD, and
+    # with no VF_OVERLAY_PATH the app writes assets/runtime_edits.vxw - the
+    # user's live-edit session, which is gitignored and therefore unrecoverable.
+    # Measured 2026-10-06: a "clean env" run (which strips an ambient
+    # VF_OVERLAY_PATH that had been masking this) rewrote a 64,907,610 B
+    # session to 980,100 B with no warning. So default the path into this run's
+    # own tmp dir, next to the frame it belongs to; an explicit VF_OVERLAY_PATH
+    # from the caller still wins, which is what the per-voxel and undo/clear
+    # checks rely on.
+    if not env.get("VF_OVERLAY_PATH"):
+        stem = os.path.splitext(os.path.basename(out))[0]
+        env["VF_OVERLAY_PATH"] = os.path.join(
+            os.path.dirname(out) or ".", stem + "_overlay.vxw")
     cmd = [
         binary, "--shot", out,
         "--width", str(W), "--height", str(H),

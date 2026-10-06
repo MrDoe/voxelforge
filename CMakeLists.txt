@@ -325,9 +325,17 @@ add_test(NAME gpu_selftest
 # 4 chunks/42969 surfels -> 1 chunk/9631). The file is gitignored, so the damage
 # leaves no trace in git. The python harnesses already default to
 # VF_NO_OVERLAY=1; this bare --selftest entry did not, and must.
+#
+# VF_NO_OVERLAY alone is NOT a read-only guard: it suppresses only the LOAD, so a
+# run that also STAMPS still writes the default overlay path (measured 2026-10-06:
+# a clean-env live_edit_check run rewrote a 64,907,610 B session to 980,100 B,
+# unrecoverable, because live_edit_check.py's render() guarded only some call
+# sites). Pin BOTH: the path goes to the build dir so this entry can never reach
+# assets/ at all. It is belt-and-braces today - --selftest has no stamp path -
+# which is exactly why it should not be left to chance.
 set_tests_properties(gpu_selftest
     PROPERTIES LABELS "visual;surfel" SKIP_RETURN_CODE 77
-                 ENVIRONMENT "VF_NO_OVERLAY=1")
+                 ENVIRONMENT "VF_NO_OVERLAY=1;VF_OVERLAY_PATH=${CMAKE_CURRENT_BINARY_DIR}/gpu_selftest_runtime_edits.vxw")
 
 # Every registered test is group-gated by tests/group_gate.py. A bare CTest
 # invocation therefore skips the checks instead of starting an accidental
