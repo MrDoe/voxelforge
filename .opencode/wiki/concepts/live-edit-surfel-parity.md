@@ -121,3 +121,50 @@ Verified to fail loudly on the pre-fix code: `fabricatedUp` 40, mean 47.3°,
 - [[concepts/smooth-terrain-brush]] — why Smooth needs the 12-cell margin.
 - [[concepts/measurement-discipline]] — the guard has teeth only because it was
   re-run against the old code.
+
+## A parity gap found by measuring normals (2026-10-03)
+
+The store path was missing the bake's **terrain-heightfield normal stage**
+entirely. The bake blends every terrain-top normal 0.55 of the way toward a
+two-scale gradient of the height *texture* — `heightAt()` bilinearly samples the
+`rg32f` float top field, tapped at `e = 0.35 m` and `e2 = 0.10 m` and mixed
+0.55. The store had no equivalent, so terrain shaded from exposed faces alone:
+an identical slope looked smooth after a bake and faceted after a live edit.
+
+That is the parity rule being violated by *omission* rather than by a divergent
+rule, and it is the version the rule most easily misses — nothing "grew a rule
+of its own", a stage was simply absent. Ported as `storeTopAt` +
+`storeHeightfieldNormal`, mirroring the bake's construction and reading the
+store's own live column tops (the store has no height texture, so the top is
+found by a bounded downward scan from the surfel's own cell).
+
+**Measured, on a 1-in-4 staircase ramp** (ideal normal 14.04° off vertical, 576
+terrain-top surfels):
+
+| configuration | mean error | worst |
+|---|---|---|
+| blend OFF (the gap) | 19.09° | 65.16° |
+| bake weight 0.55 (ported) | 17.90° | 65.16° |
+| weight 1.00 (trust the gradient) | 16.93° | 65.16° |
+
+**The weight is not the limiting factor**, so do not tune it expecting a fix.
+Two reasons the residual stays high: the metric partly penalises *correct*
+riser normals (a step-edge cell's true surface normal is diagonal, because it
+has a riser), and the neighbour pass rebuilds `n` from its own blended value
+plus the neighbours' **unblended** `rawN` — parity with the bake, which smooths
+`rawNormals[]` — so a 0.55 blend survives at roughly one term in five.
+
+**Where the real fix lives.** A Smooth stamp already computes a *float* relaxed
+height before `lround`ing to the lattice. That float field is a continuous
+surface, so its gradient is a continuous normal; deriving from the *integer*
+tops cannot get there. Stage 2 should therefore be: carry the float
+pre-quantisation field for the stamp, derive the normal from its gradient, and
+blend it in weighted by the same falloff that moved the geometry (zero weight at
+the rim, so unedited surroundings keep the bake's exact normal). It must apply
+to the **smoothed region only** — applying it generally would shade the authored
+staircase as if it were smooth and change the shipped look everywhere.
+
+Gate for the ported stage: `tests/test_store.cpp` "surfelize: a staircase
+ramp's normals need the store heightfield blend" asserts the fixture really
+steps (`topOf(20)==20`, `topOf(24)==19`, `topOf(40)==15`) and that the blend
+improves, and the sweep is monotone.

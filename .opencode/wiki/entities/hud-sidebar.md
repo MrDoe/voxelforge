@@ -36,9 +36,10 @@ Toolbox, Materials, Import STL/OBJ) plus the bottom-right AI Assistant.
   reflows it. A staged rotation/move takes over the whole footer from *any*
   section: it is a pending `world.json` write, and burying the Apply button
   inside the Edit section made it easy to lose.
-- **Collapsed** — `Tab` shrinks the sidebar to the rail alone. The footer
-  degrades to a single frame-time figure because there are only ~30 px of
-  content width left.
+- **Collapsed** — `Ctrl+B` shrinks the sidebar to the rail alone. (It was `Tab`
+  until the edit-mode shortcuts landed; `Tab` now switches View/Edit mode.)
+  The footer degrades to a single frame-time figure because there are only
+  ~30 px of content width left.
 - **Horizontal resize** — an 8 px grip at the right edge changes only the
   sidebar width. The left/top/bottom edges stay pinned, the width persists
   for the session while switching sections or collapsing/re-expanding, and
@@ -87,8 +88,8 @@ showing still reaches `m_history`.
 - **Width discipline.** The pane is ≈300 px, ≈256 px at 960×540. Use
   `-1.0f` item widths; hard-coded widths are how the old 3-column Materials and
   2-column Transform tables had to become stacked layouts.
-- **`Tab` is gated on `!WantTextInput`** so the chat's multiline input keeps it
-  as a normal character.
+- **`Tab` and `Ctrl+B` are gated on `!WantTextInput`** so the chat's multiline
+  input keeps them as normal characters.
 
 ## The `edge()` latch
 

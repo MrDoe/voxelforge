@@ -2,7 +2,7 @@
 title: Oriented brush rasterizers — project the reach on the axis, never on world Y
 tags: [live-edit, rasterizer, floating-point, brush, glm, correctness]
 sourceRefs: [src/voxel/editable_world.cpp, src/voxel/editable_world.hpp, src/app/main.cpp, shaders/splat.frag, tests/test_editable.cpp]
-lastReviewed: 2026-09-25
+lastReviewed: 2026-10-03
 ---
 
 # Oriented brush rasterizers
@@ -114,3 +114,73 @@ short-circuit to an explicit single-cell edit rather than be rasterized: see
 `EditableWorld::makeSingleVoxel` and the `perVoxel` branch in
 `App::applyEditLive`. Any new brush shape inherits this: check what the
 tolerances do at minimum size before assuming the shape still means "one voxel".
+
+## 5. Radial falloff is a NAMED CURVE (2026-10-03)
+
+Add, Carve, Delete and Paint take a `FalloffCurve`: `Constant, Sphere, Root,
+Smooth, Linear, Sharp`. All satisfy `f(0)=1`, `f(1)=0`, monotone. The
+half-radius value is how you choose one:
+
+| Curve | `f(q)` | at `q=0.5` |
+|---|---|---|
+| Constant | `1` | 1.00 — flat; the legacy footprint, and flat-bottomed digs |
+| Sphere | `√(1−q²)` | 0.87 — round dome |
+| Root | `√(1−q)` | 0.71 — broad shoulder |
+| Smooth | `1−3q²+2q³` | 0.50 — default |
+| Linear | `1−q` | 0.50 — cone |
+| Sharp | `(1−q)²` | 0.25 — crease |
+
+**Why named curves and not one scalar.** The previous single `0..1` slider had
+a cliff and no usable middle: `falloff <= 0` returned **exactly 1.0**, while
+`falloff = 0.001` was already `((1+cos πq)/2)^1.001` — **0.5 at half radius**.
+A 0.001 nudge jumped from "no taper at all" to "halved", and the rest of the
+travel only steepened toward a spike (`k=3` → **0.125** at half radius). That
+is why the control read as inert and then confusing; the shape was fine, the
+*parameterisation* was not. `Constant` is now a real curve rather than a
+special case, which is what removes the discontinuity.
+
+**Polarity rule for any exponent form:** for a base in `[0,1]`, `u^k` *shrinks*
+as `k` grows, so `k` must **increase** with falloff. Mixing it backwards
+inverts the control — measured: `falloff 0.25` gave `0.00531` at the rim where
+`0.05` gave `0.000694`, i.e. more "falloff" meant *more* influence.
+
+**No exponent form is needed now**, but the cosine base's quadratic rim
+(`f ~ (π²/8)(1−q)²`) was chosen for a second reason that still holds: it gives a
+wide band of rim columns reliably below half a voxel. A profile that drops
+linearly at the rim puts the "does this column emit" decision on a
+floating-point knife edge and the footprint boundary flickers between stamps.
+
+- **Add**: `hf = heightM · f(q)`, fillet `cf = 0.5·min(radiusM, hf)`. The two
+  branches still agree at this column's own `lipY`, which keeps the taper from
+  tearing the surface into rings. A column whose tapered height cannot hold half
+  a voxel emits nothing.
+- **Carve**: **only the far end tapers.** `kCarveTopMargin` is what opens the
+  ground the scoop starts at, and fading it puts the one-cell roof back. A
+  one-cell floor (`max(lengthM·f(q), VOXEL)`) keeps the rim crisp.
+- **Delete/Paint**: `makeSphere` scales the *radius* per cell, so a Delete
+  becomes a graded crater. `Constant` is the original hard ball.
+
+`Constant` is the default for every rasterizer, so every existing call site
+(vf_mcp, tests) is bit-for-bit unchanged; the App defaults its control to
+`Smooth`.
+
+### The mark is smaller than Width, and the panel says so
+
+The visible mark **shrinks below the nominal Width** whenever the curve tapers,
+because the curve reaches zero at the rim. That is inherent, not a bug — but it
+is *confusing* unless stated, so the Edit panel prints the reach at which a
+column still clears half a voxel (`reach 0.42 m (0.75 m footprint)`) next to
+the Width slider, and plots `f(q)` with guides at `q=0.5` and `f=0.5`.
+
+Per-voxel mode bypasses the rasterizers, so a 1-voxel brush still edits exactly
+one cell (`check_per_voxel`).
+
+## 6. The hover preview repeats the curve (bMeta.y)
+
+The tint volume is a *second implementation* of the same shape, so it was taught
+the taper: the **curve index** rides `bMeta.y` (previously unused) of
+`BrushUBO`, set through `SplatPass::setBrush` / `SvoPass::setBrush`, and read by
+`sharedInBrushVolume` via `brushFalloffCurve`. The dome branch scales its
+per-column height and fillet; the cylinder branch maps `[-w, +w]` onto
+`[−w, w·f]` so the near end stays untapered; the ball branch grades the radius.
+`test-preview` is the gate — any change to `inBrushVolume` must run it.

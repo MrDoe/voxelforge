@@ -2400,3 +2400,394 @@ scratch). Verified the committed `CMakeLists.txt` references 110 paths and all
 re-serializes only that subset. My own renders all set `VF_NO_OVERLAY=1`, but
 `gpu_selftest` in CMakeLists runs `--selftest` with neither guard set — worth
 hardening that entry.
+
+## [2026-10-01] ingest | splat base-seal architecture + the silhouette-fade frontier
+
+Follow-up to the user report "splats are white at their edges, they should be
+transparent to the edges". Added [[concepts/splat-base-seal]] and
+[[concepts/splat-edge-fade-measurement]].
+
+Key findings, all measured on the reference view against a 0.18/255 same-binary
+noise floor (`interior` = pixels >=6px inside the splat footprint):
+
+- The opaque base pass (PASS_MODE 4) is not just "the surface colour" - it also
+  stands in for every fragment the depth band rejects behind it, since nothing
+  occluded is ever drawn. So a translucent seal reveals the SKY, never the real
+  background, and the prepass cannot answer "is this fragment supported?"
+  (its depth includes the overhang).
+- Radius-keyed fades (the shipped `VF_SPLAT_SIL_FADE` and my first two attempts)
+  weaken the seal across all 3.4M surfels: interior +3.2 to +7.8/255,
+  blue-dominant = the sky washing in. Radius-keyed bands cannot win.
+- Split into two independent knobs and measured each: the edge window
+  (`VF_SPLAT_EDGE`) costs +3.19/255 neutrally and buys NOTHING on its own
+  (bleed 1.00x) because the base seal still covers the faded band; the seal
+  decline (`VF_SPLAT_SEAL_ALPHA`) is the only thing that dissolves a silhouette
+  (1.28x) and the only thing that costs interior fidelity (+5.6/255, 57%
+  blue-dominant).
+- The seal threshold is not tunable away: 0.65/0.8/0.9 render the SAME frame,
+  and `VF_MICRO=0` does not help (5.96 vs 5.60) - the sub-centimetre grains
+  were the obvious suspect and are innocent. The base pass only sees the single
+  nearest fragment at a pixel.
+- Found and fixed a real bug found on the way: the seal test was reading the
+  WINDOWED alpha, which made the threshold a radius test in disguise.
+
+Shipped DEFAULT OFF (both knobs 0), verified bit-identical to the pre-change
+build: interior 0.1818/255 vs the 0.18 noise floor, bleed 1.00x. Gates:
+test-surfel 4/4, test-visual 3/3, test-unit 8/8 green on an idle GPU.
+The structural fix (a coverage count in the already-allocated D24_S8 stencil,
+whose `recreateDepth` comment names this exact use) is staged, not implemented.
+
+## [2026-10-03] ingest | Smooth brush quality + proportional Add/Carve
+- Diagnosed the Smooth brush as a *despeckler*: its smoothing average was a fixed 3x3, so the brush radius never changed the averaging scale. Measured proof before any edit — `smooth centre sample: top=71 avg=71.000`, i.e. a ridge crest's whole neighbourhood is at its own height, so `lround` returned the current cell and the batch held zero edits at the crest. Every existing smooth test used a 1.5-voxel radius, which is why it survived.
+- Replaced it with a separable Gaussian (sigma = clamp(radiusCells/2, 1, 16 cells)), cap justified by cost (`radius^2 · sigma^2`) rather than taste. Three coupled rules came out of the measurement, not from theory: a **constant** kernel normaliser (valid-weight renormalisation amplifies the pull toward whichever side survived an obstacle — the erosion artifact), a **step cap** replacing a clamp that was dead code but would have clipped the wide kernel back to 1 cell, and a **coverage gate**. The cap had to be raised 2 → 4 because the measured deviation of a brush-sized feature is 2.53 cells.
+- A long-standing unit test caught a bug in my own volume-preservation term: a constant Taubin `mu` makes the gain negative where the brush falloff is small, so the tool *inflated* the rim of every bump into a moat (measured `dev -2.514 × gain -0.516 = +1.30`). Fixed by applying re-inflation as a fraction of the smoothing step, and shipped **off by default**. Recorded as a quirk: the right move was to fix the code, not to relax the test.
+- Gave Add and Carve a radial falloff so the brush has proportional influence. Two measured traps: a decreasing exponent **inverts** the control for a base in [0,1], and a linearly-dropping rim puts the emit decision on a floating-point knife edge. The Add dome's *deliberate* flat top was reversed on purpose, so the header comment was rewritten to stop the next session restoring it.
+- Also shipped: `VF_SMOOTH_PROBE` per-column dumps, a footer readout (columns / widest run / rise) so a sub-voxel relaxation is legible, a Smooth "Preserve volume" checkbox, `VF_EDIT_FALLOFF`, and the preview profile on `BrushUBO.bMeta.y`.
+- Gates: `test-store`, `test-preview`, `test-live-edit` all green; `assets/runtime_edits.vxw` and `assets/world.json` verified byte-identical (md5) after every render run.
+
+## [2026-10-03] ingest | Falloff curves, and what the surfel-normal measurement actually says
+- Replaced the falloff *scalar* with six named curves (`Constant/Sphere/Root/Smooth/Linear/Sharp`). Diagnosed the real complaint — "inert/confusing" — as a parameterisation cliff, not a shape problem: `falloff <= 0` returned exactly 1.0 while `falloff = 0.001` was already 0.5 at half radius, so a 0.001 nudge jumped from "no taper" to "halved" and the rest of the range only steepened toward a spike. `Constant` is now a real curve, which deletes the discontinuity, restores the legacy flat-top Add, and enables flat-bottomed Carve.
+- Threaded the curve through all four rasterizers (Delete/Paint now grade the radius), the panel (curve combo + `f(q)` plot + the effective reach in metres, because the tapered mark is genuinely smaller than Width), the footer, `BrushUBO.bMeta.y` and both shader backends.
+- Also carried the Smooth dead zone into the UI rather than hiding it with a magic floor: a stamp moves `round(|deviation| x strength)` cells, so a 1-cell step (deviation ~0.5) needs **strength 1.0** to move at all. Stated in the panel, because a floor that turned a 0.1-cell intent into a whole cell would be a worse lie.
+- **Surfel normals: measured, then partly fixed.** Found the store path was missing the bake's terrain-heightfield normal stage *entirely* — a parity gap by omission. Ported it against the store's own live tops. Measured on a 1-in-4 staircase ramp: 19.09° mean error with the stage absent, 17.90° at the bake's weight, 16.93° trusting the gradient outright, worst 65.2° in all three. The weight is not the limiting factor, so further tuning is not the fix: the residual is dominated by correct riser normals on a staircase, plus the neighbour pass diluting the blend to ~1 term in 5. Recorded the real fix (derive from the float pre-quantisation relaxed height, weighted by the same falloff, smoothed region only) rather than shipping a guess.
+- Two fixture/instrument bugs found the hard way and recorded: a hand-built octree helper comparing a chunk-local top against a leaf-local `y` (made a "ramp" fixture solid to the ceiling, so a measurement silently measured a flat plane), and a world→cell conversion that dropped the `+WORLD/2` origin so every probe sampled 51.2 m away and read as valid air.
+
+## [2026-10-03] ingest | edit-mode hotkeys + bottom hotkey bar
+
+Added [[concepts/edit-mode-hotkeys]]. User request: `+`/`-` for edit tool size,
+plus `M`=Move `A`=Add `C`=Carve `D`=Delete `S`=Smooth, and a bottom-of-screen
+reminder of the currently available hotkeys.
+
+Findings worth keeping:
+
+- **`+`/`-` already existed** (`GLFW_KEY_EQUAL`/`KP_ADD`, `MINUS`/`KP_SUBTRACT`)
+  and act only while armed; disarmed they are exposure. No change needed - the
+  request was already satisfied, which is worth saying out loud rather than
+  "implementing" it again.
+- **`A`/`D`/`S` were WASD camera keys.** Confirmed with the user: mode keys win
+  while armed, flight keys otherwise. Implemented as
+  `Camera::moveKeysYieldsToBrush`, set every frame (never latched) so disarming
+  restores flight instantly.
+- **`updateCamera` runs BEFORE `handleHotkeys`.** Gating on `m_editActive` alone
+  lets the camera strafe ~6 cm on the press frame before the tool arms. Fixed
+  with a second edge-latch in `updateCamera` over the same keys (Tab included).
+- **The `edge()` latch is stateful and single-read** - reading `edge(C)` once
+  for the arm key and again in the mode loop makes the second call return false
+  forever, so C would never select Carve. Caught it in my own first draft.
+- **Mode switching had to be extracted** from the sidebar's `chooseMode` lambda
+  into `App::chooseEditMode`, because that lambda refuses switches that would
+  orphan a staged rotate/move or race a committing preview. A hotkey writing
+  `m_editBrush` directly would have silently discarded state the panel protects.
+- **`Tab` now toggles edit mode** (user's explicit instruction, which also
+  explained their earlier "(tab)" reference). Tab was the *only* way to collapse
+  the sidebar, so that moved to **`Ctrl+B`** rather than being dropped.
+- **`M` (micro-surfel detail) moved to `U`** with the user's agreement, keeping
+  the feature on a hotkey.
+- **`ImFontAtlas::GetFont` does not exist** in this ImGui version - use
+  `io.FontDefault` or `io.Fonts->Fonts[0]`.
+- **Verification is expensive and partly environmental.** Headless `--shot`
+  omits the ImGui HUD entirely, so the bar needs the X-display route (xwd +
+  ffmpeg + python-xlib XTEST). Two of my own instrument bugs looked like app
+  bugs: `keysym_to_keycode` returns the SAME code for '=' and '0' (must read the
+  server's keyboard map), and vision captions of a 1600px-wide strip hallucinate
+  (used numeric masks: text-cluster count, blue key-label pixels, amber
+  active-chip pixels instead). A misdirected keystroke also closed the app twice
+  mid-verification, invalidating two measurement rounds.
+  resolution; the visual result is explicitly NOT claimed.
+- **Caught three of my own bugs by reading rather than rendering**: `edge()` is
+  single-read (C would never have selected Carve); `updateCamera` runs before
+  `handleHotkeys` (camera strafed on the press frame); and the plate's layout put
+  its lower edge ~3.5 px off-screen while overflowing the right edge at 960x540
+  with a 300 px sidebar (found by replicating the arithmetic in python - no GPU).
+- **A wrong comment, not a wrong line**: I wrote "unmodified B is unbound" for
+  Ctrl+B, but bare B toggles detail normals. The code was right (the Ctrl block
+  runs first and takes the edge, same as Ctrl+1..6 vs bare 1..5); only the
+  comment was wrong. A comment that explains WHY survives a code change
+  silently - the dangerous kind.
+- **Two process failures, both mine, both recorded**: (1) I chained a GPU test
+  group into a background command and it contended with a peer session,
+  voiding THEIR render verdicts; (2) killing a ninja leaf does not stop a
+  backgrounded wrapper - the wrapper just launches the next group. Correct order
+  is wrapper, then ninja, then orphans; and `pgrep -f` matches the invoking
+  shell's own command line.
+- **The corrected measurement rule** (agreed with the peer session): contention
+  invalidates a render measurement in EITHER direction - the same check measured
+  137.9 s PASS and 198.4 s FAIL on one binary - so a contended PASS is not
+  evidence either. Discard and re-run; judge by `pgrep`, never by timing.
+- Added [[concepts/interactive-ui-coverage-gap]]: `drawHud()` runs only from
+  `record_interactive.cpp`, so NO headless gate can see the sidebar or the hotkey
+  bar. Two features landed today with zero coverage for that reason alone. The
+  actionable fix is named in the page (`VF_TEST_PANEL=edit` calling `drawHud()`
+  once) so it is a task, not a regret.
+
+## [2026-10-03] ingest | Contention voids a measurement in BOTH directions; interactive UI is untested
+- Corrected the verification rule in [[concepts/focused-test-groups]]. The old wording ("a red under concurrency is a contention hypothesis") quietly permitted banking a contended PASS, which is the more expensive error because it gets believed later. Measured proof that contention crosses the verdict boundary: the same check at 137.9 s PASS / 198.4 s FAIL on one binary. The rule is now **discard and re-run on a confirmed-quiet machine**; timing is the tell, `pgrep` is the evidence. Fingerprints recorded: unit_store_tests 37→96 s, fast_live_edit_check 23→78 s, unit_surfel_tests 85→150 s, preview_check 136.6→406.8 s.
+- One session voided its own test-preview PASS after the runtime gave it away, and voided a test-surfel 4/4 for the same reason. Three different renderers shared the GPU this session: the user's own interactive app (which left a 40.6 MB runtime_edits.vxw — never touch it), a peer's GPU group chained into a backgrounded command, and a peer's splat-edge measurement app.
+- Recorded a **standing repo-level coverage gap**: `drawHud()` → `drawSidebar()` is called only from `record_interactive.cpp`, so no headless gate can draw the sidebar. Two independent sessions each landed new panel UI with zero automated coverage for that one reason, and neither noticed until both looked. Named the cheap fix (`VF_TEST_PANEL=<section>` + a `drawHud()` call in the shot path) so the gap is a task rather than a regret; until then new panel UI is manually-verified-only.
+- Process lessons from the same round: killing a backgrounded job's `ninja` leaf does not stop it (the wrapper bash starts the next group) — kill wrapper, then ninja, then orphaned children; and `pgrep -f "<pattern>"` inside a kill loop matches the invoking shell's own command line (one session killed its own shell mid-command). Bracket-escape or use exact PIDs.
+- A peer's negative result changed the plan usefully: their interactive app window composites **black** into this X session, so an interactive smoke test can only crash-detect, not verify appearance — the panel appearance check was dropped rather than attempted.
+
+## [2026-10-04] ingest | + / - bound by keycap, not by key position
+
+User report: "+ and - shall change brush size in edit mode" — the second time
+they asked, which was the tell that it did NOT work for them even though the
+code read correctly.
+
+Root cause: **GLFW reports physical X positions, not the symbol on the key.**
+On this machine's German layout (`setxkbmap` = de,pc105):
+
+| keycap | X keycode | XKB name | GLFW reports | old behaviour |
+|---|---|---|---|---|
+| `+` | 35 | AD12 | `GLFW_KEY_RIGHT_BRACKET` | grew splat disks |
+| `-` | 61 | AB10 | `GLFW_KEY_SLASH` | nothing |
+| numpad `+`/`-` | 86/82 | KPAD/KPSU | `KP_ADD`/`KP_SUBTRACT` | worked |
+
+So the only "+"/"-" that worked were the numpad ones. Fixed with
+`keyShowsChar()` (glfwGetKeyName + glfwGetKeyScancode): bind the key whose
+*keycap* is `+`/`-`, wherever the layout puts it. The US `=`/`-` positions are
+still matched, but only when the layout really shows those characters, so a
+German dead key in the `=` position cannot spuriously resize the brush.
+
+Two traps found on the way:
+- **`io.InputQueueCharacters` cannot be read from the hotkey handler.** ImGui
+  fills it from its event queue during `NewFrame()`, which runs in the *render*
+  step of the frame (`record_interactive.cpp`), i.e. AFTER `handleHotkeys`.
+  The first attempt at this fix read the queue there and always saw it empty —
+  it looked correct and did nothing.
+- The German `+` key **also** grows splat disks (it is the `]` position), so one
+  press would have changed brush size and splat size together. The splat handler
+  now yields that key while editing, and only when the layout puts `+` there.
+
+Verified interactively (XTEST, keycode-accurate): Tab → armed;
+German `+` `+` `-` → `brush size -> 19/20/19 vox` with no `splat radius` lines.
+Brush/depth/smooth changes now log at all, which is how the check was possible —
+previously they were silent, which is why the first round could not be verified.
+
+## [2026-10-04] update | Tab is the only View/Edit switch
+
+User report: "Tab should switch between View mode and Edit mode. In View mode,
+other keys than tab should never switch the mode." The uncommitted mode-key
+work let `C`/`A`/`D`/`S`/`M` arm the brush when disarmed (and `C` disarm on a
+second press), so a stray `A`/`D`/`S` while flying dragged the user into Edit
+mode. Fix in `src/app/frame/run_hotkeys.cpp`: the mode keys act only while
+`m_editActive`; arm-on-press and the `C`-disarm special case removed, so Tab is
+the single switch both directions. All five mode-key `edge()` latches are still
+read unconditionally, so arming cannot make a stale latch phantom-fire. UI text
+updated to match: hotkey bar (View mode shows only `Tab → Edit mode`, no mode
+keys), Edit panel hint, sidebar footer tooltip, `AGENTS.md`, and
+[[concepts/edit-mode-hotkeys]].
+
+Verified live (XTEST, `tools/test_inject.py` updated): in View mode `C`/`A`/`M`
+produced zero edit logs and the sidebar strip was pixel-identical; `Tab`
+switched the panel to Edit (0.217 strip diff) and back. A second injection run
+confirmed the armed half: `Tab` arms, `C` selects Carve and a second `C` stays
+armed (no disarm), `A` selects Add, `Tab` disarms. `tools/vf_input.py` gained
+the `tab` keysym; `tools/record_demo.py` now opens/closes the Edit panel with
+`Tab` (both previously assumed `C`).
+
+## [2026-10-04] ingest | decision-driven navigation (vf_nav) + ascii_view
+
+User-driven session: "Start voxelforge. Use make_decision to navigate", then
+"develop a fast decision routine based on make_decision and the ascii view".
+Two tools now live in the workspace: `tools/ascii_view.py` (PNG → ASCII block
+map + luma/blue/green stats; `block_map()` is importable) and `tools/vf_nav.py`
+(`look`/`move`/`scan`/`run`; capture → digest → decide → XTEST move).
+Decisions call the same tev1:0.8b model as the `make_decision` tool via a
+direct POST to Ollama `/v1/systemone`: measured 0.10–0.68 s warm vs ~1.9 s
+through `opencode-rag decide` (node startup). No vision model is in the loop.
+Whole runs: 6 stop-heavy steps 25.8 s, 6 forward-heavy steps 37.2 s; after two
+`forward`s through a dark close-up the camera emerged over open water (blue
+20–38 %) and the model then chose `forward` steadily. Gotchas filed as quirks:
+`wmctrl -i -a` before x11grab (a stacked terminal was captured as a "dark
+frame" for minutes), tev1 stop-bias + anti-stuck guard. Also measured: a plain
+interactive launch with `VF_OVERLAY_PATH=<copy>` left the copy byte-identical
+(mtime unchanged) over ~17 min — the rewrite-on-load shrink did not fire
+without an edit/save trigger. See [[concepts/decision-driven-navigation]].
+
+## [2026-10-04] ingest | Tower/cabin rebuilds + nature layers + the surfel thin-rule roof bug
+Rebuilt `hamlet_tower` (hollow round watchtower: arched doorway, six glazed
+windows, wooden decks, continuous stone spiral stair on a central newel,
+corbelled head, crenellated parapet, solid shingled spire, emissive
+lanterns, interior props; ~92k voxels) and `CabinPart1` (log cabin: stone
+foundation, stacked logs with chinking + corner end grain, gable roof with
+rafters/coursed shingles/moss, chimney, porch, woodpile, lit hearth,
+interior furniture; ~36k voxels) via new scripts `tools/hamlet_tower_v2.py`
+/ `tools/cabin_v2.py`, plus two new layers `hamlet_nature` (bushes, ferns,
+flowers, mushrooms, boulders, logs, stumps, tufts, canoe, standing stones)
+and `hamlet_forest` (7 deciduous trees) via `tools/hamlet_nature.py`.
+Root-caused the "sparse field of splats" roof report: the surfelizer's
+thin-structure rule classified 2–3 cell shells (cone, roof skin) as thin and
+emitted 5.5–7.5 cm ellipses that cannot seal staircase steps; fixed by
+authoring both roofs as solid/thick masses (50 % → 3 % thin; cabin 43 % →
+2 %). New page [[concepts/surfel-thin-rule]]; quirks filed for the rule and
+for `write_object` preserving manifest placement.
+
+## [2026-10-04] lint | visual_check house sky-probe failure is pre-existing
+`test-visual` came back 2/3 (gpu_selftest + fast_visual_check pass); the
+failure is `visual_check` -> "house: sky probe not blue-dominant" (top 1/8
+strip 41.9 % blue, needs >50 %). A/B with the committed layer file
+(`git show HEAD:assets/hamlet_tower.vxw`) renders 42.38 % — the same failure —
+so the rebuilt tower (~0.5 pt wider plinth) is not the cause. With the tower
+disabled entirely the strip is 49.92 %, i.e. still below the threshold: the
+probe is a composition/camera issue (tower shaft + conifers fill the strip;
+the tower top is above the frame, so tower height is irrelevant). Hero 96 %
+and water 100 % pass. Quirk filed; the fix belongs to the camera/probe, not
+the content.
+
+## [2026-10-04] ingest | Rebuilds re-filed as new layers (hamlet_cabin, hamlet_tower_v2)
+Per user request the rebuilt cabin/tower now live in NEW layer files and the
+originals are disabled instead of overwritten: `assets/CabinPart1.vxw` and
+`assets/hamlet_tower.vxw` were restored to their committed content
+(`git checkout --`) and set `enabled:false`; `tools/cabin_v2.py` now writes
+`hamlet_cabin.vxw` (36,367 records) and `tools/hamlet_tower_v2.py` writes
+`hamlet_tower_v2.vxw` (86,344 records, pos [-8.65,-0.80,-7.40] copied from
+the old tower entry). `hamlet_cabin` was moved to the first object-layer slot
+so visual_check's ownership subject (first enabled object layer) stays the
+cabin. This also makes both rebuilds visible as new rows in the sidebar World
+list.
+
+## [2026-10-04] ingest | Dense forest + tower moved into it
+`tools/hamlet_nature.py` now samples the terrain from `assets/heightmap.png`
+for every item (no more hardcoded ground heights) and grows a **dense
+forest**: 26 deciduous trees (was 8) — a ring around a clearing at (15, 14)
+plus west/north/south-east belts, with 60 forest-floor items (ferns, bushes,
+mushrooms) scattered under the canopy; `hamlet_forest` is now 96,812 voxels,
+`hamlet_nature` 11,182. `hamlet_tower_v2` moved from (11.25, 10.5) into the
+clearing via `pos [-4.90, -0.51, -3.90]` (base sits on terrain -0.11).
+Placement guards: skip keep-out (x -3..3, z -1..6) and terrain < -0.5 m;
+overlap checks now show 0 forest/tower cells and 4 nature/tower cells (a
+flower patch edge, invisible). Verified with probes (shaft/deck/cone solid,
+interior air) and the forest_tower render — the tower rises out of the
+canopy. Position/enabled-layer quirks updated to the new state.
+
+## [2026-10-04] ingest | Denser forest, gravel path, forest-floor litter
+`tools/hamlet_nature.py`: trees 26 -> **38** (second ring + west/north infill,
+guards: keep-out, underwater, tower clearing r 4.4 m, >=2.6 m trunk spacing);
+159 forest-floor items (5 per tree); dark moss/leaf-litter patches flush with
+the terrain under the canopy (so the forest floor reads darker; tree shadows
+from the CPU shadow bake do the rest); and a **gravel path** (~10.7k cells)
+following two polylines - a loop around the tower clearing, a tail north and
+a branch west to the standing stones - routed around the cabin/garden/boat
+boxes, the tower plinth and hard props, flush with the terrain (mean +0.04 m).
+New `tools/gen_gravel.py` writes a tileable pebble texture; world.json binds
+it as mat 15 (`textures/gravel.png`, 0.9 m/tile; path cells keep mat 5 +
+tex=15, so nothing emissive). Also bound `textures/stone_plaster.png` at
+mat 20 in the same write (replaces proc_plaster; asset-fixer session supplied
+the file). Forest 155,352 voxels, nature 29,991.
+
+## [2026-10-04] ingest | Soil watermark stripped; Designer textures imported
+`assets/textures/sand_highres.png` (bound to mat 2 "soil") carried a "Made
+with AI" pill badge at y 9–50 / x 858–1013. `strip_stamp` detection missed it
+(blurred-luma high-pass peaked at 0.094–0.118, under the 0.12 threshold, and
+even 0.06 found nothing) — the conservative fallback box is what removed it;
+`check_texture` corner share went 56% → 2%. The pre-existing seam (1.50x) is
+untouched. Three more user drops from `~/Downloads` were prepared and placed:
+`gravel.png` (user's Designer.png, replaces the world-builder's generated
+placeholder; mat 15, 0.9 m/tile), `stone_plaster.png` (mat 20, replaces
+proc_plaster) and `linen_designer.png` (Designer(2).png; woven ~6.5 px
+period; no binding). All PASS `check_texture`. A referenced `linen.png` does
+not exist on disk yet. See [[concepts/texture-conformance]].
+
+## [2026-10-04] ingest | Second wood, cabin->tower path, cobblestone river street
+`tools/hamlet_nature.py`: new species in `KINDS` (beech, pine with layered
+tiers, willow, poplar, alder, ancient_oak) and a second layer
+`hamlet_forest2` (17 large trees, 80,715 voxels; two layers keep each write
+under the 200k cap). Tree placement now also skips the cabin/garden
+footprints. Path reroute: the gravel way now leads **from the cabin door
+(5.2,14.8) to the tower door (13.0,12.0)** - nearest gravel cell 0.14 m from
+the door point - then the tower-clearing loop, a north tail, a branch to the
+standing stones, and a ring->street connector. New **cobblestone street**
+along the river (tex=14 -> `textures/light_rock.png`, 0.8 m/tile, bound in
+world.json): 4,949 cells, world x -11.2..22.8, z 6.2..12.8, wider (r 1.0-1.3
+m) than the gravel path and with no verge plants. Guard updates: tower
+clearance 3.3 -> 2.95 m so the path can reach the door, cabin box z -> 14.5,
+canoe obstacle 2.6 -> 1.8. nature 37,426 / forest 124,061 / forest2 80,715
+voxels; no keep-out cells; forest2/tower overlap 0.
+
+## [2026-10-06] ingest | Enclosed-space shading and light sources
+Caves read as open sky because `skyIrradiance` + the IBL cubemap carry **no**
+occlusion term and baked AO only reaches 0.6 m. Added a bit-8 one-ray
+enclosure test (`skyVisibilitySvo`/`skyVisibilitySPlat`) that scales sky
+ambient to 0.16 and IBL to 0.04 in enclosed space, plus an albedo-scaled cave
+fill — without the fill the `house` shot went to 7.21 % black-in-silhouette and
+failed the 5 % gate; with it, 4.26 %. The splat sky test uses `objDist` only
+(`heightAt` calls every point below the terrain surface solid, so hillside
+interiors read as underground); the per-light shadow test does march terrain.
+New light-source lane: top-level `"lights"` in `world.json`, parsed by
+`worldfile::loadLightManifest` into a 528 B std140 UBO at binding 25 and
+consumed by `applyLights()` in `common_base.glsl` for both backends. Measured
+with one cabin lamp: mean luma 42 → 87, pixels < 30 44.9 % → 11.0 %, splat↔SVO
+delta unchanged (-16.7 → -14.3). First light test was a silent no-op on the
+splat path because `setLights()` ran before `m_splatPass.init()`; the single
+writer `App::uploadLightSources()` now runs after every pass init.
+`test-unit`/`test-app` green; `test-visual` black-in-silhouette green. The two
+`visual_check` sky-probe failures (house, water) are **pre-existing**: they
+reproduce identically with `VF_RENDER_FLAGS=255`, i.e. with the new shading
+disabled, and come from the current scene content, not this change.
+
+## [2026-10-06] ingest | The visual_check sky probe is a camera + content assertion
+Re-measured the two `visual_check` sky-probe failures (house, water)
+independently of the shading session that first hit them, with one
+`--shotlist` process per configuration at 480x270 (`VF_NO_OVERLAY=1`,
+`VF_OVERLAY_PATH=/tmp/opencode/skyprobe/...`). Default vs the bit-exact
+off-state `VF_RENDER_FLAGS=255`: hero 100.0 % / 100.0 % PASS, house 44.0 % /
+44.7 % FAIL, water 45.2 % / 45.2 % FAIL — the whole shading change is worth
+**+0.6 pp** on house and **0.0 pp** on water against a 6 pp shortfall, so the
+probe is not measuring shading. It is not even measuring sky: the assertion is
+`b >= r` for >50 % of the **whole top eighth** (top 33 rows, 15840 px), a
+weaker test than the `is_sky` classifier used for coverage 20 lines above it,
+so it really asks "is the top of this camera's frame mostly blue". Classified
+those strips instead of captioning them: house 46.1 % warm geometry (the
+hillside behind the cabin) + 9.8 % green + 22.3 % blue-but-not-strict +
+21.7 % strict sky; water 41.0 % warm (far bank) + 13.8 % green + 34.0 %
+blue-but-not-strict + 11.2 % strict sky; hero 97.6 % strict sky. Filed as
+[[concepts/sky-probe-is-a-camera-assertion]] with the two honest fixes
+(gate the probe on a real sky floor, or re-aim the shots) and the cheap
+refutation rule — take the off-state control before blaming a lighting change,
+because the escape hatch makes that refutation one render. Same run also
+confirms the direction of the peer's black-in-silhouette claim: house 4.29 %
+default vs 2.92 % off (they measured 4.26 % / 2.70 %; drift = the hamlet
+content commits since).
+
+## [2026-10-06] lint | Wiki link check: 42/42 resolve; the one dangling link is closed by decision
+Ran a full wiki-link resolution pass over all 43 pages (double-bracket links,
+script at `/tmp/opencode/wiki_lint.py`, outside the repo). Result: **zero
+broken links outside `log.md`, zero orphan pages, zero `sourceRefs` paths that
+no longer exist.**
+
+The single dangling target is `[[concepts/water-flooding]]`, referenced from
+historical entries here (2026-09-15 and 2026-09-17) and it is **accepted, not a
+defect**: the 2026-09-17 rework deleted `App::floodNewlyDug` and the per-column
+water bookkeeping entirely, and `concepts/water-plane` replaced that page. The
+link may not be repaired by inventing a `water-flooding` page — that concept no
+longer exists in the code, so a page about it would be a page describing a
+removed design. `log.md` is append-only, so the historical references stay.
+Closing this here so future lint passes do not re-open it as new work (this is
+the fifth time it has been re-reported: log.md:754, :873, :1901, :2108, and now
+here — a lint finding nobody closed was re-discovered every few days).
+
+Caveat on the staleness half of the lint: "sourceRefs newer than the page"
+currently flags **35 of 43 pages**, which is noise, not signal — the working
+tree has uncommitted edits across `src/`, `shaders/` and `assets/` from three
+concurrent sessions, so nearly every source file has a newer mtime than any
+page. That check is only meaningful on a clean tree, or when re-based against
+git commit dates instead of mtimes. Left as-is: it is a heuristic, and this
+entry is the note.
+
+## 2026-10-06 ingest | sun-direction-pipeline — kSunDir production & consumers
+New page `concepts/sun-direction-pipeline.md`: maps the full sun direction
+lane from CLI `--sun` / manifest `"sun"` block through `App::m_sunDir` and
+the push constant to every shader consumer (skyColor, shadeTerrain/shadeSurfel,
+shadowMarch, water glint, fog, sky irradiance, SSR). Includes the
+reference-shot gate warning (a `"sun"` key shifts every baseline) and the
+loadSunManifest trap-and-fix (half-written block used to silently park the
+sun at azim 0; now requires gotElev && gotAzim, pinned by test_worldfile.cpp:785).
+Cross-linked from index.md concepts list + navigation.
+
+## 2026-10-06 ingest | overlay-silent-write-trap — harness can destroy ignored state
+New page `concepts/overlay-silent-write-trap.md`: the VF_NO_OVERLAY-vs-VF_OVERLAY_PATH
+data-loss trap. VF_NO_OVERLAY=1 suppresses only the load; stamping renders still write
+assets/runtime_edits.vxw unless VF_OVERLAY_PATH is set. The 2026-10-06 64MB→980KB loss
+as the positive firing test. Fix landed (render() defaults VF_OVERLAY_PATH into tmp),
+env-level proof verified, test-live-edit proof still owed. Cross-linked from index.md
+concepts list + navigation.

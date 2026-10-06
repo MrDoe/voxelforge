@@ -2,7 +2,7 @@
 title: Focused test groups
 tags: [testing, ctest, cmake, workflow]
 sourceRefs: [CMakeLists.txt, tests/group_gate.py, docs/testing.md, AGENTS.md]
-lastReviewed: 2026-09-26
+lastReviewed: 2026-10-03
 ---
 
 > **Post-split (2026-09-26).** `src/app` was split per subsystem; `main.cpp` is
@@ -146,8 +146,41 @@ the summary statistics — pick a gate statistic accordingly, and calibrate the 
 from the control rather than picking a round number.
 
 **Run groups sequentially on a shared GPU.** A `test-live-edit` red was traced to four
-concurrent instances competing for the device; alone it was 3/3. A red that appears
-only under concurrency is a contention hypothesis until proven otherwise.
+concurrent instances competing for the device; alone it was 3/3.
+
+**Refined 2026-10-03 — a contended measurement is VOID, not "provisionally green".**
+The earlier wording ("a red under concurrency is a contention hypothesis") quietly
+allowed a contended PASS to be banked, which is the more expensive error: it gets
+believed later. Contention flips a pixel-diff verdict in **either** direction — the
+same check has measured **137.9 s PASS vs 198.4 s FAIL** on one binary — so the rule is
+*discard and re-run on a confirmed-quiet machine*, never "distrust failures".
+
+Timing is the **tell**, never the evidence: judge by `pgrep`, not by whether a number
+looks fast. Measured fingerprints (uncontended → contended):
+`unit_store_tests` 37 → 96 s, `fast_live_edit_check` 23 → 78 s,
+`unit_surfel_tests` ~85 → 150 s, `preview_check` 136.6 → 406.8 s.
+
+One session voided its own `test-preview` PASS only after the runtime gave it away, and
+voided a `test-surfel` 4/4 for the same reason. Two renderers coexist easily in this
+repo — a bare interactive `./build/voxelforge` (possibly the **user's**, holding a large
+`assets/runtime_edits.vxw`; never kill it, never `rm` that overlay) or another agent's
+GPU group chained into a backgrounded command. Always run
+`pgrep -af "build/[v]oxelforge"` immediately before trusting a diff, and always
+`VF_OVERLAY_PATH=/tmp/…` for scratch renders.
+
+**Known gap: interactive UI has no automated coverage at all.**
+`App::drawHud()` → `drawSidebar()` is called from `record_interactive.cpp` **only**, so
+no headless gate (`--shot`/`--shotlist`, hence every `test-<group>`) ever draws the
+sidebar or any panel. Two independent sessions each landed new panel UI on 2026-10-03
+(the brush Falloff curve combo + `f(q)` plot; the edit-mode hotkey bar) with zero
+coverage for this single reason. A build error is caught; an ImGui assertion in panel
+code is not — and this repo has already been bitten by exactly that (an unguarded
+`TableSetColumnIndex` after a clipped `BeginTable` segfaulted at 960×540). Reaching a
+non-default panel section headlessly is also not possible as it stands (no `xdotool`;
+the default section is `Panel::World`). Cheapest fix, if wanted: a `VF_TEST_PANEL=<section>`
+hook that sets `m_panel` and lets the shot path call `drawHud()` once. Until then, treat
+new panel/overlay UI as **manually-verified-only** and say so rather than implying it is
+covered.
 
 The CMake target sets `VOXELFORGE_TEST_GROUPS=<group>` and selects the matching
 CTest label. Individual entries retain `ctest -N`/`ctest -L` discoverability,

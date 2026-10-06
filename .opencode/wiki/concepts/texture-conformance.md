@@ -2,7 +2,7 @@
 title: Texture conformance (the drop-in gate)
 tags: [textures, tooling, conformance, ai, workflow]
 sourceRefs: [tools/check_texture.py, tools/strip_stamp.py, tools/prepare_texture.py, tools/gen_textures.py, tools/fetch_textures.py, tests/texture_check.py]
-lastReviewed: 2026-09-19
+lastReviewed: 2026-10-04
 ---
 
 # Texture conformance
@@ -57,6 +57,19 @@ Also worth knowing:
 - **Microsoft Copilot stamps a visible watermark in the top-right corner**
   (x≈860–1015, y≈0–58 on 1024², plus C2PA `com.microsoft.invismark.1`
   metadata). All 7 Copilot candidates had it; the Gemini set did not.
+- **The "Made with AI" white-pill badge (Microsoft Designer/Meta style)
+  defeats the detector on bright textures.** Measured 2026-10-04 on
+  `assets/textures/sand_highres.png` (bound to mat 2 "soil"): the pill sat at
+  y 9–50, x 858–1013 on 1024², but the blur-20/blur-80 high-pass peaked at
+  only 0.09–0.12, so `detect_stamp` reported fallback-only even at threshold
+  0.06 — bright sand has no contrast against a white pill. What removes it is
+  the tool's **conservative fallback box** (`y < 0.075h`, `x > 0.82w`,
+  unioned by default): never run `strip_stamp` with `--no-fallback`, and
+  treat "fallback-only" as "still removed the corner". The guard that catches
+  this class is `check_texture.py`'s corner metric — corner bright share 56%
+  → 2% after the strip (threshold 25%). To locate such a badge without
+  vision, scan for a wide, flat, near-uniform bright component (luma > 0.93,
+  width > 40 px, height < 80 px, area > 1500 px).
 - Some generators emit a **pre-tiled** image: one candidate had an exact
   512² period repeated 2×2 into 1024². Detect with normalized
   autocorrelation and extract the true tile — but check it: the repeat was

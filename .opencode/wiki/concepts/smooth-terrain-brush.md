@@ -2,7 +2,7 @@
 title: Smooth brush (terrain + object surfaces)
 tags: [live-edit, terrain, object, chunk-store, smoothing, brush, surfels, undo, water]
 sourceRefs: [src/voxel/chunk_store.cpp, src/voxel/chunk_store.hpp, src/voxel/live_editor.cpp, src/voxel/live_editor.hpp, src/app/main.cpp, tests/test_store.cpp, tests/live_edit_check.py, docs/rendering.md, docs/testing.md, .opencode/wiki/entities/live-edit-brush.md]
-lastReviewed: 2026-09-25
+lastReviewed: 2026-10-03
 ---
 
 # Smooth brush (terrain + object surfaces)
@@ -29,6 +29,85 @@ reason about.
 6. emits `Clear` edits when lowering or `Set` edits with
    `StoreEdit::terrain = true` when raising. A changed span that contains an
    object is skipped, so sculpting a hillside cannot swallow a tree.
+
+> **Superseded 2026-10-03 (steps 3 and 5).** Steps 3 and 5 above describe the
+> kernel that made the tool feel broken; see "Radius-scaled kernel" below for
+> what replaced them and why. The falloff (step 4), the ownership rules
+> (steps 2 and 6) and the whole object-pick section are unchanged.
+
+## Radius-scaled kernel (2026-10-03)
+
+The old kernel averaged a **fixed 3×3 box**. `radiusCells` entered only the
+footprint mask and the falloff, never the averaging scale, so a 1 m brush
+averaged exactly what a 1-voxel brush averaged: the brush was a *despeckler*,
+not a *smoother*. Measured on a synthetic 6-cell ridge with a 1 m brush:
+
+```
+smooth centre sample: top=71 avg=71.000
+```
+
+The crest's entire 3×3 ring sits at its own height, `lround` returns the
+current cell, and the batch contains **no edit at the crest at all**. It
+survived because every smooth test used `VOXEL * 1.5f` (a 1.5-voxel radius) —
+a wide brush had never been exercised.
+
+The replacement is a **separable Gaussian**, `sigma = clamp(radiusCells/2, 1,
+kSmoothMaxSigmaCells=16)`, truncated at `2*sigma`. Blurring along z once per
+column into `zSum`/`zWeight` and along x per target is numerically identical to
+the 2-D kernel at `(2R+1)` instead of `(2R+1)²` multiply-adds.
+
+The cap is the contract, not an optimisation: a wide brush is a **wide
+footprint over a capped *local* kernel**. Uncapped, cost grows as
+`radius² · sigma²` (~50 M multiply-adds at 6 m). Pinned by
+`test_store.cpp` "the smooth kernel stops growing past the sigma cap": a 3.2 m
+and a 6 m brush relax the centre column identically.
+
+### Three coupled rules
+
+1. **Divide by the kernel's constant total weight**, not by the valid-sample
+   weight. Renormalising by a smaller denominator *amplifies* the pull toward
+   whichever side survived an obstacle — that is the terrain-erodes-next-to-a-
+   building artifact. A fixed denominator makes an obstacle behave as a mirror
+   contributing nothing.
+2. **The old `min`/`max` clamp was dead code** (`strength·falloff ∈ [0,1]`
+   keeps the relaxed value inside `[min,max]`) and only bit when samples were
+   missing — precisely when it did damage, snapping a column toward its single
+   surviving neighbour. It is replaced by a per-stamp **step cap**. The cap must
+   clear the deviation of a *brush-sized* feature: measured at **2.53 cells**,
+   so a cap of 2 silently halved every stamp (and broke the spike *and* pit
+   fixtures). It is now `kSmoothStepCapCells = 4` (0.4 m/stamp).
+3. **Coverage gate**: a column whose kernel window is less than
+   `kSmoothMinCoverage` (0.6) valid terrain is skipped entirely.
+
+### Volume preservation — off by default
+
+`preserveVolume` softens each stamp by `kSmoothTaubinReinflate` (0.47×) so a
+held brush shrinks relief less. It is **OFF by default** and the reason is a
+bug it was found by: Taubin's pair must be applied as a **fraction of the
+smoothing step that column received**. With a constant `mu`, `gain = s +
+mu(1-s)` goes **negative** where the brush falloff is small (`s=0.009`,
+`mu=-0.53` → `gain=-0.516`) and *inverts*: measured `dev -2.514 × gain -0.516 =
++1.30`, a 1-cell **raise** on the column that should have been cut — a moat
+ringing every smoothed bump. `gain = s·(1-r)` is bounded to `[0,s]` and can
+only soften a relaxation, never reverse it.
+
+### Rounding is a knife edge on small fixtures
+
+The spike fixture's neighbour set contains an object column (an invalid
+sample), so coverage is 0.940 and the mirror rule pulls the target back toward
+the current height by design: `dev -2.335 → relaxed 4.665`, which rounds **up**.
+The old 3×3 kernel gave 4.46 and rounded down. That 0.2-cell difference across
+a `.5` boundary is why the spike test now asserts *convergence* (two stamps
+reach flat) rather than an exact single-stamp target.
+
+### Reading the numbers
+
+`VF_SMOOTH_PROBE=1` dumps every planned column (`top`, `deviation`, coverage,
+falloff, gain, `target`) plus the final edit list; `VF_TRACE=1` adds the
+centre sample and a batch summary. A relaxation that moved every column by less
+than a voxel is invisible in a render, so the footer readout
+(`N col, D vox run, +R up`) is the difference between "legible" and "broken".
+The preview tint cannot supply this — it only marks surfels that already exist.
 
 ## Object pick
 
