@@ -2854,6 +2854,17 @@ so the edit is inside the layer list or the textures table); a stray
 Attribution recorded as UNKNOWN on purpose: if a later session believes the
 shading session owns it, it may feel free to clobber it.
 
+**Attribution finalised (later the same session).** Re-verified md5
+`dac9f0592bd8d408879b269676e2109e`, valid JSON, still ` M`, byte-identical to
+what was found. The framing is now **settled in state, unresolved in
+ownership** — the session that destroyed it never saw the author, so there is
+nothing to resolve it with. Do not upgrade it to an attribution and do not
+read it as still-in-progress. The load-bearing lesson is the scratch copy, not
+the hashing: the restore would NOT have worked without the
+`cp -r assets/. /tmp/opencode/scene/` made minutes earlier for an UNRELATED
+reason. The md5 verified the recovery; it did not achieve it. Prevention is
+now "copy the tree aside before you touch it", not "compare hashes".
+
 Also corrected in concepts/sun-direction-pipeline: the earlier "no moon/night
 code exists / the worldfile.hpp comment overstates" caveat is STALE and removed —
 the night lane is real (`nightFactor`, `sunFade`, `moonDir`, `kMoonCol`,
