@@ -2817,3 +2817,49 @@ framing went into concepts/sky-probe-is-a-camera-assertion, the elevation and
 silhouette delta here. Also pinned by the day/night work: elev -14/azim 96 is
 a valid night (below-horizon elevation deliberately not clamped), and a
 half-written `"sun"` block now returns false with a warn.
+
+## 2026-10-06 ingest | heightfield-blindness-enclosure + uncommitted-edit-is-not-yours
+
+Two new concept pages.
+
+**concepts/heightfield-blindness-enclosure** — the splat backend had two
+independent occlusion blind spots, both fixed in-tree, both of which returned
+"no-op" rather than an error. (a) Enclosure: `aoShEnclosure` was pinned to 0
+for a carved terrain cave because the object volume cannot see terrain that was
+carved away AND the bake skips the shadow march on backfacing surfels
+(`sh=1`), which is most cave walls — so the one field that knew about the carve
+was forced to 1 exactly where it was needed. 45.26 ON vs 45.84 OFF (a no-op)
+became 36.51 ON vs 45.84 OFF, with the OFF path byte-identical so
+`VF_RENDER_FLAGS=255` is now honest. The fix adds a heightfield term to
+`skyVisibilitySplat` testing only the START column (a heightfield has no
+overhangs, so terrain cannot hide a ray that already left the surface) with a
+0.35 m clearance, and switches `shadeSurfel` to the RAW baked shadow `shRaw`
+rather than the caller's gated one. (b) Per-light march: a lamp inside its own
+carved cave moved the splat frame by 0.00 mean luma while SVO moved 0.51,
+because underground `sHf` is negative at every tap so the first tap returned 0.
+Fixed by skipping the terrain tap while BOTH endpoints are below their local
+column (a segment that never crosses the surface cannot be crossing terrain);
+the step size switches to the object field alone so the march still arrives.
+Lamp at a verified in-cavity point: splat 36.51 -> 54.12 (warm% 0 -> 17.1),
+SVO 48.58 -> 100.85 (warm% 0 -> 77.7); an out-of-range lamp changes nothing in
+either. OPEN: magnitudes still differ (splat +17.6 vs SVO +52.3 mean luma).
+The page states the pattern — the bug class is a test whose BLIND case returns
+the same value as its PASS case.
+
+**concepts/uncommitted-edit-is-not-yours** — a leading ` M` means the file is
+not yours to restore. `assets/world.json` (md5 `dac9f059`) was a pre-existing
+uncommitted edit by an unknown session (keys are only version/layers/textures,
+so the edit is inside the layer list or the textures table); a stray
+`git checkout` destroyed it and it was recovered byte-exact from a scratch copy.
+Attribution recorded as UNKNOWN on purpose: if a later session believes the
+shading session owns it, it may feel free to clobber it.
+
+Also corrected in concepts/sun-direction-pipeline: the earlier "no moon/night
+code exists / the worldfile.hpp comment overstates" caveat is STALE and removed —
+the night lane is real (`nightFactor`, `sunFade`, `moonDir`, `kMoonCol`,
+`moonLight`, `applyNight` in common_base.glsl, called from both sky variants
+with `moonLight` reaching both splat paths). Recorded verbatim: `kMoonCol` was
+0.62 first, gave mean luma 46 and read as dusk — 0.14 is settled, do not
+"restore" 0.62. And a provenance note: assets/world.json is SUNLESS, so the
+A/B arms came from CLI `--sun` flags, not a manifest edit; reference shots are
+unchanged.

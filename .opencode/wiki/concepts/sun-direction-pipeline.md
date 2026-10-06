@@ -35,8 +35,8 @@ any sun-related shader work.
 2. **Manifest `"sun": {elev, azim}` block** in `world.json` — used when
    `--sun` is NOT given. Parsed by `worldfile::loadSunManifest`
    (`src/voxel/worldfile.cpp:649`). Non-finite values fall back to 34/238.
-   The `worldfile.hpp:152` comment says *"the shader derives the moon from it"*
-   but **no moon/night code exists in `shaders/`** — that comment overstates.
+   The `worldfile.hpp:152` comment about the shader deriving the moon is now
+   accurate — see the night lane below.
    **Trap-and-fix (resolved):** `loadSunManifest` used to return `true` on a
    half-written `"sun"` block, leaving the missing key at `0.000` — the
    `isfinite` guard never caught the caller's 0 seed, so `{"sun":{"elev":12}}`
@@ -46,6 +46,26 @@ any sun-related shader work.
    [[concepts/sky-probe-is-a-camera-assertion]] for the full trap-and-fix story.
 
 3. **Hardcoded default** — 34° / 238° when neither source is present.
+
+**Provenance note (2026-10-06):** `assets/world.json` is **sunless** — its keys
+are `layers` / `textures` / `version` only. No `"sun"` key was authored, so
+every reference shot still renders at the CLI default 34/238 and their coverage
+/ black-in-silhouette numbers are unchanged. The A/B arms measured below
+therefore came from **CLI `--sun` flags**, not from a manifest edit — nothing
+about the shipped scene moved.
+
+### Night lane (landed 2026-10-06)
+
+The night path is real and lives in `shaders/common_base.glsl`:
+`nightFactor()` (526), `sunFade()` (533), `moonDir()` (546), `kMoonCol` (551),
+`moonLight()` (557), `applyNight()` (569). `applyNight` is called from **both**
+sky variants (`skyColor` 646, `skyColorFast` 679) and `moonLight` reaches both
+splat paths, so `worldfile.hpp:152` and `test_worldfile.cpp:804` are accurate
+about the moon being derived from the sun.
+
+> **Caution — do not "restore" `kMoonCol = 0.62`.** That value was tried first
+> and produced mean luma 46, which read as dusk rather than night.
+> **0.14 is the settled value.**
 
 ### Direction computation (`App::run`, `src/app/frame/run.cpp:48-60`)
 
@@ -237,10 +257,9 @@ assertion-is-wrong cases.
 
 For the day/night cycle work (George, shading engineer):
 
-- **No moon/night code exists.** `grep -ri moon shaders/` = 0 hits. The
-  `worldfile.hpp:152` comment is aspirational.
-- `skyColor()` has a `lowSun` term but no night path — no stars, no moon disc,
-  no dark sky gradient.
+- **The night lane has landed** — see the Night lane section above for the
+  real function set. `moonLight()` reaches both splat paths, and the SVO twin
+  adds `+ moonLight(n, 1.0)` to its ambient.
 - The `m_animTime` pattern (advance only interactively) is the model for a
   time-of-day clock.
 - All consumers listed above read `kSunDir` (or `pc.sunDir`), so a day/night
