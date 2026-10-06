@@ -51,15 +51,21 @@ default rather than the exception. Also: CMakeLists' `gpu_selftest` runs
 Safe today because `--selftest` never stamps — an accident waiting for a
 feature, not a considered guard.
 
-**Status (2026-10-06):** both fixes landed. `render()` defaults
-`VF_OVERLAY_PATH` into tmp (env-level + real-suite verified). CMakeLists
-`gpu_selftest` now pins BOTH vars (`VF_NO_OVERLAY=1` +
-`VF_OVERLAY_PATH=…/build/gpu_selftest_runtime_edits.vxw`); cmake reconfigure
-rc=0, `VOXELFORGE_TEST_GROUPS=visual,surfel ctest -R gpu_selftest` → 100 %
-passed, `assets/runtime_edits.vxw` md5 unchanged. Guard installed and
-confirmed plumbed; the destructive path remains untested because
-`--selftest` has no stamp path. Note: bare `ctest -R gpu_selftest` SKIPS
-(group gate, exit 77) — `VOXELFORGE_TEST_GROUPS` must be set.
+**Status (2026-10-06) — three verification levels.** `test-live-edit` run
+end to end leaves `assets/runtime_edits.vxw` byte-identical (md5 `a18739a7`,
+980,100 B before AND after): **the stamping path is FIXED AND PROVEN**, which
+was the destructive case. `CMakeLists.txt`'s `gpu_selftest` now pins both vars
+(`VF_NO_OVERLAY=1` + `VF_OVERLAY_PATH=…/build/gpu_selftest_runtime_edits.vxw`),
+cmake reconfigure rc=0 and `VOXELFORGE_TEST_GROUPS=visual,surfel ctest -R
+gpu_selftest` → 100 % passed — but that guard is only **plumbed, not proven**,
+because `--selftest` has no stamp path to protect. Note: bare `ctest -R
+gpu_selftest` SKIPS (group gate, exit 77) — `VOXELFORGE_TEST_GROUPS` must be
+set.
+
+**Corollary from the day/night A/B:** a *copied* `assets/` still ships
+`runtime_edits.vxw`, so a render against the copy rewrites the copy's overlay
+unless `VF_OVERLAY_PATH` is set per-arm. The in-tree `render()` default covers
+the test suite; a hand-rolled A/B script must set it itself.
 
 **Status (2026-10-06):** the `render()` default-VF_OVERLAY_PATH fix is
 landed and verified — env-level (fake binary across four cases: default

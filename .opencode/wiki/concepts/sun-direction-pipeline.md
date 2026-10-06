@@ -164,6 +164,75 @@ The baked shadow verdict is stored in `Surfel::bent_sh.w` and the AO in
 > (`visual_check.py`, `live_edit_check.py`, `fog_check.py`) should pin `--sun`
 > explicitly so a manifest edit does not cause false failures.
 
+### Measured (640×360, hero cam `1.0 2.0 1.5 → 5.3 1.0 11.3`, splat)
+
+Reported by the day/night session, rendered on that session's tree:
+
+| Arm | Manifest | mean luma | dark% | blue% |
+|-----|----------|-----------|-------|-------|
+| (a) null control | no `"sun"` key → CLI default 34/238 | 120.43 | 0.01 | 32.1 |
+| (b) low sun | `{"sun":{"elev":4,"azim":240}}` | 100.60 | 0.03 | 46.1 |
+| (c) night | `{"sun":{"elev":-30,"azim":96}}` | 32.92 | 23.49 | 56.7 |
+
+Night-vs-day colour: sky RGB `(12.5, 23.4, 37.0)` vs `(127.8, 137.9, 133.9)`;
+ground `(35.5, 47.5, 43.6)` vs `(124.6, 130.1, 106.9)`.
+
+**How to read this.** Arm (a) is a null control, not a data point: 34/238 is the
+CLI default, so an absent key must reproduce the current reference shots
+exactly. Arms (b) and (c) are the real measurement — dark% goes 0.01 → 0.03 →
+23.49, i.e. **a below-horizon sun pushes the frame past the `< 5 %`
+black-in-silhouette gate by ~4.7×**. Any gate that renders a night scene
+without pinning the sun will fail for this reason alone.
+
+Caveat: these are **George-reported**, not measured by the wiki session.
+Numbers only re-derive within one tree — mixing arms from different sessions
+inherits that tree's content drift. Re-run the null control as a measured arm
+before quoting a delta. See [[concepts/sky-probe-is-a-camera-assertion]] for
+the companion `b >= r` measurement on the same arms.
+
+Also pinned by the day/night work: `tests/test_worldfile.cpp` fixes
+`{"sun":{"elev":-14,"azim":96}}` as a **valid night** — elevation below the
+horizon is deliberately NOT clamped.
+
+### Which gate actually catches a day/night change
+
+The two `visual_check` assertions split cleanly, and the split is the finding:
+
+- **The sky probe (`b >= r`) cannot detect day/night at all.** The blue share
+  *rises* across the arms — 32.1 % → 46.1 % → **56.7 %** — so the probe passes
+  comfortably at `elev -30`. The reason is structural: `b >= r` is
+  brightness-independent by construction and only tests for *warmth*. Night sky
+  is `(12.5, 23.4, 37.0)`, which satisfies `b >= r` as strongly as day
+  `(127.8, 137.9, 133.9)`, which satisfies it by 6 codes. A 34° → −30° sun
+  change is invisible to this assertion.
+- **Black-in-silhouette is the assertion that moves**: 0.01 % → 23.49 %, past
+  the `< 5 %` gate by ~4.7×.
+
+So a night scene fails `visual_check` on **silhouette, not sky** — and a gate
+pinned only on the sky probe will report a night frame as healthy. This is the
+strongest form of the claim in [[concepts/sky-probe-is-a-camera-assertion]]:
+the probe is not merely a camera assertion on those three shots, it cannot
+detect the very transition a day/night lane introduces. Pin the sun (or use a
+day-only fixture) for both assertions.
+
+### Consequence: the night verdict is currently an argument, not a measurement
+
+If a night frame fails on silhouette and not on sky, then `test-visual`'s night
+verdict is an **argument between two gates** rather than a measurement — and
+silhouette is the wrong gate for it. 23.49 % dark pixels in a legitimately dark
+scene is not a rendering defect; it is the time of day. `black_in_obj > 0.05`
+therefore fails **every** night scene by construction, and whoever authors one
+will read it as "my lighting is broken" and start tuning brightness instead of
+fixing the gate — the same trap as the sky probe, one level down: an assertion
+calibrated on daylight content being read as a shading verdict.
+
+**The day/night lane needs its own reference arms** — night shots with
+night-appropriate budgets — not the existing daylight thresholds reinterpreted.
+Until those exist, treat a night `visual_check` failure as a missing-fixture
+signal, never as a lighting defect. See
+[[concepts/sky-probe-is-a-camera-assertion]] for the other two
+assertion-is-wrong cases.
+
 ## Day/night implementation notes
 
 For the day/night cycle work (George, shading engineer):

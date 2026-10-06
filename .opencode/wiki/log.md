@@ -2791,3 +2791,29 @@ assets/runtime_edits.vxw unless VF_OVERLAY_PATH is set. The 2026-10-06 64MB→98
 as the positive firing test. Fix landed (render() defaults VF_OVERLAY_PATH into tmp),
 env-level proof verified, test-live-edit proof still owed. Cross-linked from index.md
 concepts list + navigation.
+
+## 2026-10-06 ingest | sun-key A/B measured — which gate catches day/night
+`concepts/sun-direction-pipeline.md` upgraded from an unmeasured warning to a
+measurement. Three arms at 640x360 on the hero cam (splat): (a) no `"sun"` key
+/ CLI default 34/238 = luma 120.43, dark% 0.01, blue% 32.1 (null control —
+must reproduce the current shots exactly); (b) elev 4 azim 240 = 100.60 /
+0.03 / 46.1; (c) elev -30 azim 96 = 32.92 / 23.49 / 56.7.
+
+The finding: the two `visual_check` assertions split. The **sky probe cannot
+detect day/night** — the blue share *rises* (32.1 -> 46.1 -> 56.7 %) so it
+passes at elev -30, because `b >= r` is brightness-independent by construction
+and tests warmth, not daylight (night sky `(12.5,23.4,37.0)` satisfies it as
+strongly as day `(127.8,137.9,133.9)`, by 6 codes). **Black-in-silhouette is
+the assertion that moves** — 0.01 % -> 23.49 %, past the `< 5 %` gate by
+~4.7x. So a night frame fails visual_check on silhouette, not sky, and a gate
+pinned only on the sky probe reports a night frame as healthy. This is the
+strongest form of the claim in concepts/sky-probe-is-a-camera-assertion.
+
+Numbers are labelled George-reported, not measured by this session; mixing
+arms across trees inherits content drift (cf. the 4.29/2.92 vs 4.26/2.70
+drift), so the null control must be re-measured as an arm of the same A/B.
+Recorded separately by page owner: the b>=r percentages and the two-outcome
+framing went into concepts/sky-probe-is-a-camera-assertion, the elevation and
+silhouette delta here. Also pinned by the day/night work: elev -14/azim 96 is
+a valid night (below-horizon elevation deliberately not clamped), and a
+half-written `"sun"` block now returns false with a warn.
