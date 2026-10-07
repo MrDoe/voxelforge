@@ -3048,6 +3048,34 @@ of angle error, plus a **falsifiability gate** (day34 anti-solar sky must be
 blue or the script exits non-zero) so a broken probe fails loudly instead of
 printing a clean table.
 
+## [2026-10-07] verify | sunset lane closed green; wiki lint clean at 50 pages
+
+George implemented and measured the sunset change; `visual_check` green and
+**byte-identical to the pre-change run** on the daylight gates (coverage
+70.8/94.4/96.6, black-in-silhouette 0.18/4.29/2.25 %, ownership + present probe
+unchanged; only the two known pre-existing sky-probe fails on house/water).
+`night_check` PASSED with references unchanged. Byte-identical daylight is the
+outcome that matters: the change moved exactly the frames it was meant to and
+nothing else.
+
+Sunset gates, all met: away-from-sun luma strictly monotonic
+155.25 → 151.41 → 143.90 → 133.50 → 110.43 → 89.92 (34/12/8/4/0/−2), ratio
+**0.711 < 0.75**; toward-sun saturation **0.168 ≥ 0.16** at elev 2 with
+`R−B = +63.3` (target +60…90); high sky blue-dominant at every elevation.
+
+**Gate 5 — the one worth remembering — is now measured rather than argued.**
+`night_check` on the post-sunset tree gave hero 22.96/0.185, house 15.11/0.143,
+water 25.60/0.229, *identical* to the pre-sunset references. That gate existed
+to force exactly this: a daylight factor that touched the moonlit night would
+have failed there instead of being noted in review and forgotten.
+
+Wiki lint (50 pages): frontmatter complete on all 48 non-index/log pages, **no
+dangling links**, **no orphans** other than `log.md` itself (nothing links *to*
+an append-only timeline — correct), and **every `sourceRefs` path resolves**. The
+one known dangling target, `[[concepts/water-flooding]]`, remains accepted by
+decision: the concept was deleted in the 2026-09-17 water rework and `log.md` is
+append-only, so repairing it would mean inventing a page about a removed design.
+
 
 
 ## [2026-10-07] ingest | Day/night switch implemented (uncommitted); measurement-provenance page filed
@@ -3225,3 +3253,66 @@ quietly. Until then 0.32 is *loose*, not *proven*.
 
 Filed [[concepts/night-gate-thresholds]]. Wiki lint after the edits: 47 pages,
 0 broken links, 0 orphans, frontmatter clean.
+
+### kMoonCol tripwire VALIDATED in-window (2026-10-07 23:33)
+
+Measured under an explicit build window granted by the shading session, with the
+restoration proof agreed in advance:
+
+| arm | night hero mean luma | night/day ratio |
+|---|---|---|
+| `kMoonCol` **0.62** | **40.06** | **0.323** |
+| `kMoonCol` 0.14 (reference) | 22.96 | 0.185 |
+| day arm | 123.88 | 1.000 |
+
+`0.62` **clears** the gate's 0.32 ceiling, by 0.003. Two consequences:
+
+- **The ceiling is NOT treated as validated at 0.32.** Healthy arms top out at
+  0.229 (`water`), so 0.32 leaves ~1% margin above the regression it exists to
+  catch. A gate that false-positives on a 1% margin gets disabled by whoever
+  hits it first, and a disabled tripwire is worse than a loose one. Proposed
+  loosening to ~0.27 (well above 0.229, well below 0.323) — shading session's
+  call, it is their lane and their number.
+- **The brightness multiplier is 1.74x at this camera, not the 1.40x**
+  extrapolated from the reference camera's 32.9 → 46. This camera's night frame
+  is darker and more moon-driven, so the moon's share of it is larger. Another
+  instance of a number not transferring between cameras.
+
+**Restoration, proven three ways, not asserted:** shader md5 back to
+`7637a2fac15da77df8b2f8410bf24be5` (`md5sum -c` OK); diffstat back to exactly
+`160 insertions(+), 2 deletions(-)`; `grep` on the **file** shows `* 0.14`;
+`.spv` `e3e1ded3…` → `e9220de0…`. Restored from a byte copy taken before
+editing rather than by inverting the edit, so the restore does not depend on the
+edit being symmetric. Overlay md5 `a7daecd5` unchanged. One render, no test
+group.
+
+**Protocol corrections this window produced — both worth keeping:**
+
+1. **`git diff` is the wrong instrument on a dirty tree.** The proposed proof was
+   "git diff must be empty afterwards", but `common_base.glsl` was *already*
+   160 insertions from before the window. The only way to empty that diff is
+   `git checkout --`, which deletes the night path outright — and is verbatim
+   the command that destroyed an uncommitted `world.json` edit earlier the same
+   day. A check whose only satisfying action is the day's worst incident is
+   worse than no check. Proof belongs on the **file** (md5) and the **diffstat**,
+   neither of which can be satisfied by reverting to HEAD.
+2. **`grep` the file, not the diff.** `git diff | grep kMoonCol` is non-empty on
+   a *correct* restore, because `kMoonCol` is itself an uncommitted addition that
+   does not exist in HEAD — so it appears in the diff whether the token is 0.14
+   or 0.62. A non-empty hit there is precisely the signal that sends someone for
+   `git checkout`. My proposed check #3 had this flaw; the shading session caught
+   it. Checks must distinguish the two states they are meant to distinguish, not
+   merely correlate with them.
+3. **Hash the `.spv`, not the binary, for a shader change.** The binary md5 came
+   back **identical** to the pre-window value across the whole window: shaders
+   load at runtime from `build/shaders/*.spv` and are not linked into the
+   executable. So the agreed "binary md5 differs from the 0.62 build" was
+   unsatisfiable by construction, and reporting it as a failure would have been
+   misreading a pass. Corollary: the "loud binary" warning broadcast to the other
+   sessions described an artifact that never changed — nobody could have run a
+   too-bright night by accident here.
+
+**Pending:** the measured 0.323 is specific to the current night sky. The
+shading session's sunset-transition work lands after this window and moves it,
+so the ceiling decision and the whole threshold set need one re-measure
+afterwards. Not finalised before then.
