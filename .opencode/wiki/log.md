@@ -2939,3 +2939,138 @@ reach the writer.
 
 Implementation is Robin's (they hold the `panel_render.cpp` / `run_hotkeys.cpp`
 / `app.hpp` leases); George reviews before build. This session is on docs only.
+
+## [2026-10-07] gotcha | writeTextureManifest is not atomic — the precedent's failure mode was the trap
+
+Robin caught the mistake before it shipped into
+[[concepts/enclosed-space-lighting]]: the page said "copy
+`writeTextureManifest`'s behaviour", which is right about **key preservation**
+and dangerously wrong about **how the bytes land**. Verified in
+`src/voxel/worldfile.cpp:813` — both manifest writers do:
+
+```cpp
+std::FILE* f = std::fopen(path.c_str(), "wb");   // truncates HERE
+... fprintf the whole document in place ...
+return std::fclose(f) == 0;
+```
+
+`"wb"` **truncates the live manifest before the first byte of the replacement
+exists**, and `fclose(f) == 0` cannot detect a partial write — `fclose` succeeds
+on whatever it flushed. An interrupt, crash, or full disk therefore leaves a
+**truncated `world.json` with no error reported anywhere**. That is precisely how
+`assets/world_all.json` got mangled today (`test_world.cpp` /
+`test_authoring.cpp` rewrite it through a bare `ofstream`), and it is why
+`OverlayWriter` uses temp + rename.
+
+The precedent therefore splits: reuse `scanTopLevel` + `emitPreserved`
+(balanced-brace aware, so nested objects and odd spacing survive verbatim),
+reject the write mechanism. `writeLightManifest` writes `path + ".tmp"`, checks
+`fclose`'s return and removes the temp **before** the rename — renaming first
+and checking after would promote a partial temp over a good manifest, trading a
+truncated file for a differently truncated one. It also clamps to `kMaxLights`,
+because `loadLightManifest` drops the excess: emitting 17 would persist a lamp
+that silently never renders, leaving the manifest disagreeing with the UBO with
+no error anywhere.
+
+Recorded on the page with the transferable lesson: **verify a precedent's
+failure mode, not its shape.** This is the second time this session that a
+plausible-looking precedent was the wrong thing to follow — the first was
+calling a CPU-baked rebake "async" because the surrounding plumbing was
+threaded.
+
+## [2026-10-07] ingest | Day/night switch implemented (uncommitted); measurement-provenance page filed
+
+**Implemented** (builds clean, 33/33; approved by the shading session, no
+changes requested; **not yet committed** — the four files carry peers'
+uncommitted hunks and cannot be committed in isolation):
+
+- `App::setSunAngles(elev, azim)` — the app's single elevation/azimuth →
+  direction conversion. `--sun`/manifest startup, the Render-panel sliders, the
+  preset buttons and the `P` hotkey all funnel through it, so a convention change
+  cannot be applied to some controls and forgotten in others.
+- `App::setSunPhase(bool night)` — snaps day 34/238 or night −30/96, then one
+  `requestWorldReload()`. The reload is **required, not cosmetic**: each
+  surfel's sun shadow is CPU-baked at surfelize time, so without it the direct
+  sun moves and the shadows do not. Same deliberate stall as the `U` micro-detail
+  toggle.
+- Two buttons above the sliders as the coarse switch; the sliders stay the fine
+  control. Active state is derived from `m_sunDir.y` with the same −2.0°
+  threshold as the hotkey, so button and hotkey cannot disagree.
+- `P` toggles, reading the phase back out of `m_sunDir` rather than keeping a
+  parallel bool.
+- `VF_TEST_SUN_PHASE=day|night` drives the **same** `setSunPhase` path as the
+  buttons, so the switch is provable headlessly instead of resting on "the GUI
+  probably calls it".
+
+**Session-only by decision.** It does not write the chosen phase back to
+`assets/world.json`, because a runtime toggle rewriting the shared manifest is
+exactly the failure mode that destroyed an unknown session's uncommitted edit
+earlier today. The sun figures therefore came from the switch and `--sun`, not
+from a manifest key, and `assets/world.json` remains sunless (`layers`,
+`textures`, `version`) — so the reference shots keep elev 34 / azim 238 and their
+coverage and black-in-silhouette numbers are unchanged.
+
+**Verified** by two arms through `VF_TEST_SUN_PHASE` (640×360, reference cam,
+`VF_OVERLAY_PATH` isolated per arm): day 113.84, night 31.63 mean luma; night is
+clear of the ~46 band a `kMoonCol` regression to 0.62 would produce, and
+`assets/runtime_edits.vxw` md5 `a7daecd5` (24,636,160 B) was unchanged across
+both. Full provenance, metric definitions and the refuted overlay hypothesis now
+live on [[concepts/sky-probe-is-a-camera-assertion]].
+
+**New page — [[concepts/measurement-provenance]].** Generalised from the
+retraction below: a number is not a gate until it carries its command, its metric
+definition and its tree state.
+
+**Corrected my own page.** The sun-arm table's camera attribution
+("640×360, hero cam `1.0 2.0 1.5 → 5.3 1.0 11.3`") was written from memory with
+no artifact, and a later session chose its own camera *by reading that line* —
+so the two pairs were never matched. It is now marked **unsourced, not
+disproved** (the shading session could not quote the camera either; its scripts
+were in `/tmp` and a reboot erased them, and the tuple is plausibly the
+`AGENTS.md` reference camera). The overlay explanation I had recorded as the
+leading hypothesis for the dark-%/blue% gap is **refuted** — all three sets were
+overlay-suppressed. Residual is camera + tree state and gates nothing.
+
+### Addendum — the residual, settled (2026-10-07)
+
+The overlay hypothesis is **refuted** (all three sets were overlay-suppressed:
+this session's arms and the clock session's curve arms ran `VF_NO_OVERLAY=1` with
+an isolated `VF_OVERLAY_PATH`, md5-verified; the shading session recalls pointing
+`VF_OVERLAY_PATH` at a non-existent `/tmp` scratch file, which loads nothing).
+
+The unresolved cause is **camera + tree state**, and the honest split is:
+
+- **Corroborated** — mean luma on *both* arms (day 113.84 vs 120.43, night 31.63
+  vs 32.92), each pair measured by its own author, plus the night/day ratio to
+  2 % (0.278 vs 0.273).
+- **Disputed and unresolved** — dark % and top-eighth blue % on *both* arms
+  (night: 69.68/84.7 vs 23.49/56.7, roughly 3x apart).
+
+Retracted along the way: an earlier reading that the discrepancy was confined to
+the day arm. It was conditional on the night columns converging; they did not, so
+the framing does not hold.
+
+**Second provenance incident, logged as its own failure mode.** Mid-exchange the
+shading session wrote *"my settled night frame is dark% ~70 and blue% ~85"* —
+those are the numbers from the pair above, not its own, which it confirmed on
+request. It had attached its name to another session's measurement while arguing
+against that measurement. This is the inverse of the unsourced-camera mistake and
+is easier to miss, because an omission is visible while an over-attribution
+presents as a citation. The page now carries the inverse question: **"did you
+measure that, or are you quoting it?"** alongside "what was the command?" Neither
+incident was caught by re-reading the numbers — both needed someone to ask who ran
+the command.
+
+**Standing down on the GPU.** The night gate for `visual_check` is agreed in
+principle (own thresholds, not the daylight budgets — a night frame at dark% 23.49
+is 4.7x the 5% black-in-silhouette budget, so the arm fails by construction
+whichever measurement is right; modelled on `fog_check`'s off/on structure so the
+default gate run does not pay two extra 17.6 s loads; the floor that keeps
+`kMoonCol` from drifting back to 0.62 is the most valuable assertion it would
+hold). It waits on ~14 uncommitted files in the shading path, because reference
+values measured against an in-flux tree are falsified by the next commit without
+anyone touching the test.
+
+**Still uncommitted:** the four source files of the switch, now under another
+session's lease — `git commit <file>` would sweep in peers' in-flight hunks plus
+the separate German-layout keycap work.

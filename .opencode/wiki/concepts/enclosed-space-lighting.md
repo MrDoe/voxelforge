@@ -101,11 +101,52 @@ So the writer is gated behind three requirements before it may exist:
 
 | # | Requirement | Why |
 |---|---|---|
-| a | **Preserve every top-level key it does not own** — `layers`, `textures`, `sun`, anything else. Copy `writeTextureManifest` / `writeManifest`; do not write a fresh serialize. | A light write that rebuilds the file from a parsed struct silently drops keys the parser doesn't know about. |
-| b | **temp + rename**, never a bare `std::ofstream`. | `tests/test_authoring.cpp` truncates `world_all.json` exactly that way; an interrupted write leaves a dead manifest. |
+| a | **Preserve every top-level key it does not own** — `layers`, `textures`, `sun`, anything else. Reuse `scanTopLevel` + `emitPreserved` (the machinery behind `writeTextureManifest` / `writeManifest`); do not write a fresh serialize. | A light write that rebuilds the file from a parsed struct silently drops keys the parser doesn't know about. |
+| b | **temp + rename**, never a bare in-place `fopen("wb")`. | See the trap below — the obvious precedent is the one mechanism that must *not* be copied. |
 | c | **A round-trip unit test in `test_worldfile`** that writes a manifest containing an unknown key and asserts it survives. | (a) and (b) are invisible in a screenshot. |
 
 **Until that test exists, lights stay loader-only.**
+
+### `writeTextureManifest` is NOT atomic — do not copy its write mechanism
+
+This is the trap that makes (b) non-obvious. `writeTextureManifest` and
+`writeManifest` both do:
+
+```cpp
+std::FILE* f = std::fopen(path.c_str(), "wb");   // truncates HERE
+... fprintf the whole document in place ...
+return std::fclose(f) == 0;
+```
+
+`"wb"` **truncates the live manifest before the first byte of the replacement
+exists**, and `return fclose(f) == 0` cannot detect a partial write — `fclose`
+succeeds on whatever it managed to flush. So an interrupt, a crash, or a full
+disk leaves a **truncated `world.json` with no error reported anywhere**. That is
+exactly how `assets/world_all.json` got mangled today, and it is the reason
+`OverlayWriter` uses temp + rename.
+
+So the precedent splits cleanly:
+
+- **Reuse its key-preservation** — `scanTopLevel` is balanced-brace aware, so
+  nested objects/arrays and odd spacing survive verbatim. That is the right
+  part.
+- **Do not reuse its write mechanism.** Write `path + ".tmp"`, and **check
+  `fclose`'s return and remove the temp file on failure *before* the rename**.
+  It is not enough to rename and then notice failure: promoting a partial temp
+  file over a good manifest trades a truncated file for a differently truncated
+  one.
+
+This is Robin's finding, and it is the second time this session that a
+plausible-looking precedent was the wrong thing to copy — the first being a
+day/night page that called a CPU-baked rebake "async" because the plumbing
+around it was threaded. **Verify the precedent's failure mode, not its shape.**
+
+### The writer also clamps to `kMaxLights`
+
+`loadLightManifest` drops entries beyond 16 and the `LightUBO` holds 16, so
+emitting 17 would persist a lamp that silently never renders — the manifest
+would disagree with the GPU with no error anywhere. The writer emits
+`min(lights.size(), kMaxLights)`.
 
 ### A moved light is staged, not written through
 
