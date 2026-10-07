@@ -2874,3 +2874,68 @@ with `moonLight` reaching both splat paths). Recorded verbatim: `kMoonCol` was
 "restore" 0.62. And a provenance note: assets/world.json is SUNLESS, so the
 A/B arms came from CLI `--sun` flags, not a manifest edit; reference shots are
 unchanged.
+
+## [2026-10-07] fix | the day/night switch page claimed "async reload" — it is a stall
+
+Robin implemented the Day/Night switch (Render panel, hotkey **P**, `App::setSunPhase`
+snapping `m_sunDir` between day 34/238 and night −30/96) and caught an error in
+my page: it said the reload was asynchronous. **That was wrong, and it was mine
+— inferred from plumbing rather than traced.**
+
+The wrong inference: `LayeredWorld::kick` really does thread the SVO rebuild on
+a worker (unless `VF_SYNC_RELOAD`). But the frame that *applies* it,
+`App::applyWorldReload` (src/app/world/world_layers.cpp), calls
+`vkDeviceWaitIdle` and then `rebuildSurfels()` — and the per-surfel sun shadow
+is CPU-baked at surfelize time. The stall lands on the applying frame, so a
+toggle costs a hitch of roughly the same order as the `U` micro-detail toggle.
+`requestWorldReload()` setting a flag means *queued*, not *converging*; nothing
+chases it. Sky and direct light move next frame because `m_sunDir` rides the
+push constant; the baked shadows do not move until the rebake finishes.
+
+Recorded as the page's load-bearing warning, plus the two facts that make both
+arms checkable without the GUI: `VF_TEST_SUN_PHASE=day|night` drives the same
+`setSunPhase()` path as the buttons, and `--shot` **cannot** prove the buttons
+at all — `drawHud()` runs only from `record_interactive.cpp`, the standing gap
+in [[concepts/interactive-ui-coverage-gap]]. So the switch's *rendered result*
+is headlessly provable; its *UI* is manually verified only.
+
+Also pinned here: the switch is **session-only, deliberately**. It never writes
+the phase to `assets/world.json`. That file still has no `"sun"` key, which is
+what keeps every reference shot at 34/238.
+
+## [2026-10-07] decision | editing lights needs a writer that does not exist yet
+
+User request: add a light at the selected voxel, and move lights in Move mode.
+Investigating first turned up the reason this is not a button: **there is no
+`writeLightManifest`.** Only `loadLightManifest` exists, and
+`App::uploadLightSources()` **re-reads the manifest** — so the sole way to add
+or move a light today is to write `assets/world.json`, the tracked file that
+still carries an unknown session's uncommitted edit
+([[concepts/uncommitted-edit-is-not-yours]]).
+
+George's contract for the writer, now on
+[[concepts/enclosed-space-lighting]] and gated before any code:
+
+- **(a) preserve every top-level key it does not own** (`layers`, `textures`,
+  `sun`) — copy `writeTextureManifest`/`writeManifest`, never a fresh
+  serialize; a parsed-struct reserialize silently drops keys the parser does not
+  know about.
+- **(b) temp + rename**, never a bare `std::ofstream` — `tests/test_authoring.cpp`
+  truncates `world_all.json` exactly that way.
+- **(c) a round-trip unit test in `test_worldfile`** writing a manifest with an
+  unknown key and asserting it survives byte-for-byte. **Loader-only until this
+  exists**, because (a) and (b) are invisible in a screenshot.
+
+A moved light is **staged, not written through** — preview live, commit on
+Apply, matching the trackball and Move. The load-bearing part is that the
+preview patches `LightUBO` in RAM (binding 25, the same in-RAM lane the sun
+uses), which makes Apply the **only** call site of the writer, so no drag path
+can reach disk and the UBO cannot drift from the manifest.
+
+Move mode has no lane for lights: it drags a selected `.vxw` layer owner, and
+picking resolves to a voxel plus its winning `.vxw` owner (never an AABB), so
+lights need a second, non-voxel selection answer. `VF_TEST_*` runs must never
+reach the writer.
+
+Implementation is Robin's (they hold the `panel_render.cpp` / `run_hotkeys.cpp`
+/ `app.hpp` leases); George reviews before build. This session is on docs only.

@@ -89,6 +89,49 @@ uninitialised.
 `App::uploadLightSources()` is now the single writer, called from
 `initVulkan()` after the last pass and from `applyWorldReload()`.
 
+## Editing lights is a different problem from loading them
+
+**There is no writer today.** `loadLightManifest` is the only light code; adding
+or moving a light in the GUI means writing the `"lights"` array back into
+`assets/world.json` — a tracked manifest that currently carries an
+uncommitted edit from an unknown session, destroyed once today and recovered by
+forensics (see [[concepts/uncommitted-edit-is-not-yours]]).
+
+So the writer is gated behind three requirements before it may exist:
+
+| # | Requirement | Why |
+|---|---|---|
+| a | **Preserve every top-level key it does not own** — `layers`, `textures`, `sun`, anything else. Copy `writeTextureManifest` / `writeManifest`; do not write a fresh serialize. | A light write that rebuilds the file from a parsed struct silently drops keys the parser doesn't know about. |
+| b | **temp + rename**, never a bare `std::ofstream`. | `tests/test_authoring.cpp` truncates `world_all.json` exactly that way; an interrupted write leaves a dead manifest. |
+| c | **A round-trip unit test in `test_worldfile`** that writes a manifest containing an unknown key and asserts it survives. | (a) and (b) are invisible in a screenshot. |
+
+**Until that test exists, lights stay loader-only.**
+
+### A moved light is staged, not written through
+
+Same UX contract as the trackball and Move: preview live, commit on **Apply**.
+Three reasons, in order of weight:
+
+1. A light that wrote straight through would be the **only transform in the app
+   that silently rewrites a tracked file mid-drag**.
+2. An accidental write to `world.json` is not hypothetical here.
+3. A staged light **cannot desync the UBO from the manifest**: preview by
+   patching `LightUBO` in RAM — the same in-RAM lane
+   [[concepts/sun-direction-pipeline]] uses for the sun — so `Apply` is the
+   single call site of the writer. There is no code path where a drag reaches
+   the disk.
+
+### Move mode has no lane for lights
+
+Move currently drags a **selected layer owner** and writes that layer's `pos`.
+A light has no `.vxw` and no layer ID, so it needs its own selection and its own
+translation path. Picking resolves to a voxel and its **winning `.vxw` owner**,
+never a layer AABB (`src/voxel/picking`) — so "what did the cursor hit" has no
+answer for a light until selection gains a second, non-voxel answer.
+Note `App::uploadLightSources()` **re-reads the manifest**, so a preview that
+only patched the UBO must not be followed by an unrelated reload re-deriving
+lights from disk and undoing it.
+
 ## Verification
 
 One lamp inside the cabin, 320×180, camera inside the shell:

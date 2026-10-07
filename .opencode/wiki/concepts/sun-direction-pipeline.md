@@ -214,6 +214,64 @@ Also pinned by the day/night work: `tests/test_worldfile.cpp` fixes
 `{"sun":{"elev":-14,"azim":96}}` as a **valid night** — elevation below the
 horizon is deliberately NOT clamped.
 
+### Day/night switch (in the Render panel)
+
+A discrete **Day / Night** toggle sits in the Sun section above the
+elevation/azimuth sliders, which stay as the fine control underneath it. It
+snaps `m_sunDir` between two fixed angles:
+
+- **Day** — elev 34°, azim 238° (the golden hour the gates are calibrated to)
+- **Night** — elev −30°, azim 96° (the measured night arm)
+
+Hotkey **P**. Both snap points are the arms already measured in the table
+above, so the toggle's two states are numbers that exist rather than guesses.
+
+`setSunPhase()` calls `requestWorldReload()`, and **that rebake is a
+deliberate stall, not an async handoff.** The SVO rebuild itself is threaded
+(`LayeredWorld::kick` spawns a worker unless `VF_SYNC_RELOAD`), but the frame
+that *applies* it — `App::applyWorldReload` — calls `vkDeviceWaitIdle` and then
+`rebuildSurfels()`, and the per-surfel sun shadow is CPU-baked at surfelize
+time. So a toggle costs a visible hitch of roughly the same order as the `U`
+micro-detail toggle.
+
+Do not read "the reload is queued" as "the shadows will catch up on their own" —
+nothing chases it. The sky and direct light move on the next frame because
+`m_sunDir` rides the push constant; the baked shadows do not move until the
+rebake finishes.
+
+### Proving both arms headlessly
+
+`VF_TEST_SUN_PHASE=day|night` drives the **same `setSunPhase()` path as the
+buttons**, so neither arm requires clicking the GUI:
+
+```
+VF_TEST_SUN_PHASE=night ./build/voxelforge --shot night.ppm --cam ...
+```
+
+Use it instead of a manual click — and note that `--shot` **cannot** prove the
+buttons work at all: `drawHud()` runs only from `record_interactive.cpp`, so no
+headless render ever draws the sidebar. That is the standing gap in
+[[concepts/interactive-ui-coverage-gap]], and it applies here unchanged: the
+switch's *rendered result* is headlessly provable, the switch's *UI* is
+manually verified only.
+
+### The switch deliberately does NOT persist
+
+> **"The switch does not save your night" is a feature, not a gap.**
+
+Writing the phase back to `assets/world.json` was rejected, and the reason is
+today's incident on that exact file: a pre-existing uncommitted edit by an
+unknown session was destroyed by a stray `git checkout --` and recovered only
+via a scratch copy plus md5 reconstruction (md5 `dac9f059…`, still ` M` — see
+[[concepts/uncommitted-edit-is-not-yours]]). A GUI that rewrites a tracked
+manifest on every toggle would put that same file back in the blast radius of
+routine interaction.
+
+`assets/world.json` therefore **still has no `"sun"` key**, which is what keeps
+every reference shot at 34/238 with unchanged coverage and
+black-in-silhouette numbers. Persisting a night scene means editing the
+manifest deliberately, not clicking a button.
+
 ### Which gate actually catches a day/night change
 
 The two `visual_check` assertions split cleanly, and the split is the finding:
