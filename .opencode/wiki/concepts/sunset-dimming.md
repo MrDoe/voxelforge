@@ -71,23 +71,47 @@ multiplies a ~45 % dimming into the entire moonlit night and silently moves
 every night reference. The night is already handled by `applyNight`; a second
 dimming term is not complementary, it is a regression.
 
-The intended form is exactly **1.0 outside the twilight window**, dipping only
-inside it:
+"Leave the night alone" is really a constraint on *where the night preset sits*
+— `y = -0.5`, i.e. the elev −30 arm, **not** `y = -0.03`. So the low edge of
+the dimming window has to reach below the horizon without covering that preset:
 
 ```glsl
-float daylight = 1.0 - 0.38 * smoothstep(0.0, 0.10, kSunDir.y) *
+float daylight = 1.0 - 0.45 * smoothstep(-0.16, 0.10, kSunDir.y) *
                          (1.0 - smoothstep(0.10, 0.35, kSunDir.y));
 ```
 
-- `y ≤ 0` (all night): first factor is 0 → `daylight` is **exactly 1.0**.
-- `y ≥ 0.35` (elev ≈ 20.5°, noon): second factor is 1 → **1.0**.
-- Peak dimming **0.62** at `y = 0.10` (elev ≈ 5.7°) — deliberately inside the
-  band `applyNight` does *not* cover, since `applyNight` only begins at
-  `y = 0.06` and the 12°→3° window is exactly where nothing happens today.
+- `y ≤ -0.16` (elev ≤ −9.2°, **the entire night band**): first factor is 0 →
+  `daylight` is exactly **1.0**, moon untouched.
+- `y ≥ 0.35` (elev ≈ 20.5°, noon): second factor is 1 → exactly **1.0**.
+- `y = 0`: `smoothstep(-0.16, 0.10, 0)` = `t = 0.6154` → `0.6699`, so
+  `daylight = 0.699` — the sunset is genuinely dimmer than noon.
 
-The two-sided smoothstep is what keeps it bounded at both ends. **"A sunset
-change must not move the moonlit night" is a constraint worth encoding, not
-reviewing** — hence gate 5 below.
+### A correction worth keeping: low edge at exactly 0.0 is a trap
+
+The first attempt here used `smoothstep(0.0, 0.10, y)`. At `y = 0` that is
+**exactly 0**, so `daylight(0) = 1.0` and **elev 0 gets no dimming at all**.
+Worse, because the dip peaks at `y = 0.10` and closes back to 1.0 by `y = 0`,
+the curve is **non-monotonic** — the sky would get darker as the sun falls from
+12° to 4°, then get *brighter again* at the horizon. A sunset that brightens as
+it sets.
+
+It satisfied the letter of "don't touch the night" while breaking the thing it
+was written to fix. **Gate 4 caught it, because gate 4 measures elev 0** — which
+is the argument for writing the gate before the formula, not after.
+
+### These are structural claims, not measured numbers
+
+What is established by hand and does not depend on rendering:
+
+- `daylight(y ≤ -0.16) = 1.0` exactly → the night band cannot move.
+- `daylight(0) = 0.699` exactly → the horizon is dimmer than noon.
+- The curve is monotonic decreasing in `y` over `[-0.16, 0.10]`.
+
+What is **not** established: any resulting pixel luma. Multiplying sky radiance
+by 0.699 does **not** imply the frame luma falls by 30 %, because the frame goes
+through AgX in post and that is not a linear transfer. Predicted lumas are
+arithmetic on a false assumption and need one render to confirm. Do not quote
+them.
 
 ## Gate spec — ratios, not vibes
 
@@ -114,6 +138,14 @@ Gate 3 is the one that matters most for trusting any of it: two of the three
 measurement runs were void because the *instrument* was broken while the script
 printed a clean table. A gate that can abort is worth more than one that always
 reports.
+
+**Gate 3 must abort with a message distinguishable from a threshold failure**,
+and it must do so *before* any threshold is evaluated — otherwise the first
+person to hit it reads a broken render as a dim sunset and "fixes" a working
+shader. Distinct exit path, distinct first line of output, no numbers printed.
+
+Gate 4 is what caught the non-monotonic `daylight` bug above, which is the
+argument for writing the gate before the formula.
 
 ## No reference shot frames a sunset
 
