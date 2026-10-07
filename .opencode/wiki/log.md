@@ -3004,6 +3004,51 @@ actually lives there, not in `svo_raymarch.comp`, which is only the entry
 point), and the `RaymarchPush` note now carries the `misc.y = animTime_s`
 correction. Added the day/night parity pointer.
 
+## [2026-10-07] measure | sunset/sunrise: the gradient is right, the magnitude is not
+
+New page `concepts/sunset-dimming.md`. Measured at 320×180, camera `y=40`
+pitched 20° up so the frame bottom (−10°) meets ground at `40/tan(10°) ≈ 227 m`,
+outside the 102 m world — every sampled pixel is sky.
+
+**Finding.** The golden-hour gradient *exists and has the right sign* — warm at
+the horizon toward the sun, blue above — but it is roughly **3× too weak to
+read**. Peak horizon `R−B` toward the sun is **+12.6/255** at elev 2, against a
+high sky of `R−B = −38` directly above it. A warm smudge a third the strength
+of the blue above it is haze, not a sunset; a convincing one wants +60…90.
+
+**Second finding, and the more serious one: the sky never dims.** Away-from-sun
+luma runs 164 (elev 34) → 170 (12) → **172 (4)** → 161 (0) → 141 (−2). It is as
+bright at elev 4 as at noon and merely desaturates to neutral grey; warm share
+away from the sun is **0 % at every elevation**. So the frame gives no sense of
+the day ending.
+
+Three causes, all in `skyColor`/`skyColorFast`: (1) `base` mixes **fixed**
+`kHorizon`/`kZenith`, so nothing scales with sun elevation; (2) `horizBand =
+pow(1-cosTheta, 3.0)` is cubic and confines the tint to a thin strip; (3)
+`applyNight` starts at `kSunDir.y = 0.06` (elev ≈ 3.4°), so the whole 12°→3°
+window where a real sunset happens has **no transition in it** — the only
+low-sun change there is an additive tint, never a dimming.
+
+Proposed to George (his lane, not landed here): a daylight factor on `base`,
+`mix(0.55, 1.0, smoothstep(-0.02, 0.35, kSunDir.y))`; a wider `horizBand`; a
+stronger `sunsetTint`; and a dusk ramp separated from `applyNight`.
+
+**No reference shot frames a sunset** — the hero cam looks `+x,+z` while the sun
+sits at azim 238 (`−x,−z`), so `visual_check` is blind to all of this and stays
+green regardless. Same class as the sky-probe gap, one step further out.
+
+**Probe hygiene (took three runs; two were void).** A *partial* `--cam` token
+silently discards the target — three values fill `camx/camy/camz` and leave
+`tx/ty/tz` at defaults — so "toward sun" and "away from sun" rendered
+**byte-identical**, aimed at terrain. The tell was that two viewpoints which
+must differ produced *every row equal*. And `describe_image` confidently
+mislabelled the frame as a "top-down aerial view… with a blue river". What made
+run 3 trustworthy: a camera height that puts the ground out of frame regardless
+of angle error, plus a **falsifiability gate** (day34 anti-solar sky must be
+blue or the script exits non-zero) so a broken probe fails loudly instead of
+printing a clean table.
+
+
 
 ## [2026-10-07] ingest | Day/night switch implemented (uncommitted); measurement-provenance page filed
 
@@ -3101,3 +3146,82 @@ anyone touching the test.
 **Still uncommitted:** the four source files of the switch, now under another
 session's lease — `git commit <file>` would sweep in peers' in-flight hunks plus
 the separate German-layout keycap work.
+
+## [2026-10-07] ingest | Night gate: test-night group + night-gate-thresholds page; sun_angles.hpp hoist
+
+Cleared by the shading session after a green `visual_check` on the combined tree
+(coverage 70.8 / 94.4 / 96.6, black-in-silhouette 0.18 / 4.29 / 2.25 %,
+byte-identical to the pre-change run). No shader edit queued by me — confirmed
+positively rather than by silence.
+
+**`src/app/sun_angles.hpp` (new, pure/header-only).** Hoists the preset angles
+and both phase thresholds out of the code that used them, for two reasons:
+
+1. The `-2.0` night threshold was written as **four literals across
+   `panel_render.cpp` and `run_hotkeys.cpp`**. They agreed only by convention —
+   nothing stopped someone editing one, and then the Night button highlight and
+   the `P` key would disagree about the current phase. I had told the shading
+   session they "cannot disagree"; that was true by coincidence of having typed
+   the number the same way four times, and I should have grepped before
+   asserting it. Now one `sunIsNight()`.
+2. `setSunPhase`'s angles were function-local `constexpr`, so a test asserting
+   "the preset is -30/96" would have been asserting its own copy — the same
+   failure mode as copying a non-atomic writer as a precedent.
+
+Verified by grep: zero literals remain outside the header.
+
+**New invariant pinned:** `kSunDayElev`/`kSunDayAzim` must equal the CLI
+defaults in `args.hpp`, because 34/238 is what every reference shot was
+calibrated to *and* what snapping back to Day must restore. If they drift,
+every gate's reference moves and **nothing fails** — both values are
+individually correct. Found immediately after the first fix, which is the
+pattern paying off.
+
+**Three new `test-app` cases** (12 cases / 110 assertions pass): the two-suns
+distinction on angles (clock 00:00 = -60/0 vs preset -30/96, 30 deg apart),
+`sunIsNight` as the single predicate, and the preset-equals-CLI-default
+invariant. The two-suns claim is deliberately **not** an image metric: the two
+measured arms differ by 1.7 mean luma, inside the 1.3 spread that made the raw
+means unusable.
+
+**`tests/night_check.py` + `night` CTest group** (mirrors `fog_check`;
+`fast_night_check` alias; deliberately **not** in `smoke` — two extra world
+loads). Three `visual_check` metrics fail on a **correct** night frame, verified
+in source at `visual_check.py:69` and then measured:
+
+- `is_sky = b > r+12 and g > r+4 and **b > 120**` — the last term is a daylight
+  term. Scores **0.00 %** on all three night shots, so nothing is sky,
+  `obj_frac → ~1.00`, and coverage fails out of range as **too little** sky.
+  Without that term: 40.1 / 8.7 / 10.0 %.
+- `black_in_obj` uses **absolute** `lum < 30`; the night frame's own mean is 23,
+  so two thirds of a correct render reads black. Measured **66.0 / 86.5 / 78.3 %**
+  against a 5 % gate — the worst of the three, off by more than an order of
+  magnitude, and the one that would have been misread as "the renderer broke".
+- `ownership_classes` needs `g >= 100` / `r >= 100` / `b >= 90`; night matches no
+  class and the mask comes back empty.
+
+`sky_probe_ok` (`b >= r`) **passes** at night, so the one metric that survives
+cannot testify that the others are wrong — the same brightness-independence
+problem as `visual_check`'s probe, reached from the other side.
+
+**Thresholds are ratios to the day arm at the same camera**, because the same
+preset measures **22.96 at the hero camera vs 31.63 at the reference camera** —
+37 % from framing alone. An absolute luma limit here would be a claim about a
+camera, not about night. Measured ratios 0.185 / 0.143 / 0.229 in a 0.10–0.32
+band; sky ≥ 5 %; top-eighth blue ≥ 60 %; dark share **relative** (the absolute
+daylight value is printed but explicitly not a gate).
+
+**Positive control run:** thresholds made impossible → all three assertion types
+fire with actionable messages and rc=1, so the assertions bite. Reproduces the
+reference exactly across separate processes. That validates the instrument, not
+the tripwire.
+
+**The `kMoonCol` tripwire is NOT yet validated** — the ratio ceiling is
+extrapolated from the 32.9 → 46 measurement taken at a *different* camera, which
+is the exact mistake this session has been correcting. Tightening it needs one
+render with `kMoonCol` at 0.62, a shader edit on a tree other sessions build
+from; awaiting the shading session's explicit window rather than doing it
+quietly. Until then 0.32 is *loose*, not *proven*.
+
+Filed [[concepts/night-gate-thresholds]]. Wiki lint after the edits: 47 pages,
+0 broken links, 0 orphans, frontmatter clean.
