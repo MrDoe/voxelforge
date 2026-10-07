@@ -3076,6 +3076,30 @@ one known dangling target, `[[concepts/water-flooding]]`, remains accepted by
 decision: the concept was deleted in the 2026-09-17 water rework and `log.md` is
 append-only, so repairing it would mean inventing a page about a removed design.
 
+## [2026-10-07] gotcha | a shader edit does not touch the binary — verify identity, not health
+
+Relayed by Robin via George after a ~5 min shader window (`kMoonCol` briefly
+`0.62` to revalidate the night-gate tripwire, since the `0.323` figure had been
+measured on the **pre-sunset** sky and a stale figure must not read as current).
+
+**A `.glsl`/`.comp` edit does not change `build/voxelforge`.** The binary's
+md5 was **identical** across both windows (`07306f1c…`) — shaders compile to
+`build/shaders/*.spv` and load at runtime, they are not linked into the
+executable. So during a shader window `md5sum` on the binary is clean, its mtime
+is old, `strings` finds nothing new, `ninja` may say "no work to do" — and the
+**render is wrong anyway**. The only tell is `build/shaders/*.spv`.
+
+This is worse than an ordinary stale-build trap: every cheap verification a
+person reaches for returns a clean answer, and a stale `.spv` yields *plausible*
+pixels from the previous shader, so nothing downstream flags it. Recorded on
+[[concepts/measurement-discipline]] as **confirm the instrument's identity, not
+its health**, with the required proof shape for closing a shader window:
+`md5sum -c` on the `.spv`, a diffstat matching the expected baseline (222
+insertions / 10 deletions for the post-sunset tree), and a grep of the **source**
+file for the reverted constant (`kMoonCol` reads `0.14`) — never of the binary.
+
+Session did not render inside the window, so no measurement here is affected.
+
 
 
 ## [2026-10-07] ingest | Day/night switch implemented (uncommitted); measurement-provenance page filed
@@ -3316,3 +3340,113 @@ group.
 shading session's sunset-transition work lands after this window and moves it,
 so the ceiling decision and the whole threshold set need one re-measure
 afterwards. Not finalised before then.
+
+### Post-sunset re-measure (2026-10-07 23:55)
+
+Re-measured all four items independently at the three canonical views after the
+shading session's sunset transition work (+222 insertions to
+`common_base.glsl`). Items 1-3 came back **bit-identical** to the pre-sunset
+values — ratio band 0.185/0.143/0.229, sky floor 40.1/8.7/10.0 %, top-blue
+100.0/75.1/70.9 %, daylight classifier 0.00 % on all three, day arm unchanged.
+
+Exact equality is interpretable, not lucky: at elev -30 the sunset term
+contributes exactly nothing and at 34 deg it is exactly 1.0 (smoothstep clamps),
+so both endpoints are untouched by construction and the change lives entirely in
+the 12 deg -> 3 deg window that previously had **no transition at all** — the
+fifth member of the calibration family, a constant standing in for a range.
+
+The floors and band are therefore confirmed on the tree the gate will run on and
+need no edits.
+
+**Item 4 (the 0.323 regression figure) is NOT re-measured and is STALE** — it was
+measured on the pre-sunset sky, and re-validating needs `kMoonCol` at 0.62 again
+(a shader edit plus a shared build). So the tripwire is neither demonstrably
+weaker nor demonstrably intact: healthy band 0.185/0.143/0.229 (current), last
+confirmed regression 0.323 (pre-sunset), ceiling 0.27 between them. Second
+validation window requested. If 0.62 has moved toward the healthy band the
+ceiling gets re-derived, never the band narrowed to fit.
+
+**The `b > 120` finding is permanent.** A 37-value night sky cannot cross 120,
+so no shading work can heal that classifier — only editing `visual_check.py`
+can. The night classifier in `night_check.py` is permanently necessary, not a
+stopgap for the current sky.
+
+**Stale-build trap checked, not assumed.** `ninja -C build` reported "no work to
+do" immediately after the shader change, which in this repo can mean a stale
+object. Verified via the `.spv` md5 (post-sunset `40fe6576…` vs pre-sunset
+`e9220de0…`) and mtime ordering, so the build was current. Unchecked, this
+re-measure would have measured the wrong tree and reported "no movement" as a
+finding — the `.spv` lesson from the tripwire window paying off immediately.
+
+Overlay md5 `a7daecd5` unchanged across both arms.
+
+### 0.323 confirmed post-sunset BY MECHANISM, not re-measured (2026-10-07)
+
+The shading session predicted the regression ratio would not move and asked to run
+(1)-(3) first as a falsifiable test. It came back bit-identical, so **no second
+window was taken** — and that is the deliberate call, not an omission.
+
+The mechanism, read in the source rather than accepted:
+
+- `applyNight` does `col = mix(col, nightBase, night)`, so at `night == 1.0` the
+  incoming colour is **discarded wholesale** before the moon disc/corona/wash.
+- `nightFactor() = 1.0 - smoothstep(-0.14, 0.06, kSunDir.y)` is **exactly** 1.0 at
+  the preset's y = -0.5; the clamp is well clear of it.
+- The sunset work touches only `col` upstream of that, in **both** blocks —
+  `skyColor` and the `skyIrradiance`/fog variant at `common_base.glsl:727`, which
+  also ends `col *= sunDaylight(); return applyNight(...)`. The second block was
+  the one that could have leaked into ground lighting; it does not.
+- Day arm pinned the same way: `sunDaylight()` is exactly 1.0 at 34 deg.
+
+So both terms of the ratio are outside the change, and the label is stated
+exactly: **"confirmed by mechanism", not "re-measured"**. Opening a second window
+would have produced a matching number and a stronger-sounding label while adding
+a shader edit and shared-build exposure to prove something already provable from
+the source. That is provenance theatre, not provenance.
+
+**Residual kept visible rather than closed:** the argument covers the *sky* path.
+`kMoonCol` also reaches geometry via `moonLight()`, and these frames are
+sky/distance-dominated, so a small surface-only change could hide under an
+identical mean. Established: three cameras, mean luma to two decimals, dark and
+sky shares identical. Surface-level confidence wants a `--probe` pair on a lit
+surface per `kMoonCol`, not another full render.
+
+
+### Tripwire RE-MEASURED post-sunset: 0.323 reproduces to 0.13% (2026-10-07)
+
+Second shader window, run under the protocol corrected by the first: hash the
+`.spv` not the executable, restore from a byte copy, one render, rebuild, prove.
+
+| arm | mean luma | ratio |
+|---|---|---|
+| `kMoonCol` 0.62, **re-measured post-sunset** | **40.06** | **0.323** |
+| `kMoonCol` 0.62, pre-sunset | 40.06 | 0.323 |
+| delta | — | **+0.13 %** |
+
+The shading session's prediction — that the sunset work lives inside `col` before
+`applyNight`, which discards `col` wholesale at `night == 1.0` — reproduced. So
+the ceiling's provenance is now a **current measurement**, not the weaker
+"confirmed by mechanism" label filed earlier. That label was right about what
+could be concluded; it was superseded the moment the measurement existed, and the
+page now says so rather than carrying both.
+
+Tripwire strength unchanged: healthy max 0.229 (`water`) -> regression 0.323,
+ceiling 0.27 between them with 0.041 / 0.053 of margin. No band edits.
+
+**Restoration:** shader file md5 back to `52dd3c5989e72c30723f2d0de6180dc4`;
+diffstat back to exactly `222 insertions(+), 10 deletions(-)` — the **post-sunset**
+baseline, not the 160/2 from the first window, since the sunset work moved it and
+restoring to a stale number would have been the same category of error as a stale
+regression figure; file grep shows `* 0.14`; `.spv` returned to the **exact**
+pre-window value `40fe6576…`, not merely to something different from 0.62.
+Binary md5 `07306f1c…` unchanged across both windows, reconfirming that a shader
+edit does not touch the executable. Overlay md5 `a7daecd5` unchanged.
+
+**Broadcast wording corrected:** the "too-bright night frame will be visible"
+half of the warning was the misleading one. A peer rendering inside the window
+gets a bright night with **no tell in the binary or a `strings` check** — only the
+`.spv` md5/mtime reveals it. That was my wording as much as the protocol's, and
+worth not repeating in the next window.
+
+Third time in this exchange that a **bit-identical control** (the 123.88 day
+denominator here) is what made a small delta interpretable instead of alarming.

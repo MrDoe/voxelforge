@@ -240,7 +240,40 @@ asking whether it passes.** A green brand-new test is weak evidence; a red one t
 turns out to be a wrong *expectation* is strong evidence, because it means the author
 checked the code's answer instead of asserting their own.
 
-## A green signal that does not cover the change is not weak evidence — it is none
+## Confirm the instrument's IDENTITY, not its health
+
+Every section above is about a check returning the *wrong answer*. This one is
+narrower and sneakier: the check returns a **clean** answer while the thing
+under test is broken.
+
+A `.glsl`/`.comp` edit does **not** change `build/voxelforge`. Measured
+2026-10-07 across two shader windows: the binary's md5 was **identical**
+(`07306f1c…`) on both sides, because shaders compile to `build/shaders/*.spv`
+and load at runtime — they are not linked into the executable. So during a
+shader edit:
+
+- `md5sum build/voxelforge` — clean
+- its mtime — old
+- `strings` — finds nothing new
+- `ninja` — may report "no work to do"
+
+…and yet the **render is wrong**. The only reliable tell is
+`build/shaders/*.spv` (md5 or mtime). A stale `.spv` produces *plausible* pixels
+from the previous shader, so nothing downstream flags it and every number taken
+during the window looks like data.
+
+Two rules:
+
+1. **Never render, measure, or screenshot inside another session's announced
+   shader window.** If you might have, re-render before trusting anything.
+2. **On a shader window close, require proof on the artefacts that actually
+   moved:** `md5sum -c` on the `.spv`, a diffstat matching the expected
+   baseline line counts, and a grep of the **source** file for the reverted
+   constant — never of the binary.
+
+Robin caught this by noticing the misleading symptom was the *frame*, not the
+`.spv`, and that no check available on the executable could explain it. The
+generalisation: **verify the identity of the instrument, not its liveness.**
 
 The preceding section is about a gate that has never *fired*. This is the
 stronger and more common form of the mistake: reporting a verification that
