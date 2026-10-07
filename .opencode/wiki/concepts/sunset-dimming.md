@@ -59,10 +59,61 @@ peak horizon `R−B` around **+60…90** with the high sky still blue.
    additive tint, not a dimming.
 
 Proposed (not landed at time of writing — George's lane, see
-[[concepts/sun-direction-pipeline]]): a daylight factor on `base`,
-`mix(0.55, 1.0, smoothstep(-0.02, 0.35, kSunDir.y))`; a wider `horizBand`; a
-stronger `sunsetTint`; and a dusk ramp separated from `applyNight` so 12° → 3°
-is a transition rather than a step.
+[[concepts/sun-direction-pipeline]]): a daylight factor on `base`, a wider
+`horizBand`, a stronger `sunsetTint`, and a dusk ramp separated from
+`applyNight` so 12° → 3° is a transition rather than a step.
+
+## The daylight factor must saturate, or it dims the moonlit night
+
+The obvious fix — `mix(0.55, 1.0, smoothstep(-0.02, 0.35, kSunDir.y))` — is a
+trap: at any `kSunDir.y ≤ -0.02` it settles at **0.55 and stays there**, so it
+multiplies a ~45 % dimming into the entire moonlit night and silently moves
+every night reference. The night is already handled by `applyNight`; a second
+dimming term is not complementary, it is a regression.
+
+The intended form is exactly **1.0 outside the twilight window**, dipping only
+inside it:
+
+```glsl
+float daylight = 1.0 - 0.38 * smoothstep(0.0, 0.10, kSunDir.y) *
+                         (1.0 - smoothstep(0.10, 0.35, kSunDir.y));
+```
+
+- `y ≤ 0` (all night): first factor is 0 → `daylight` is **exactly 1.0**.
+- `y ≥ 0.35` (elev ≈ 20.5°, noon): second factor is 1 → **1.0**.
+- Peak dimming **0.62** at `y = 0.10` (elev ≈ 5.7°) — deliberately inside the
+  band `applyNight` does *not* cover, since `applyNight` only begins at
+  `y = 0.06` and the 12°→3° window is exactly where nothing happens today.
+
+The two-sided smoothstep is what keeps it bounded at both ends. **"A sunset
+change must not move the moonlit night" is a constraint worth encoding, not
+reviewing** — hence gate 5 below.
+
+## Gate spec — ratios, not vibes
+
+Durable home is a new `tests/sunset_check.py` arm, since no existing reference
+shot frames azim 238. Camera: `y=40`, pitched 20° up, looking toward the sun,
+which puts the frame bottom at 227 m and keeps ground out of frame entirely.
+**Every metric below is a ratio or a delta, so none of them is a claim about a
+particular camera.**
+
+| # | Gate | Baseline | Target |
+|---|---|---|---|
+| 1 | `sunsetSat = (R−B)/(R+B)`, glow band **toward** the sun, elev 2° | **0.031** | ≥ **0.16** |
+| 2 | **Invariant:** high sky stays blue-dominant, `(R−B)_high < 0` | −0.33 | stays < 0 |
+| 3 | **Falsifiability:** day34 anti-solar high sky must be blue-dominant, else **ABORT** | passes | must keep passing |
+| 4 | **Dimming:** away-from-sun luma falls across 34→12→4→0; `luma(0) < 0.75 · luma(34)` | **0.98 — FAILS** | < 0.75 |
+| 5 | **Night immovable:** `luma(−30)` within tolerance of the moonlight reference | (Robin's) | must not move |
+
+Gate 4 is **supposed to fail today** — that is the finding, and a gate that
+passes on the current tree would be measuring nothing. Gate 5 exists so a later
+daylight factor cannot quietly re-dim the moon; it turns a review note into an
+enforced invariant.
+
+Gate 3 is the one that matters most for trusting any of it: two of the three
+measurement runs were void because the *instrument* was broken while the script
+printed a clean table. A gate that can abort is worth more than one that always
+reports.
 
 ## No reference shot frames a sunset
 
