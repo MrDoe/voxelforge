@@ -2978,6 +2978,33 @@ plausible-looking precedent was the wrong thing to follow — the first was
 calling a CPU-baked rebake "async" because the surrounding plumbing was
 threaded.
 
+## [2026-10-07] lint | svo-render.md: schema bug plus two stale claims
+
+Robin found the schema bug and George handed me the refresh. `entities/svo-render.md`
+carried `name:` in frontmatter where all 46 other pages use `tags:` — the only
+page in the wiki with it. Fixed, and it was the only occurrence.
+
+Refreshing it then turned up two claims that had been wrong for a month, which
+is the real finding: **a schema bug hides content rot, because nothing was
+reading the page's structure closely enough to notice the body.** Both are now
+recorded on the page as "no longer true" so they are not re-added:
+
+- **"ACES"** — the raymarcher outputs **linear HDR pre-tonemap** and the post
+  pass applies exposure, **AgX**, bloom and the outline. The `aces()` in
+  `common_base.glsl` is dead code on this path.
+- **"shadows march `uObjVol`"** — `softShadow` is a **16-tap PCF over
+  `exactSVOHit`**, exact DDA traversal of the sparse octree; terrain uses
+  `softShadowTerrain`. The coarse r8_snorm 256³ object volume is only marched on
+  the GPU for the **splat water** path now, and splat surface sun shadows are
+  baked per-surfel on the CPU. No `objDist`/`uObjVol` reference exists in
+  `common_svo.glsl` at all.
+
+Also: `sourceRefs` now includes `shaders/common_svo.glsl` (the traversal
+actually lives there, not in `svo_raymarch.comp`, which is only the entry
+point), and the `RaymarchPush` note now carries the `misc.y = animTime_s`
+correction. Added the day/night parity pointer.
+
+
 ## [2026-10-07] ingest | Day/night switch implemented (uncommitted); measurement-provenance page filed
 
 **Implemented** (builds clean, 33/33; approved by the shading session, no
