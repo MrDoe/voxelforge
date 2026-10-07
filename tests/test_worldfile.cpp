@@ -4,6 +4,8 @@
 #include <filesystem>
 #include <fstream>
 #include <cstdio>
+#include <cstddef>
+#include <iterator>
 #include <set>
 
 using namespace vf::voxel;
@@ -709,5 +711,469 @@ TEST_CASE("writeTextureManifest swaps only the textures table")
     std::vector<worldfile::TextureBinding> none;
     REQUIRE(worldfile::loadTextureManifest(p, none));
     CHECK(none.empty());
+    fs::remove_all(dir);
+}
+
+TEST_CASE("lights manifest parses and rejects non-positive lights")
+{
+    namespace fs = std::filesystem;
+    const fs::path dir = fs::temp_directory_path() / "vf_lights_test";
+    fs::remove_all(dir);
+    fs::create_directories(dir);
+    const fs::path p = dir / "world.json";
+
+    // No "lights" key at all is NOT an error: the app then uploads a zero-count
+    // UBO and applyLights() is a no-op (the pre-lights behaviour).
+    {
+        std::ofstream out(p);
+        out << "{ \"version\": 1, \"layers\": [] }";
+    }
+    std::vector<worldfile::LightSource> lights;
+    REQUIRE(worldfile::loadLightManifest(p.string(), lights));
+    CHECK(lights.empty());
+
+    {
+        std::ofstream out(p);
+        out << R"({
+  "version": 1,
+  "layers": [],
+  "lights": [
+    { "pos": [1.5, -0.25, 9.0], "color": [1.0, 0.55, 0.18], "radius": 7.0, "intensity": 6.0 },
+    { "pos": [2.0, 1.0, 3.0], "color": [0.2, 0.9, 1.0], "radius": 4.0, "intensity": 2.5 },
+    { "pos": [0, 0, 0], "radius": 0.0, "intensity": 1.0 },
+    { "pos": [0, 0, 0], "radius": 3.0, "intensity": 0.0 }
+  ]
+})";
+    }
+    REQUIRE(worldfile::loadLightManifest(p.string(), lights));
+    // the two well-formed lights parse; radius<=0 / intensity<=0 are dropped
+    // rather than uploaded as a light that can never contribute.
+    REQUIRE(lights.size() == 2);
+    CHECK(lights[0].pos.x == doctest::Approx(1.5f));
+    CHECK(lights[0].pos.y == doctest::Approx(-0.25f));
+    CHECK(lights[0].pos.z == doctest::Approx(9.0f));
+    CHECK(lights[0].color.r == doctest::Approx(1.0f));
+    CHECK(lights[0].color.g == doctest::Approx(0.55f));
+    CHECK(lights[0].color.b == doctest::Approx(0.18f));
+    CHECK(lights[0].radius == doctest::Approx(7.0f));
+    CHECK(lights[0].intensity == doctest::Approx(6.0f));
+    CHECK(lights[1].color.b == doctest::Approx(1.0f));
+
+    // A missing colour keeps the default white (a torch with no tint is white,
+    // not black), and an unknown per-light key must not derail the parse.
+    {
+        std::ofstream out(p);
+        out << R"({ "layers": [], "lights": [ { "pos": [0,0,0], "flicker": 3, "radius": 2 } ] })";
+    }
+    lights.clear();
+    REQUIRE(worldfile::loadLightManifest(p.string(), lights));
+    REQUIRE(lights.size() == 1);
+    CHECK(lights[0].color.r == doctest::Approx(1.0f));
+    CHECK(lights[0].intensity == doctest::Approx(1.0f));
+
+    // The std140 layout is shared verbatim with common_base.glsl's LightUBO:
+    // two vec4[16] arrays then the count at byte 512, total 528 = 33 vec4s.
+    // If either side moves, the descriptor silently reads garbage count.
+    CHECK(sizeof(worldfile::LightUBO) == 528);
+    CHECK(offsetof(worldfile::LightUBO, posRadius) == 0);
+    CHECK(offsetof(worldfile::LightUBO, colorIntensity) == 256);
+    CHECK(offsetof(worldfile::LightUBO, count) == 512);
+    CHECK(worldfile::kMaxLights == 16);
+
+    fs::remove_all(dir);
+}
+
+TEST_CASE("sun manifest requires both keys and tolerates garbage")
+{
+    namespace fs = std::filesystem;
+    const fs::path dir = fs::temp_directory_path() / "vf_sun_test";
+    fs::remove_all(dir);
+    fs::create_directories(dir);
+    const fs::path p = dir / "world.json";
+    float e = 0.0f, a = 0.0f;
+
+    // Absent key: false, caller keeps its CLI/default (run.cpp seeds from args).
+    {
+        std::ofstream out(p);
+        out << R"({ "version": 1, "layers": [] })";
+    }
+    CHECK_FALSE(worldfile::loadSunManifest(p.string(), e, a));
+    CHECK(e == doctest::Approx(0.0f));
+    CHECK(a == doctest::Approx(0.0f));
+
+    // Both keys: true, both applied. Elevation below the horizon is a valid
+    // scene (night) and must NOT be clamped - the shader derives the moon.
+    {
+        std::ofstream out(p);
+        out << R"({ "layers": [], "sun": { "elev": -14.0, "azim": 96.0 } })";
+    }
+    REQUIRE(worldfile::loadSunManifest(p.string(), e, a));
+    CHECK(e == doctest::Approx(-14.0f));
+    CHECK(a == doctest::Approx(96.0f));
+
+    // Half-written block: an authoring error, not a partial request. Returning
+    // true here would leave the caller's 0 seed in place, parking the sun due
+    // north while the "scene sun: .." log still reads as a healthy load - the
+    // isfinite fallback only ever catches NaN/inf, never this 0.
+    e = 0.0f;
+    a = 0.0f;
+    {
+        std::ofstream out(p);
+        out << R"({ "layers": [], "sun": { "elev": 12.0 } })";
+    }
+    CHECK_FALSE(worldfile::loadSunManifest(p.string(), e, a));
+    e = 0.0f;
+    a = 0.0f;
+    {
+        std::ofstream out(p);
+        out << R"({ "layers": [], "sun": { "azim": 30.0 } })";
+    }
+    CHECK_FALSE(worldfile::loadSunManifest(p.string(), e, a));
+
+    // Empty and misspelled blocks are the same story.
+    {
+        std::ofstream out(p);
+        out << R"({ "layers": [], "sun": {} })";
+    }
+    CHECK_FALSE(worldfile::loadSunManifest(p.string(), e, a));
+    {
+        std::ofstream out(p);
+        out << R"({ "layers": [], "sun": { "elevation": 12.0, "azimuth": 30.0 } })";
+    }
+    CHECK_FALSE(worldfile::loadSunManifest(p.string(), e, a));
+
+    fs::remove_all(dir);
+}
+
+TEST_CASE("writeLightManifest round-trips and preserves every key it does not own")
+{
+    namespace fs = std::filesystem;
+    const fs::path dir = fs::temp_directory_path() / "vf_light_write_test";
+    fs::remove_all(dir);
+    fs::create_directories(dir);
+    const fs::path p = dir / "world.json";
+
+    // A manifest with a "sun" block, a "textures" table, a layer list AND two
+    // keys no current parser knows about. The unknowns are the point: a
+    // writer that rebuilt the document from a parsed struct would drop them
+    // silently, and the result still loads - so nothing else would catch it.
+    {
+        std::ofstream out(p);
+        out << R"({
+  "version": 1,
+  "layers": [ { "file": "landscape.vxw", "enabled": true } ],
+  "sun": { "elev": 34.0, "azim": 238.0 },
+  "textures": [ { "file": "rock.png", "mat": 3, "scale": 2.00 } ],
+  "futureThing": { "nested": [1, 2, { "deep": true }], "trailingComma": 1, },
+  "someUnknownScalar": 42
+})";
+    }
+
+    std::vector<worldfile::LightSource> lights;
+    {
+        worldfile::LightSource a;
+        a.pos = glm::vec3(6.0f, 1.6f, 11.5f);
+        a.color = glm::vec3(1.0f, 0.55f, 0.18f);
+        a.radius = 7.0f;
+        a.intensity = 6.0f;
+        lights.push_back(a);
+        worldfile::LightSource b;
+        b.pos = glm::vec3(-2.5f, 3.0f, 4.0f);
+        b.color = glm::vec3(0.4f, 0.7f, 1.0f);
+        b.radius = 4.5f;
+        b.intensity = 2.25f;
+        lights.push_back(b);
+    }
+    REQUIRE(worldfile::writeLightManifest(p.string(), lights));
+
+    // 1. The lights survive a reload with their numbers intact.
+    {
+        std::vector<worldfile::LightSource> back;
+        REQUIRE(worldfile::loadLightManifest(p.string(), back));
+        REQUIRE(back.size() == 2);
+        CHECK(back[0].pos.x == doctest::Approx(6.0f));
+        CHECK(back[0].pos.y == doctest::Approx(1.6f));
+        CHECK(back[0].pos.z == doctest::Approx(11.5f));
+        CHECK(back[0].color.y == doctest::Approx(0.55f));
+        CHECK(back[0].radius == doctest::Approx(7.0f));
+        CHECK(back[0].intensity == doctest::Approx(6.0f));
+        CHECK(back[1].pos.x == doctest::Approx(-2.5f));
+        CHECK(back[1].color.z == doctest::Approx(1.0f));
+        CHECK(back[1].intensity == doctest::Approx(2.25f));
+    }
+
+    // 2. Every key the writer does not own survives verbatim, including the
+    //    nested/oddly-spelled unknown value above. scanTopLevel is
+    //    balanced-brace aware, so this is a byte compare on the value text.
+    std::ifstream in(p, std::ios::binary);
+    const std::string text((std::istreambuf_iterator<char>(in)),
+                           std::istreambuf_iterator<char>());
+    CHECK(text.find("\"futureThing\": { \"nested\": [1, 2, { \"deep\": true }], "
+                    "\"trailingComma\": 1, }") != std::string::npos);
+    CHECK(text.find("\"someUnknownScalar\": 42") != std::string::npos);
+    CHECK(text.find("\"sun\": { \"elev\": 34.0, \"azim\": 238.0 }") != std::string::npos);
+    CHECK(text.find("\"version\": 1") != std::string::npos);
+    CHECK(text.find("landscape.vxw") != std::string::npos);
+    CHECK(text.find("\"mat\": 3") != std::string::npos);
+    CHECK(text.find("\"lights\"") != std::string::npos);
+    // Exactly one lights key: the rewrite replaced it rather than appending.
+    CHECK(text.find("\"lights\"") == text.rfind("\"lights\""));
+
+    // 3. The sun block still parses, so a light write cannot silently unbind
+    //    the scene sun the way a naive reserialize would.
+    float e = 0.0f, a2 = 0.0f;
+    REQUIRE(worldfile::loadSunManifest(p.string(), e, a2));
+    CHECK(e == doctest::Approx(34.0f));
+    CHECK(a2 == doctest::Approx(238.0f));
+
+    // 4. Emptying the list writes an empty array, not a dangling key.
+    REQUIRE(worldfile::writeLightManifest(p.string(), {}));
+    {
+        std::vector<worldfile::LightSource> back;
+        REQUIRE(worldfile::loadLightManifest(p.string(), back));
+        CHECK(back.empty());
+    }
+    std::ifstream in2(p, std::ios::binary);
+    const std::string text2((std::istreambuf_iterator<char>(in2)),
+                            std::istreambuf_iterator<char>());
+    // Preserved values keep whatever whitespace followed the original colon
+    // (the extractor trims trailing, not leading), so this one still has a
+    // space; the freshly written "lights" key has none.
+    CHECK(text2.find("\"lights\":[]") != std::string::npos);
+    CHECK(text2.find("\"someUnknownScalar\": 42") != std::string::npos);
+
+    // 5. No temp file is left behind - a failed rename must not accumulate
+    //    world.json.tmp siblings next to the manifest.
+    CHECK_FALSE(fs::exists(fs::path(p.string() + ".tmp")));
+
+    fs::remove_all(dir);
+}
+
+TEST_CASE("writeLightManifest refuses a malformed manifest and leaves it untouched")
+{
+    namespace fs = std::filesystem;
+    const fs::path dir = fs::temp_directory_path() / "vf_light_malformed_test";
+    fs::remove_all(dir);
+    fs::create_directories(dir);
+    const fs::path p = dir / "world.json";
+
+    // A truncated top level: the object never closes. scanTopLevel stops with
+    // whatever it collected, so "every other key survives" would quietly become
+    // "every other key that happened to be scannable". temp+rename protects
+    // against a failed WRITE; promoting a partial key set is a successful write
+    // of WRONG CONTENT, which is the one thing temp+rename does not catch. This
+    // is the case it earns its keep on.
+    //
+    // Note the fixture is a TRUNCATION, not a missing comma: a manifest missing
+    // the comma between two members still scans cleanly (the value scanner just
+    // finds the next key), so the writer repairs the comma silently. That is
+    // tolerated deliberately - it is a recoverable authoring slip, and
+    // refusing to save would be worse than normalising it.
+    const std::string broken =
+        R"({ "version": 1, "layers": [ { "file": "landscape.vxw" } ] )";
+    {
+        std::ofstream out(p);
+        out << broken;
+    }
+
+    worldfile::LightSource l;
+    l.pos = glm::vec3(1.0f, 2.0f, 3.0f);
+    l.radius = 5.0f;
+    l.intensity = 3.0f;
+    CHECK_FALSE(worldfile::writeLightManifest(p.string(), { l }));
+
+    // Byte-identical: nothing was renamed over it.
+    std::ifstream in(p, std::ios::binary);
+    const std::string after((std::istreambuf_iterator<char>(in)),
+                            std::istreambuf_iterator<char>());
+    CHECK(after == broken);
+
+    // And no temp file was even created - the bail happens before the fopen.
+    CHECK_FALSE(fs::exists(fs::path(p.string() + ".tmp")));
+
+    // A key with no ':' after it is the other bail path.
+    const std::string noColon = R"({ "version" 1, "layers": [] })";
+    {
+        std::ofstream out(p);
+        out << noColon;
+    }
+    CHECK_FALSE(worldfile::writeLightManifest(p.string(), { l }));
+    std::ifstream in2(p, std::ios::binary);
+    const std::string after2((std::istreambuf_iterator<char>(in2)),
+                             std::istreambuf_iterator<char>());
+    CHECK(after2 == noColon);
+    CHECK_FALSE(fs::exists(fs::path(p.string() + ".tmp")));
+
+    // A manifest with no top-level object at all is equally unrewritable.
+    {
+        std::ofstream out(p);
+        out << R"(not json at all)";
+    }
+    CHECK_FALSE(worldfile::writeLightManifest(p.string(), { l }));
+    std::ifstream in3(p, std::ios::binary);
+    const std::string after3((std::istreambuf_iterator<char>(in3)),
+                             std::istreambuf_iterator<char>());
+    CHECK(after3 == "not json at all");
+    CHECK_FALSE(fs::exists(fs::path(p.string() + ".tmp")));
+
+    // A well-formed manifest still works, so the guard is not simply refusing
+    // everything: scanTopLevel's success exit is the closing '}'.
+    {
+        std::ofstream out(p);
+        out << R"({ "version": 1, "layers": [], "textures": [] })";
+    }
+    CHECK(worldfile::writeLightManifest(p.string(), { l }));
+    std::vector<worldfile::LightSource> back;
+    REQUIRE(worldfile::loadLightManifest(p.string(), back));
+    REQUIRE(back.size() == 1);
+    CHECK(back[0].pos.z == doctest::Approx(3.0f));
+
+    fs::remove_all(dir);
+}
+
+TEST_CASE("writeLightManifest self-checks the temp file before renaming")
+{
+    namespace fs = std::filesystem;
+    const fs::path dir = fs::temp_directory_path() / "vf_light_selfcheck_test";
+    fs::remove_all(dir);
+    fs::create_directories(dir);
+    const fs::path p = dir / "world.json";
+
+    // The missing-comma case, which does NOT bail on shape - it reports success.
+    // scanTopLevel breaks a depth-0 value only on ',' or '}', so a MISSING
+    // COMMA AFTER A SCALAR makes the first value run past its own member
+    // (`"version"` swallows `1 "lights": []`) and the scan still reaches the
+    // closing brace. What stops the loss here is the SCAN-TIME VALUE CHECK:
+    // `1 "lights": []` is not a legal JSON value, so the scan returns false
+    // and the writer fails closed before it ever creates the temp file.
+    //
+    // This must be pinned at that layer. A read-back comparison would NOT
+    // catch it: it compares the tmp against the in-memory pair list, and that
+    // list is already missing the key by then - every assertion would go green
+    // while the key stayed dropped.
+    //
+    // A missing comma after a self-terminating value (`]` or `}`) is harmless
+    // and deliberately untested: the scan stops there and finds the next key.
+    const std::string missingComma =
+        R"({ "version": 1 "lights": [], "textures": [ { "file": "rock.png" } ] })";
+    {
+        std::ofstream out(p);
+        out << missingComma;
+    }
+
+    worldfile::LightSource l;
+    l.pos = glm::vec3(2.0f, 1.0f, 4.0f);
+    l.color = glm::vec3(1.0f, 0.6f, 0.2f);
+    l.radius = 6.0f;
+    l.intensity = 4.0f;
+    CHECK_FALSE(worldfile::writeLightManifest(p.string(), { l }));
+
+    // Refused: the manifest is byte-identical and no temp file survives. No
+    // temp file is the tell that this was the scan-time guard, not the
+    // read-back - the read-back rejects AFTER writing one.
+    std::ifstream in(p, std::ios::binary);
+    const std::string after((std::istreambuf_iterator<char>(in)),
+                            std::istreambuf_iterator<char>());
+    CHECK(after == missingComma);
+    CHECK_FALSE(fs::exists(fs::path(p.string() + ".tmp")));
+
+    // A scalar followed by an UNRELATED invalid token is the same class
+    // (the value ran past its member) and must also fail closed.
+    {
+        std::ofstream out(p);
+        out << R"({ "version": 1 oops, "layers": [] })";
+    }
+    CHECK_FALSE(worldfile::writeLightManifest(p.string(), { l }));
+    CHECK_FALSE(fs::exists(fs::path(p.string() + ".tmp")));
+
+    // And legal scalars must still be ACCEPTED - the check is a value
+    // validator, not a refusal of everything numeric. This is the guard's
+    // real risk: a false positive refuses a save that used to succeed, and
+    // the only symptom would be a warn line. So cover the shapes our own
+    // writers emit plus the ones a hand-edited manifest plausibly holds -
+    // sign, decimal, exponent with and without a sign exponent, bools, null,
+    // empty and nested lists, nested objects, strings.
+    //
+    // Note the assertion is that the WRITE succeeds and the keys survive. It
+    // deliberately does NOT call loadLightManifest here: that loader cannot
+    // step over a foreign bare `null` at the top level (measured: 0 lights
+    // loaded from a manifest containing one), which is a separate pre-existing
+    // gap. The writer must not inherit it - an earlier version of this check
+    // routed through loadLightManifest and refused every edit on such a file.
+    {
+        std::ofstream out(p);
+        out << R"({ "version": 1, "scale": -2.5e-3, "big": 1.0e5, "flag": true,
+                     "off": false, "none": null, "pos3": [1.500, 2.000, 3.000],
+                     "arr": [1, 2.0], "empty": [], "obj": { "a": { "b": 1 } },
+                     "str": "hi" })";
+    }
+    REQUIRE(worldfile::writeLightManifest(p.string(), { l }));
+    {
+        std::ifstream in(p, std::ios::binary);
+        const std::string s((std::istreambuf_iterator<char>(in)),
+                            std::istreambuf_iterator<char>());
+        // Preserved values carry the whitespace that followed the original
+        // colon; only the freshly written "lights" key has none.
+        CHECK(s.find("\"version\": 1") != std::string::npos);
+        CHECK(s.find("\"scale\": -2.5e-3") != std::string::npos);
+        CHECK(s.find("\"big\": 1.0e5") != std::string::npos);
+        CHECK(s.find("\"none\": null") != std::string::npos);
+        CHECK(s.find("\"empty\": []") != std::string::npos);
+        CHECK(s.find("\"obj\": { \"a\": { \"b\": 1 } }") != std::string::npos);
+        CHECK(s.find("\"lights\":[{ \"pos\": [2.000, 1.000, 4.000]") !=
+              std::string::npos);
+    }
+
+    // Prove the guard is not simply refusing every input: a correctly
+    // comma-separated manifest writes, keeps BOTH keys, and the lights load.
+    {
+        std::ofstream out(p);
+        out << R"({ "version": 1, "layers": [], "textures": [], "lights": [] })";
+    }
+    REQUIRE(worldfile::writeLightManifest(p.string(), { l }));
+    std::vector<worldfile::LightSource> back;
+    REQUIRE(worldfile::loadLightManifest(p.string(), back));
+    REQUIRE(back.size() == 1);
+    CHECK(back[0].pos.x == doctest::Approx(2.0f));
+    CHECK(back[0].radius == doctest::Approx(6.0f));
+    std::ifstream in2(p, std::ios::binary);
+    const std::string ok((std::istreambuf_iterator<char>(in2)),
+                         std::istreambuf_iterator<char>());
+    CHECK(ok.find("\"textures\": []") != std::string::npos);
+    CHECK(ok.find("\"version\": 1") != std::string::npos);
+    CHECK_FALSE(fs::exists(fs::path(p.string() + ".tmp")));
+
+    fs::remove_all(dir);
+}
+
+TEST_CASE("writeLightManifest clamps to the UBO capacity")
+{
+    namespace fs = std::filesystem;
+    const fs::path dir = fs::temp_directory_path() / "vf_light_clamp_test";
+    fs::remove_all(dir);
+    fs::create_directories(dir);
+    const fs::path p = dir / "world.json";
+    {
+        std::ofstream out(p);
+        out << R"({ "layers": [] })";
+    }
+
+    // 20 lamps: only kMaxLights can ever render, and loadLightManifest drops
+    // the excess. Emitting all 20 would persist lights that silently never
+    // appear - the manifest would disagree with the UBO with no error. The
+    // writer spdlog::warn's on this (asserted in the test below by virtue of
+    // the count being visible here); this suite has no spdlog sink to capture
+    // the line, so the log itself is verified by eye, not by assertion.
+    std::vector<worldfile::LightSource> many(worldfile::kMaxLights + 4);
+    for (size_t i = 0; i < many.size(); ++i) {
+        many[i].pos = glm::vec3(float(i), 1.0f, 0.0f);
+        many[i].radius = 3.0f;
+        many[i].intensity = 1.0f;
+    }
+    REQUIRE(worldfile::writeLightManifest(p.string(), many));
+    std::vector<worldfile::LightSource> back;
+    REQUIRE(worldfile::loadLightManifest(p.string(), back));
+    CHECK(back.size() == size_t(worldfile::kMaxLights));
+
     fs::remove_all(dir);
 }

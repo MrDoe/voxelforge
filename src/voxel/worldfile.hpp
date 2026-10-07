@@ -124,12 +124,50 @@ struct TextureBinding {
 };
 bool loadTextureManifest(const std::string& path, std::vector<TextureBinding>& out);
 
+// Point light sources from the same world.json manifest. A light is a
+// position, colour, radius (soft falloff to zero at radius) and intensity.
+// Example:
+//   "lights": [
+//     { "pos": [12.0, 3.0, 8.0], "color": [1.0, 0.55, 0.18],
+//       "radius": 8.0, "intensity": 1.5 }
+//   ]
+struct LightSource {
+    glm::vec3 pos { 0.f };
+    glm::vec3 color { 1.f };
+    float radius = 1.0f;
+    float intensity = 1.0f;
+};
+inline constexpr int kMaxLights = 16;
+struct alignas(16) LightUBO {
+    glm::vec4 posRadius[kMaxLights];    // pos.xyz, radius
+    glm::vec4 colorIntensity[kMaxLights]; // color.rgb, intensity
+    int32_t count = 0;
+    int32_t _pad0 = 0, _pad1 = 0, _pad2 = 0;
+};
+bool loadLightManifest(const std::string& path, std::vector<LightSource>& out);
+
+// Scene sun from the same manifest: "sun": { "elev": <deg>, "azim": <deg> }.
+// Direction TOWARD the sun, same convention as --sun. Absent = false; the
+// caller keeps its CLI/default value. An elevation below the horizon is a
+// valid scene (night) - the shader derives the moon from it.
+bool loadSunManifest(const std::string& path, float& elev, float& azim);
+
 // Rewrite only the top-level "textures" array, preserving every other key
 // (layers, version, unknown keys) verbatim from the file on disk. Used by the
 // in-app texture picker so swapping a material's texture never touches the
 // layer set.
 bool writeTextureManifest(const std::string& path,
                           const std::vector<TextureBinding>& textures);
+
+// Rewrite only the top-level "lights" array, preserving every other key
+// (layers, version, textures, sun, unknown keys) verbatim from the file on
+// disk - same key-preservation contract as writeTextureManifest, but written
+// temp+rename instead of in place, because an in-place writer truncates the
+// manifest before the replacement exists and an interrupt there loses it with
+// no error reported. At most kMaxLights entries are emitted; the rest are
+// dropped, matching what loadLightManifest/the UBO would render anyway.
+bool writeLightManifest(const std::string& path,
+                        const std::vector<LightSource>& lights);
 
 // Read every layer listed in the manifest (skipping "packed" entries) into one
 // record set. Earlier layers win on cell collisions (manifest order =
@@ -173,5 +211,10 @@ void transformRecords(const std::vector<VoxelRecord>& src,
                       float rotDeg, float rotX, float rotZ,
                       std::vector<VoxelRecord>& out);
 } // namespace worldfile
+
+using worldfile::LightSource;
+using worldfile::LightUBO;
+using worldfile::loadLightManifest;
+using worldfile::kMaxLights;
 
 } // namespace vf::voxel

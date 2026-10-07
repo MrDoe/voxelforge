@@ -8,6 +8,8 @@
 #include <cstdlib>
 #include <cstring>
 #include <fstream>
+#include <filesystem>
+#include <algorithm>
 #include <unordered_set>
 
 namespace vf::voxel::worldfile {
@@ -570,6 +572,146 @@ bool loadTextureManifest(const std::string& path, std::vector<TextureBinding>& o
     return true;
 }
 
+bool loadLightManifest(const std::string& path, std::vector<LightSource>& out)
+{
+    out.clear();
+    std::FILE* f = std::fopen(path.c_str(), "rb");
+    if (!f)
+        return false;
+    std::string text;
+    char buf[4096];
+    size_t n;
+    while ((n = std::fread(buf, 1, sizeof(buf), f)) > 0)
+        text.append(buf, n);
+    std::fclose(f);
+
+    Json j{ text };
+    if (!j.eat('{'))
+        return false;
+    while (!j.peek('}') && j.i < text.size()) {
+        std::string key;
+        if (!j.str(key) || !j.eat(':'))
+            return false;
+        if (key == "lights" && j.eat('[')) {
+            while (!j.peek(']') && j.i < text.size()) {
+                LightSource l;
+                if (!j.eat('{'))
+                    return false;
+                while (!j.peek('}') && j.i < text.size()) {
+                    std::string k;
+                    if (!j.str(k) || !j.eat(':'))
+                        return false;
+                    if (k == "pos") {
+                        if (!j.eat('['))
+                            return false;
+                        for (int c = 0; c < 3; ++c) {
+                            if (!j.num(l.pos[c]))
+                                return false;
+                            if (c < 2)
+                                j.eat(',');
+                        }
+                        if (!j.eat(']'))
+                            return false;
+                    } else if (k == "color") {
+                        if (!j.eat('['))
+                            return false;
+                        for (int c = 0; c < 3; ++c) {
+                            if (!j.num(l.color[c]))
+                                return false;
+                            if (c < 2)
+                                j.eat(',');
+                        }
+                        if (!j.eat(']'))
+                            return false;
+                    } else if (k == "radius")
+                        j.num(l.radius);
+                    else if (k == "intensity")
+                        j.num(l.intensity);
+                    else
+                        j.skipValue();
+                    if (!j.eat(','))
+                        break;
+                }
+                j.eat('}');
+                if (l.radius > 0.0f && l.intensity > 0.0f)
+                    out.push_back(std::move(l));
+                if (!j.eat(','))
+                    break;
+            }
+            j.eat(']');
+        } else {
+            j.skipValue();
+        }
+        if (!j.eat(','))
+            break;
+    }
+    return true;
+}
+
+bool loadSunManifest(const std::string& path, float& elev, float& azim)
+{
+    std::FILE* f = std::fopen(path.c_str(), "rb");
+    if (!f)
+        return false;
+    std::string text;
+    char buf[4096];
+    size_t n;
+    while ((n = std::fread(buf, 1, sizeof(buf), f)) > 0)
+        text.append(buf, n);
+    std::fclose(f);
+
+    // A "sun" block is all-or-nothing: both keys are required. A half-written
+    // block is an authoring error, not a partial request, and returning true
+    // for it would leave the caller's other seed (run.cpp seeds 0/0) in place,
+    // parking the sun due north while the "scene sun: .." log still reads as a
+    // healthy load. isfinite below only ever catches NaN/inf, never that 0.
+    Json j{ text };
+    if (!j.eat('{'))
+        return false;
+    bool gotElev = false, gotAzim = false;
+    while (!j.peek('}') && j.i < text.size()) {
+        std::string key;
+        if (!j.str(key) || !j.eat(':'))
+            return false;
+        if (key == "sun" && j.eat('{')) {
+            while (!j.peek('}') && j.i < text.size()) {
+                std::string k;
+                if (!j.str(k) || !j.eat(':'))
+                    return false;
+                if (k == "elev") {
+                    if (!j.num(elev))
+                        return false;
+                    gotElev = true;
+                } else if (k == "azim") {
+                    if (!j.num(azim))
+                        return false;
+                    gotAzim = true;
+                } else {
+                    j.skipValue();
+                }
+                if (!j.eat(','))
+                    break;
+            }
+            j.eat('}');
+            if (gotElev && gotAzim) {
+                if (!std::isfinite(elev))
+                    elev = 34.0f;
+                if (!std::isfinite(azim))
+                    azim = 238.0f;
+                return true;
+            }
+            if (gotElev != gotAzim)
+                spdlog::warn("world.json: \"sun\" needs both elev and azim - ignoring it");
+            return false;
+        } else {
+            j.skipValue();
+        }
+        if (!j.eat(','))
+            break;
+    }
+    return false;
+}
+
 // One top-level "key": <value> pair of a manifest, value text verbatim.
 // Scanning is balanced-brace aware, so nested objects/arrays (and the odd
 // comment or trailing comma inside them) survive a rewrite untouched.
@@ -578,19 +720,112 @@ struct TopPair {
     std::string value;
 };
 
-static void scanTopLevel(const std::string& text, std::vector<TopPair>& out)
+// Is `v` a syntactically complete JSON value - a terminated string, a
+// balanced {...}/[...], or a bare true/false/null/number?
+//
+// This exists because the extractor's only depth-0 terminators are ',' and '}'.
+// So a MISSING COMMA AFTER A SCALAR makes the value run past its own member:
+// `{"a":1 "b":2}` yields raw = `1 "b":2`, which is not a number, so the scan
+// reaches the closing brace and reports success while key "b" is silently
+// absorbed and lost. Re-emitting then produces a manifest that is either
+// missing a key or (worse) not valid JSON at all. Rejecting the value turns
+// that silent loss into a loud failure for every "value ran past its member"
+// shape, not just this one.
+static bool isJsonValue(const std::string& v)
+{
+    size_t i = 0;
+    while (i < v.size() && (v[i] == ' ' || v[i] == '\t' || v[i] == '\n' ||
+                            v[i] == '\r'))
+        ++i;
+    if (i >= v.size())
+        return false;
+    const char c0 = v[i];
+    if (c0 == '"')
+        return v.size() >= 2 && v.back() == '"';
+    if (c0 != '{' && c0 != '[') {
+        std::string t = v.substr(i);
+        while (!t.empty() && (t.back() == ' ' || t.back() == '\t' ||
+                              t.back() == '\n' || t.back() == '\r'))
+            t.pop_back();
+        if (t == "true" || t == "false" || t == "null")
+            return true;
+        size_t k = 0;
+        if (k < t.size() && (t[k] == '-' || t[k] == '+'))
+            ++k;
+        bool digits = false, dot = false, ex = false;
+        for (; k < t.size(); ++k) {
+            const char c = t[k];
+            if (c >= '0' && c <= '9') {
+                digits = true;
+                continue;
+            }
+            if (c == '.' && !dot && !ex) {
+                dot = true;
+                continue;
+            }
+            if ((c == 'e' || c == 'E') && digits && !ex) {
+                ex = true;
+                if (k + 1 < t.size() && (t[k + 1] == '-' || t[k + 1] == '+'))
+                    ++k;
+                continue;
+            }
+            return false;
+        }
+        return digits;
+    }
+    const char close = (c0 == '{') ? '}' : ']';
+    if (v.back() != close)
+        return false;
+    int depth = 0;
+    bool inStr = false;
+    for (size_t k = i; k < v.size(); ++k) {
+        const char c = v[k];
+        if (inStr) {
+            if (c == '\\') {
+                ++k;
+                continue;
+            }
+            if (c == '"')
+                inStr = false;
+            continue;
+        }
+        if (c == '"') {
+            inStr = true;
+            continue;
+        }
+        if (c == c0)
+            ++depth;
+        else if (c == close) {
+            if (--depth == 0)
+                return k + 1 == v.size();
+        }
+    }
+    return false;
+}
+
+// Returns false when the text is not a well-formed top-level object: no '{',
+// text exhausted before the closing brace, a key with no ':', or a value that
+// is not a legal JSON value (which is how a missing comma after a scalar
+// silently swallows the next key). On false, `out` holds exactly what today's
+// lenient scan collected - every pair is still pushed BEFORE the value check,
+// so the two existing callers that ignore this return
+// (writeTextureManifest / writeManifest) keep byte-identical behaviour and do
+// not start dropping keys.
+static bool scanTopLevel(const std::string& text, std::vector<TopPair>& out)
 {
     size_t i = 0;
     while (i < text.size() && text[i] != '{')
         ++i;
     if (i == text.size())
-        return;
+        return false;
     ++i; // past the top-level '{'
     for (;;) {
         while (i < text.size() && text[i] != '"' && text[i] != '}')
             ++i;
-        if (i >= text.size() || text[i] == '}')
-            return;
+        if (i >= text.size())
+            return false;
+        if (text[i] == '}')
+            return true;
         std::string key;
         size_t k0 = i + 1;
         for (size_t j = k0; j < text.size(); ++j) {
@@ -607,7 +842,7 @@ static void scanTopLevel(const std::string& text, std::vector<TopPair>& out)
         while (i < text.size() && (text[i] == ' ' || text[i] == '\t'))
             ++i;
         if (i >= text.size() || text[i] != ':')
-            return; // malformed; stop scanning
+            return false; // malformed; stop scanning
         ++i;
         size_t v0 = i;
         int depth = 0;
@@ -643,6 +878,11 @@ static void scanTopLevel(const std::string& text, std::vector<TopPair>& out)
             raw.pop_back();
         if (!key.empty())
             out.push_back({ key, raw });
+        // Push first, validate second: the pair is already in `out` exactly as
+        // the lenient scan would have left it, so a caller ignoring the return
+        // sees no change. Only the return value is new.
+        if (!isJsonValue(raw))
+            return false;
     }
 }
 
@@ -727,6 +967,167 @@ bool writeManifest(const std::string& path, const std::vector<WorldLayer>& layer
     }
     std::fprintf(f, "\n}\n");
     return std::fclose(f) == 0;
+}
+
+bool writeLightManifest(const std::string& path,
+                        const std::vector<LightSource>& lights)
+{
+    const std::string prev = readFileText(path);
+    std::vector<TopPair> pairs;
+    // Fail CLOSED. temp+rename only protects against a failed write; promoting
+    // a partial key set is a successful write of wrong content, which is the
+    // one thing temp+rename does not catch. If the top level did not parse,
+    // bail before the tmp file exists so the manifest on disk is untouched -
+    // a caller that overwrites anyway would drop every key past the malform.
+    if (!scanTopLevel(prev, pairs)) {
+        spdlog::warn("world.json: malformed top level, refusing to rewrite lights");
+        return false;
+    }
+
+    // Known limitation, not fixed here: `prev` is read above and the rename
+    // happens at the end, so a concurrent writer - the texture picker goes
+    // through writeTextureManifest from a different call path - landing inside
+    // that window has its key clobbered. Apply-only and rare makes it
+    // tolerable; it is written down because three sessions share one manifest.
+    //
+    // Write to a sibling temp file and rename, NOT in place. writeManifest /
+    // writeTextureManifest fopen("wb") the live manifest, which truncates it
+    // before the first byte of the replacement exists: an interrupt or a crash
+    // mid-write leaves a truncated world.json with no error reported anywhere
+    // (return fclose() == 0 cannot see it - fclose succeeds on what it flushed).
+    // That is exactly how assets/world_all.json got mangled, and it is the
+    // reason the overlay writer uses temp+rename. A manifest already holding
+    // someone's uncommitted work is the last place to add that failure mode,
+    // so the key-preservation machinery above is reused but its write
+    // mechanism deliberately is not.
+    const std::string tmp = path + ".tmp";
+    std::FILE* f = std::fopen(tmp.c_str(), "wb");
+    if (!f)
+        return false;
+    std::fprintf(f, "{");
+    bool first = true;
+    emitPreserved(f, pairs, "lights", nullptr, first);
+    const char* sep = first ? "" : ",";
+    // Never emit more than the UBO holds: loadLightManifest drops the excess,
+    // so writing 17 would persist a lamp that silently never renders. Warn,
+    // because a light that vanishes on save with no message reads as a bug in
+    // the app rather than a full buffer.
+    const size_t n = std::min<size_t>(lights.size(), size_t(kMaxLights));
+    if (lights.size() > n)
+        spdlog::warn("world.json: {} lights given, only {} emitted (kMaxLights)",
+                     lights.size(), n);
+    // Build the array as text first, so the read-back below can compare it
+    // EXACTLY instead of re-parsing it. (Routing the check through
+    // loadLightManifest was a mistake: that makes "did we write the lights we
+    // meant to" depend on the loader tolerating every FOREIGN key in the
+    // file, so a manifest containing a legal-but-unsupported `null` would
+    // block the edit entirely. Measured: `{"a": null}` + a lights array
+    // loads 0 lights, because the loader's top-level skip cannot step over a
+    // bare word.)
+    std::string lightsJson = "[";
+    for (size_t i = 0; i < n; ++i) {
+        const LightSource& l = lights[i];
+        char buf[192];
+        std::snprintf(buf, sizeof(buf),
+                      "%s{ \"pos\": [%.3f, %.3f, %.3f], "
+                      "\"color\": [%.3f, %.3f, %.3f], "
+                      "\"radius\": %.2f, \"intensity\": %.2f }",
+                      i ? "," : "", l.pos.x, l.pos.y, l.pos.z, l.color.x,
+                      l.color.y, l.color.z, l.radius, l.intensity);
+        lightsJson += buf;
+    }
+    lightsJson += "]";
+    // No space after the colon: emitPreserved writes "%s":%s with none either,
+    // and the extractor only trims TRAILING whitespace from a value, so a
+    // leading space here would make the read-back compare against a different
+    // string than the one written.
+    std::fprintf(f, "%s\n  \"lights\":%s\n}\n", sep, lightsJson.c_str());
+    // fclose is the only durability barrier: it is where the buffered bytes
+    // are actually handed to the OS. A failed flush must abort BEFORE the
+    // rename, otherwise a partial temp file gets promoted over a good
+    // manifest - trading a truncated file for a different truncated file.
+    // There is deliberately NO fsync: rename is atomic with respect to content,
+    // and a power loss losing one interactive edit is acceptable. Do not "fix"
+    // the missing fsync by writing in place - that reintroduces truncation.
+    if (std::fclose(f) != 0) {
+        std::remove(tmp.c_str());
+        return false;
+    }
+
+    // ---- read the tmp back and PROVE it before promoting it ----------------
+    // temp+rename protects against a failed WRITE. It cannot distinguish a
+    // successful write of correct content from a successful write of WRONG
+    // content, and the concrete case is not exotic: scanTopLevel's depth-0
+    // terminators are ',' and '}' ONLY, so a manifest missing the comma
+    // between two members scans "cleanly" - the first value absorbs the rest
+    // ({"a":1 "b":2} yields ONE pair, "a" = `1 "b":2`), the scan reaches the
+    // closing brace and reports success, and key "b" is silently dropped.
+    // Chasing malformed shapes one fixture at a time does not close that
+    // class, so the guard is general instead: rescan what we actually wrote,
+    // and require the key set and every preserved value to be exactly what we
+    // promised. One read of a small file, on an Apply-only path.
+    auto selfCheckFail = [&](const char* why) {
+        spdlog::warn("world.json: lights rewrite rejected by self-check ({}), "
+                     "manifest left untouched", why);
+        std::remove(tmp.c_str());
+        return false;
+    };
+    std::vector<TopPair> got;
+    if (!scanTopLevel(readFileText(tmp), got))
+        return selfCheckFail("tmp does not re-parse");
+
+    size_t preserved = 0;
+    for (const TopPair& p : pairs)
+        if (p.key != "lights")
+            ++preserved;
+    if (got.size() != preserved + 1)
+        return selfCheckFail("top-level key count changed");
+    // No key may appear twice. A missing comma after a SCALAR is the shape
+    // that loses data: the value scanner has no depth-0 terminator before the
+    // next key, so it absorbs `"lights": []` into the previous value and the
+    // scan still succeeds - re-emitting then writes "lights" a SECOND time.
+    // Same count, same per-key values, so only an explicit duplicate check
+    // sees it. (A missing comma after a self-terminating value like `]` or `}`
+    // is harmless: the scan stops there and finds the next key normally.)
+    for (size_t i = 0; i < got.size(); ++i)
+        for (size_t j = i + 1; j < got.size(); ++j)
+            if (got[i].key == got[j].key)
+                return selfCheckFail("duplicate top-level key after rewrite");
+    for (const TopPair& want : pairs) {
+        if (want.key == "lights")
+            continue;
+        const TopPair* found = nullptr;
+        for (const TopPair& g : got)
+            if (g.key == want.key) {
+                found = &g;
+                break;
+            }
+        if (!found)
+            return selfCheckFail("a preserved key vanished");
+        if (found->value != want.value)
+            return selfCheckFail("a preserved value was altered");
+    }
+
+    // The key we own must come back byte-for-byte as we wrote it. Comparing
+    // the text (rather than re-loading it) keeps the check self-contained: it
+    // verifies THIS function's output without depending on how tolerant
+    // loadLightManifest is about foreign keys elsewhere in the manifest.
+    const TopPair* mine = nullptr;
+    for (const TopPair& g : got)
+        if (g.key == "lights")
+            mine = &g;
+    if (!mine)
+        return selfCheckFail("the lights key is absent from the rewrite");
+    if (mine->value != lightsJson)
+        return selfCheckFail("the emitted lights array does not match");
+
+    std::error_code ec;
+    std::filesystem::rename(tmp, path, ec);
+    if (ec) {
+        std::remove(tmp.c_str());
+        return false;
+    }
+    return true;
 }
 
 bool readLayered(const std::string& manifestPath, const WorldFileMeta& expected,
