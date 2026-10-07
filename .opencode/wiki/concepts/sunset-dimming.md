@@ -3,6 +3,15 @@ title: Why a sunset measures as faint haze, not a sunset
 tags: [shading, sky, sunset, sunrise, day-night, measurement, common-base]
 sourceRefs: [shaders/common_base.glsl, src/app/cli/args.cpp, src/app/frame/run.cpp, docs/rendering.md]
 lastReviewed: 2026-10-07
+numbers: |
+  Measured by this session (baseline, before the fix): toward-sun horizon
+  saturation 0.031 and R-B +12.6 at elev 2; away-from-sun frame luma 164 at
+  elev 34 vs 172 at elev 4; high sky R-B -38.
+  Measured by George (after the fix, 480x270 splat, same camera): toward-sun
+  saturation 0.120/0.143/0.160/0.168/0.179/0.192 at elev 12/8/4/2/0/-2 and
+  R-B +63.3 at elev 2; away-from-sun frame luma 155.25/151.41/143.90/133.50/
+  110.43/89.92 at elev 34/12/8/4/0/-2, ratio 0.711; high sky R-B all negative,
+  worst -12.5.
 ---
 
 # The golden-hour gradient exists — it is just ~3× too weak to read
@@ -63,55 +72,94 @@ Proposed (not landed at time of writing — George's lane, see
 `horizBand`, a stronger `sunsetTint`, and a dusk ramp separated from
 `applyNight` so 12° → 3° is a transition rather than a step.
 
-## The daylight factor must saturate, or it dims the moonlit night
+## What landed (supersedes the proposals below)
 
-The obvious fix — `mix(0.55, 1.0, smoothstep(-0.02, 0.35, kSunDir.y))` — is a
-trap: at any `kSunDir.y ≤ -0.02` it settles at **0.55 and stays there**, so it
-multiplies a ~45 % dimming into the entire moonlit night and silently moves
-every night reference. The night is already handled by `applyNight`; a second
-dimming term is not complementary, it is a regression.
-
-"Leave the night alone" is really a constraint on *where the night preset sits*
-— `y = -0.5`, i.e. the elev −30 arm, **not** `y = -0.03`. So the low edge of
-the dimming window has to reach below the horizon without covering that preset:
+**Read `common_base.glsl` for the current form; the two earlier proposals on
+this page are both dead.** What is in the tree:
 
 ```glsl
-float daylight = 1.0 - 0.45 * smoothstep(-0.16, 0.10, kSunDir.y) *
+float sunDaylight()
+{
+    return mix(0.36, 1.0, smoothstep(-0.14, 0.35, kSunDir.y));
+}
+```
+
+- **Monotonically increasing in `y`**, so the sky dims monotonically as the sun
+  sinks with **no recovery before the horizon**. An earlier two-sided bump
+  peaked at 5.7° and opened back to 1.0 at `y = 0`, which would have made the
+  sky *brighten* as it set.
+- **The moonlit night is protected structurally, not by a saturating window.**
+  The ramp is allowed to keep falling below the horizon because `applyNight`
+  **replaces the sky outright** once `nightFactor()` reaches 1 (`y ≤ -0.14`) —
+  so for the entire night band this factor has *no effect at all*. That is what
+  frees the ramp to be monotonic instead of squeezing a recovery into the
+  twilight band. The earlier proposal here added a two-sided smoothstep purely
+  to protect the night; once the replacement semantics are noticed, that
+  machinery is unnecessary.
+- **The floor is 0.36, not 0.50.** AgX compresses hard: a scene-space 0.60 at
+  the horizon measured **0.87 of the day value on screen**, against a required
+  0.75. The floor has to be chosen in **output** space and then converted,
+  which is why it looks deeper than the curve suggests. *Anyone tidying 0.36 up
+  to 0.50 because it looks too dark will silently fail gate 4.*
+
+Also in `skyColor`/`skyColorFast`: `horizBand` widened from
+`pow(1 - cosTheta, 3.0)` to `1.9`; `sunsetTint` made directional and far more
+saturated, `(1.0, 0.47, 0.12)` toward `(1.0, 0.34, 0.26)` away; and the
+**anti-solar floors** rebalanced — the golden-hour terms were `0.55` and `0.35`,
+which lit the *whole horizon ring regardless of where the sun was* and made the
+away-from-sun sky brighter than the daylight dimming removed (away luma rose
+155 → 160 from 34° to 12°). They are now **0.20 and 0.15**, with the toward-sun
+coefficients raised so the sums stay at 1.95 / 1.00 — the toward-sun glow is
+unchanged by the rebalance. **That rebalance, not the daylight curve, is the
+mechanism behind gate 4 passing.**
+
+## Dead proposal 1 — the fixed daylight factor
+
+`mix(0.55, 1.0, smoothstep(-0.02, 0.35, kSunDir.y))` is a trap: at any
+`kSunDir.y ≤ -0.02` it settles at **0.55 and stays there**, multiplying a ~45 %
+dimming into the entire moonlit night and silently moving every night
+reference. Kept here only so it is not re-proposed.
+
+## Dead proposal 2 — the saturating two-sided bump
+
+```glsl
+float daylight = 1.0 - 0.38 * smoothstep(0.0, 0.10, kSunDir.y) *
                          (1.0 - smoothstep(0.10, 0.35, kSunDir.y));
 ```
 
-- `y ≤ -0.16` (elev ≤ −9.2°, **the entire night band**): first factor is 0 →
-  `daylight` is exactly **1.0**, moon untouched.
-- `y ≥ 0.35` (elev ≈ 20.5°, noon): second factor is 1 → exactly **1.0**.
-- `y = 0`: `smoothstep(-0.16, 0.10, 0)` = `t = 0.6154` → `0.6699`, so
-  `daylight = 0.699` — the sunset is genuinely dimmer than noon.
+Written to keep `daylight = 1.0` outside the twilight window. It failed **its own
+gate 4**: `smoothstep(0.0, 0.10, 0)` is *exactly* 0, so `daylight(0) = 1.0` and
+elev 0 — the elevation gate 4 measures — got no dimming at all. It satisfied the
+letter of "don't touch the night" while breaking the thing it was written to
+fix. **Gate 4 caught it because gate 4 measures elev 0**, which is the argument
+for writing the gate before the formula. Superseded: a monotonic ramp plus
+`applyNight`'s replace semantics is both simpler and correct.
 
-### A correction worth keeping: low edge at exactly 0.0 is a trap
+## Measured after the fix
 
-The first attempt here used `smoothstep(0.0, 0.10, y)`. At `y = 0` that is
-**exactly 0**, so `daylight(0) = 1.0` and **elev 0 gets no dimming at all**.
-Worse, because the dip peaks at `y = 0.10` and closes back to 1.0 by `y = 0`,
-the curve is **non-monotonic** — the sky would get darker as the sun falls from
-12° to 4°, then get *brighter again* at the horizon. A sunset that brightens as
-it sets.
+Setup verbatim: eye `(0,40,0)` pitched 20° up, 480×270 splat, horizon band rows
+0.72–0.95, high sky rows 0.05–0.25, sun azim 238. "Toward" aims the camera at
+the sun; "away" aims at azim 58 with the sun still at 238.
 
-It satisfied the letter of "don't touch the night" while breaking the thing it
-was written to fix. **Gate 4 caught it, because gate 4 measures elev 0** — which
-is the argument for writing the gate before the formula, not after.
+**Toward sun — saturation `(R−B)/(R+B)`, horizon band:**
 
-### These are structural claims, not measured numbers
+| elev | 34 | 12 | 8 | 4 | 2 | 0 | −2 |
+|---|---|---|---|---|---|---|---|
+| sat | −0.037 | 0.120 | 0.143 | 0.160 | 0.168 | 0.179 | 0.192 |
 
-What is established by hand and does not depend on rendering:
+`R−B` at elev 2 is **+63.3** (baseline +12.6), clearing the +60 target. The
+high-sky value that was thinnest (toward, 8°) is now −12.5, was −2.4.
 
-- `daylight(y ≤ -0.16) = 1.0` exactly → the night band cannot move.
-- `daylight(0) = 0.699` exactly → the horizon is dimmer than noon.
-- The curve is monotonic decreasing in `y` over `[-0.16, 0.10]`.
+**Away from sun — frame luma, the monotonicity gate:**
 
-What is **not** established: any resulting pixel luma. Multiplying sky radiance
-by 0.699 does **not** imply the frame luma falls by 30 %, because the frame goes
-through AgX in post and that is not a linear transfer. Predicted lumas are
-arithmetic on a false assumption and need one render to confirm. Do not quote
-them.
+| elev | 34 | 12 | 8 | 4 | 0 | −2 |
+|---|---|---|---|---|---|---|
+| luma | 155.25 | 151.41 | 143.90 | 133.50 | 110.43 | 89.92 |
+
+Strictly decreasing; ratio **0.711 < 0.75**.
+
+**High sky stays blue-dominant** (`R−B < 0`): away −48.2 / −43.2 / −42.3 /
+−41.8 / −41.4; toward −29.9 / −13.7 / −12.5 / −14.0 / −15.5 / −17.7 / −21.1.
 
 ## Gate spec — ratios, not vibes
 
@@ -121,31 +169,37 @@ which puts the frame bottom at 227 m and keeps ground out of frame entirely.
 **Every metric below is a ratio or a delta, so none of them is a claim about a
 particular camera.**
 
-| # | Gate | Baseline | Target |
-|---|---|---|---|
-| 1 | `sunsetSat = (R−B)/(R+B)`, glow band **toward** the sun, elev 2° | **0.031** | ≥ **0.16** |
-| 2 | **Invariant:** high sky stays blue-dominant, `(R−B)_high < 0` | −0.33 | stays < 0 |
-| 3 | **Falsifiability:** day34 anti-solar high sky must be blue-dominant, else **ABORT** | passes | must keep passing |
-| 4 | **Dimming:** away-from-sun luma falls across 34→12→4→0; `luma(0) < 0.75 · luma(34)` | **0.98 — FAILS** | < 0.75 |
-| 5 | **Night immovable:** `luma(−30)` within tolerance of the moonlight reference | (Robin's) | must not move |
+| # | Gate | Metric | Baseline | Threshold | Measured |
+|---|---|---|---|---|---|
+| 1 | Sunset reads as a sunset | `sunsetSat = (R−B)/(R+B)`, **horizon band**, toward sun, elev 2° | 0.031 | ≥ 0.16 | **0.168** |
+| 2 | High sky stays blue | `R−B < 0`, high sky | −0.33 | < 0 | **−12.5** (worst case) |
+| 3 | Probe is valid | day34 away-sun high sky blue-dominant, else **ABORT** | passes | must pass | passes |
+| 4 | Golden hour gets darker | `luma(0) / luma(34)`, **away from sun**, **frame luma** | 0.98 | < 0.75 | **0.711** |
+| 5 | Night must not move | `luma(−30)` vs the moonlight reference | — | unchanged | see `tests/night_check.py` |
 
-Gate 4 is **supposed to fail today** — that is the finding, and a gate that
-passes on the current tree would be measuring nothing. Gate 5 exists so a later
-daylight factor cannot quietly re-dim the moon; it turns a review note into an
-enforced invariant.
+### Each gate uses the metric that matches what it measures
 
-Gate 3 is the one that matters most for trusting any of it: two of the three
-measurement runs were void because the *instrument* was broken while the script
-printed a clean table. A gate that can abort is worth more than one that always
-reports.
+**Do not harmonise these into one metric.** Gate 1 and gate 4 both *could* be
+computed from the horizon band, and the band is the worse choice for gate 4:
+measured on the band the ratio is **128.3/170.7 = 0.752**, which fails 0.75 by
+0.002 — and that 0.002 is the band talking, not a real violation. The band is a
+narrow strip whose **content** moves with elevation (cloud cover is
+`0.46 + 0.10·(1 − smoothstep(0, 0.6, kSunDir.y))`, so which pixels are cloud
+versus clear sky changes as the sun sets), and it sits in the AgX shoulder where
+the glow lives, so a small radiance change moves the encoded mean a lot.
+
+Gate 1 wants the band because the glow lives there. Gate 4 wants frame luma
+because at `y = 40` pitched 20° up the frame is **all sky by construction**, so
+frame luma *is* sky luma and nothing is contaminated. Collapsing them would
+weaken one gate to spare the other.
+
+Thresholds are written as the **measured** value with the setup attached, not
+as a rounded target.
 
 **Gate 3 must abort with a message distinguishable from a threshold failure**,
 and it must do so *before* any threshold is evaluated — otherwise the first
 person to hit it reads a broken render as a dim sunset and "fixes" a working
-shader. Distinct exit path, distinct first line of output, no numbers printed.
-
-Gate 4 is what caught the non-monotonic `daylight` bug above, which is the
-argument for writing the gate before the formula.
+shader. Distinct exit path, distinct first line, no numbers printed.
 
 ## No reference shot frames a sunset
 
