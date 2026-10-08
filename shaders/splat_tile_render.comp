@@ -38,6 +38,7 @@ layout(set = 0, binding = 21, rgba16f) uniform highp image2D uGNorm;
 layout(std140, set = 0, binding = 3) uniform SplatUBO {
     vec4 uSplat;  // x=buried, y=sigma2, z=quad extent, w=debug mode
     vec4 uSplat2; // x=radius scale, y=opacity, z/w=spare
+    vec4 uSplat3; // x=base-seal alpha threshold (VF_SPLAT_SEAL_ALPHA), yzw=spare
 } sp;
 
 layout(std140, set = 0, binding = 24) uniform RotUBO {
@@ -171,6 +172,8 @@ void main()
     const float rScale = clamp(sp.uSplat2.x, 0.5, 2.0);
     const float sigma2 = max(sp.uSplat.y, 1e-3);
     const float depthTol = max(sp.uSplat2.z, 0.0);
+    const float edgeStart = clamp(sp.uSplat2.w, 0.0, 0.999);
+    const float sealAlpha = max(sp.uSplat3.x, 0.0);
     const bool noCollapse = sp.uSplat.x > 0.5; // buried (debug excluded above)
 
     // Pass 1: prepass mirror — nearest full-disk opaque plane depth over the
@@ -204,16 +207,25 @@ void main()
         const vec4 vMat = s.mat_ao;
         const bool isWater = surfelIsWater(vMat.w);
 
-        // pure Gaussian alpha (mirrors splat.frag PASS_MODE 1); the discard
-        // threshold also frees pixels from far sub-threshold ghosts.
+        // pure Gaussian alpha (mirrors splat.frag PASS_MODE 1) times the
+        // ellipse-normalised edge window, which rolls alpha to exactly zero at
+        // the clip radius so a silhouette splat fades out instead of ending in
+        // a step; the discard threshold also frees pixels from far
+        // sub-threshold ghosts.
         float alpha = 0.0;
+        float alphaKernel = 0.0; // pre-window kernel alpha; the seal test
         float fragDepthQ = 0.0;
         if (!isWater) {
+            const bool edgeOn = sp.uSplat2.w > 0.0;
+            const float rN = sqrt(d2) / max(extent, 1e-5); // 1.0 at the clip
+            const float edge =
+                edgeOn ? 1.0 - smoothstep(edgeStart, 1.0, rN) : 1.0;
             fragDepthQ =
                 floor((1.0 - exp(-t * 0.02)) * 100000.0 + 0.5) / 100000.0;
             if (!(fragDepthQ - depthTol < depth))
                 continue;
-            alpha = sp.uSplat2.y * exp(-0.5 * d2 / sigma2);
+            alphaKernel = sp.uSplat2.y * exp(-0.5 * d2 / sigma2);
+            alpha = alphaKernel * edge;
             if (alpha < 0.004)
                 continue;
         }
@@ -252,7 +264,8 @@ void main()
                 bent = R * bent;
             }
             const vec3 bentB = normalize(bent);
-            col = shadeSurfel(q, rd, alb, rr, ro, n, bentB, shB, aoB, mId);
+            col = shadeSurfel(q, rd, alb, rr, ro, n, bentB, shB, aoB, mId,
+                              s.bent_sh.w);
             const float fog = 1.0 - exp(-t * 0.0016);
             vec3 fc = fogColor(rd, q);
             const float mist = mistFactor(ro, q, t);
@@ -275,13 +288,18 @@ void main()
             hdr.a = hdr.a * (1.0 - alpha) + alpha;
             gpos = vec4(q, hitType);
             gnorm = vec4(0.0, 1.0, 0.0, 0.0);
-        } else if (fragDepthQ == depth) {
-            // opaque base (PASS_MODE 4 mirror): the exact nearest fragment
-            // writes opaque colour so the sky can never bleed through the
-            // band's low-alpha rims. Encountered last in the far->near walk,
-            // so it replaces any earlier band blend — the forward base pass
-            // is drawn first and the band over it; with the base nearest the
-            // two orders agree to first order.
+        } else if (fragDepthQ == depth &&
+                   (sealAlpha <= 0.0 || alphaKernel >= sealAlpha)) {
+            // Base seal mirror (PASS_MODE 4): the exact nearest fragment writes
+            // opaque colour so the sky can never bleed through the band's
+            // low-alpha rims - and so it stands in for the geometry the depth
+            // band rejects behind it. Fragments too thin to do that (rims and
+            // overhangs) decline the seal and fall through to the band branch
+            // below, which draws them at their own windowed alpha and so fades
+            // them into the background. Encountered last in the far->near walk,
+            // so it replaces any earlier band blend - the forward base pass is
+            // drawn first and the band over it; with the base nearest the two
+            // orders agree to first order.
             hdr = vec4(col, 1.0);
             gpos = vec4(q, hitType);
             gnorm = vec4(n, 0.0);

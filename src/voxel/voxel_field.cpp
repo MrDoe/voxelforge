@@ -855,4 +855,188 @@ inline bool VoxelField::carveFind(uint32_t k, uint32_t& v) const
     return false;
 }
 
+void VoxelField::collectEmissive(const std::vector<glm::vec3>& matEmission,
+                                 std::vector<EmissiveCluster>& out) const
+{
+    out.clear();
+    if (!m_built || matEmission.empty())
+        return;
+
+    auto emissionOf = [&](int mat) -> const glm::vec3* {
+        if (mat < 0 || mat >= int(matEmission.size()))
+            return nullptr;
+        const glm::vec3& e = matEmission[size_t(mat)];
+        return (e.r > 0.0f || e.g > 0.0f || e.b > 0.0f) ? &e : nullptr;
+    };
+
+    std::vector<EmissiveCell> cells;
+    // object cells: value = sdfRaw | mat << 8 | tex << 16 | layerId << 24
+    for (size_t i = 0; i < m_okey.size(); ++i) {
+        if (!m_okey[i])
+            continue;
+        const glm::vec3* e = emissionOf(int((m_oval[i] >> 8) & 0xFFu));
+        if (!e)
+            continue;
+        const uint32_t k = m_okey[i] - 1u;
+        cells.push_back({ glm::vec3(-0.5f * WORLD + (float(k >> 20) + 0.5f) * VOXEL,
+                                     -0.5f * WORLD + (float((k >> 10) & 0x3FFu) + 0.5f) * VOXEL,
+                                     -0.5f * WORLD + (float(k & 0x3FFu) + 0.5f) * VOXEL),
+                          *e });
+    }
+
+    // terrain columns emit from the centre of their top cell
+    for (int z = 0; z < m_latN; ++z) {
+        for (int x = 0; x < m_latN; ++x) {
+            const size_t idx = size_t(z) * m_latN + size_t(x);
+            if (m_colTop[idx] < 0)
+                continue;
+            const glm::vec3* e = emissionOf(int(m_colMat[idx]));
+            if (!e)
+                continue;
+            cells.push_back({ glm::vec3(-0.5f * WORLD + (float(x) + 0.5f) * VOXEL,
+                                        -0.5f * WORLD + (float(m_colTop[idx]) + 0.5f) * VOXEL,
+                                        -0.5f * WORLD + (float(z) + 0.5f) * VOXEL),
+                             *e });
+        }
+    }
+
+    // No truncation here: the caller (uploadLightSources) owns the slot
+    // budget and logs the truncation loudly.
+    clusterEmissiveCells(cells, std::numeric_limits<int>::max(),
+                         [&](const glm::vec3& p) { return sampleWorld(p).d >= 0.02f; },
+                         out);
+}
+
+void clusterEmissiveCells(const std::vector<EmissiveCell>& cells, int budget,
+                          const std::function<bool(const glm::vec3&)>& isAir,
+                          std::vector<VoxelField::EmissiveCluster>& out)
+{
+    out.clear();
+    if (budget <= 0 || cells.empty())
+        return;
+
+    // 1 m buckets, sparse: emitter cells are rare, so hashing beats a dense
+    // 103^3 grid (35 MB) for the same job
+    struct Acc {
+        glm::vec3 sumPos { 0.0f };
+        glm::vec3 sumEmis { 0.0f };
+        glm::vec3 lo { 1e9f };
+        glm::vec3 hi { -1e9f };
+        int n = 0;
+    };
+    std::unordered_map<uint32_t, Acc> buckets;
+    for (const EmissiveCell& c : cells) {
+        const uint32_t key =
+            uint32_t(int(std::floor(c.pos.x + 0.5f * WORLD)) & 0x3FF) |
+            (uint32_t(int(std::floor(c.pos.y + 0.5f * WORLD)) & 0x3FF) << 10) |
+            (uint32_t(int(std::floor(c.pos.z + 0.5f * WORLD)) & 0x3FF) << 20);
+        Acc& a = buckets[key];
+        a.sumPos += c.pos;
+        a.sumEmis += c.emission;
+        a.lo = glm::min(a.lo, c.pos);
+        a.hi = glm::max(a.hi, c.pos);
+        a.n += 1;
+    }
+
+    if (buckets.empty())
+        return;
+
+    // deterministic order: most-populated bucket first, ties by key, so the
+    // same content yields the same lights in the same slots on every reload
+    std::vector<std::pair<uint32_t, Acc>> ordered;
+    ordered.reserve(buckets.size());
+    for (const auto& kv : buckets)
+        ordered.push_back(kv);
+    std::sort(ordered.begin(), ordered.end(),
+              [](const std::pair<uint32_t, Acc>& a,
+                 const std::pair<uint32_t, Acc>& b) {
+                  return a.second.n != b.second.n ? a.second.n > b.second.n
+                                                  : a.first < b.first;
+              });
+
+    // Lift a centroid out of its own emitter: a light buried in solid is
+    // occluded by the emitter itself on EVERY receiver's march, so it would
+    // contribute nothing while still occupying a slot.
+    auto liftToAir = [&](glm::vec3 p) {
+        if (isAir(p))
+            return p;
+        for (float up = 0.1f; up < 0.85f; up += 0.1f) {
+            const glm::vec3 q = p + glm::vec3(0.0f, up, 0.0f);
+            if (isAir(q))
+                return q;
+        }
+        return p + glm::vec3(0.0f, 0.9f, 0.0f); // last resort: above the emitter
+    };
+
+    constexpr float kMinSep2 = kEmissiveThinDist * kEmissiveThinDist;
+    for (const auto& kv : ordered) {
+        if (int(out.size()) >= budget)
+            break;
+        const Acc& a = kv.second;
+        const glm::vec3 centroid = a.sumPos / float(a.n);
+        bool tooClose = false;
+        for (const VoxelField::EmissiveCluster& c : out) {
+            const glm::vec3 d = c.pos - centroid;
+            if (glm::dot(d, d) < kMinSep2) {
+                tooClose = true;
+                break;
+            }
+        }
+        if (tooClose)
+            continue;
+
+        VoxelField::EmissiveCluster c;
+        const glm::vec3 avg = a.sumEmis / float(a.n);
+        const float mag = std::max({ avg.r, avg.g, avg.b });
+        c.color = mag > 0.0f ? avg / mag : glm::vec3(1.0f);
+        c.intensity = mag;
+        const glm::vec3 ext = a.hi - a.lo;
+        // Reach grows with emitter strength, not just cluster extent: a
+        // compact white-hot hearth (extent ~1 m) used to get r = 1.0-1.5 m,
+        // and applyLights hard-culls beyond radius, so open ground a few
+        // metres away got exactly zero direct light. Brighter emitters now
+        // reach further (white-hot ~4.6 m, ember ~3.6 m), capped at 8 m.
+        // Cost stays bounded: a bigger radius only adds phase-1 ALU over all
+        // count lights; visibility marches stay capped at K nearest.
+        c.radius = std::clamp(
+            0.5f * std::max({ ext.r, ext.g, ext.b }) + 1.0f + mag, 1.0f, 8.0f);
+        c.pos = liftToAir(centroid);
+        out.push_back(c);
+    }
+}
+
+int fillLightUBO(const std::vector<worldfile::LightSource>& authored,
+                 const std::vector<VoxelField::EmissiveCluster>& derived,
+                 int budget, worldfile::LightUBO& ubo, bool warn)
+{
+    ubo = worldfile::LightUBO{};
+    int n = 0;
+    const int nAuthored = std::min<int>(int(authored.size()), budget);
+    for (; n < nAuthored; ++n) {
+        ubo.posRadius[n] = glm::vec4(authored[size_t(n)].pos,
+                                     authored[size_t(n)].radius);
+        ubo.colorIntensity[n] = glm::vec4(authored[size_t(n)].color,
+                                          authored[size_t(n)].intensity);
+    }
+    if (warn && int(authored.size()) > nAuthored)
+        spdlog::warn("lighting: {} lights in world.json, only the first {} are used",
+                     int(authored.size()), nAuthored);
+    int nDerived = 0;
+    for (const VoxelField::EmissiveCluster& c : derived) {
+        if (n >= budget)
+            break;
+        ubo.posRadius[n] = glm::vec4(c.pos, c.radius);
+        ubo.colorIntensity[n] = glm::vec4(c.color, c.intensity * kEmissiveGain);
+        ++n;
+        ++nDerived;
+    }
+    if (warn && nDerived < int(derived.size()))
+        spdlog::warn("lighting: {} emissive clusters but only {} slots left in the "
+                     "{}-light budget - {} emitters cast no light",
+                     int(derived.size()), budget - nAuthored,
+                     budget, int(derived.size()) - nDerived);
+    ubo.count = n;
+    return n;
+}
+
 } // namespace vf::voxel

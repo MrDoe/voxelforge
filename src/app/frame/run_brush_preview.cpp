@@ -212,13 +212,22 @@ void App::updateBrushPreview()
                 }
             }
         }
+        // Add/Carve/Delete/Paint carry the falloff CURVE index so the tint
+        // marks the tapered volume the stamp actually emits. Smooth has no
+        // tapered volume (its preview is a conservative footprint ball).
+        const float brushFalloff =
+            (m_editBrush == EditBrush::Add || m_editBrush == EditBrush::Carve ||
+             m_editBrush == EditBrush::Delete || m_editBrush == EditBrush::Paint)
+                ? float(m_editFalloffCurve)
+                : 0.0f;
         m_splatPass.setBrush(
             vol, axis, tint,
             (m_editBrush == EditBrush::Rotate && !m_rotateLayer.empty())
                 ? m_layers.layerId(m_rotateLayer)
                 : ((m_editBrush == EditBrush::Move && !m_moveLayer.empty())
                        ? m_layers.layerId(m_moveLayer)
-                       : uint8_t(0)));
+                       : uint8_t(0)),
+            brushFalloff);
         // The SVO reference backend gets the same volume. It used to have no
         // preview at all (setBrush fed only m_splatPass), so in --mode svo
         // every brush-size change was invisible. SVO shades a raymarch HIT
@@ -231,7 +240,8 @@ void App::updateBrushPreview()
                 ? m_layers.layerId(m_rotateLayer)
                 : ((m_editBrush == EditBrush::Move && !m_moveLayer.empty())
                        ? m_layers.layerId(m_moveLayer)
-                       : uint8_t(0)));
+                       : uint8_t(0)),
+            brushFalloff);
         volumeTint = tint;
     }
 

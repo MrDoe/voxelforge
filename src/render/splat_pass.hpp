@@ -14,6 +14,7 @@
 #include "rhi/context.hpp"
 #include "rhi/resources.hpp"
 #include "render/svo_pass.hpp" // RaymarchPush (shared push layout)
+#include "voxel/worldfile.hpp"
 #include <cstdint>
 #include <vector>
 
@@ -30,18 +31,23 @@ public:
     // reload re-uploads pixels without re-writing descriptors. A null view
     // binds nothing (the shader's slot table is then all -1 = palette).
     void setTexAtlas(VkImageView view, VkSampler sampler, VkBuffer tableUbo);
+    // Explicit point light UBO (binding 25 for both the forward and tile
+    // descriptor sets). Zero-count buffers bind a valid UBO so the shared
+    // applyLights() in common_base.glsl is always safe.
+    void setLights(const vf::voxel::LightUBO& lights);
+    // Coarse irradiance volume (binding 26, sampler3D) into the forward AND
+    // tile descriptor sets, mirroring setTexAtlas: the shared
+    // common_irradiance.glsl declaration serves both pipelines. The sampler is
+    // created here once (LINEAR + CLAMP_TO_EDGE - the header promises trilinear
+    // irradiance, so a NEAREST sampler would quantise the term into visible
+    // 1.6 m blocks) and destroyed with the pass.
+    void setIrrVolView(VkImageView view);
     // waterStart = first index of appended water surfels (== count if none).
     // waterChunkRange optionally buckets the trailing water surfels per chunk
     // (GRID_N^3 + 1 absolute offsets, like chunkRange) so off-screen water is
     // culled per frame; empty = draw all water in one call (legacy).
     // edgeStart optionally marks the end of base parents in each chunk; the
     // following small hard-edge bridges remain in the always-on opaque range.
-    // microStart optionally splits each chunk into [base+edge, micro) (same
-    // GRID_N^3 + 1 layout, absolute offsets); empty = no split. Distant
-    // chunks skip their sub-pixel micro range (VF_MICRO_DIST, default 20 m).
-    // objectChunks (GRID_N^3 flags: chunk contains object-field surfels)
-    // keeps micros visible farther out for foliage/prop chunks
-    // (VF_MICRO_DIST_OBJ, default 35 m).
     // lod1Range/lod2Range hold the merged-terrain LOD ring runs per chunk
     // (same layout); draw-time selection picks a ring by chunk distance
     // (VF_LOD1/VF_LOD2, default 30/90 m) with base-range fallback for
@@ -49,26 +55,22 @@ public:
     void setSurfels(const void* data, size_t bytes, size_t count,
                     const std::vector<uint32_t>& chunkRange, uint32_t waterStart,
                     const std::vector<uint32_t>& waterChunkRange = {},
-                    const std::vector<uint32_t>& microStart = {},
                     const std::vector<uint32_t>& edgeStart = {},
                     const std::vector<uint32_t>& lod1Range = {},
-                    const std::vector<uint32_t>& lod2Range = {},
-                    const std::vector<uint8_t>& objectChunks = {});
+                    const std::vector<uint32_t>& lod2Range = {});
 
     // Live-edit patch: replace one chunk's surfels (e.g. after a voxel edit).
     // The paged layout reserves per-chunk capacity, so the common case is an
     // in-place staging copy; a chunk that outgrows its slot is relocated to
     // the end of the opaque region (growing the buffer if needed). Patched
-    // chunks drop their LOD ring until the next full upload. `microOffset` is
-    // the index where the material micro tail begins inside the patched run;
+    // chunks drop their LOD ring until the next full upload.
     // `edgeCount` is the number of base parents followed by hard-edge bridges.
-    // UINT32_MAX means the corresponding split is unavailable/legacy.
+    // UINT32_MAX means the split is unavailable/legacy.
     // Blocking (device idle + immediate submit): call between frames.
     void patchChunkSurfels(uint32_t chunk, const void* data, size_t bytes,
-                           size_t count, uint32_t microOffset = UINT32_MAX,
-                           uint32_t edgeCount = UINT32_MAX);
+                           size_t count, uint32_t edgeCount = UINT32_MAX);
 
-    // Copy one chunk's current base+edge surfels (material micro tail excluded)
+    // Copy one chunk's current base+edge surfels
     // into `out` as raw 80 B records. `edgeCount`, when provided, receives the
     // number of trailing edge bridges so the live editor can preserve the
     // segment split. Returns the total copied count.
@@ -105,13 +107,17 @@ public:
     //   axis   = (unit axis xyz, half length m; 0 = sphere)
     //   tint   = (rgb, strength; 0 = preview off)
     // Staged on the CPU and flushed into the mapped UBO by record().
+    // `falloff` rides bMeta.y (0..1) and is the radial profile the CPU
+    // rasterizers apply to Add/Carve: the shader repeats it so the hover tint
+    // marks the tapered volume, not the full-depth one. 0 = hard edge.
     void setBrush(const glm::vec4& volume, const glm::vec4& axis,
-                  const glm::vec4& tint, uint8_t layerId = 0)
+                  const glm::vec4& tint, uint8_t layerId = 0,
+                  float falloff = 0.0f)
     {
         m_brush[0] = volume;
         m_brush[1] = axis;
         m_brush[2] = tint;
-        m_brush[3] = glm::vec4(float(layerId), 0.f, 0.f, 0.f);
+        m_brush[3] = glm::vec4(float(layerId), falloff, 0.f, 0.f);
     }
 
     // Live trackball drag preview: rotate only surfels owned by `layerId`.
@@ -238,6 +244,8 @@ private:
     Buffer m_brushBuf {};
     glm::vec4 m_brush[4] { glm::vec4(0.f), glm::vec4(0.f), glm::vec4(0.f),
                            glm::vec4(0.f) };
+    // Explicit point lights (bind 25; same UBO in the forward and tile sets).
+    Buffer m_lightsBuf {};
     // Live selected-layer transform (bind 14): exact owner rotation plus an
     // optional world translation for Move mode, shared by forward, cull and
     // tile paths. The target ID occupies row2.w; row4.xyz is translation.
@@ -251,6 +259,7 @@ private:
     VkImageView m_hizViews[kMaxHiZMips] = {};   // per-mip storage views
     VkImageView m_hizSampledView = VK_NULL_HANDLE;
     VkSampler m_hizSampler = VK_NULL_HANDLE;
+    VkSampler m_irrSampler = VK_NULL_HANDLE; // irradiance volume (binding 26)
     VkSampler m_depthSampler = VK_NULL_HANDLE;
     int m_hizNumMips = 0;
     Buffer m_occlBuf {}; // OcclParams {occlEnabled, hizNumMips}
@@ -264,6 +273,13 @@ private:
     // Triple-buffered indirect draw commands (host-visible, CPU-filled per
     // frame; cycled in lockstep with the frame slots so the GPU never reads
     // a buffer the CPU is currently writing).
+    //
+    // This is a BUDGET, not a chunk count: it sizes the selection buffer
+    // (kMaxChunkDraws entries x 4 uint32) and the tile counts matrix, whose
+    // row stride is nDraws + m_waterDraws. computeDraws() enforces
+    // (opaque + water) <= this and warns if it ever trims; do not raise it
+    // without re-sizing the tile counts matrix, which is nTiles * this * 4
+    // bytes and already ~130 MB at 1080p.
     static constexpr uint32_t kMaxChunkDraws = 16 * 16 * 16;
     Buffer m_drawCmds[3] {};
     uint32_t m_cmdSlot = 0;
@@ -275,6 +291,40 @@ private:
     // copied into the indirect buffers above).
     std::vector<VkDrawIndirectCommand> m_cpuDraws;
     std::vector<VkDrawIndirectCommand> m_cpuWaterDraws;
+    // Per-process env tuning, cached once: VF_* vars are fixed for the
+    // process (set before launch), so re-running getenv+atof ~28x per frame
+    // is pure overhead. refreshEnvCache() reads them on first use; behaviour
+    // is identical unless someone setenv()s mid-run, which no path does.
+    struct EnvCache {
+        bool init = false;
+        bool noCull = false;
+        bool noWaterCull = false;
+        bool direct = false;
+        bool noGpuCull = false;
+        bool noIndirectBarrier = false;
+        bool noOccl = false;
+        bool noWater = false;
+        bool tile = false;
+        bool trace = false;
+        bool debugSet = false;
+        float debugVal = 0.0f;
+        float lod1Dist = 30.0f;
+        float lod2Dist = 90.0f;
+        float sigma = -1.0f;   // <0 = not set
+        float extent = -1.0f;  // <0 = not set
+        float radius = -1.0f;  // <0 = not set
+        float opacity = -1.0f;
+        float depthTol = -1.0f;
+        float edgeStart = -1.0f;
+        float sealAlpha = -1.0f;
+    };
+    EnvCache m_env;
+    struct ScratchDraw {
+        float dist2;
+        uint32_t first, count;
+    };
+    std::vector<ScratchDraw> m_drawScratch;
+    void refreshEnvCache();
     glm::vec4 m_params { 0.0f, 0.5f, 1.02f, 0.0f };
     float m_radiusScale = 1.0f;
     bool m_buried = false;
@@ -292,8 +342,6 @@ private:
     uint32_t m_bufSlots = 0;   // total slots in m_surfelBuf
     std::vector<uint32_t> m_waterChunkRange; // GRID_N^3 + 1 absolute offsets, or empty
     std::vector<uint32_t> m_edgeStart;       // per-chunk base/edge split, or empty
-    std::vector<uint32_t> m_microStart;      // per-chunk edge/micro split, or empty
-    std::vector<uint8_t> m_objectChunks;     // per-chunk object presence, or empty
     std::vector<uint32_t> m_lod1Range;       // merged-terrain LOD rings, or empty
     std::vector<uint32_t> m_lod2Range;
     VkImageView m_hdrView = VK_NULL_HANDLE;

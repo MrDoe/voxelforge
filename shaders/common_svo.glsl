@@ -503,6 +503,21 @@ vec2 brickReflectivity(vec3 p)
 }
 
 float sceneMap(vec3 p) { return map(p); }
+
+// Sky transmission along the bent normal: 1 = open sky, 0.05 = fully
+// enclosed. Used to stop the sky/IBL ambient from washing out caves.
+float skyVisibilitySvo(vec3 p, vec3 bent)
+{
+    vec3 dir = normalize(mix(bent, vec3(0.0, 1.0, 0.0), 0.65));
+    float th;
+    return exactSVOHit(p + dir * 0.25, dir, 0.05, 24.0, th) ? 0.05 : 1.0;
+}
+
+float lightVisibilitySvo(vec3 ro, vec3 rd, float maxDist)
+{
+    float th;
+    return exactSVOHit(ro, normalize(rd), 0.05, maxDist, th) ? 0.0 : 1.0;
+}
 // multi-scale SDF ambient occlusion with bent normal
 void sdfAO(vec3 p, vec3 n, out float ao, out vec3 bent)
 {
@@ -551,12 +566,12 @@ vec3 shadeFloor(vec3 q, vec3 r)
     vec3 F = fresnelSchlick(f0, vdh);
     float fAvg = (F.r + F.g + F.b) * 0.3333;
     vec3 spec = pbrSpec(n, V, kSunDir, f0, rough);
-    vec3 amb = skyIrradiance(n) * 0.5;
+    vec3 amb = skyIrradiance(n) * 0.5 + moonLight(n, 1.0);
     // IBL: environment contribution for realistic ambient fill
     vec3 ibl = iblContribution(n, V, f0, rough) * 0.5;
-    vec3 col = alb * (1.0 - fAvg) * (kSunCol * ndl * sh + amb + ibl)
-         + spec * kSunCol * ndl * sh;
-    col += (mId >= 9u && mId <= 15u) ? kEmissive[mId] : vec3(0.0);
+    vec3 col = alb * (1.0 - fAvg) * (sunCol() * ndl * sh + amb + ibl)
+         + spec * sunCol() * ndl * sh;
+    col += emissiveTerm(q, n, mId, alb);
     return col;
 }
 vec3 shadeTerrain(vec3 p, vec3 rd, vec3 alb, vec2 rr, vec3 ro)
@@ -572,13 +587,39 @@ vec3 shadeTerrain(vec3 p, vec3 rd, vec3 alb, vec2 rr, vec3 ro)
     if ((gRenderFlags & 1) != 0)
         sdfAO(p, n, ao, bent);
 
+    // Bit 8 = enclosed-space sky occlusion: 0 = open sky, 1 = fully enclosed.
+    // Daylight ambient is scaled down hard in enclosed space and a dim,
+    // albedo-scaled fill replaces it, so caves stop reading as open-sky
+    // daylight without collapsing to black.
+    float enclosed = 1.0 - ((gRenderFlags & 256) != 0
+                            ? skyVisibilitySvo(p, bent) : 1.0);
+    // Same carve-aware closure as common_splat.glsl: the SDF fields behind the
+    // carve know it, and the product of (1-ao)*(1-sh) isolates "no direct
+    // light AND no local sky exposure".
+    enclosed = max(enclosed, aoShEnclosure(ao, sh));
+    float skyAmb = mix(1.0, 0.16, enclosed);
+    float skyIbl = mix(1.0, 0.04, enclosed);
+
     applyFlora(p, rd, ro, mId, false, 0.0, alb, n, sh, ao);
 
     float ndl = max(dot(n, kSunDir), 0.0);
 
-    vec3 amb = skyIrradiance(bent) * (0.28 + 0.30 * ao);
+    vec3 amb = skyIrradiance(bent) * (0.28 + 0.30 * ao) * skyAmb;
+    // Moon takes over from the sun at night; scaled by skyAmb so a cave still
+    // gets almost none of it (the lamp inside is what should read).
+    amb += moonLight(n, ao) * skyAmb;
     float fold = clamp(-n.y, 0.0, 1.0);
-    vec3 bounce = (alb * 0.65 + vec3(0.10, 0.09, 0.07)) * fold * (0.3 + 0.7 * ao);
+    // Indirect term - the exact twin of common_splat.glsl's, and the two must
+    // stay textually identical: same volume, same gain, same fallback, so the
+    // backends cannot disagree about what "indirect light" means. See the
+    // long note in common_splat.glsl before changing either (in particular:
+    // the zero-volume fallback is the bit-exact OFF state, and a ceiling halo
+    // would be a reason to drop the fallback, not to retune the gain).
+    vec3 irr = irradianceVolume(p);
+    vec3 bounce = any(greaterThan(irr, vec3(0.0)))
+                      ? alb * irr * (0.3 + 0.7 * ao) * skyAmb
+                      : (alb * 0.65 + vec3(0.10, 0.09, 0.07)) * fold *
+                            (0.3 + 0.7 * ao) * skyAmb;
 
     vec3 V = -rd;
     vec3 h = normalize(kSunDir + V);
@@ -590,17 +631,20 @@ vec3 shadeTerrain(vec3 p, vec3 rd, vec3 alb, vec2 rr, vec3 ro)
     vec3 spec = pbrSpec(n, V, kSunDir, f0, rough);
 
     // IBL: image-based lighting contribution for realistic ambient
-    vec3 ibl = iblContribution(n, V, f0, rough) * (0.28 + 0.30 * ao);
+    vec3 ibl = iblContribution(n, V, f0, rough) * (0.28 + 0.30 * ao) * skyIbl;
 
-    vec3 col = alb * (1.0 - fAvg) * (kSunCol * ndl * sh + amb + bounce + ibl)
-             + spec * kSunCol * ndl * sh
-             + spec * alb * 0.30 * kSunCol * sh; // albedo-scale multi-scatter compensation
+    vec3 col = alb * (1.0 - fAvg) * (sunCol() * ndl * sh + amb + bounce + ibl)
+             + spec * sunCol() * ndl * sh
+             + spec * alb * 0.30 * sunCol() * sh; // albedo-scale multi-scatter compensation
+
+    // Enclosed-space fill (see common_splat.glsl's twin for the rationale).
+    col += alb * vec3(0.075, 0.080, 0.090) * enclosed * (0.35 + 0.65 * ao);
 
     // backlit foliage translucency (canopy scatters light through leaves)
     if ((gRenderFlags & 4) != 0 && mId == 8u) {
         float back = pow(1.0 - max(dot(n, kSunDir), 0.0), 2.0);
         float thick = clamp(0.5 - sceneMap(p + n * 0.3) * 2.0, 0.0, 1.0);
-        col += alb * kSunCol * back * (1.0 - thick * 0.85) * 0.38;
+        col += alb * sunCol() * back * (1.0 - thick * 0.85) * 0.38;
     }
 
     // Subsurface scattering for foliage: light transport through thin surfaces
@@ -608,7 +652,7 @@ vec3 shadeTerrain(vec3 p, vec3 rd, vec3 alb, vec2 rr, vec3 ro)
         float thickness = clamp(0.5 - sceneMap(p + n * 0.3) * 2.0, 0.0, 1.0);
         float sss = pow(max(1.0 - dot(-rd, n), 0.0), 2.0) * thickness;
         vec3 sssColor = vec3(0.4, 0.7, 0.2) * sss * 0.40; // green-tinted SSS
-        col += sssColor * kSunCol * ndl * sh;
+        col += sssColor * sunCol() * ndl * sh;
     }
 
     if (p.y < kWaterLevel && underWater(p.xz) && !gUnderwater) {
@@ -616,9 +660,10 @@ vec3 shadeTerrain(vec3 p, vec3 rd, vec3 alb, vec2 rr, vec3 ro)
         col *= exp(-depth * vec3(0.35, 0.18, 0.12) * 3.0);
         col = mix(col, vec3(0.05, 0.14, 0.13), clamp(depth * 0.8, 0.0, 0.85));
         // refracted-sun caustics on the bed (shared with the splat backend)
-        col += kSunCol * causticAt(p.xz, pc.misc.y) * ndl * sh
+        col += sunCol() * causticAt(p.xz, pc.misc.y) * ndl * sh
                * 0.25 * exp(-depth * 0.55);
     }
-    col += (mId >= 9u && mId <= 15u) ? kEmissive[mId] : vec3(0.0);
+    col += applyLights(p, n, V, rr, alb);
+    col += emissiveTerm(p, n, mId, alb);
     return col;
 }

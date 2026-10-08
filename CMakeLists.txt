@@ -90,6 +90,7 @@ target_link_libraries(vf_platform PUBLIC glfw Vulkan::Vulkan vf_glm spdlog::spdl
 add_library(vf_core STATIC src/core/camera.cpp
                           src/voxel/layered_world.cpp src/voxel/voxel_field.cpp
                           src/voxel/chunk_store.cpp
+                          src/voxel/irradiance_volume.cpp
                           src/voxel/live_editor.cpp
                           src/voxel/surfelize.cpp
                           src/voxel/heightmap.cpp src/voxel/worldfile.cpp
@@ -188,7 +189,7 @@ foreach(src_file ${VF_SHADER_SRCS})
     set(out_file ${CMAKE_CURRENT_BINARY_DIR}/shaders/${name}.spv)
     add_custom_command(OUTPUT ${out_file}
         COMMAND ${GLSLANG_VALIDATOR} -V --target-env vulkan1.3 -I${CMAKE_CURRENT_SOURCE_DIR}/shaders -o ${out_file} ${src_file}
-        DEPENDS ${src_file} ${CMAKE_CURRENT_SOURCE_DIR}/shaders/common_base.glsl ${CMAKE_CURRENT_SOURCE_DIR}/shaders/common_svo.glsl ${CMAKE_CURRENT_SOURCE_DIR}/shaders/common_splat.glsl ${CMAKE_CURRENT_SOURCE_DIR}/shaders/common_surfel.glsl
+        DEPENDS ${src_file} ${CMAKE_CURRENT_SOURCE_DIR}/shaders/common_base.glsl ${CMAKE_CURRENT_SOURCE_DIR}/shaders/common_svo.glsl ${CMAKE_CURRENT_SOURCE_DIR}/shaders/common_splat.glsl ${CMAKE_CURRENT_SOURCE_DIR}/shaders/common_surfel.glsl ${CMAKE_CURRENT_SOURCE_DIR}/shaders/common_irradiance.glsl
         COMMENT "glslangValidator ${name}")
     list(APPEND VF_SHADER_SPVS ${out_file})
 endforeach()
@@ -315,6 +316,16 @@ add_test(NAME fog_check
     COMMAND ${Python3_EXECUTABLE} ${GROUP_GATE} fog
             ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/tests/fog_check.py
             $<TARGET_FILE:voxelforge>)
+# Night phase. Its own thresholds because every visual_check metric is
+# calibrated on daylight: is_sky's `b > 120` term reports 0.00% night sky (so
+# obj_frac -> ~1.0 and coverage fails out of range), black-in-silhouette uses an
+# absolute `lum < 30` that calls ~2/3 of a correct night frame black, and
+# ownership_classes needs `b >= 90` / `r,g >= 100`, so night water matches no
+# class. See .opencode/wiki/concepts/night-gate-thresholds.md.
+add_test(NAME night_check
+    COMMAND ${Python3_EXECUTABLE} ${GROUP_GATE} night
+            ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/tests/night_check.py
+            $<TARGET_FILE:voxelforge>)
 add_test(NAME gpu_selftest
     COMMAND ${Python3_EXECUTABLE} ${GROUP_GATE} visual,surfel
             $<TARGET_FILE:voxelforge> --selftest --width 640 --height 360)
@@ -369,6 +380,8 @@ set_tests_properties(texture_check
     PROPERTIES LABELS "textures" SKIP_RETURN_CODE 77)
 set_tests_properties(fog_check
     PROPERTIES LABELS "fog" SKIP_RETURN_CODE 77)
+set_tests_properties(night_check
+    PROPERTIES LABELS "night" SKIP_RETURN_CODE 77)
 
 add_test(NAME fast_unit_tests
     COMMAND ${Python3_EXECUTABLE} ${GROUP_GATE} unit,camera,smoke
@@ -396,6 +409,10 @@ add_test(NAME fast_fog_check
     COMMAND ${Python3_EXECUTABLE} ${GROUP_GATE} fog,effects,smoke
             ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/tests/fog_check.py
             $<TARGET_FILE:voxelforge>)
+add_test(NAME fast_night_check
+    COMMAND ${Python3_EXECUTABLE} ${GROUP_GATE} night,effects,smoke
+            ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/tests/night_check.py
+            $<TARGET_FILE:voxelforge>)
 set_tests_properties(fast_unit_tests
     PROPERTIES LABELS "unit;camera;smoke" ENVIRONMENT "VF_FAST_TESTS=1"
                      SKIP_RETURN_CODE 77)
@@ -416,6 +433,9 @@ set_tests_properties(fast_texture_check
                      SKIP_RETURN_CODE 77)
 set_tests_properties(fast_fog_check
     PROPERTIES LABELS "fog;effects;smoke" ENVIRONMENT "VF_FAST_TESTS=1"
+                     SKIP_RETURN_CODE 77)
+set_tests_properties(fast_night_check
+    PROPERTIES LABELS "night;effects;smoke" ENVIRONMENT "VF_FAST_TESTS=1"
                      SKIP_RETURN_CODE 77)
 
 function(vf_add_test_group group)
@@ -442,6 +462,10 @@ vf_add_test_group(visual voxelforge)
 vf_add_test_group(effects voxelforge)
 vf_add_test_group(textures voxelforge)
 vf_add_test_group(fog voxelforge)
+# Night phase: its own thresholds, because every visual_check metric is
+# calibrated on daylight. Two extra world loads, so it is NOT in smoke --
+# `ninja -C build test-night`.
+vf_add_test_group(night voxelforge)
 vf_add_test_group(smoke vf_tests voxelforge)
 
 # Keep the historical spelling as a compatibility alias; both run only the

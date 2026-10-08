@@ -45,9 +45,6 @@ void App::loadStoreOverlay()
     sp.edgeShrink = m_edgeShrink;
     sp.edgeFill = m_edgeFill;
     sp.sunDir = glm::vec3(m_sunDir);
-    // Same micro-detail default as the full bake: restored chunks keep their
-    // micro tail (VF_MICRO=0 disables).
-    sp.microDetail = m_microDetail;
     sp.lodRings = false;
     sp.anisotropy = true;
     if (const char* e = getenv("VF_ANISO"))
@@ -79,7 +76,6 @@ void App::loadStoreOverlay()
             m_splatPass.patchChunkSurfels(uint32_t(ci), surfels.data(),
                                           surfels.size() * sizeof(vf::voxel::Surfel),
                                           surfels.size(),
-                                          m_liveEditor.microStartOf(ci),
                                           m_liveEditor.edgeCountOf(ci));
         }
         // the restored edit also changed the terrain surface the water

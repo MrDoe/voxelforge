@@ -34,6 +34,10 @@ struct Args {
     std::string mode = "splat"; // primary renderer: "splat" | "svo" (reference)
     bool probeSet=false;
     glm::vec3 probe { 0.f };
+    // --probe-surfel X Y Z (LATTICE cell): list the splats that make up that
+    // cell with their stable ids and the floating-splat verdict.
+    bool probeSurfelSet=false;
+    glm::ivec3 probeSurfel { 0, 0, 0 };
     std::string llmUrl = "http://127.0.0.1:11434";
     std::string llmModel = "gemma4:12b";
 };

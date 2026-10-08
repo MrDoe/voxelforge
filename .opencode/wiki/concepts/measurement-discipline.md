@@ -2,7 +2,7 @@
 title: Measurement discipline — confirm the instrument can produce the result
 tags: [debugging, methodology, testing, tooling, review]
 sourceRefs: [tools/fetch_textures.py, tools/check_texture.py, tests/visual_check.py, tests/live_edit_check.py, tests/visual_check.py, tools/record_demo.py, tools/test_inject_iso.py, docs/testing.md, AGENTS.md]
-lastReviewed: 2026-09-26
+lastReviewed: 2026-10-08
 ---
 
 # Measurement discipline
@@ -77,6 +77,119 @@ Concretely, in this repo:
   behaviour with no headless seam (see the click-vs-drag gate in
   [[entities/live-edit-brush]], which reads `glfwGetMouseButton` directly) is
   **manual-verify only**, and a green suite is not evidence about it.
+
+## The most expensive defects here are not wrong numbers — they are right numbers in the wrong place, unlabelled
+
+Three instances, one category, and it is worth naming because all three looked
+like missing instrumentation and none of them were.
+
+| instance | the value was | what was missing |
+|---|---|---|
+| `night_check.py` day mean | **computed and printed on every run** (`:162-164`, `mean %7.2f -> %7.2f`) | a label, so nobody read the left figure as an absolute anchor. The scale-blindness of the ratio gate looked like a missing instrument; the instrument was in the output all along. |
+| `visual_check`'s `is_sky` | a correct classifier term | the `b > 120` daylight constant, which made it classify a valid night sky as *object* — and made coverage fail as too *little* sky |
+| `skyVisibilitySPlat` | a correct one-ray occlusion test | the decision not to consult `heightfield`; `heightAt` says "solid" below the surface, so every interior read as underground |
+
+The shared shape: a correct quantity is available, and its meaning is not
+recoverable from where it sits. A number with no label is not evidence, however
+true it is.
+
+**Two of the three had a comment already explaining the correct behaviour** —
+inside the code, adjacent to the defect. That is the part worth internalising:
+reading a function's own comments is not politeness, it is often the only place
+the intent is recorded at all. Twice today a page was written from comments that
+had been in the source the whole time, and twice the first reading of them was
+wrong in a direction the comment would have prevented.
+
+Corollary for review: when something looks unmeasured, **check whether it is
+measured and unlabelled before proposing a new measurement.** A proposal to add
+an instrument should be preceded by a check for an existing one — otherwise the
+new instrument arrives, is trustworthy, and quietly duplicates a value nobody is
+reading.
+
+## Rank the claim by the evidence you hold, and let that choose where it lives
+
+### A log entry is a pointer with provenance, not a restatement of the page
+
+Whatever lives on a content page does **not** belong again in `log.md`. An entry
+carries what the page cannot: what changed, the numbers **with their
+configuration**, what is still open, and who owns it. If an entry can be deleted
+without losing a single mechanism, it was duplicating a page.
+
+The failure mode is specific and it is invisible in review, because a long entry
+*looks* thorough: the knowledge layer grows two copies of each finding, they
+drift apart, and a reader who finds the log copy has no way to tell it is
+second-hand. `log.md` reached 298 KB / 4660 lines over 95 entries — median 22
+lines, so a handful of narrative entries were carrying the bulk. Prose about who
+said what to whom is chat transcript, and a transcript in a knowledge layer is
+history pretending to be reference.
+
+**Corollary for provenance:** a correction belongs in the log even when the page
+is what gets fixed, because "this was wrong, here is why" is the fact a reader
+cannot reconstruct from the corrected page alone.
+
+Earned 2026-10-08 by filing a finding that was wrong. The sequence is worth
+keeping because each step was individually reasonable.
+
+Two backends folded apparently different values into the same helper, which
+looked like a divergence — so it was filed as a lead in a content page, tagged
+**"structural, not measured"**, with a proposed A/B. It was retracted the same
+day: the helper opened with its own bitmask guard that made the difference
+unreachable in exactly the state the test proposed. No GPU time was spent and no
+code changed, which is the only reason the outcome was cheap.
+
+The hedge is the part that made it expensive. It was filed as intellectual
+caution, but its effect was to make a wrong claim **survivable** — a lead in a
+page reads to the next session as settled-but-unexplored, and that is the state
+that costs someone an edit.
+
+> **"Structural, not measured" is not a third state. It is state (a) wearing a
+> disclaimer.**
+
+### The rule
+
+| evidence you hold | what you may write | where it goes |
+|---|---|---|
+| consistent with source, read end to end | assert it | a content page |
+| **contradicted** by source | delete it, keep the reasoning | `log.md`, as a retraction |
+| neither — you cannot settle it | **open question** | `log.md`, or a message to whoever holds the instrument. **Never a content page.** |
+
+The load-bearing part is the last row, and it is testable on your own tree:
+
+```sh
+grep -rnE "structural, not measured|unmeasured|unvalidated|untested|not compared" \
+     concepts/ entities/
+```
+
+A content page asserting an unmeasured divergence is a defect **regardless of
+the heading's tag**. Swept on 2026-10-08: the hits were all *disclosure*
+(tables saying "unmeasured", "George-reported, not measured by the wiki
+session") or *terminology* (`sh = 1` meaning unmeasured rather than lit), plus
+one borderline — `entities/live-edit-brush.md` labelling a proposed test
+"**unvalidated** — a proposed test, not a working one", which correctly
+discloses the test's status but sits in a page about a mechanism a reader may
+assume works. Refusing to assert is not the same as asserting while hedging.
+
+### A call-site comparison is not a behaviour comparison
+
+The retracted claim was correct about both call sites and wrong about the
+system. Small pure helpers with a bitmask guard are **where the decision
+lives**; call sites are where the plumbing lives. So the actionable heuristic is
+not "read the callee first" in general — it is:
+
+> **Pure leaf helper, no I/O, short body → read it whole.** It fits on a screen
+> and it is the thing you are reasoning about.
+
+That is recognisable in a second, unlike an instruction to be more careful. The
+guard was three lines from the call site and had already been read earlier in
+the same session; the evidence was present and unconsulted, because the claim
+was already formed and the hedge made it feel *unfinished* rather than *wrong*.
+
+Same shape as two neighbours in one exchange: a `${f%.*}` probe that passed while
+wrong, and a catalogue sweep clean on one direction and eyeballed on the other.
+**Three results that were clean at the layer inspected and uninformative at the
+layer that decides.** When a result is clean, ask which layer you actually
+tested — and see [[concepts/measurement-provenance]] for the related trap of a
+number whose provenance does not survive being quoted.
 
 ## A NEW log field is a NEW instrument — and its first reading is the least trustworthy
 
@@ -215,6 +328,31 @@ Corollary: *"2/2 green"* is a statement about a named group on a named revision.
 not a statement about the change unless the group provably covers the change's surface.
 Check the coverage argument before repeating the result — and if the change's surface
 is a stage the gate does not reach, say that instead of reporting the green.
+
+## A guard defined relative to the feature it guards disappears with the feature
+
+Ask this of **any deletion**, not just code: *which assertions, gates and checks
+were expressed in terms of the thing being removed?*
+
+Worked example (micro-surfel removal, ordered 2026-10-08): the live-edit check
+asserted **"the patched run grows substantially with `VF_MICRO` on vs off"** —
+so it *compared the feature against its absence*. Deleting the feature deletes
+that assertion, because the assertion is not about the property being protected;
+it is about the feature existing. The property that actually matters is *"a
+patched chunk's regenerated run still covers the cells the stamp touched"*, and
+nothing in the old assertion names it.
+
+> **A test whose subject is the feature is not a guard on the feature's
+> behaviour.** The replacement must be phrased against the surviving system, or
+> the next person to touch that code inherits a guard with a hole shaped exactly
+> like the deletion — and it is invisible, because the guard and the gap arrive
+> in the same commit.
+
+The cheap review form: after a deletion, grep the surviving checks for the
+deleted identifier. Anything still naming it was either rewritten correctly or is
+about to be deleted quietly. And prefer replacements that name **no** part of the
+removed system — "non-empty patched run, count differs from pre-stamp, base and
+bridges regenerate" survives a second deletion that the original never could.
 
 ## A gate that has never failed is not yet known to fire
 
@@ -442,6 +580,348 @@ filename. One frozen name frozen twice in one script became N confusing reds
 that looked exactly like a renderer regression while every shot-acceptance
 check passed. Derive the path from the same env the app was launched with. See
 [[concepts/focused-test-groups]] for how the groups gate bodies.
+
+## Structural lint: checks that need no judgement
+
+Three axes, and the distinction that matters is what each one compares against:
+
+| axis | question | compares against | needs a human? |
+|---|---|---|---|
+| presence vs uniqueness | does every page appear in the catalogue; every link resolve? | the catalogue | no |
+| presence vs settledness | does this claim still describe the thing it was written about? | the code as it is now | **yes** |
+| structure vs neighbour | is this line still attached to what it belongs to? | **its own neighbour** | no |
+
+The third is the least skippable because it has no opinion about what the text
+should say, so it cannot be fooled by prose that reads well. Every
+content-judgement check on this page was fooled by exactly that.
+
+### Orphaned table rows
+
+A `|` line **not** preceded by a table row is an orphan **unless it is itself a
+header** — i.e. unless a separator row (`|---|`) follows. Blank lines do not
+break a table; intervening prose does.
+
+### `edit` anchored on a heading silently deletes it
+
+`edit` matches on text and has no notion that the string being replaced **is** a
+heading, so "insert before X" becomes "delete X" whenever X occurs once. Nothing
+complains: the file stays valid markdown, links resolve, prose reads.
+
+> **Re-emit the anchor in the replacement, then verify it survived.**
+
+Instrument: `git diff -U0 <file> | grep -E '^[+-]## '` — a deleted heading shows
+as `-## …` with no `+##` counterpart. **Two documented limits:**
+
+1. **It only sees headings present in `HEAD`,** so a heading added *and* deleted
+   within one uncommitted session is invisible. For uncommitted work, diff
+   against the file as it was before the edit.
+2. **It cannot distinguish a deletion from a rename.** A correct rename appears
+   as an unmatched `-## old` / `+## new` pair and is indistinguishable from a
+   deletion plus an addition. Confirmed in practice: `voxel-object-authoring.md`
+   reported a lost `## Why SDF-in-code (no mesh import)` when the heading had in
+   fact been **correctly renamed** to `## Why SDF-in-code is the primary path` —
+   the old title was stale, because STL/OBJ import does exist.
+
+> **Resolve every finding by reading the section, not by trusting the diff.**
+> A rename is a *fix* and a deletion is a *defect*, and they look the same in
+> the instrument. The check narrows the search; it does not decide it.
+
+### The non-unique anchor: `edit` matches somewhere you did not look
+
+The rule above assumes the anchor is **unique**, so replacing it removes
+something. When it is not unique, `edit` matches the first occurrence it finds
+and **reports success** — you wrote new text into a *different* table than the
+one you were reading.
+
+> **The failure is not only "deletes the heading"; it is "silently matched
+> somewhere else".** And the non-unique anchor is the one that feels safe, since
+> it is visibly repeated and therefore obviously targeted.
+
+This is strictly worse than the unique-anchor case: nothing is missing, the edit
+succeeded, and the damage is only visible by comparing against what you meant to
+write. **Verify the match, not the write** — `grep -c` the anchor first; a count
+above 1 means re-anchor on more surrounding context before editing.
+
+
+### A heading split from its body
+
+Anchoring on a heading and inserting immediately below it separates the heading
+from its body. Both survive, the file stays valid, **and no presence check sees
+it** — the only damage is that content no longer sits under its own title.
+
+> **Anchor on a heading only if you re-emit everything below it.**
+
+`grep -A3 '^## ' <file>` — a heading whose following lines are blank, fenced, or
+another heading has been split.
+
+### Why the order axis is the one worth adding
+
+Presence checks find what is **missing**. This finds damage where **nothing is
+missing** and the content is merely in the wrong place. That class is strictly
+worse: deletion shows up in a diff, reordering shows up nowhere.
+
+Working example (2026-10-08): moving a note below a table left the table's last
+two rows behind, duplicating them under a blockquote. A row-count check against
+a remembered structure caught it; every content check read the file as fine.
+
+## A test that chooses its own subject cannot detect that the subject set is truncated
+
+The closed loop above is a test that **re-implements** the expression under test.
+This is the stronger form, and it survives an independent reference: **a test
+that selects its own subject cannot detect that the subject set is a fraction of
+what it should be.**
+
+In the irradiance volume (2026-10-08), the six tests **passed with the bug
+present** — 6/6, 153 assertions. The tests place a synthetic emitter wherever
+`findOpenAirAirCell` lands. The bake's slice loop used the slice *count* as a z
+*stride*, so it covered a quarter of the volume — and the quarter it covered
+happened to contain the spot the test had chosen.
+
+Note what this defeats: **even a hand-computed expected value would have passed**,
+provided it was computed over the same truncated band. That is not a loop between
+two implementations. It is a loop between a test and *the data it picked*, so
+adding an external reference does not fix it — the reference has to be an
+**enumeration** of the subject set, not a value computed from it.
+
+> **The fix is a census, not an oracle:** assert *what the instrument visited*,
+> not only what it concluded. "N subjects in range, 0 visited" is the signal; a
+> green pass on the same run is not.
+
+Instance fix **verified through `ninja` 2026-10-08** — see `log.md`. Green
+configuration, reported by Vega: `vf_core` links (`ninja vf_tests`),
+irradiance **7/7 cases, 180/180 assertions** via the ninja-built binary
+(the seventh case pins the fixed subject, so the suite that passed with the
+bug present both directions can no longer do so), `test-world` group 2/2 via
+`ninja` (110.66 s), `build/voxelforge` md5 untouched throughout.
+
+> **Label: current-tree until commit.** Vega's 4 files are uncommitted, so this
+> green belongs to the dirty tree, not to a hash. The historical 6/6-153 figure
+> above stays as the record of the bug-present run; the 7/7-180 figure is the
+> fixed run that supersedes it.
+
+## When a measurement reports "no effect", check that it enumerated its subject set first
+
+Two instruments, one codebase, one light set, disagreed: **40 candidate pairs in
+range, 0 visited.** The disagreement *was* the signal. Both hypotheses — the
+author's and the shading session's — reasoned about **visibility and resolution**,
+i.e. about the physics, while the actual defect was in the **iteration bounds**.
+
+> **A clean zero is a claim about the subject. Before accepting it, confirm the
+> instrument looked at the subject.** An instrument that reported a confident
+> zero over a quarter of the world was not measuring a null result; it was
+> measuring its own coverage, and reporting it in the subject's voice.
+
+This is why "no effect" needs a stronger precondition than "effect" does. A
+*present* effect is self-evidencing — if you can see it, the instrument reached
+it. A *missing* effect is indistinguishable between the subject being absent and
+the instrument never going there, and only a coverage claim separates them.
+
+**Corollary:** disagreement between two instruments is evidence, not noise. When
+two instruments on the same codebase report differently, the most productive
+question is not which is right — it is what each one looked at.
+
+## Purpose-built instruments keep answering a neighbouring question
+
+Three times in one session, an instrument built to answer a specific question
+answered a **different** one: a census built to test one hypothesis invalidated
+**both** standing hypotheses. That is a pattern, not a coincidence.
+
+> **Prefer instruments that report what they enumerated over instruments that
+> report only what they concluded.** A census is reusable across every question
+> about the same subject set; a verdict is disposable.
+
+The practical form: an instrument that emits its own coverage — how many
+candidates were in range, how many were visited, what fraction of the domain it
+covered — is debuggable on a day when its answer is wrong, and a null result from
+one is distinguishable from a null subject.
+
+## A diagnostic that is byte-identical for two different causes
+
+The irradiance bake logs `14 seen / 0 used / 0 cells lit`. That string is
+**byte-identical** to the `VF_NO_IRR_VOLUME` fallback path, which returns its
+stats immediately after emit collection. So the line cannot distinguish
+*the volume loaded and is empty* from *the volume never loaded*.
+
+> **A diagnostic shared by two causes carries no information about either.** It
+> is not a wrong value — it is a correct value that cannot answer the question it
+> is being asked. Any branch that would change the reported number must get its
+> own token; a sentinel that means "empty" must be spelled differently from one
+> that means "absent".
+
+This is the sharpest form of *correct value, present, unread*: everything is
+correct and nothing is legible. It is worse than a missing log line, because a
+missing line invites a fix while an ambiguous one invites a conclusion. Filed on
+[[concepts/enclosed-space-lighting]], where the descriptor is live and reading
+zero.
+
+## The author of a lesson reproduces it while writing it down
+
+Wrote a page arguing that a coordinate formula must not be re-derived in two
+places — then re-derived `- WORLD * 0.5f` inline at exactly the line the page's
+own comment forbids, and attributed the finding to the reviewer who caught it.
+
+Two independent facts, and both matter: the lesson did not transfer to the
+act of writing the page about it, and **attributing the catch to a reviewer kept
+the page credible while the error was still in it.** A page whose author can be
+wrong in the page is not a reason to skip it — it is a reason to mark it
+unverified until someone else has checked the references.
+
+> **Do not treat a page's own line references as sound because the page is
+> careful.** Careful is a property of a session, not a page.
+
+## A test derived from the implementation cannot falsify the implementation
+
+Found 2026-10-08 in the irradiance-volume bake (George's plumbing + Vega's
+volume). `tests/test_world.cpp`'s `irrCellCentre()` copied the bake's **own**
+uncentred cell formula (`p = (x + 0.5) * kCell`), so the bake and its test agreed
+with each other while the **shader** — the only consumer reading the volume in
+the real origin-centred world frame — sampled it **51.2 m / 32 cells** away on
+every axis. **All 232 assertions passed.**
+
+### The assertion count is not evidence
+
+232 green assertions are not stronger evidence than 5. They are **the same
+single check, counted 232 times**, and they would have reported the wrong frame
+just as happily. Any metric derived from agreement *inside* the pair under test is
+constant with respect to the thing you are trying to detect — so quoting it as a
+confidence signal is not conservatism, it is arithmetic.
+
+> **The number that can move is: how many inputs came from outside the pair.**
+
+### Two frames, not a sign error
+
+**The producer bakes in `0..WORLD`. The consumer reads in `-WORLD/2..+WORLD/2`.**
+The bake used `(i + 0.5) * kCell`; the shader sampled `irrVolumeUVW =
+p / WORLD + 0.5`. **Both sides are monotonic** — CPU `p` increases with `x`, GPU
+`p` increases with `WORLD`-normalised input — so no axis can be flipped and the
+only possible discrepancy is a constant **translation** of `WORLD / 2 = 51.2 m
+= 32 cells` on every axis.
+
+That is the whole mechanism, and both symptoms fall out of it:
+
+- a room at world `y ≈ 1.5` reads the CPU's cell at `y ≈ 52.7` — above every
+  surface — hence **sky wash**;
+- the lamp's peak, stored at CPU `y ≈ lamp y`, renders at `y ≈ lamp y − 51.2` —
+  hence **no lamp light**.
+
+Two opposite-looking symptoms, one translation. The fix is **subtract
+`WORLD * 0.5`**, not flip an index — which is why the wording matters. This page
+first said "inverted / mirrored", inferred from the *shape* of two ranges rather
+than from the mechanism. That was wrong in a way worse than silence: "mirror"
+sends a reader looking for a sign error that does not exist, and it invited a
+wrong fix that would have been made confidently. **A wrong mechanism reads as a
+wrong symptom, which a careful reader discards — so a wrong mechanism is
+worse than no mechanism at all.**
+
+### The file disagreed with itself — the cheapest signal, unused
+
+The same file's `heightAt()` / `objDistAt()` used `wx / WORLD + 0.5`, i.e. the
+**centred** convention. So the file already contained the contradiction, and
+diffing it against itself would have caught this with **no external authority at
+all**. Most investigations never look for that, because they are looking for the
+thing they just wrote.
+
+This sharpens the usual escape route. It is not strictly "find a source outside
+the pair" — it is:
+
+- **look for a second convention already present in the file.** A file that
+  disagrees with itself is cheaper to detect than a bug that is wrong
+  everywhere.
+- **read it from the consumer.** The only thing that broke the loop was George's
+  plumbing-side read of `irrVolumeUVW` — a *consumer* of the output, outside the
+  pair, reading it in the frame the consumer actually uses. Every bake has at
+  least one consumer that knows the real origin, and the consumer is where the
+  truth lives. (A reviewer diffing the CPU port against the GPU code caught the
+  same thing: two files written from the same understanding, which therefore
+  *should* have matched and didn't.)
+
+### The fix that makes it non-reversible (Vega, 2026-10-08)
+
+Advice a future session can decline is worth less than a constraint it cannot
+talk itself out of. Vega's fix is the second kind:
+
+> **The test keeps its own independent `indexOf` on purpose; collapsing the two
+> would re-create the closed loop that hid the frame bug.**
+
+Two index functions that **must not be merged** survive exactly the moment
+someone is refactoring — which is the moment advice fails. And the upload was
+changed to **byte-copy `cells.data()`** with no packing step, so the cell type is
+now a build error rather than a silently misaligned 2 MB upload.
+
+This is a **family**, and two more members landed in the same fix:
+
+| member | silent failure it replaces |
+|---|---|
+| `static_assert(sizeof(glm::vec4) == 16)` | a vec4 reinterpretation that is wrong only on one layout |
+| `kBytes` tied to `kN^3 * sizeof` | a buffer size that is a *number* instead of a *consequence* |
+| upload byte-copies `cells.data()` | a packing step that can disagree with the producer |
+| test keeps its **own** `indexOf` | the closed loop itself |
+
+**Prefer a constraint the compiler enforces over a review step a future session
+may not run.** A `static_assert` cannot be talked out of; a comment explaining a
+convention can.
+
+### Assertion count and independent-check count move independently
+
+Vega's fix took the suite from **232 assertions to 153** — the count went *down*
+— while **97 of the original assertions had been about the wrong region**, and
+the ray walk went from **186 cells over 6 rays** (broken) to **89 over 3**
+(fixed). So the count fell while the coverage of the thing under test improved.
+
+> **A falling assertion count with rising independent coverage is not a weaker
+> suite. Reading the count as strength cannot distinguish the two, which is the
+> clearest possible demonstration that it is the wrong thing to read.**
+
+Resulting build state: `vf_tests` 6/6 with **153** assertions, `test-world` 2/2.
+
+### A model of an instrument is not the instrument
+
+A Python model of the expression predicted float32 truncation would break **4**
+cells (3, 5, 10, 11). The compiled C++ expression fails on **8** — 3, 5, 8, 10,
+23, 44, 49, 54. Same quantity, twice the cells.
+
+Note the source of the wrong figure: it came from the same author who had spent
+the session establishing that models are not measurements. Nothing in the
+presentation differs — the number simply arrives in the shape of one.
+
+> **A model of the thing under test produces numbers that are indistinguishable
+> from measurements by form.** Only provenance separates them, which means
+> provenance has to be *stated*, not inferred from the notation.
+
+The practical rule this generalises to: **the gate is the instrument.** Vega's
+`static_assert` / `indexOf` gate is compiled and was **proven to fire** — he
+reverted `lround` to truncation, watched it report all 8 cells **by name**,
+restored, and **md5-verified** the restore. That is the positive firing test
+[[concepts/focused-test-groups]]'s gate checks exist to require, and it is also
+the direct answer to the stale-binary hazard below: an md5-verified restore is
+what distinguishes "I put it back" from "the artifact is what I think it is".
+
+### A build that failed can leave the previous binary running
+
+Part of Vega's near-miss: a failed build silently ran a **stale binary**, so an
+instrument reported from an artifact nobody was editing. The general form is
+independent of irradiance — this is the documented "`ninja` says *no work to do*"
+hazard biting in practice, and it means **a shader or source edit does not imply
+the binary changed**.
+
+**Two separate questions, both of which must be answered:** *which source was
+written* and *which artifact ran*. On a dirty tree the answer to the second can
+be "neither". Ask for the md5 of the binaries actually run alongside
+`git rev-parse HEAD` and the dirty-path list — see
+[[concepts/measurement-provenance]].
+
+### The escape route, concretely
+
+Derive at least one expectation from an **independent authority** — never from
+the code under test:
+
+- `VoxelField::sampleWorld`: `int((p.x + 0.5f * WORLD) / VOXEL)`
+- `--probe`, which reads the live layered field rather than the bake
+- the terrain's own `kHmMinMeters = -8.0f` (`heightmap.hpp`)
+
+If you cannot name the external reference your assertions actually check
+against, they are not asserting correctness — they are asserting that the
+implementation agrees with itself.
 
 ## Before filing any number
 

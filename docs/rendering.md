@@ -149,9 +149,9 @@ in `App::rebuildSurfels`, ~0.6 s for ~1.3 M surfels):
   also emits one smaller tangent-aligned splat on the true face-plane
   intersection. Bridges inherit the parent's baked AO/shadow/bent normal,
   material, texture override, and owner ID, so they cost geometry but no extra
-  shadow/AO march. Per chunk the stream is `[base parents | edge bridges |
-  material micros]`; bridges stay in the always-on opaque range and add no draw
-  call, while only the material micro tail is distance-culled. The app exposes
+  shadow/AO march. Per chunk the stream is `[base | edge bridges]`;
+  bridges stay in the always-on opaque range and add no draw
+  call. The app exposes
   **Rendering → Sharp-edge fit** (`0.00–0.80`, default `0.35`) and **Interpolate
   crease splats** (default on); either change queues `requestWorldReload()` so
   full-bake and live-store paths rebuild together. `VF_EDGE_SHRINK` and
@@ -181,26 +181,6 @@ in `App::rebuildSurfels`, ~0.6 s for ~1.3 M surfels):
   straight-up) before, 0.08 % (mean 0.57°, none) after. Gate:
   `tests/test_store.cpp` "live surfel normals follow the bake".
 - Chunk bucketing (16³ + 1 `chunkRange` offsets) for per-chunk draws/culling.
-- **Micro-detail** (`SurfelParams::microDetail`, app default ON, `VF_MICRO=0`
-  to disable at launch or the **M** key to toggle at runtime, unit-test default
-  OFF): because the micros are baked into the surfel stream the runtime toggle
-  goes through the world-reload path (`requestWorldReload` -> `applyWorldReload`
-  -> `rebuildSurfels`) and stalls briefly; the HUD reports the state. The
-  launch-time override is read in `initVulkan` *before* the first bake.
-  Deterministic 0–2 child
-  disks per base surfel that turn texture texels into real geometry with
-  parallax/occlusion — meadow crumbs, soil pebbles, rock chips, bark relief,
-  roof moss puffs + underside filler seals, canopy leaflets. Children inherit
-  the base cell's chunk, material and baked shadow/AO/bent (no extra marches)
-  with a jittered tangent offset + micro-facet normal from a sin-hash of the
-  lattice coords, so rebuilds stay bit-identical. All-layers count grows
-  ~1.55 M → ~2.4 M. The same per-cell emitter (`emitMicroSurfelsForCell` /
-  `buildMicroSurfels`) serves the live store path: `LiveEditor::chunkRun`
-  regenerates a patched chunk's micro tail after every stamp, so live edits
-  never lose micro geometry (the LOD ring still drops until the next reload).
-  Draw-time culling is per chunk: terrain chunks drop micros beyond
-  `VF_MICRO_DIST` (20 m), chunks the bake flagged as containing object
-  surfels (`SurfelSet::objectChunks`) keep them to `VF_MICRO_DIST_OBJ` (35 m).
 - **Photoreal grade** (shared `common_base.glsl`, both backends in sync):
   `skyColor` adds an fbm cloud deck (thin at zenith so the sky probe stays
   blue) + golden-hour horizon warmth that tracks `kSunDir.y`; `detailAlbedo`
@@ -210,6 +190,28 @@ in `App::rebuildSurfels`, ~0.6 s for ~1.3 M surfels):
   mist near the water table; water gets a two-lobe sun glitter + pebble
   sparkle. Foliage translucency/SSS kept modest (0.38/0.40) so canopies stay
   deep green instead of neon.
+- **Enclosed space + light sources** (render-flag bit 8, default ON; the
+  sun/sky path is a single directional light plus an *unoccluded* environment,
+  so a cave lit only by AO still read as open-sky daylight). `skyVisibility*`
+  casts ONE ray along `mix(bent, +Y, 0.65)`; a hit means `enclosed = 1`, which
+  scales the analytic sky ambient by `mix(1, 0.16, enclosed)` and the IBL by
+  `mix(1, 0.04, enclosed)`, and adds an albedo-scaled cave fill
+  (`vec3(0.075,0.080,0.090) · enclosed · (0.35 + 0.65·ao)`) standing in for
+  wall multi-bounce. The fill is not cosmetic: without it the removed daylight
+  drops the `house` shot from 2.70 % to 7.21 % black-in-silhouette and trips
+  `visual_check`'s 5 % hollow-voxel gate.
+  Per backend: `lightVisibilitySvo` is a single `exactSVOHit`; the splat
+  counterpart marches `heightAt` + `objDist` (its *sky* test deliberately uses
+  `objDist` alone — `heightAt` calls every point below the terrain surface
+  solid, which would mark hillside interiors as underground).
+  Point lights come from a top-level `"lights"` array in `world.json`
+  (`pos`/`color`/`radius`/`intensity`, max 16, non-positive radius or intensity
+  dropped), parsed by `worldfile::loadLightManifest` into a 528 B std140 UBO at
+  binding 25 and consumed by `applyLights()` in `common_base.glsl` — shared by
+  the forward, GPU-cull and tile paths. `App::uploadLightSources()` is the only
+  writer and must run after every pass `init()` (see the descriptor-ordering
+  gotcha below). `VF_RENDER_FLAGS=255` disables the whole feature and restores
+  the pre-lights image bit-exactly.
 
 **Surfel layout** (80 B, 5×vec4, std430): `pos_rU` (w = radiusU, along the
 stored tangent), `normal_rV` (w = radiusV, across), `bent_sh` (bent normal +
@@ -308,13 +310,7 @@ terrain/water dark blue),
 /`VF_SURFEL_HFBLEND` (bake variants), `VF_ANISO` (anisotropic footprint bake),
 `VF_EDGE_SHRINK` (hard-edge parent reduction, launch default 0.35; GUI
 **Rendering → Sharp-edge fit**) / `VF_EDGE_FILL=0` (disable derived crease
-bridges), `VF_MICRO` (micro-surfel detail at
-launch; **M** toggles it at runtime),
-`VF_MICRO_DIST` / `VF_MICRO_DIST_OBJ` (per-chunk micro cull distance for
-terrain / object chunks, defaults 20 m / 35 m; the bake exports
-`SurfelSet::objectChunks` so foliage and prop chunks keep their micro
-geometry farther out — hero 720p +1.6 ms),
-`VF_VOLFOG` / `VF_MOTIONBLUR` / `VF_DOF` (headless overrides for the J/K/L toggles),
+bridges), `VF_VOLFOG` / `VF_MOTIONBLUR` / `VF_DOF` (headless overrides for the J/K/L toggles),
 `VF_SSAO_STRENGTH` (0..1, default 0.6), `VF_SSAO_RADIUS` (far-band world
 radius in metres, default 0.8; the near crease band is 0.35x that),
 `VF_SSAO_BLUR=0` (skip the cross-bilateral denoise), `VF_SSAO_DEBUG`
@@ -406,8 +402,8 @@ picks for headless screenshot checks.
 Object ownership is provenance, not geometry by overlap. `LayeredWorld` gives
 each enabled placeable `.vxw` a stable non-zero 8-bit ID (retained across
 reloads/toggles, with filename-hash collision probing), tags the winning cell
-in `VoxelField`, returns that ID in `PickHit`, and packs it into every base or
-micro surfel. In Rotate mode, one plain LMB click activates the exact picked
+in `VoxelField`, returns that ID in `PickHit`, and packs it into every base
+surfel. In Rotate mode, one plain LMB click activates the exact picked
 cell owner; it does not begin a drag. The placed AABB is then used only to
 place the interaction surface: its projected centre is the trackball centre
 and its farthest projected corner sets the radius. The outer circle is local
@@ -447,7 +443,7 @@ The forward vertex stage, GPU-cull
 compute stage, and tile bin/render stages all apply it only when
 `surfelLayerId(mat_ao.w) == targetId`; terrain, water, unowned live geometry,
 and other files do not move. While previewing, conservative CPU chunk culling
-is bypassed and micro surfels are force-included so source-chunk distance/LOD
+is bypassed so source-chunk distance/LOD
 cannot make the selected owner disappear. The final transform remains active
 until `applyWorldReload()` swaps in the committed rebuild.
 

@@ -31,9 +31,12 @@ buried cells emitted **up-facing disks** that:
    (see [[concepts/detail-pipeline]]) then blended them through, and the
    pixels read as dark holes/slots.
 
-A third contributor: the micro-detail disks' facet normals (tilt 0.35-0.9
+A third contributor (gone with the micro removal 2026-10-08 — see
+[[concepts/detail-pipeline]] §3): the micro-detail disks' facet normals (tilt 0.35-0.9
 rad) made each 2-6 cm child shade visibly darker/lighter than its base cell
-at mid distance, adding speckle on flat planks and the roof.
+at mid distance, adding speckle on flat planks and the roof. Recorded as
+history: the diagnosis was correct for the frame it was made on, and the
+contributor no longer exists to verify against.
 
 **Fix (surfelize.cpp).**
 

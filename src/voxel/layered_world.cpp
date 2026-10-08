@@ -396,7 +396,7 @@ bool LayeredWorld::parseAndComputeDirty(bool& outFull, std::vector<int>& outDirt
         unsigned long long mt = sigOf(path);
         LayerCacheEntry& ce = m_layerCache[l.file];
         const std::vector<VoxelRecord>* vox = nullptr;
-        if (ce.valid && ce.mtime == mt && ce.size == sz) {
+        if (ce.valid && ce.mtime == mt && ce.size == sz && ce.scale == l.scale) {
             vox = &ce.voxels;
         } else {
             WorldFileData data;
@@ -405,16 +405,27 @@ bool LayeredWorld::parseAndComputeDirty(bool& outFull, std::vector<int>& outDirt
                 ce.valid = false;
                 continue;
             }
-            if (data.meta.worldSize != expected.worldSize ||
-                data.meta.voxelSize != expected.voxelSize ||
-                data.meta.gridN != expected.gridN) {
+            const bool isPlaceable = l.role == "object" || l.role == "scatter";
+            const bool metaMatch =
+                data.meta.worldSize == expected.worldSize &&
+                data.meta.voxelSize == expected.voxelSize &&
+                data.meta.gridN == expected.gridN;
+            if (!metaMatch && !isPlaceable) {
                 spdlog::error("layered_world: layer '{}' meta mismatch", l.file);
                 ce.valid = false;
                 continue;
             }
             ce.mtime = mt;
             ce.size = sz;
-            ce.voxels = std::move(data.voxels);
+            ce.scale = l.scale;
+            if (isPlaceable && (!metaMatch || l.scale != 1.f)) {
+                std::vector<VoxelRecord> normalized;
+                worldfile::resampleRecords(data.voxels, data.meta, expected,
+                                           l.scale, normalized);
+                ce.voxels = std::move(normalized);
+            } else {
+                ce.voxels = std::move(data.voxels);
+            }
             ce.valid = true;
             vox = &ce.voxels;
         }
@@ -462,6 +473,12 @@ bool LayeredWorld::parseAndComputeDirty(bool& outFull, std::vector<int>& outDirt
         for (int c = 0; c < 3; ++c) {
             uint32_t bits;
             std::memcpy(&bits, &rot[c], 4);
+            placeKey ^= bits;
+            placeKey *= 1099511628211ULL;
+        }
+        {
+            uint32_t bits;
+            std::memcpy(&bits, &l.scale, 4);
             placeKey ^= bits;
             placeKey *= 1099511628211ULL;
         }

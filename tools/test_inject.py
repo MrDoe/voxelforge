@@ -7,7 +7,8 @@ then A/B-compares frames to prove each input class lands:
   1. keyboard: hold W 2 s        -> camera moves forward
   2. mouse-look: RMB + 500 px    -> view rotates
   3. hotkey: F (svo) then F      -> renderer flips and returns
-  4. edit tool: C                -> sidebar switches to the Edit panel
+  4. edit tool: C/A/M first (must be inert in View mode), then Tab
+                                 -> sidebar switches to the Edit panel
 
 World load is ~17 s (per AGENTS.md) and the GLFW window exists long before
 it, so readiness is gated on the app's own "layered_world: load" log line
@@ -220,18 +221,33 @@ def main():
         print(f"      splat->svo {d_svo:.3f}, back {d_back:.3f} -> "
               f"{'PASS' if results['hotkey'] else 'FAIL'}")
 
-        # ---- 4. edit panel ----------------------------------------------
-        print("[5/5] edit tool: C switches sidebar to Edit")
-        inp.tap("c", settle=1.0)
+        # ---- 4. edit panel (Tab is the only View/Edit switch) ------------
+        print("[5/5] View-mode mode keys inert; Tab switches sidebar to Edit")
+        # Regression guard: C/A/D/S/M used to arm the brush when disarmed, so
+        # a stray press while flying dragged the user into Edit mode. They
+        # must do nothing now; only Tab may switch.
+        inp.tap("c", hold=0.25, settle=0.4)
+        inp.tap("a", hold=0.25, settle=0.4)
+        inp.tap("m", hold=0.25, settle=0.4)
+        inert = grab("inert.png")
+        a, b = load_rgb(back), load_rgb(inert)
+        strip_i = float((np.abs(a[:, :300] - b[:, :300]).max(axis=2) > 12).mean())
+        no_arm = not any("edit tool -> active" in l or "edit mode ->" in l
+                         for l in app.log())
+        results["view_mode_inert"] = strip_i < 0.02 and no_arm
+        print(f"      left-strip diff {strip_i:.3f}, no arm log {no_arm} -> "
+              f"{'PASS' if results['view_mode_inert'] else 'FAIL'}")
+
+        inp.tap("tab", settle=1.0)
         pan = grab("panel.png")
-        dp = diff_frac(back, pan)
+        dp = diff_frac(inert, pan)
         # panel is a ~300 px left strip; restrict the metric to that region
-        a, b = load_rgb(back), load_rgb(pan)
+        a, b = load_rgb(inert), load_rgb(pan)
         strip = float((np.abs(a[:, :300] - b[:, :300]).max(axis=2) > 12).mean())
         results["panel"] = strip > 0.20
         print(f"      full diff {dp:.3f}, left-strip diff {strip:.3f} -> "
               f"{'PASS' if results['panel'] else 'FAIL'}")
-        inp.tap("c", settle=0.5)
+        inp.tap("tab", settle=0.5)
 
         print()
         for k, v in results.items():

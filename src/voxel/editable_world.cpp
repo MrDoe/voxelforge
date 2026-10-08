@@ -303,10 +303,20 @@ size_t EditableWorld::importLayer(const std::string& vxwPath, glm::ivec3 anchor)
         return 0;
     }
     const WorldFileMeta want = meta();
-    if (d.voxels.empty() || d.meta.worldSize != want.worldSize ||
-        d.meta.voxelSize != want.voxelSize || d.meta.gridN != want.gridN) {
-        spdlog::warn("editable_world: importLayer {} empty or meta mismatch", vxwPath);
+    if (d.voxels.empty()) {
+        spdlog::warn("editable_world: importLayer {} empty", vxwPath);
         return 0;
+    }
+    if (d.meta.worldSize != want.worldSize || d.meta.voxelSize != want.voxelSize ||
+        d.meta.gridN != want.gridN) {
+        // fine/coarse-authored source: resample onto the world lattice
+        std::vector<VoxelRecord> normalized;
+        worldfile::resampleRecords(d.voxels, d.meta, want, 1.0f, normalized);
+        if (normalized.empty()) {
+            spdlog::warn("editable_world: importLayer {} resample produced nothing", vxwPath);
+            return 0;
+        }
+        d.voxels = std::move(normalized);
     }
     // source AABB -> bottom-center origin in lattice coords (x/z centred,
     // y at the lowest record), matching the picking bottom-center contract
@@ -387,7 +397,8 @@ bool EditableWorld::deleteObjectLayer(const std::string& name)
 }
 
 std::vector<VoxelRecord> EditableWorld::makeOrientedCylinder(
-    glm::ivec3 anchor, glm::vec3 axisDir, float radiusM, float lengthM, uint8_t mat, bool carve) const
+    glm::ivec3 anchor, glm::vec3 axisDir, float radiusM, float lengthM, uint8_t mat, bool carve,
+    FalloffCurve curve) const
 {
     axisDir = glm::normalize(axisDir);
     radiusM = std::max(radiusM, VOXEL * 0.5f);
@@ -438,6 +449,33 @@ std::vector<VoxelRecord> EditableWorld::makeOrientedCylinder(
                 // half its disk and never flood. The epsilon is 0.001 voxel.
                 if (carve ? (d > VOXEL * 1e-3f) : (std::fabs(d) > kBand))
                     continue;
+                // Radial falloff feathers the scoop's FAR end per rim column, so
+                // the dig is deepest under the cursor and tapers out at its edge
+                // instead of leaving a vertical crater wall. TWO HAZARDS, both
+                // load-bearing: (1) the near end is NOT tapered - sdfY0 above is
+                // kCarveTopMargin, the margin that opens the ground the scoop
+                // starts at, and fading it puts the one-cell roof back over the
+                // dig (a covered void gains no water); a rim column still cuts
+                // one cell, so the footprint boundary stays crisp. (2) Only the
+                // carve is graded; the Add path is a shell band and takes its
+                // taper from makeDome's height-per-column rule instead. Constant
+                // is the legacy volume exactly: f == 1 maps far onto lengthM.
+                if (carve && curve != FalloffCurve::Constant) {
+                    const float perp = std::sqrt(local.x * local.x + local.z * local.z);
+                    const float f = falloffCurveAt(curve, perp / std::max(radiusM, 1e-6f));
+                    // A rim column (q = 1, f = 0 for every tapered curve) must
+                    // still open the ground the scoop starts at, so the reach is
+                    // floored at the top margin plus one cell - without that floor
+                    // the taper reached exactly sdfY0, the rim cells at the margin
+                    // boundary fell out on the strict comparison, and measured 2814
+                    // of the 2821 cells the test expects. The epsilon matches the
+                    // SDF test's own, so the last cell of a full-depth column is
+                    // kept whichever side fp lands on.
+                    const float reach =
+                        std::max((lengthM - sdfY0) * f, kCarveTopMargin + VOXEL);
+                    if (local.y > sdfY0 + reach + VOXEL * 1e-3f)
+                        continue;
+                }
                 VoxelRecord v;
                 v.x = uint16_t(x); v.y = uint16_t(y); v.z = uint16_t(z);
                 const glm::vec3& col = kPalette[std::min(int(mat), kPaletteN - 1)];
@@ -453,7 +491,8 @@ std::vector<VoxelRecord> EditableWorld::makeOrientedCylinder(
 }
 
 std::vector<VoxelRecord> EditableWorld::makeDome(glm::ivec3 anchor, glm::vec3 axisDir,
-                                                 float radiusM, float heightM, uint8_t mat) const
+                                                 float radiusM, float heightM, uint8_t mat,
+                                                 FalloffCurve curve) const
 {
     std::vector<VoxelRecord> res;
     if (radiusM <= 1e-3f || heightM <= 1e-3f)
@@ -479,9 +518,10 @@ std::vector<VoxelRecord> EditableWorld::makeDome(glm::ivec3 anchor, glm::vec3 ax
     // t == lipY (both give radiusM), so a 1-ulp sign flip at the switch plane
     // cannot drop half the footprint - unlike a branch on the cap plane, which
     // is exactly the degenerate glm::rotation(up, -up) trap the carve cylinder
-    // documents.
-    const float c = 0.5f * std::min(radiusM, heightM);
-    const float lipY = heightM - c;
+    // documents. c and lipY are now computed PER COLUMN in the loop (the curve
+    // grades the height, so the fillet radius moves with it); for Constant they
+    // come out as these two constants did, which is what keeps the legacy shape
+    // exact.
     const float eps = VOXEL;
 
     // World AABB of that volume: +-radiusM across the axis, [0, heightM] along
@@ -508,7 +548,16 @@ std::vector<VoxelRecord> EditableWorld::makeDome(glm::ivec3 anchor, glm::vec3 ax
     // boundary cells are kept (the footprint edge, the fillet): an exact test
     // would drop the rim of the disk wherever fp lands on the wrong side.
     const float keep = VOXEL * 1e-3f;
-    const float r2 = radiusM * radiusM, c2 = c * c;
+    const float r2 = radiusM * radiusM;
+    // Radial falloff scales the growth HEIGHT per column and the fillet shrinks
+    // with it, so the stamp is a mound - full heightM under the cursor, nothing
+    // at the rim - instead of the legacy full-height rim. The hover preview
+    // repeats exactly this profile (sharedInBrushVolume's dome branch), so the
+    // tint marks the tapered growth and not the full-depth one; the two must
+    // agree curve for curve or the preview lies. Constant is NOT a flat top
+    // being "restored": it is the pre-curve shape, which is what every existing
+    // stamp and test expects.
+    const bool grade = curve != FalloffCurve::Constant;
     for (int z = z0; z <= z1; ++z)
         for (int y = y0; y <= y1; ++y)
             for (int x = x0; x <= x1; ++x) {
@@ -518,16 +567,32 @@ std::vector<VoxelRecord> EditableWorld::makeDome(glm::ivec3 anchor, glm::vec3 ax
                 if (t < -eps)
                     continue; // nothing behind the surface
                 const float perp2 = local.x * local.x + local.z * local.z;
+                // Per-column height and fillet radius for this curve.
+                const float colHeight = grade
+                                            ? heightM * falloffCurveAt(
+                                                  curve, std::sqrt(perp2) / std::max(radiusM, 1e-6f))
+                                            : heightM;
+                // A column the taper grades to nothing emits nothing. Without
+                // this the straight-disk branch below still tests the UNGRADED
+                // perp2 <= r2, so the rim ring (q = 1, f = 0 for every tapered
+                // curve) keeps its base cell and the mark never stops short of
+                // the nominal width - measured as rim reach 1 where the test
+                // pins "nothing at the rim". Gated on grade, so Constant keeps
+                // the legacy boundary behaviour bit for bit.
+                if (grade && colHeight < 0.5f * VOXEL)
+                    continue;
+                const float cf = 0.5f * std::min(radiusM, colHeight);
+                const float lipYc = colHeight - cf;
                 bool inside;
-                if (t <= lipY) {
+                if (t <= lipYc) {
                     inside = perp2 <= r2 + keep; // straight extruded disk
                 } else {
-                    const float k = t - lipY;
-                    if (k > c + keep) {
+                    const float k = t - lipYc;
+                    if (k > cf + keep) {
                         inside = false; // past the top of the growth
                     } else {
-                        const float rr = radiusM - c +
-                                         std::sqrt(std::max(0.f, c2 - k * k));
+                        const float rr = radiusM - cf +
+                                         std::sqrt(std::max(0.f, cf * cf - k * k));
                         inside = perp2 <= rr * rr + keep; // rounded lip
                     }
                 }
@@ -574,7 +639,8 @@ std::vector<VoxelRecord> EditableWorld::makeSingleVoxel(glm::ivec3 anchor,
 }
 
 std::vector<VoxelRecord> EditableWorld::makeSphere(glm::ivec3 anchor, float radiusM,
-                                                   uint8_t mat) const
+                                                   uint8_t mat,
+                                                   FalloffCurve curve) const
 {
     radiusM = std::max(radiusM, VOXEL * 0.5f);
     const glm::vec3 c = voxelCenter(anchor);
@@ -586,13 +652,26 @@ std::vector<VoxelRecord> EditableWorld::makeSphere(glm::ivec3 anchor, float radi
 
     std::vector<VoxelRecord> res;
     const float r2 = radiusM * radiusM;
+    // Radial falloff grades the ball's radius per cell, exactly as the hover
+    // preview does (sharedInBrushVolume's ball branch, common_surfel.glsl):
+    // a cell counts when dist <= radiusM * f(dist/radiusM), so Constant is the
+    // original hard sphere (f == 1) and the tapered curves cut a graded crater
+    // instead of a hard-edged ball. Branched so Constant keeps the legacy test
+    // bit for bit rather than through an algebraically equal one.
+    const bool grade = curve != FalloffCurve::Constant;
     for (int z = z0; z <= z1; ++z)
         for (int y = y0; y <= y1; ++y)
             for (int x = x0; x <= x1; ++x) {
                 const glm::vec3 p = voxelCenter(glm::ivec3(x, y, z));
                 const glm::vec3 d = p - c;
-                if (glm::dot(d, d) > r2)
+                if (grade) {
+                    const float dist = glm::length(d);
+                    const float q = dist / std::max(radiusM, 1e-6f);
+                    if (dist > radiusM * falloffCurveAt(curve, q))
+                        continue;
+                } else if (glm::dot(d, d) > r2) {
                     continue;
+                }
                 VoxelRecord rec;
                 rec.x = uint16_t(x); rec.y = uint16_t(y); rec.z = uint16_t(z);
                 const glm::vec3& col = kPalette[std::min(int(mat), kPaletteN - 1)];

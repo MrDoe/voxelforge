@@ -17,6 +17,7 @@
 #include "voxel/common.hpp"
 #include "voxel/worldfile.hpp"
 #include <cstdint>
+#include <functional>
 #include <vector>
 
 namespace vf::voxel {
@@ -102,6 +103,27 @@ public:
 
     size_t objectCellsStored() const { return m_stored; }
 
+    // ---- emissive materials -> point lights -------------------------------
+    // One light per spatial cluster of emitter cells. matEmission[mat] is the
+    // emission colour for a material (black = does not emit); its magnitude
+    // becomes the light's intensity, its hue the light's colour.
+    //   * cells are bucketed on a 1 m grid;
+    //   * buckets are sorted count-desc, then key asc (so the same content
+    //     always yields the same lights, across reloads and backends);
+    //   * greedily thinned to a 1.5 m separation (a 20-cell ember bed is one
+    //     hearth, not twenty lights);
+    //   * each centroid is LIFTED to the nearest air cell: a light buried in
+    //     its own emitter is occluded by every shadow march from any
+    //     receiver, so it would contribute exactly nothing.
+    struct EmissiveCluster {
+        glm::vec3 pos;    // world position, in air
+        glm::vec3 color;  // linear colour, max component normalised to 1
+        float intensity;  // max component of the cluster's average emission
+        float radius;     // falloff radius, metres (cluster extent + margin)
+    };
+    void collectEmissive(const std::vector<glm::vec3>& matEmission,
+                         std::vector<EmissiveCluster>& out) const;
+
 private:
     int m_latN = int(WORLD / VOXEL);
     bool m_built = false;
@@ -158,5 +180,31 @@ private:
     std::vector<uint64_t> m_prevHashes;
     bool m_hasPrev = false;
 };
+
+// Greedy cluster separation shared by the emission tail and the live
+// trigger's survivor merge (a region-fresh cluster too close to a surviving
+// baked one is dropped, never duplicated). Flip both call sites together.
+inline constexpr float kEmissiveThinDist = 1.5f;
+// One emissive surface cell feeding the shared cluster tail below.
+struct EmissiveCell {
+    glm::vec3 pos;      // world position, metres
+    glm::vec3 emission; // emission colour (magnitude = intensity)
+};
+// Shared cluster tail for both emission enumerators (field + store): 1 m
+// buckets, deterministic count-desc/key-asc order, greedy 1.5 m thinning,
+// lift-to-air via isAir, cluster build. `budget` caps the output (<= 0 =
+// empty); callers keeping the old truncate-loudly contract pass INT_MAX.
+// Identical input cells always yield identical clusters.
+// Fill a LightUBO authored-first from an explicit manifest list, then from
+// derived clusters, truncating both at `budget` (warn loudly when anything
+// is dropped only if `warn`). Returns the slot count. Both the bake upload
+// and the live trigger route through here so slot order, gain and the
+// truncation rule cannot drift apart.
+int fillLightUBO(const std::vector<worldfile::LightSource>& authored,
+                 const std::vector<VoxelField::EmissiveCluster>& derived,
+                 int budget, worldfile::LightUBO& ubo, bool warn);
+void clusterEmissiveCells(const std::vector<EmissiveCell>& cells, int budget,
+                          const std::function<bool(const glm::vec3&)>& isAir,
+                          std::vector<VoxelField::EmissiveCluster>& out);
 
 } // namespace vf::voxel

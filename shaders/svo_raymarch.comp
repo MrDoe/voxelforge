@@ -143,7 +143,7 @@ void main()
                     vec3 skyT = skyColor(vec3(rd.x, abs(rd.y), rd.z));
                     skyT *= vec3(0.55, 0.80, 0.85);
                     col = mix(skyT, rc * mix(vec3(0.45,0.55,0.55), vec3(1.0), wsh), fres)
-                          + kSunCol * sunGlint * 3.0 * wsh;
+                          + sunCol() * sunGlint * 3.0 * wsh;
                 } else {
                     vec3 R = reflect(rd, n);
                     R.y = abs(R.y);
@@ -152,7 +152,7 @@ void main()
                     if (exactSVOHit(pw, R, 0.02, 200.0, rth))
                         rc = shadeFloor(pw + R * rth, R);
                     col = mix(vec3(0.04,0.10,0.09), rc * mix(vec3(0.45,0.55,0.55), vec3(1.0), wsh), clamp(fres+0.25,0.0,1.0))
-                          + kSunCol * sunGlint * 3.0 * wsh;
+                          + sunCol() * sunGlint * 3.0 * wsh;
                 }
                 // shoreline foam: thin streaks hugging the waterline
                 float bedH = heightAt(pw.xz);
@@ -164,7 +164,7 @@ void main()
                 // scale as the splat backend's shadeWaterSplat, so the two
                 // backends stay in sync (the bed is hidden past ~0.7 m by the
                 // absorption alpha, so the web has to be composited here)
-                col += kSunCol * causticAt(pw.xz, pc.misc.y) * 0.85 * exp(-max(kWaterLevel - bedH, 0.0) * 0.45);
+                col += sunCol() * causticAt(pw.xz, pc.misc.y) * 0.85 * exp(-max(kWaterLevel - bedH, 0.0) * 0.45);
                 col = mix(col, fogColor(rd, pw), 1.0-exp(-tWater*0.004));
             } else {
                 col = shadeTerrain(p, rd, brickAlbedo(p), brickReflectivity(p), ro);

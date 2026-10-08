@@ -18,6 +18,28 @@ all-tests target and a bare `ctest --test-dir build` does not start any test
 body: every CTest command is wrapped by `tests/group_gate.py` and returns CTest's
 skip code unless its group is enabled.
 
+## Groups are independent — a red in one never skips another
+
+Worth stating because it is easy to assume the opposite, and the assumption costs
+a day. Each `test-<group>` target is `ctest -L <group>` with
+`VOXELFORGE_TEST_GROUPS=<group>`, and `vf_add_test_group` gives it `DEPENDS` on
+the **binaries only** (`vf_add_test_group(night voxelforge)`). There is no
+`DEPENDS`, no `FIXTURES_REQUIRED`, and no ordering between groups.
+
+So `test-visual` being red **cannot** skip `test-night`. Verified 2026-10-08
+after a session recorded `test-night` as "skipped when the visual group went
+red" — the two are unrelated, and the night gate had simply not been run. The
+two `test-visual` reds in that window were the **known pre-existing** house/water
+sky-probe failures, which are camera assertions on correct content
+([[concepts/sky-probe-is-a-camera-assertion]]) and have no bearing on night.
+
+**Practical consequence:** when a gate is reported as skipped, check whether it
+was *run* before accepting the reason. "Skipped" and "not run" are different
+states, and only one of them is evidence.
+
+Related, and the reason a group can be trusted at all: **run groups sequentially
+on a shared GPU** — see below.
+
 ## Group entry points
 
 | Target | Covers |
@@ -31,6 +53,7 @@ skip code unless its group is enabled.
 | `test-effects` | SSAO and its fast variant |
 | `test-textures` | atlas/material texture checks and fast variant |
 | `test-fog` | volumetric fog checks and fast variant |
+| `test-night` | night/day ratio band, night sky classifier, `kMoonCol` tripwire (`night_check.py`) |
 | `test-smoke` | all fast variants; `test-fast` is a compatibility alias |
 | `test-preview` | brush preview only: tint hue, Depth sensitivity, SVO parity (`--only preview`) |
 
@@ -147,6 +170,16 @@ from the control rather than picking a round number.
 
 **Run groups sequentially on a shared GPU.** A `test-live-edit` red was traced to four
 concurrent instances competing for the device; alone it was 3/3.
+
+**`ninja -k1` stops scheduling after the first failing target — so downstream
+targets never start, and it reads as "skipped".** This is ninja-level, not
+ctest-level: the groups are independent (see above), so a red in one group
+cannot skip another. A `ninja -k1` pass that dies on `test-textures` leaves
+`test-night` never-started, which gets recorded as a skip with a confident
+wrong story about why. **"Skipped" and "not run" are different states, and only
+one of them is evidence** — check whether a gate was actually run before
+accepting the reason. Use `-k0` to keep going past failures when the full
+picture is wanted.
 
 **Refined 2026-10-03 — a contended measurement is VOID, not "provisionally green".**
 The earlier wording ("a red under concurrency is a contention hypothesis") quietly

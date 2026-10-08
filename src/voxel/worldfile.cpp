@@ -10,6 +10,7 @@
 #include <fstream>
 #include <filesystem>
 #include <algorithm>
+#include <unordered_map>
 #include <unordered_set>
 
 namespace vf::voxel::worldfile {
@@ -477,6 +478,8 @@ bool loadManifest(const std::string& path, std::vector<WorldLayer>& out)
                         j.num(layer.rotZ);
                     else if (k == "enabled")
                         j.boolean(layer.enabled);
+                    else if (k == "scale")
+                        j.num(layer.scale);
                     else if (k == "pos") {
                         if (!j.eat('['))
                             return false;
@@ -495,6 +498,8 @@ bool loadManifest(const std::string& path, std::vector<WorldLayer>& out)
                         break;
                 }
                 j.eat('}');
+                if (!(layer.scale > 0.f))
+                    layer.scale = 1.f; // corrupt/absent -> identity
                 if (!layer.file.empty())
                     out.push_back(std::move(layer));
                 if (!j.eat(','))
@@ -550,6 +555,10 @@ bool loadTextureManifest(const std::string& path, std::vector<TextureBinding>& o
                         b.mat = int(v);
                     } else if (k == "scale") {
                         j.num(b.scale);
+                    } else if (k == "emissive") {
+                        j.boolean(b.emissive);
+                    } else if (k == "emissiveScale") {
+                        j.num(b.emissiveScale);
                     } else {
                         j.skipValue();
                     }
@@ -627,7 +636,13 @@ bool loadLightManifest(const std::string& path, std::vector<LightSource>& out)
                         j.num(l.radius);
                     else if (k == "intensity")
                         j.num(l.intensity);
-                    else
+                    else if (k == "follow") {
+                        // Optional layer file this light rides; a non-string
+                        // is skipped like any foreign value (same tolerance
+                        // class as the documented top-level `null` quirk).
+                        if (!j.str(l.follow))
+                            j.skipValue();
+                    } else
                         j.skipValue();
                     if (!j.eat(','))
                         break;
@@ -929,10 +944,19 @@ bool writeTextureManifest(const std::string& path,
         std::fprintf(f, "%s\n  \"textures\": [\n", sep);
         for (size_t i = 0; i < textures.size(); ++i) {
             const TextureBinding& b = textures[i];
-            std::fprintf(f,
-                         "    { \"file\": \"%s\", \"mat\": %d, \"scale\": %.2f }%s\n",
-                         b.file.c_str(), b.mat, b.scale,
-                         i + 1 < textures.size() ? "," : "");
+            // emissive travels only when set: manifests that never used it
+            // round-trip byte-identically (same rule as writeManifest's scale).
+            if (b.emissive)
+                std::fprintf(f,
+                             "    { \"file\": \"%s\", \"mat\": %d, \"scale\": %.2f, "
+                             "\"emissive\": true, \"emissiveScale\": %.2f }%s\n",
+                             b.file.c_str(), b.mat, b.scale, b.emissiveScale,
+                             i + 1 < textures.size() ? "," : "");
+            else
+                std::fprintf(f,
+                             "    { \"file\": \"%s\", \"mat\": %d, \"scale\": %.2f }%s\n",
+                             b.file.c_str(), b.mat, b.scale,
+                             i + 1 < textures.size() ? "," : "");
         }
         std::fprintf(f, "  ]\n}\n");
     }
@@ -951,12 +975,15 @@ bool writeManifest(const std::string& path, const std::vector<WorldLayer>& layer
         const WorldLayer& l = layers[i];
         std::fprintf(f,
                      "    { \"file\": \"%s\", \"role\": \"%s\", \"name\": \"%s\", "
-                     "\"pos\": [%.2f, %.2f, %.2f], \"rot\": %.1f, \"rotX\": %.1f, "
-                     "\"rotZ\": %.1f, \"enabled\": %s }%s\n",
+                     " \"pos\": [%.2f, %.2f, %.2f], \"rot\": %.1f, \"rotX\": %.1f, "
+                     " \"rotZ\": %.1f, \"enabled\": %s",
                      l.file.c_str(), l.role.c_str(), l.name.c_str(), l.pos[0], l.pos[1],
                      l.pos[2], l.rotDeg, l.rotX, l.rotZ,
-                     l.enabled ? "true" : "false",
-                     i + 1 < layers.size() ? "," : "");
+                     l.enabled ? "true" : "false");
+        // scale stays absent (identity) for byte-identical manifests
+        if (l.scale != 1.0f)
+            std::fprintf(f, ", \"scale\": %.3f", l.scale);
+        std::fprintf(f, " }%s\n", i + 1 < layers.size() ? "," : "");
     }
     std::fprintf(f, "  ]");
     if (!prev.empty()) {
@@ -1027,13 +1054,25 @@ bool writeLightManifest(const std::string& path,
     std::string lightsJson = "[";
     for (size_t i = 0; i < n; ++i) {
         const LightSource& l = lights[i];
-        char buf[192];
+        // Filenames are loader-controlled, but a quote in one must not break
+        // the array: escape the two JSON-significant chars (the loader's
+        // naive unescape reads them back literally, so this round-trips).
+        std::string followEsc;
+        for (char c : l.follow) {
+            if (c == '"' || c == '\\')
+                followEsc.push_back('\\');
+            followEsc.push_back(c);
+        }
+        char buf[384];
         std::snprintf(buf, sizeof(buf),
                       "%s{ \"pos\": [%.3f, %.3f, %.3f], "
                       "\"color\": [%.3f, %.3f, %.3f], "
-                      "\"radius\": %.2f, \"intensity\": %.2f }",
+                      "\"radius\": %.2f, \"intensity\": %.2f%s%s%s }",
                       i ? "," : "", l.pos.x, l.pos.y, l.pos.z, l.color.x,
-                      l.color.y, l.color.z, l.radius, l.intensity);
+                      l.color.y, l.color.z, l.radius, l.intensity,
+                      followEsc.empty() ? "" : ", \"follow\": \"",
+                      followEsc.c_str(),
+                      followEsc.empty() ? "" : "\"");
         lightsJson += buf;
     }
     lightsJson += "]";
@@ -1150,21 +1189,32 @@ bool readLayered(const std::string& manifestPath, const WorldFileMeta& expected,
         WorldFileData data;
         if (!read(dir + l.file, data))
             return false;
-        if (data.meta.worldSize != expected.worldSize ||
-            data.meta.voxelSize != expected.voxelSize ||
-            data.meta.gridN != expected.gridN) {
+        const bool isPlaceable = l.role == "object" || l.role == "scatter";
+        const bool metaMatch =
+            data.meta.worldSize == expected.worldSize &&
+            data.meta.voxelSize == expected.voxelSize &&
+            data.meta.gridN == expected.gridN;
+        if (!metaMatch && !isPlaceable) {
             spdlog::warn("worldfile: layer '{}' meta mismatch (rejected)", l.file);
             return false;
         }
         const std::vector<VoxelRecord>* vox = &data.voxels;
         std::vector<VoxelRecord> placed;
-        if ((l.role == "object" || l.role == "scatter") &&
+        if (isPlaceable && (!metaMatch || l.scale != 1.f)) {
+            // fine/coarse-authored or scaled object: resample onto the world
+            // lattice about its bottom-center pivot, then place as usual
+            resampleRecords(data.voxels, data.meta, expected, l.scale, placed);
+            vox = &placed;
+        }
+        std::vector<VoxelRecord> placed2;
+        if (isPlaceable &&
             (l.pos[0] != 0.f || l.pos[1] != 0.f || l.pos[2] != 0.f ||
              l.rotDeg != 0.f || l.rotX != 0.f || l.rotZ != 0.f)) {
-            transformRecords(data.voxels, expected,
+            const std::vector<VoxelRecord>& base = *vox;
+            transformRecords(base, expected,
                              glm::vec3(l.pos[0], l.pos[1], l.pos[2]),
-                             l.rotDeg, l.rotX, l.rotZ, placed);
-            vox = &placed;
+                             l.rotDeg, l.rotX, l.rotZ, placed2);
+            vox = &placed2;
         }
         for (const VoxelRecord& v : *vox) {
             uint32_t key = (uint32_t(v.x) << 20) | (uint32_t(v.y) << 10) | uint32_t(v.z);
@@ -1347,5 +1397,79 @@ void transformRecords(const std::vector<VoxelRecord>& src,
                 t.z = uint16_t(z);
                 out.push_back(t);
             }
+}
+
+void resampleRecords(const std::vector<VoxelRecord>& src,
+                     const WorldFileMeta& srcMeta,
+                     const WorldFileMeta& dstMeta,
+                     float scale,
+                     std::vector<VoxelRecord>& out)
+{
+    out.clear();
+    if (src.empty() || !(scale > 0.f))
+        return;
+    glm::vec3 pivot;
+    if (!recordBottomCenter(src, srcMeta, pivot))
+        return;
+    const float half = 0.5f * dstMeta.worldSize;
+    const float voxD = dstMeta.voxelSize;
+    const int grid = int(std::lround(dstMeta.worldSize / voxD));
+    const float srcHalf = 0.5f * scale * srcMeta.voxelSize;
+    if (srcHalf <= 0.f)
+        return;
+    auto keyOf = [](int x, int y, int z) {
+        return (uint32_t(x) << 20) | (uint32_t(y) << 10) | uint32_t(z);
+    };
+    struct Vote {
+        float vol = 0.f;
+        VoxelRecord rec;
+    };
+    std::unordered_map<uint32_t, Vote> best;
+    best.reserve(src.size() * 2);
+    for (const VoxelRecord& v : src) {
+        glm::vec3 c = v.position(srcMeta);
+        c = pivot + scale * (c - pivot);
+        const glm::vec3 lo = c - srcHalf;
+        const glm::vec3 hi = c + srcHalf;
+        const glm::ivec3 i0(int(std::floor((lo.x + half) / voxD)),
+                            int(std::floor((lo.y + half) / voxD)),
+                            int(std::floor((lo.z + half) / voxD)));
+        const glm::ivec3 i1(int(std::floor((hi.x + half) / voxD)),
+                            int(std::floor((hi.y + half) / voxD)),
+                            int(std::floor((hi.z + half) / voxD)));
+        for (int z = i0.z; z <= i1.z; ++z)
+            for (int y = i0.y; y <= i1.y; ++y)
+                for (int x = i0.x; x <= i1.x; ++x) {
+                    if (x < 0 || y < 0 || z < 0 || x >= grid || y >= grid || z >= grid)
+                        continue;
+                    const float cx0 = -half + float(x) * voxD;
+                    const float cy0 = -half + float(y) * voxD;
+                    const float cz0 = -half + float(z) * voxD;
+                    const float ox = std::min(hi.x, cx0 + voxD) - std::max(lo.x, cx0);
+                    const float oy = std::min(hi.y, cy0 + voxD) - std::max(lo.y, cy0);
+                    const float oz = std::min(hi.z, cz0 + voxD) - std::max(lo.z, cz0);
+                    if (ox <= 0.f || oy <= 0.f || oz <= 0.f)
+                        continue;
+                    const float vol = ox * oy * oz;
+                    Vote& vt = best[keyOf(x, y, z)];
+                    if (vol > vt.vol) {
+                        vt.vol = vol;
+                        vt.rec = v;
+                    }
+                }
+    }
+    std::vector<uint32_t> keys;
+    keys.reserve(best.size());
+    for (const auto& kv : best)
+        keys.push_back(kv.first);
+    std::sort(keys.begin(), keys.end());
+    out.reserve(keys.size());
+    for (uint32_t k : keys) {
+        VoxelRecord t = best[k].rec;
+        t.x = uint16_t(k >> 20);
+        t.y = uint16_t((k >> 10) & 0x3FF);
+        t.z = uint16_t(k & 0x3FF);
+        out.push_back(t);
+    }
 }
 } // namespace vf::voxel::worldfile

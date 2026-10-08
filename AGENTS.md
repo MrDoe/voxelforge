@@ -67,6 +67,20 @@ one costs a whole turn, because the bad call is rejected before any work runs.
 - **Don't kill processes you didn't start.** If another test driver owns the
   display or the GPU, wait for it or report the conflict; `pkill` on a shared
   binary destroys someone else's in-flight run.
+- **Never `rm` with a glob near a file you depend on.** A tidy-up like
+  `rm /tmp/x/*.vxw` will eat a backup you forgot was there, and an *unlabelled*
+  backup cannot be told apart from a peer session's identically-named file —
+  which is exactly how a live-edit session was lost here on 2026-10-01. Spell
+  out the path; `ls -la` the matches first and confirm nothing is newer than
+  what you are protecting; name backups so ownership is obvious (e.g.
+  `overlay-remnant-619KB-05f4a21e.DO-NOT-RESTORE`); and verify a restore with
+  `md5sum`, because matching mtime+size did not prove it.
+- **Screenshots and metrics beat descriptions.** A vision caption of a render
+  is too coarse to judge a 0.1% artifact and will confidently mislabel the
+  cause — prefer numeric masks (luminance silhouettes, hole tests). Two false
+  conclusions this session came from images: a "hole" that was really the
+  world-wide water plane showing through a 0.2 m grid, and a "bug" that was
+  another session's render contending for the GPU.
 - **Measure, don't theorise.** A failing numeric/geometry assertion: print the
   values (throwaway `g++` binary, `--probe`, `vf_slice`) before proposing a
   cause. Two rounds of float-behaviour guessing on `makeDome` were both wrong;
@@ -84,6 +98,50 @@ one costs a whole turn, because the bad call is rejected before any work runs.
   The only ignored file is `assets/runtime_edits.vxw` — the live-edit session
   overlay the app rewrites on every brush stroke (state, not content; the app
   loads it explicitly, it is never a `world.json` layer).
+- **Five ways to destroy data here, and every one of them is silent.** The
+  overlay is gitignored and the manifests are tracked, so damage is invisible
+  in `git status`; check there before blaming a build.
+  1. **Never `ninja -C build clean` (or `ninja clean`).** `build.ninja`
+     registers `assets/heightmap.png`, `assets/world.json` and
+     `assets/landscape.vxw` as OUTPUTS of the heightmap_gen custom command
+     (targets `world` / `vf_heightmap`), so the versioned authored scene lives
+     in the SOURCE tree while being registered as a build product — a clean
+     deletes tracked files. Recover with `git checkout -- assets/…`, **not**
+     `ninja -C build world`: a regen rewrites the authored hamlet and is a
+     different, unrecoverable change. To force a recompile, `touch` the
+     sources (that is also the stale-object fix in Build).
+  2. **A headless run is NOT read-only against `assets/runtime_edits.vxw`.**
+     With neither `VF_NO_OVERLAY=1` nor `VF_OVERLAY_PATH=<tmp>` set, the app
+     loads the overlay and then *writes it back*: `loadStoreOverlay`
+     re-derives chunks via `LiveEditor::refreshRegion`, which sets
+     `Chunk::edited`, and `OverlayWriter` re-serializes only the flagged
+     subset. Measured 2026-10-01: a 4-chunk / 42,969-surfel session became
+     1 chunk / 9,641, and 3.26 MB became 619 KB, with no warning. `VF_NO_OVERLAY`
+     suppresses only the *load* — a run that also stamps (`VF_TEST_EDIT`,
+     `VF_TEST_STROKE_SAVE=1`) still writes. Use `VF_OVERLAY_PATH=/tmp/…` for
+     every scratch render. (Caveat when debugging the reload bug itself:
+     that path *requires* the shared location, because the bug is precisely
+     that the layer path and the overlay path are the same file.)
+  3. **`serializeEdited` walks `Chunk::edited` only**, so any process whose
+     edited set is a *subset* of the file's chunk list persists a smaller
+     file. A plain load-then-save round-trips, but a world reload re-adopts
+     the store from freshly baked pools first, so repeated debugging runs
+     shrink a session progressively. A small restore count is therefore NOT
+     evidence of a broken restore path.
+  4. **"Clear live edits" is irreversible** (`src/app/edit/live_edit.cpp`):
+     it flushes the writer, then `std::filesystem::remove(overlayPath())`,
+     with no backup step anywhere. Same for `VF_TEST_CLEAR=1`.
+  5. `assets/world_all.json` is **tracked** and rewritten by
+     `tests/test_authoring.cpp` and `tests/test_world.cpp` through a bare
+     `std::ofstream` with no temp+rename, so an interrupted `test-world` /
+     `test-unit` leaves a truncated manifest — the same reason `OverlayWriter`
+     uses temp+rename.
+  The durable fix for 2+3 is to stop rewriting the file from a derived subset
+  (persist the loaded chunk list, or refuse to save when the set shrinks) and
+  to default AUTOMATED runs at an isolated overlay path while keeping
+  `assets/` for the interactive app. Do **not** make the default per-process:
+  the interactive app is one long-lived process, so a PID-scoped default would
+  discard a user's edits on restart — the one consumer who wants persistence.
 - `assets/heightmap.png` and `assets/*.vxw` + `assets/world.json` are baked by
   `heightmap_gen`, which now emits **only the terrain shell** (`landscape.vxw`)
   plus the preserved highest-priority `ai_edits.vxw`; object layers are
@@ -155,11 +213,43 @@ one costs a whole turn, because the bad call is rejected before any work runs.
 - `./build/voxelforge` — reference cam `1.0,2.0,1.5 → 5.3,1.0,11.3` (house.jpeg view), sun `34°/238°`.
 - Keys: `WASD/QE` move, `RMB+mouse` look, wheel speed, `Ctrl+LMB` pick anchor,
   `F` toggles splats/SVO renderer, `N` toggles TAA, `[`/`]` shrink/grow splat disks. The window close button quits; `Esc` is reserved and does not exit.
-  `M` toggles micro-surfel detail (bake-time: it rebuilds the surfel stream via
-  the world-reload path, so expect a short stall; HUD shows the state).
   `B` toggles texture detail normals (render-flag bit 7, default on), `G`/`H` toggle SSR/SSAO,
-  `J` volumetric fog (opt-in, see below).
-  `C` toggles the focused Edit toolbox (Carve/Add/Delete/Paint/Smooth/Rotate/Move).
+  `J` volumetric fog (opt-in, see below). Enclosed-space sky occlusion
+  (render-flag bit 8) has no key — it is on by default and `VF_RENDER_FLAGS=255`
+  turns it off; see "Enclosed-space shading + light sources" below.
+  **Edit brush hotkeys** (state-dependent, and the reason the key list is not
+  one flat table): `Tab` is the ONLY View/Edit switch (the plain arm/disarm
+  toggle, both directions); `C` = Carve, `A` = Add, `D` = Delete, `S` =
+  Smooth, `M` = Move, and those pick a mode only while the brush is armed — in
+  View mode they never switch the mode (A/D/S still fly, `C`/`M` do nothing),
+  so a stray press while looking around cannot drag you into Edit. The mode
+  keys' edge latches are still read every frame while disarmed, so arming can
+  never make a stale latch phantom-fire.
+  `+`/`-` change the width by one voxel and `Shift`+`+`/`-` the depth (Smooth
+  strength) — those already existed and act only while armed; disarmed, `+`/`-`
+  are exposure. **Bind these by keycap, not by position**: GLFW reports physical
+  X positions, so on a German layout the `+` key is `GLFW_KEY_RIGHT_BRACKET`
+  (which also grows splat disks) and `-` is `GLFW_KEY_SLASH` (unbound) — the old
+  position-based test silently did nothing for the keys a German user actually
+  presses. `keyShowsChar()` in run_hotkeys.cpp asks the layout via
+  `glfwGetKeyName`, the numpad stays positional, and the splat-radius handler
+  yields its `]`-position grow to the brush while editing when that key shows
+  `+`. Do NOT use `io.InputQueueCharacters` for this: ImGui fills it from its
+  event queue during `NewFrame()`, which runs in the *render* step — after
+  `handleHotkeys` — so it is always empty there.
+  **`W/A/S/D/Q/E` always move the camera, in every edit-tool state.** While
+  armed, A/D/S are therefore dual-purpose: the mode is picked on the *edge*
+  (one action per press) while flying is level-triggered (continuous while
+  held), so holding A strafes and selects Add once. Do not "fix" this by
+  yielding the keys to the brush while armed — that was tried
+  (`Camera::moveKeysYieldsToBrush`) and reverted, because flying is how you
+  aim the brush in the first place.
+  Mode keys go through `App::chooseEditMode`, the single implementation shared
+  with the sidebar's mode buttons — a bare `m_editBrush` write from the hotkeys
+  would silently discard a staged rotate/move that the panel would have refused.
+  Rotate has no hotkey: it needs a selected layer first, and a key that
+  silently no-ops is worse than no key. `App::drawHotkeyBar` renders the current
+  set at the bottom of the screen on a dark plate.
   **Rotate** is selected from the toolbox or the World Layers **Activate
   trackball** action. A plain LMB click on an object then activates that exact
   owner; ownership comes from the picked `VoxelField` cell and stable 8-bit
@@ -217,13 +307,14 @@ one costs a whole turn, because the bad call is rejected before any work runs.
   *overlay*: the render stays full-window and picking still runs camera→cursor,
   so the sidebar only costs screen area. Sections:
   `drawPanelEdit/World/Render/Textures/Mesh/AI`.
-  `Tab` collapses it to the rail alone; `Ctrl+1..6` jump to a section (bare
+  `Ctrl+B` collapses it to the rail alone (`Tab` used to, and now toggles the
+  edit mode instead); `Ctrl+1..6` jump to a section (bare
   `1..5` remain the render-flag toggles, and the `edge()` latch gives the
   Ctrl path the edge on exactly the frames the bare loop must ignore).
   `ChatUi::drawPanel` renders the chat body into the AI pane — the chat has no
   window, position, or visibility state of its own. `m_editActive` is
   tool-armed state, *not* a window flag: it gates LMB stamping in the frame
-  loop, `C` also switches the rail to Edit, and an accent bar marks the armed
+  loop, `Tab` also switches the rail to Edit, and an accent bar marks the armed
   rail button. A staged rotation/move is announced in the footer from every
   section (it is a pending `world.json` write). Keep widget widths relative
   (`-1.0f`) or ≤ pane width; the default pane is ≈300 px wide (the full
@@ -237,12 +328,7 @@ one costs a whole turn, because the bad call is rejected before any work runs.
   `VF_LOD1`/`VF_LOD2` = 30/90 m, material-split blocks keep shore/rock
   boundaries readable; `VF_LOD_SPLIT=0` restores the single-majority disk;
   objects ride along unmerged — trees must
-  never vanish), `VF_MICRO=0` (micro-surfel detail off; also the **M** key at
-  runtime, which re-runs the surfelizer: 3.40M -> 2.13M surfels),
-  `VF_MICRO_DIST` (default 20 m micro cull) and
-  `VF_MICRO_DIST_OBJ` (default 35 m for chunks flagged as containing object
-  surfels — foliage/props read as blobs when their micros are culled; hero
-  720p +1.6 ms), `VF_NO_GPU_CULL=1` disables the GPU per-surfel
+  never vanish), `VF_NO_GPU_CULL=1` disables the GPU per-surfel
   cull pre-pass (compute compaction + GPU-written indirect counts;
   bit-exact), `VF_NO_OCCL=1` disables the Hi-Z occlusion pyramid + GPU
   occlusion cull (~3 ms overhead at 720p; saves fragments when objects
@@ -255,7 +341,7 @@ one costs a whole turn, because the bad call is rejected before any work runs.
   non-opposite exposed lattice faces; normal disagreement never shrinks object
   coverage. `VF_EDGE_FILL=0` disables the derived small tangent-aligned crease
   bridges (GUI: **Rendering → Interpolate crease splats**, default on). The
-  chunk layout is `[base | edge bridges | material micros]`: bridges stay in
+  chunk layout is `[base | edge bridges]`: bridges stay in
   the always-on opaque range, add no draw call, and carry no extra shadow/AO
   march (GUI: **Sharp-edge fit**, default 0.35; changes trigger a world/surfel
   rebuild). `VF_LOD_SPLIT=0` restores the
@@ -265,7 +351,7 @@ one costs a whole turn, because the bad call is rejected before any work runs.
   `VF_SPLAT_DEPTH_TOL` (depth-resolve band in NDC depth units, default
   0.002 ≈ 10 cm; applied per frame as a dynamic rasterizer depth bias),
   `VF_SPLAT_EXTENT` (quad half-size), `VF_SPLAT_RADIUS`.
-- Live edit: the sidebar's **Edit** section (`C` arms the tool) has seven brush
+- Live edit: the sidebar's **Edit** section (`Tab` arms the tool) has seven brush
   modes — **Carve** (depth-limited cylinder scoop along the surface normal),
   **Add** (grow the surface out along the surface normal: the brush footprint
   disk is extruded `depth` and closed by a fillet of `min(radius, depth)/2`, so
@@ -379,10 +465,9 @@ one costs a whole turn, because the bad call is rejected before any work runs.
   stroke is **saved asynchronously** to `assets/runtime_edits.vxw` (VXW v2
   store section, schema 3 = per-chunk edit AABB + texture tags) and restored at the next
   startup / world reload (GPU-seed + refresh the saved AABB, so the restored
-  frame matches the session). Patched chunks **keep their micro tail** —
-  `LiveEditor::chunkRun` regenerates it from the cached base run with the same
-  deterministic `buildMicroSurfels` hash the bake uses (shared per-cell emitter
-  `emitMicroSurfelsForCell`) — while their LOD ring drops until the next full
+  frame matches the session). Patched chunks keep their full run —
+  `LiveEditor::chunkRun` regenerates it from the cached base run —
+  while their LOD ring drops until the next full
   reload; `uHeight` is patched for the edited columns and the water plane is
   world-wide, so both follow a live edit. Headless hooks: `VF_TEST_EDIT="x,y,z,carve|add|delete|paint|smooth"` (one
   stamp), `VF_TEST_BRUSH="x,y,z,carve|delete|paint|smooth"` (activates the tool and
@@ -480,8 +565,8 @@ one costs a whole turn, because the bad call is rejected before any work runs.
 - `python3 tests/live_edit_check.py build/voxelforge` — renders the hero view
   untouched and with `VF_TEST_EDIT` (live store patch) in **both backends**
   (splat + `--mode svo`) for Add, plus the splat-only Delete/Paint store modes
-  (micro detail off so the diff is geometry, not micro-disk noise; a separate
-  check pins that a patched chunk keeps its micro tail), the
+  (the diff is geometry only; a separate
+  check pins that a patched chunk keeps its full run), the
   carve/add hover tints (warm vs green), the **Depth** slider and the SVO
   preview (both new: `check_depth_sensitivity` demands the frame change by more
   than the ~1.25% TAA noise floor, and `check_svo_preview` demands `--mode svo`
@@ -563,8 +648,8 @@ one costs a whole turn, because the bad call is rejected before any work runs.
   small hard-edge crease bridges, mean face normal + smoothing, baked CPU
   sun-shadow/AO/bent normal, chunk bucketing + water grid); rebuilt on every
   world reload (`rebuildSurfels`). Full and store paths preserve `Sample::layer`
-  into the surfel's packed owner metadata, including deterministic edge and
-  micro children. The store path adds `buildChunkSurfels`/`buildChunksSurfels`
+  into the surfel's packed owner metadata, including deterministic edge
+  children. The store path adds `buildChunkSurfels`/`buildChunksSurfels`
   (the BAKE's normal pipeline — exposed-face mean, per-face expansion for
   thin/cancelling cells, face-neighbour smoothing — plus parallel shading) for
   live edits. It must never grow a normal rule of its own: a stamp re-derives
@@ -640,8 +725,65 @@ one costs a whole turn, because the bad call is rejected before any work runs.
   `VoxelField::sample`, binary like SVO `softShadow`); the GPU shadow march
   (`softShadowSplat`) only serves the water path. `objDist` returns METERS
   (`r8_snorm × 1.26`); empty reads exactly `+kObjVolMax` (no info beyond).
+  The sidebar toggle is **Shadows** (render-flag **bit 1**, renamed from
+  "Sun shadows") and it gates EVERY occlusion march now: the baked sun `sh`
+  AND the point-light visibility marches inside `applyLights()` on both
+  backends. It also interacts with bit 8: `aoShEnclosure` requires
+  `(gRenderFlags & (256|3)) == (256|3)`, so clearing bit 1 (`=253`)
+  disables the enclosure proxy too — an A/B that clears only bit 1 changes
+  cave shading on both backends by design, and `VF_RENDER_FLAGS=255` (bit 8
+  clear) is the pre-lights escape hatch, not a bit-1 one.
+- **Enclosed-space shading + light sources** (render-flag **bit 8**, default
+  ON — `m_renderFlags` is now 511; `VF_RENDER_FLAGS=255` is the bit-exact
+  pre-lights escape hatch). `skyVisibilitySvo` / `skyVisibilitySPlat` cast one
+  ray along `mix(bent, +Y, 0.65)` and return 0/1, so a cave or a room reads as
+  enclosed instead of open sky. Enclosed surfaces scale the analytic sky
+  ambient by `mix(1, 0.16)` and the IBL by `mix(1, 0.04)`, then get an
+  albedo-scaled fill (`vec3(0.075,0.08,0.09)·enclosed·(0.35+0.65·ao)`) —
+  WITHOUT that fill the removed daylight just pushes them under
+  `visual_check`'s 5 % black-in-silhouette gate (measured house 7.21 % → 4.26 %
+  with it). **The splat sky test uses `objDist` ONLY**: `heightAt` reports
+  "solid" for every point below the terrain surface, which marks any interior
+  dug into a hillside (and any floor under a smoothed height texture) as
+  underground. A heightfield cannot have overhangs, so terrain can never
+  occlude an upward ray; the per-light shadow test still marches terrain,
+  because a lamp behind a hill must not light the far side.
+- **Light sources**: a top-level `"lights"` array in `world.json`
+  (`{"pos":[x,y,z], "color":[r,g,b], "radius":m, "intensity":n}`, max 16,
+  `radius<=0`/`intensity<=0` entries are dropped) parsed by
+  `worldfile::loadLightManifest` into a std140 UBO at **binding 25** (528 B =
+  two `vec4[16]` + count at byte 512 + 3 pad ints), declared once in
+  `common_base.glsl` and read by `applyLights()`. Both backends march for the
+  light (`lightVisibilitySvo` = one `exactSVOHit`; `lightVisibilitySPlat` =
+  the heightfield+objVol binary march). Uploaded by `App::uploadLightSources()`
+  — **call it only after every pass is initialised**: `setLights()` writes a
+  descriptor of a set that does not exist until `init()` ran, and the silent
+  no-op looks exactly like "the lamp is in the manifest but does nothing".
+  Measured with one lamp in the cabin: mean luma 42 → 87, pixels under luma 30
+  44.9 % → 11.0 %; the splat↔SVO delta is unchanged (-16.7 → -14.3), i.e. the
+  light does not add backend divergence.
+  **Emissive materials derive lights too**: `uploadLightSources()` builds a
+  per-material emission table — palette `kEmissive` mats 9-15 (CPU copy in
+  `common.hpp`, GLSL copy in `common_base.glsl`; change both or lit colour
+  and glowing colour disagree) plus every texture binding flagged
+  `"emissive"` in world.json, read from the ATLAS (`emissiveScale`/
+  `meanColor`, both zeroed by `VF_TEXTURES=0`, so the bit-exact escape hatch
+  kills derived lights with the glow) — then
+  `VoxelField::collectEmissive()` buckets emitter cells on a 1 m grid, sorts
+  count-desc/key-asc (same content ⇒ same lights, every reload), thins to
+  1.5 m separation (one hearth, not twenty lights) and lifts each centroid
+  to the nearest AIR cell, because a light buried in its own emitter is
+  occluded by every receiver's march and would occupy a slot contributing
+  nothing. AUTHORED lights fill the 16 slots first, derived fill the rest,
+  truncation logged. Derived lights are a function of content — never
+  persisted (`writeLightManifest` must not learn about them). Re-derived on
+  every atlas reload (`reloadTexAtlas`) and world reload; the default hamlet
+  derives 14 from `ai_edits` mat 15 + cabin/tower emitters. Texture-flagged
+  light colour = the texture's mean colour × 3 × `emissiveScale`, gain 0.5.
 - **Photo textures** (both backends): a `world.json` top-level `"textures"`
-  array (`{file, mat, scale}` in m/tile, paths relative to the manifest)
+  array (`{file, mat, scale}` in m/tile, optional `emissive` +
+  `emissiveScale` — written ONLY when set, so manifests that never used them
+  round-trip byte-identically; paths relative to the manifest)
   binds a PNG/JPG per material into a fixed 17-layer **512²** atlas (layer ==
   mat; `TexAtlas`, bindings 22/23 shared by splat + SVO). `TexAtlas::kTexSize`
   is the only hardcode (mips/staging/blits derive from it); the shipped
@@ -756,7 +898,7 @@ one costs a whole turn, because the bad call is rejected before any work runs.
   chunks (VXW v2 store section); it is **not** in `world.json`, so the layer
   poll ignores it — the app loads it explicitly at startup / after every world
   reload (`App::loadStoreOverlay`) and patches the chunks. Patched chunks keep
-  their micro tail (`LiveEditor::chunkRun`) but lose their LOD ring until the
+  their full run (`LiveEditor::chunkRun`) but lose their LOD ring until the
   next full reload; `uHeight`/water stay stale in
   the edited region; both patches stall the device (`vkDeviceWaitIdle`), so
   painting is click/drag-scale, not a free-running sculpt loop. Rebuild-region
@@ -773,7 +915,7 @@ one costs a whole turn, because the bad call is rejected before any work runs.
   run's `data()` is null, and the old `!data` guard silently skipped the patch,
   so a chunk emptied by an undo/Clear kept drawing its stale run (the store and
   the LiveEditor cache were already correct — the GPU patch was the only broken
-  layer). Zeroing `m_chunkCount` (+ micro-start/LOD flags) is enough; there is
+  layer). Zeroing `m_chunkCount` (+ LOD flags) is enough; there is
   nothing to copy.
 - Load cost is bbox-bound: `VoxelField::build` pays a padded-bbox EDT per
   object component — 72k components / 533k cells but **361M padded bbox cells**
@@ -793,20 +935,93 @@ one costs a whole turn, because the bad call is rejected before any work runs.
 Other OpenCode sessions in this workspace are reachable through the
 `opencode-crosstalk` plugin: `crosstalk_status`, `crosstalk_peers`,
 `crosstalk_send`, `crosstalk_inbox`, `crosstalk_claim`, `crosstalk_wait`.
-Talk to each other briefly, but keep working — only stop for coordination that prevents
+Talk to each other, but keep working — only stop for coordination that prevents
 a real collision.
 
-- **Declare once - precisely and concisely - then keep moving.** `crosstalk_status` sets your role and goal;
+- **Declare once, then keep moving.** `crosstalk_status` sets your role and goal;
   `crosstalk_peers` shows active sessions and their leases. Work that does not
   overlap theirs needs no coordination.
 - **Talk before you collide.** If you need something a peer holds, `crosstalk_send`
-  a short precise ask and continue elsewhere; replies are injected into live turns (use
+  a short ask and continue elsewhere; replies are injected into live turns (use
   `crosstalk_inbox` to catch up). Never force a claim.
 - **Lease what you are editing now.** `crosstalk_claim` takes an exclusive expiring
   lease on exact paths — no globs (`resources`, `note`, `ttlSeconds`). `renew` if the
   work runs long, `release` when done; a refusal names the holder.
+- **Check the shared surfaces here.** `crosstalk_peers` before a render or rebuild:
+  the GPU/display, the `build/` tree, `shaders/*.glsl` (hot-reloaded into a peer's
+  running render), the live-edit overlay `assets/runtime_edits.vxw`, and the authored
+  `assets/*.vxw` / `world.json` are shared — concurrent renders, rebuilds or writes
+  there corrupt a peer's state. Use `VF_OVERLAY_PATH=/tmp/…` for every scratch render
+  and label scratch/backup files so ownership is obvious.
+- **Do not destroy what you did not create.** Never `ninja -C build clean` (it
+  deletes tracked assets), never `rm` a glob near a peer's files, and never kill a
+  process you did not start — wait with `crosstalk_wait` or ask with
+  `crosstalk_send` instead.
 - **Identity is automatic** — never pass a "who am I". Blocking calls are capped by
   `maxWaitMs` and may return early; that is normal.
 
-Installed globally - `opencode api get /api/plugin` shows if `opencode.crosstalk` is active.
+Installed globally (`npm run setup` in `/home/christoph/code/opencode-crosstalk`);
+`opencode api get /api/plugin` shows `opencode.crosstalk` active. Disable per
+workspace with `"plugins": ["-opencode.crosstalk"]`; no permission rule is required.
 <!-- opencode-crosstalk:end -->
+
+<!-- BEGIN opencode-rag -->
+## Code Navigation
+
+ALWAYS use OpenCodeRAG tools before reading or editing:
+- **Search first** — `search_semantic(query)` instead of grep/glob
+- **Skeleton before read** — `get_file_skeleton(filePath)` then read specific lines
+- **Usages before edit** — `find_usages(symbolName)` before modifying any symbol
+- **Images via describe** — `describe_image(filePath, systemPrompt?)` — never read raw bytes
+- **Recall quirks** — `recall_quirks(query)` when you hit a known pitfall
+- **Add quirks** — `add_quirk(content)` when you discover a non-obvious fact
+- **Fix quirks** — `update_quirk(id, ...)` / `delete_quirk(id)` when a stored quirk is outdated or wrong
+
+If no results, run `opencode-rag index`.
+
+### Decision model (`make_decision`)
+
+- Classify, route, or score short text with the local tev1 model (`state` + 1-64 questions).
+- Question types: `choice` (options map to descriptions), `noul` (true/false probability), `score` (ordered rubric levels, lowest first).
+- Keep `state` short (~2k-token context); add a `none` option when no listed option may fit.
+- Never use it as the only check for a high-stakes decision.
+- With `decision.routeBeforeAsking` enabled: route option choices through `make_decision` before asking the user; ask the user only when the model is undecided (low confidence) or the choice is preference-based.
+
+### Decision tree — ALWAYS follow this order
+1. User mentions code behavior/architecture → `search_semantic(query)`
+2. User mentions a file path → `get_file_skeleton(filePath)` THEN `read` on specific lines
+3. User mentions a function/class/variable to edit → `find_usages(symbolName)` THEN `search_semantic` THEN `edit`
+4. User asks a code question → `search_semantic` to gather context before answering
+5. User asks about an image or visual asset → `describe_image(filePath)` (optionally pass `systemPrompt` to focus on specific features) to retrieve its generated description, then optionally `search_semantic` for related code
+6. You encounter an error or need to recall a known pitfall → `recall_quirks(query)`
+7. You discover a non-obvious fact or workaround → `add_quirk(content)` to persist it for future sessions
+8. A recalled quirk is outdated or wrong → `update_quirk(id, ...)` to fix it, or `delete_quirk(id)` if it no longer applies
+
+### Proactive triggers — you MUST call these tools when
+- User asks about code behavior, architecture, or implementation details
+- User asks to edit, refactor, or fix code — call `find_usages` first
+- User references files or functions you haven't read yet
+- User says "find", "search", "look up", "where is", "how does"
+- User refers to an image, screenshot, diagram, or visual asset
+- Before answering ANY code-related question, retrieve context first
+- Before reading ANY file, call `get_file_skeleton` to orient first
+
+### Anti-patterns — NEVER do these
+- Reading full files without calling `get_file_skeleton` first (wastes tokens)
+- Editing a function without calling `find_usages` first (breaks call sites)
+- Answering code questions without calling `search_semantic` first (you guess at behavior)
+- Using `grep`/`glob` when `search_semantic` would find the answer faster
+- Treating image files as text — use `describe_image` instead of reading raw bytes
+- Using `npx opencode-rag quirk` shell commands instead of the built-in quirk tools (`add_quirk` / `recall_quirks` / `update_quirk` / `delete_quirk`) (the tools are faster, already loaded in-process, and go through the trust monitor)
+
+### MANDATORY quirk capture rules — you MUST call `add_quirk` when
+- A build, test, or type-check command fails and you resolve it
+- You discover an undocumented library constraint, peer dep, or workaround
+- You learn an environment-specific requirement (OS, tool version, etc.)
+- You make a design decision that future sessions should remember
+- You resolve a gotcha that cost more than one attempt
+
+### MANDATORY quirk hygiene — you MUST call `update_quirk` or `delete_quirk` when
+- A stored quirk is outdated, wrong, or has been fixed — update it or delete it instead of adding a contradicting duplicate
+- NEVER finish a coding session without adding quirks for resolved errors.
+<!-- END opencode-rag -->

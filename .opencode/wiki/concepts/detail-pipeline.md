@@ -2,7 +2,7 @@
 title: Detail pipeline (bake + live path)
 tags: [rendering, surfels, micro-detail, live-editing, lod]
 sourceRefs: [src/voxel/surfelize.cpp, src/voxel/surfelize.hpp, src/voxel/live_editor.cpp, src/voxel/live_editor.hpp, src/render/splat_pass.cpp, src/render/splat_pass.hpp, shaders/splat.frag, shaders/splat.vert, tests/live_edit_check.py]
-lastReviewed: 2026-09-26
+lastReviewed: 2026-10-08
 ---
 
 # Detail pipeline
@@ -33,26 +33,48 @@ object parents; each exposed face pair also emits a smaller tangent-aligned
 bridge in the always-on base+edge segment. Bridges are not material micros and
 are not distance-culled; see [[concepts/edge-aware-surfel-radius]].
 
-## 3. Micro detail (hash-driven child disks)
+## 3. Micro detail (removed 2026-10-08 — app surface deleted, bake emitter retained off)
 
-`emitMicroSurfelsForCell(x, y, z, baseSurfel, out)` in `surfelize.cpp` is the
-single source of truth: 0–3 children per base cell (2–6 cm apparent), spawn
-rules per material (meadow grain, pebbles, bark, roof moss/underside seals,
-canopy leaflets), offsets/lift/normal-tilt from a `sin`-hash of the lattice
-cell. Children inherit the base cell's material and baked shadow/AO/bent, so
-they cost no extra marches. Materials 9–15 (emissive) are skipped by design.
+> **Status: removal implemented in the working tree, UNCOMMITTED — label
+> current-tree until commit.** Verified by grep 2026-10-08, and this section
+> records *deleted vs retained*, because the two halves landed differently.
 
-- Bake: `SurfelSet.microStart` splits each chunk into base + micro; the renderer
-  skips the micro range beyond `VF_MICRO_DIST` (default 20 m ≈ sub-pixel).
-- Live path: `LiveEditor` caches base surfels per chunk and `chunkRun()`
-  regenerates the micro tail with `buildMicroSurfels(keys, base)` (the same
-  emitter). `SplatPass::patchChunkSurfels(..., microOffset)` updates the
-  chunk's `m_microStart`, so a brush stamp never loses micro geometry.
-  `tests/test_store.cpp` pins determinism and parent proximity;
-  `tests/live_edit_check.py` asserts the patched run grows substantially with
-  `VF_MICRO` on vs off.
-- Cost: stamp latency unchanged (16–21 ms) vs micros off; the extra GPU patch
-  time (~2–4 ms) scales with the run size.
+**Deleted:** the `U` key handler (`run_hotkeys.cpp`), `App::m_microDetail`
+(`app.hpp`), all `VF_MICRO` / `VF_MICRO_DIST` / `VF_MICRO_DIST_OBJ` env reads
+(the only remaining `VF_MICRO` strings are two comments), the sidebar toggle,
+and every test reference (`live_edit_check.py`, `test_store.cpp`,
+`test_surfelize.cpp` — zero `micro` matches). Docs rewritten (`AGENTS.md`,
+`docs/rendering.md`).
+
+**Retained, default-off:** the bake emitter in `surfelize.*`
+(`emitMicroSurfelsForCell`, `buildMicroSurfels`, the `microStart` chunk
+layout; `microDetail = false` at `surfelize.hpp:54`). The layout the removal
+was most likely to break — `patchChunkSurfels`' run update plus
+`LiveEditor::chunkRun` regeneration — survives as the full-run path, and the
+guard survived with it: `check_patched_run` now asserts a **non-empty** patched
+run surfel count and names no micro, exactly the replacement the removal plan
+specified. The feared "delete the guard with the feature" outcome did not happen.
+
+What the feature was, for the record: 0–3 deterministic child disks per base
+cell (2–6 cm apparent), per-material spawn rules, inherited shadow/AO/bent at
+no extra march cost, chunk layout `[base | edge bridges | material micros]`
+(now `[base | edge bridges]`), stamp latency unchanged vs off.
+
+**Measured context, kept so the removal is not mistaken for a regression.**
+From [[concepts/load-time-field-build]]:
+
+| quantity | value |
+|---|---|
+| repeat-run noise floor | **0.085/255** |
+| ON-vs-OFF frame delta | **2.444/255** |
+| pixels moving >4/255 | **15.12 %** |
+| surfel cost removed | **1,229,627 (56.7 %)** |
+
+The signal was **~29× the noise floor** across ~15 % of pixels — measurably
+present detail, traded for an aesthetic preference by user order. Recorded as
+an **aesthetic** verdict (the first and only input to the *WORTH* question),
+never to be upgraded into a quality measurement after the fact. Caveats that
+bound it: single camera, splat backend only, **no SVO arm**, no HF metric.
 
 ## 4. LOD rings + shading detail
 
@@ -67,12 +89,11 @@ surfaces beyond the micro cull are no longer flat-lit.
 
 ## Knobs
 
-`VF_MICRO=0` (launch) / the **`M`** key (runtime — micros are baked into the
-surfel stream, so the toggle re-runs the surfelizer via the world-reload path
-and stalls briefly; 3.40M -> 2.13M surfels), `VF_MICRO_DIST` (default 20 m),
 `VF_LOD=0`, `VF_LOD1`/`VF_LOD2`
 (30/90 m), `VF_SPLAT_{SIGMA,OPACITY,RADIUS,EXTENT}`, `VF_SURFEL_{SMOOTH,HFBLEND}`.
-See `docs/rendering.md` for the full table.
+See `docs/rendering.md` for the full table. (Micro knobs `VF_MICRO`,
+`VF_MICRO_DIST`, `VF_MICRO_DIST_OBJ` and the `U`/`M`-key toggle were removed
+with the feature 2026-10-08 — see §3.)
 
 ## Roadmap (decided 2026-09-16)
 
@@ -108,10 +129,16 @@ See `docs/rendering.md` for the full table.
    normals), the [[concepts/texture-conformance]] drop-in gate, water
    [[concepts/water-caustics]], and shoreline [[concepts/world-detail-content]].
 
-## The per-chunk surfel layout contract (three parallel index arrays)
+## The per-chunk surfel layout contract (three declared arrays, two live ranges)
+
+> Post-micro-removal (2026-10-08, current-tree): each chunk's run is
+> effectively `[base parents | hard-edge bridges]`. The third array below still
+> exists in the struct but its range is always empty (`microDetail = false`) —
+> read every `microStart` statement that follows as "present, empty, retained
+> for the bake path".
 
 Each chunk's run in the surfel stream is `[base parents | hard-edge bridges |
-material micros]`, described by three `GRID_N^3 + 1` arrays. Verified by
+(empty) material micros]`, described by three `GRID_N^3 + 1` arrays. Verified by
 reading the producer (`surfelize.cpp`, the two interleave blocks) rather than
 inferred from a comment:
 
@@ -119,9 +146,10 @@ inferred from a comment:
   **total count**. Empty chunks satisfy `range[c] == range[c+1]`.
 - `edgeStart[c]` — where the always-on bridges begin (= the base-parent range
   end). Bridges stay in the opaque range, so they cost no extra draw call and
-  no extra shadow/AO march; only the micro tail behind them is culled.
-- `microStart[c]` — where the micro tail begins; `microStart[GRID_N^3]` is the
-  total count. Empty when micro detail is off.
+  no extra shadow/AO march.
+- `microStart[c]` — where the micro tail *would* begin; always empty since the
+  removal (`microStart[GRID_N^3]` is the total count, every entry equal to its
+  chunk end). Retained for the bake path, never filled by the app.
 
 The ordering that actually holds, and that any assertion may rely on:
 

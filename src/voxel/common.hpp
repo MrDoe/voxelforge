@@ -47,6 +47,40 @@ inline const std::array<glm::vec3, kPaletteN> kPalette {
     glm::vec3 { 0.80f, 0.76f, 0.70f }, // 20 plaster - white-washed walls
 };
 
+// Self-emission colour per material, MIRROR of kEmissive[] in
+// shaders/common_base.glsl (that array stops at 16; this one is kPaletteN so
+// it can be indexed straight by a material id). Materials 9-15 emit; the rest
+// are black = non-emissive. The CPU needs it to turn emissive materials into
+// real point lights (App::uploadLightSources -> VoxelField::collectEmissive);
+// if you change one, change both or the lit colour and the glowing colour
+// will disagree.
+inline const std::array<glm::vec3, kPaletteN> kEmissive {
+    glm::vec3 { 0.0f },                   // 0 grass dark
+    glm::vec3 { 0.0f },                   // 1 grass light
+    glm::vec3 { 0.0f },                   // 2 soil
+    glm::vec3 { 0.0f },                   // 3 sand
+    glm::vec3 { 0.0f },                   // 4 rock
+    glm::vec3 { 0.0f },                   // 5 light rock
+    glm::vec3 { 0.0f },                   // 6 wood
+    glm::vec3 { 0.0f },                   // 7 roof
+    glm::vec3 { 0.0f },                   // 8 foliage
+    glm::vec3 { 3.0f, 0.9f, 0.18f },      // 9 lava
+    glm::vec3 { 2.4f, 0.5f, 0.10f },      // 10 ember
+    glm::vec3 { 0.2f, 1.6f, 2.8f },       // 11 glow cyan
+    glm::vec3 { 0.3f, 2.4f, 0.6f },       // 12 glow green
+    glm::vec3 { 1.6f, 0.3f, 2.6f },       // 13 glow purple
+    glm::vec3 { 0.3f, 0.9f, 3.2f },       // 14 glow blue
+    glm::vec3 { 3.2f, 3.0f, 2.8f },       // 15 white-hot
+    glm::vec3 { 0.0f },                   // 16 snow
+    glm::vec3 { 0.0f },                   // 17 bark
+    glm::vec3 { 0.0f },                   // 18 moss
+    glm::vec3 { 0.0f },                   // 19 thatch
+    glm::vec3 { 0.0f },                   // 20 plaster
+};
+// Emission magnitude -> point-light intensity, shared by the bake upload
+// and the live trigger so both sides agree on brightness.
+inline constexpr float kEmissiveGain = 0.5f;
+
 // per-material surface attributes, 0-255: x = reflectivity, y = roughness
 inline const std::array<glm::vec2, kPaletteN> kMaterialReflection {
     glm::vec2 { 35.f, 235.f },  // 0 grass dark

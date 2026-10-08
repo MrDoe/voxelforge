@@ -3,6 +3,9 @@
 #include <algorithm>
 #include <numeric>
 #include <utility>
+#include <unordered_map>
+#include <vector>
+#include <cstdint>
 
 namespace vf::voxel {
 
@@ -206,24 +209,92 @@ const std::vector<Surfel>& LiveEditor::chunkSurfels(int chunk, const SurfelParam
     return it == m_cache.end() ? empty : it->second.surfels;
 }
 
-void LiveEditor::rebuildRun(int chunk, const SurfelParams& params)
+void LiveEditor::rebuildRun(int chunk)
 {
     auto it = m_cache.find(chunk);
     if (it == m_cache.end())
         return;
     Cache& c = it->second;
-    if (params.microDetail)
-        c.micros = buildMicroSurfels(c.keys, c.surfels);
-    else
-        c.micros.clear();
-    c.microStart = uint32_t(c.surfels.size() + c.edgeSurfels.size());
     c.run.clear();
-    c.run.reserve(c.surfels.size() + c.edgeSurfels.size() + c.micros.size());
+    c.run.reserve(c.surfels.size() + c.edgeSurfels.size());
     c.run.insert(c.run.end(), c.surfels.begin(), c.surfels.end());
     c.run.insert(c.run.end(), c.edgeSurfels.begin(), c.edgeSurfels.end());
-    c.run.insert(c.run.end(), c.micros.begin(), c.micros.end());
     c.runDirty = false;
-    c.runMicroDetail = params.microDetail;
+
+    // ---- TRACE audit: geometric support over the LIVE run ----------------
+    // The bake audit (buildSurfels) reports ~0.02% unconnected disks, all at
+    // the world rim. This is the same question for the store/live path, which
+    // is a SEPARATE enumerator (collectChunkCandidates) and therefore the one
+    // place a floating disk can appear without the bake gate noticing. The run
+    // layout here is [base | edge bridges], the same one the
+    // GPU draws, so this measures exactly what is visible.
+    if (getenv("VF_TRACE")) {
+        const auto& S = c.run;
+        const float half = 0.5f * vf::voxel::WORLD;
+        const float vs = vf::voxel::VOXEL;
+        // Same 10-10-10 packing the surfelizer uses internally (it is not
+        // exported); duplicated here only for this diagnostic bucket.
+        auto cellKey = [&](int cx, int cy, int cz) {
+            return (uint64_t(std::uint32_t(cx)) << 20) | (uint32_t(cy) << 10) |
+                   uint32_t(cz);
+        };
+        auto cellOf = [&](const vf::voxel::Surfel& s) {
+            return cellKey(int((s.pos_rU.x + half) / vs),
+                           int((s.pos_rU.y + half) / vs),
+                           int((s.pos_rU.z + half) / vs));
+        };
+        std::unordered_map<uint64_t, std::vector<int>> bucket;
+        bucket.reserve(S.size());
+        for (size_t i = 0; i < S.size(); ++i)
+            bucket[cellOf(S[i])].push_back(int(i));
+        static const int kProbe[27][3] = {
+            {-1,-1,-1},{0,-1,-1},{1,-1,-1},{-1,0,-1},{1,0,-1},{-1,1,-1},{0,1,-1},{1,1,-1},
+            {-1,-1, 0},{1,-1, 0},{-1, 1, 0},{1, 1, 0},
+            {-1,-1, 1},{0,-1, 1},{1,-1, 1},{-1,0, 1},{1,0, 1},{-1,1, 1},{0,1, 1},{1,1, 1},
+            {-1, 0, 0},{1, 0, 0},{0,-1, 0},{0, 1, 0},{0, 0,-1},{0, 0, 1},{0, 0, 0}};
+        size_t floating = 0, probed = 0;
+        int shown = 0;
+        for (size_t i = 0; i < S.size(); i += 11) {
+            const auto& a = S[i];
+            const uint64_t ck = cellOf(a);
+            const int x = int((ck >> 20) & 0x3FFu);
+            const int y = int((ck >> 10) & 0x3FFu);
+            const int z = int(ck & 0x3FFu);
+            const float ra = std::max(a.pos_rU.w, a.normal_rV.w);
+            ++probed;
+            bool touch = false;
+            for (int d = 0; d < 27 && !touch; ++d) {
+                auto it = bucket.find(cellKey(x + kProbe[d][0], y + kProbe[d][1],
+                                              z + kProbe[d][2]));
+                if (it == bucket.end())
+                    continue;
+                for (int j : it->second) {
+                    if (size_t(j) == i)
+                        continue;
+                    const auto& b = S[j];
+                    if (glm::distance(a.pos_rU, b.pos_rU) <
+                        ra + std::max(b.pos_rU.w, b.normal_rV.w)) {
+                        touch = true;
+                        break;
+                    }
+                }
+            }
+            if (touch)
+                continue;
+            ++floating;
+            if (shown < 8) {
+                ++shown;
+                spdlog::info("  LIVE-FLOATING #{} chunk {} cell ({},{},{}) mat {} "
+                             "r {:.3f} pos ({:.2f},{:.2f},{:.2f}) run {}", shown,
+                             chunk, x, y, z, int(a.mat_ao.x + 0.5f), ra,
+                             a.pos_rU.x, a.pos_rU.y, a.pos_rU.z, S.size());
+            }
+        }
+        if (probed)
+            spdlog::info("live-support audit: chunk {} run {} -> {} unconnected of "
+                         "{} probed ({:.4f}%)", chunk, S.size(), floating, probed,
+                         100.0 * floating / probed);
+    }
 }
 
 const std::vector<Surfel>& LiveEditor::chunkRun(int chunk, const SurfelParams& params)
@@ -237,15 +308,9 @@ const std::vector<Surfel>& LiveEditor::chunkRun(int chunk, const SurfelParams& p
     auto it = m_cache.find(chunk);
     if (it == m_cache.end())
         return empty;
-    if (it->second.runDirty || it->second.runMicroDetail != params.microDetail)
-        rebuildRun(chunk, params);
+    if (it->second.runDirty)
+        rebuildRun(chunk);
     return it->second.run;
-}
-
-uint32_t LiveEditor::microStartOf(int chunk) const
-{
-    auto it = m_cache.find(chunk);
-    return it == m_cache.end() ? 0u : it->second.microStart;
 }
 
 uint32_t LiveEditor::edgeCountOf(int chunk) const

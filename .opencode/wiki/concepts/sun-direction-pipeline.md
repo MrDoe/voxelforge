@@ -231,8 +231,10 @@ deliberate stall, not an async handoff.** The SVO rebuild itself is threaded
 (`LayeredWorld::kick` spawns a worker unless `VF_SYNC_RELOAD`), but the frame
 that *applies* it — `App::applyWorldReload` — calls `vkDeviceWaitIdle` and then
 `rebuildSurfels()`, and the per-surfel sun shadow is CPU-baked at surfelize
-time. So a toggle costs a visible hitch of roughly the same order as the `U`
-micro-detail toggle.
+time. So a toggle costs a visible hitch of roughly the same order as a full
+surfel-stream rebuild stall. (An earlier draft compared against the `U`
+micro-detail toggle's stall; the toggle is gone with the micro removal
+2026-10-08, so the comparison now stands on its own.)
 
 Do not read "the reload is queued" as "the shadows will catch up on their own" —
 nothing chases it. The sky and direct light move on the next frame because

@@ -7,9 +7,13 @@
 #include "voxel/live_editor.hpp"
 #include "voxel/surfelize.hpp"
 #include <doctest/doctest.h>
+#include <spdlog/spdlog.h>
 #include <algorithm>
+#include <cmath>
 #include <cstring>
+#include <functional>
 #include <limits>
+#include <map>
 #include <memory>
 #include <vector>
 
@@ -209,6 +213,326 @@ TEST_CASE("chunk store: synthetic adoption, query and pool validity")
     CHECK(s.stats().bricks == 1);
 }
 
+// Minimal octree builder for the terrain fixtures: leaves are BRICK_N^3 cells,
+// an internal node of side S has 8 children of side S/2, and a node is emitted
+// only when it contains at least one non-empty brick. `topAt` returns the
+// column height in CHUNK-LOCAL cells, or -1 for a void column. Mirrors
+// ChunkStore::buildPoolOnly's handle encoding (child index bits: x, y, z).
+int32_t buildTestOctree(ChunkPool& p, int side, int ox0, int oy0, int oz0,
+                        const std::function<int(int, int)>& topAt)
+{
+    if (side == BRICK_N) {
+        uint32_t data[BRICK_WORDS];
+        bool any = false;
+        for (int z = 0; z < BRICK_N; ++z)
+            for (int y = 0; y < BRICK_N; ++y)
+                for (int x = 0; x < BRICK_N; ++x) {
+                    const size_t i = (size_t(z) * BRICK_N + y) * BRICK_N + x;
+                    // Both the height lookup and the test must be in the SAME
+                    // (chunk-local) space. Comparing a chunk-local top against
+                    // the leaf-LOCAL y (0..7) silently fills every brick in a
+                    // column whose top is >= 7, which is how a "ramp" fixture
+                    // came out solid to the chunk ceiling. makeRidgeStore used
+                    // to mask it with a `y > 7` guard inside its lambda; taking
+                    // the origin as a parameter removes the whole class of bug.
+                    const int top = topAt(ox0 + x, oz0 + z);
+                    const bool solid = top >= 0 && (oy0 + y) <= top;
+                    any |= solid;
+                    const int8_t sdf = solid ? -1 : 2;
+                    data[i * 2] = 0x40u | (0x80u << 8) | (0x20u << 16) |
+                                  (uint32_t(uint8_t(sdf)) << 24);
+                    data[i * 2 + 1] = 255u | (0u << 8) | (200u << 16) |
+                                       (4u << 24);
+                }
+        return any ? int32_t(p.emitBrick(data)) : -1;
+    }
+    const int half = side / 2;
+    const uint32_t nodeH = p.allocNode();
+    const uint32_t base = p.childBase[nodeIndexOf(nodeH)];
+    uint32_t validMask = 0;
+    for (int i = 0; i < 8; ++i) {
+        const int ox = (i & 1) * half, oy = ((i >> 1) & 1) * half,
+                  oz = ((i >> 2) & 1) * half;
+        const int32_t child = buildTestOctree(p, half, ox0 + ox, oy0 + oy,
+                                              oz0 + oz, topAt);
+        p.handles[base + i] = uint32_t(child);
+        if (child >= 0)
+            validMask |= 1u << i;
+    }
+    if (validMask == 0)
+        return -1;
+    // validMask only: the children are BRICKS, not solid terminals, so setting
+    // solidMask would make adopt() promote them to -2 (fully solid).
+    p.payload[nodeIndexOf(nodeH)] = validMask;
+    return int32_t(nodeH);
+}
+
+// A square terrain patch centred on the chunk, 2*halfCells cells across and 8
+// cells tall, with a RIDGE of half-width `ridgeHalf` running along z through
+// the chunk's mid-x at height `ridgeTop`; the rest is flat at `baseTop`.
+// Deliberately wider than any brush kernel support: a patch narrower than the
+// kernel makes every outer sample a void, the coverage guard then skips the
+// whole footprint, and the test would pass for the wrong reason.
+ChunkStore makeRidgeStore(int ci, int halfCells, int ridgeHalf,
+                          int baseTop = 4, int ridgeTop = 7)
+{
+    const int baseY = (ci / kChunkGridN % kChunkGridN) * CHUNK_N;
+    int ccx, ccy, ccz;
+    chunkCoordsOf(ci, ccx, ccy, ccz);
+    const int gx0 = ccx * CHUNK_N, gz0 = ccz * CHUNK_N;
+    auto p = std::make_unique<ChunkPool>();
+    // Clamped to the chunk: a patch cannot extend outside it, and the negative
+    // index would be a wild colTop write.
+    const int lo = std::max(0, CHUNK_N / 2 - halfCells);
+    const int hi = std::min(CHUNK_N, CHUNK_N / 2 + halfCells);
+    const int mid = CHUNK_N / 2;
+    auto topAt = [&](int x, int z) {
+        if (x < lo || x >= hi || z < lo || z >= hi)
+            return -1; // outside the patch: void, not terrain
+        return (x >= mid - ridgeHalf && x <= mid + ridgeHalf) ? ridgeTop
+                                                              : baseTop;
+    };
+    p->root = buildTestOctree(*p, CHUNK_N, 0, 0, 0, topAt);
+
+    std::vector<std::unique_ptr<ChunkPool>> pools(kChunkCount);
+    pools[size_t(ci)] = std::move(p);
+
+    ChunkStore s;
+    const int n = latN();
+    // colTop is the landscape truth; -1 marks "no terrain record", which is
+    // what keeps the void outside the patch from reading as editable.
+    std::vector<int16_t> colTop(size_t(n) * size_t(n), int16_t(-1));
+    std::vector<uint8_t> colMat(size_t(n) * size_t(n), 3);
+    for (int z = lo; z < hi; ++z)
+        for (int x = lo; x < hi; ++x) {
+            const int top = (x >= mid - ridgeHalf && x <= mid + ridgeHalf)
+                                ? ridgeTop
+                                : baseTop;
+            // m_colTop is indexed by GLOBAL lattice coords, not chunk-local:
+            // ChunkStore::findColumn looks the adopted top up at the sample's
+            // own (x,z). Writing chunk-local indices here leaves every real
+            // column at -1 ("no terrain record") and the brush finds nothing.
+            colTop[size_t(gz0 + z) * size_t(n) + size_t(gx0 + x)] =
+                int16_t(baseY + top);
+        }
+    s.adopt(pools, colTop, colMat);
+    return s;
+}
+
+// A staircase RAMP: the top steps down one cell every `run` columns along x,
+// over a square patch. This is the shape a voxel slope always has, and the one
+// a surfel normal has to describe. Taller than makeRidgeStore's 8 cells so the
+// ramp has room to run.
+ChunkStore makeRampStore(int ci, int halfCells, int run, int topBase = 20)
+{
+    int ccx, ccy, ccz;
+    chunkCoordsOf(ci, ccx, ccy, ccz);
+    const int baseY = ccy * CHUNK_N;
+    const int gx0 = ccx * CHUNK_N, gz0 = ccz * CHUNK_N;
+    const int lo = std::max(0, CHUNK_N / 2 - halfCells);
+    const int hi = std::min(CHUNK_N, CHUNK_N / 2 + halfCells);
+    auto p = std::make_unique<ChunkPool>();
+    auto topAt = [&](int x, int z) {
+        if (x < lo || x >= hi || z < lo || z >= hi)
+            return -1;
+        return std::max(1, topBase - (x - lo) / std::max(1, run));
+    };
+    p->root = buildTestOctree(*p, CHUNK_N, 0, 0, 0, topAt);
+
+    std::vector<std::unique_ptr<ChunkPool>> pools(kChunkCount);
+    pools[size_t(ci)] = std::move(p);
+
+    ChunkStore s;
+    const int n = latN();
+    std::vector<int16_t> colTop(size_t(n) * size_t(n), int16_t(-1));
+    std::vector<uint8_t> colMat(size_t(n) * size_t(n), 3);
+    for (int z = lo; z < hi; ++z)
+        for (int x = lo; x < hi; ++x)
+            colTop[size_t(gz0 + z) * size_t(n) + size_t(gx0 + x)] =
+                int16_t(baseY + topAt(x, z));
+    s.adopt(pools, colTop, colMat);
+    return s;
+}
+
+TEST_CASE("surfelize: a staircase ramp's normals need the store heightfield blend")
+{
+    // The BAKE blends every terrain-top normal 0.55 toward a two-scale gradient
+    // of a bilinearly interpolated FLOAT top field. The store path had no such
+    // blend, so a live edit shaded terrain from exposed faces alone - which is
+    // axis-quantised. This measures the gap on the shape that exposes it: a
+    // 1-in-4 staircase ramp, where the ideal normal is 14.0 deg off vertical.
+    //
+    // A/B on ONE fixture, with the blend off and on, so the number is the
+    // blend's doing and nothing else.
+    const int ci = chunkIndexOf(2, 1, 3);
+    ChunkStore store = makeRampStore(ci, /*halfCells=*/12, /*run=*/4);
+    const int gx0 = 2 * CHUNK_N, gy0 = 1 * CHUNK_N, gz0 = 3 * CHUNK_N;
+
+    // The ramp descends along +x, so the true surface normal is (0.25, 1, 0)
+    // normalised: one cell down every four across.
+    const glm::vec3 ideal = glm::normalize(glm::vec3(0.25f, 1.0f, 0.0f));
+
+    // The fixture must really step: a solid-to-the-ceiling bug in the octree
+    // builder once made this a flat plane, and the normal measurement then
+    // silently measured the wrong thing.
+    auto topOf = [&](int lx) {
+        for (int y = CHUNK_N - 1; y >= 0; --y)
+            if (store.cellAt(gx0 + lx, gy0 + y, gz0 + 20).solid)
+                return y;
+        return -1;
+    };
+    CHECK(topOf(20) == 20);
+    CHECK(topOf(24) == 19);
+    CHECK(topOf(40) == 15);
+
+    auto meanError = [&](bool heightfieldNormals, float blend = 0.55f) {
+        SurfelParams sp;
+        sp.terrainHeightfieldNormals = heightfieldNormals;
+        sp.heightfieldBlend = blend;
+        const SurfelRange rg = buildChunkSurfelsRange(
+            store, ci, glm::ivec3(gx0, gy0, gz0),
+            glm::ivec3(gx0 + CHUNK_N, gy0 + CHUNK_N, gz0 + CHUNK_N), sp);
+        double sum = 0.0;
+        double worst = 0.0;
+        int n = 0;
+        for (const Surfel& f : rg.surfels) {
+            const glm::vec3 nrm = glm::vec3(f.normal_rV);
+            if (glm::dot(nrm, nrm) < 1e-6f)
+                continue;
+            // Only terrain tops: the ramp's exposed +Y faces.
+            if (nrm.y < 0.5f)
+                continue;
+            const float ang = glm::degrees(
+                std::acos(std::clamp(glm::dot(glm::normalize(nrm), ideal), -1.0f, 1.0f)));
+            sum += ang;
+            worst = std::max(worst, double(ang));
+            ++n;
+        }
+        return std::tuple<double, double, int>(n > 0 ? sum / n : -1.0, worst, n);
+    };
+
+    // Fixture sanity: print the actual column tops the ramp built, so a wrong
+    // fixture cannot be mistaken for a surfel-normal result.
+    const auto [meanOff, worstOff, nOff] = meanError(false);
+    const auto [meanOn, worstOn, nOn] = meanError(true);
+    // Weight sweep: how much of the normal SHOULD come from the heightfield?
+    // 0.55 is the bake's look-tuning; 1.0 trusts the gradient outright. This
+    // measures whether the stage is merely mistuned or structurally diluted,
+    // because the neighbour pass rebuilds n from its own blended value plus the
+    // neighbours' UNBLENDED rawN (parity with the bake, which smooths
+    // rawNormals[]), so a 0.55 blend survives at roughly 1 term in 5.
+    const auto [meanFull, worstFull, nFull] = meanError(true, 1.0f);
+    MESSAGE("ramp normals (ideal " << glm::degrees(std::acos(glm::dot(ideal, glm::vec3(0,1,0))))
+            << " deg off vertical): blend OFF mean " << meanOff << ", worst " << worstOff
+            << " (" << nOff << "); 0.55 mean " << meanOn << ", worst " << worstOn
+            << " (" << nOn << "); 1.00 mean " << meanFull << ", worst " << worstFull
+            << " (" << nFull << ")");
+
+    REQUIRE(nOff > 0);
+    REQUIRE(nOn > 0);
+    // The stage must measurably improve agreement with the true slope, and it
+    // must not invent surfels or drop any.
+    CHECK(meanOn < meanOff);
+    CHECK(nOn == nOff);
+    // And the sweep must be monotone: the heightfield normal is a better
+    // description of the slope than the face normal, at any weight > 0.
+    CHECK(meanFull < meanOn);
+}
+
+TEST_CASE("chunk store: a WIDE smooth brush collapses a WIDE ridge")
+{
+    // Regression for the brush that did not scale: the smoothing average was a
+    // fixed 3x3 box, so the brush radius only set the footprint mask and the
+    // falloff - a 1 m brush averaged exactly what a 1-voxel brush averaged and
+    // could not move a ridge wider than its own neighbourhood. Measured on this
+    // fixture before the fix: "top=71 avg=71.000" - the crest's whole 3x3 ring
+    // sits at its own height, lround returns the current cell, and the batch
+    // contains NO edit at the crest. Every other smooth test in this file used
+    // VOXEL*1.5f (a 1.5-voxel radius), which is why it never showed up.
+    const int ci = chunkIndexOf(2, 1, 3);
+    ChunkStore store = makeRidgeStore(ci, /*halfCells=*/16, /*ridgeHalf=*/3);
+    const int gx = 2 * CHUNK_N + CHUNK_N / 2; // chunk (2,1,3), patch centre
+    const int gz = 3 * CHUNK_N + CHUNK_N / 2;
+    const int gy = 1 * CHUNK_N;
+
+    const SmoothTerrainEdits batch =
+        store.makeSmoothEdits({ gx, gy + 7, gz }, 1.0f, 1.0f);
+    REQUIRE(!batch.edits.empty());
+
+    // The crest must be CUT, not merely feathered at the flanks.
+    int crestClears = 0;
+    for (const StoreEdit& e : batch.edits)
+        if (e.x >= gx - 3 && e.x <= gx + 3 && e.z == gz &&
+            e.mode == StoreEdit::Mode::Clear)
+            ++crestClears;
+    CHECK(crestClears > 0);
+
+    store.apply(batch.edits);
+    store.rebuildDirty();
+    CHECK_FALSE(store.cellAt(gx, gy + 7, gz).solid);
+    // ...and the surrounding flat base must not sink into the void with it.
+    CHECK(store.cellAt(gx - 12, gy + 4, gz).solid);
+}
+
+TEST_CASE("chunk store: the smooth kernel stops growing past the sigma cap")
+{
+    // The cap is the contract that keeps a wide brush interactive: past it the
+    // kernel is pinned, so a 3.2 m brush and a 6 m brush relax the CENTRE
+    // column identically and differ only in footprint. Without the cap the
+    // kernel cost grows as radius^2 * sigma^2 and one 6 m stamp becomes tens
+    // of millions of multiply-adds.
+    const int ci = chunkIndexOf(2, 1, 3);
+    const int gx = 2 * CHUNK_N + CHUNK_N / 2; // chunk (2,1,3), patch centre
+    const int gz = 3 * CHUNK_N + CHUNK_N / 2;
+    const int gy = 1 * CHUNK_N;
+
+    auto centreClears = [&](float radiusM) {
+        // halfCells 48 -> a 96-cell patch, wide enough for a 3.2 m brush
+        // (65-cell kernel support) to keep full coverage.
+        ChunkStore store =
+            makeRidgeStore(ci, /*halfCells=*/48, /*ridgeHalf=*/3);
+        const SmoothTerrainEdits batch =
+            store.makeSmoothEdits({ gx, gy + 7, gz }, radiusM, 1.0f);
+        int cleared = 0;
+        for (const StoreEdit& e : batch.edits)
+            if (e.x == gx && e.z == gz && e.mode == StoreEdit::Mode::Clear)
+                ++cleared;
+        return cleared;
+    };
+
+    const int atCap = centreClears(3.2f);
+    const int pastCap = centreClears(6.0f);
+    CHECK(atCap > 0);
+    CHECK(pastCap == atCap);
+}
+
+TEST_CASE("chunk store: smooth leaves a column whose kernel window is mostly void")
+{
+    // The obstacle guard. With the OLD renormalisation the average was taken
+    // over whatever samples survived and divided by THEIR weight, so a column
+    // beside a hole was averaged over its one surviving side at full strength
+    // and snapped toward it - terrain visibly eroding away from any void or
+    // building. The fix divides by the kernel's CONSTANT weight (an obstacle
+    // acts as a mirror, contributing nothing) and skips a column whose window
+    // is not mostly terrain at all.
+    // A 6-cell strip under a 1 m brush (21-cell kernel support) covers ~8% of
+    // the window, far below kSmoothMinCoverage, so nothing may move. The old
+    // code moved every column in it.
+    const int ci = chunkIndexOf(2, 1, 3);
+    ChunkStore store = makeRidgeStore(ci, /*halfCells=*/3, /*ridgeHalf=*/0);
+    const int gx = 2 * CHUNK_N + CHUNK_N / 2;
+    const int gz = 3 * CHUNK_N + CHUNK_N / 2;
+    const int gy = 1 * CHUNK_N;
+
+    const SmoothTerrainEdits batch =
+        store.makeSmoothEdits({ gx, gy + 7, gz }, 1.0f, 1.0f);
+    CHECK(batch.edits.empty());
+
+    // And the geometry is genuinely untouched.
+    CHECK(store.cellAt(gx, gy + 7, gz).solid);
+    CHECK(store.cellAt(gx - 2, gy + 4, gz).solid);
+}
+
 TEST_CASE("chunk store: smooth terrain relaxes a spike and protects objects")
 {
     const int ci = chunkIndexOf(2, 1, 3);
@@ -234,9 +558,23 @@ TEST_CASE("chunk store: smooth terrain relaxes a spike and protects objects")
 
     store.apply(batch.edits);
     store.rebuildDirty();
+    // The crest is cut. How MANY cells it loses in one stamp is deliberately
+    // NOT pinned: this fixture's neighbour set contains an object column, which
+    // is an invalid sample, so coverage is 0.940 and the constant-normaliser
+    // rule pulls the target back toward the current height by design
+    // (measured: dev -2.335 -> relaxed 4.665, which rounds UP). The old 3x3
+    // kernel gave 4.46 and rounded down. That 0.2-cell difference straddling a
+    // .5 boundary is an accident of the fixture, not a contract.
+    CHECK_FALSE(store.cellAt(gx, gy + 7, gz).solid);
     CHECK(store.cellAt(gx, gy + 4, gz).solid);
+    // The invariant that does matter: the spike converges away rather than
+    // stalling one cell short of flat.
+    store.apply(
+        store.makeSmoothEdits({ gx, gy + 7, gz }, VOXEL * 1.5f, 1.0f).edits);
+    store.rebuildDirty();
     CHECK_FALSE(store.cellAt(gx, gy + 5, gz).solid);
     CHECK_FALSE(store.cellAt(gx, gy + 5, gz).obj);
+    CHECK(store.cellAt(gx, gy + 4, gz).solid);
 
     const int objectX = 2 * CHUNK_N + 5;
     const int objectZ = 3 * CHUNK_N + 5;
@@ -813,7 +1151,7 @@ TEST_CASE("chunk store: live editor set-then-clear round-trips the cached run")
     CHECK(r2.size() <= run1.size());
 }
 
-TEST_CASE("chunk store: live editor keeps hard-edge bridges outside the micro tail")
+TEST_CASE("chunk store: live editor keeps hard-edge bridges after the base run")
 {
     ChunkStore store = makeSyntheticStore(0, true);
     LiveEditor editor;
@@ -821,7 +1159,6 @@ TEST_CASE("chunk store: live editor keeps hard-edge bridges outside the micro ta
     SurfelParams params;
     params.edgeShrink = 0.35f;
     params.edgeFill = true;
-    params.microDetail = false;
     params.anisotropy = false;
 
     editor.seedFromStore(0, params);
@@ -831,7 +1168,6 @@ TEST_CASE("chunk store: live editor keeps hard-edge bridges outside the micro ta
     REQUIRE(parents > 0);
     CHECK(edges > 0);
     CHECK(run.size() == parents + edges);
-    CHECK(editor.microStartOf(0) == parents + edges);
     for (uint32_t i = parents; i < run.size(); ++i) {
         CHECK(run[i].pos_rU.w > 0.0f);
         CHECK(run[i].normal_rV.w > 0.0f);
@@ -839,12 +1175,11 @@ TEST_CASE("chunk store: live editor keeps hard-edge bridges outside the micro ta
     }
 
     // A full region refresh removes and rebuilds both segments together; it
-    // must not duplicate bridges or fold them into the material micro tail.
+    // must not duplicate bridges.
     CHECK(editor.refreshRegion(0, glm::ivec3(0), glm::ivec3(CHUNK_N), params));
     CHECK(editor.chunkSurfels(0, params).size() == parents);
     CHECK(editor.edgeCountOf(0) == edges);
     CHECK(editor.chunkRun(0, params).size() == parents + edges);
-    CHECK(editor.microStartOf(0) == parents + edges);
 }
 
 TEST_CASE("chunk store: rebuild preserves surface density of untouched dirty chunks")
@@ -1190,7 +1525,7 @@ TEST_CASE("chunk store: adoption is deterministic")
         CHECK(a.chunkHash(c) == b.chunkHash(c));
 }
 
-TEST_CASE("chunk store: micro-detail is deterministic and follows edits")
+TEST_CASE("chunk store: range bake is deterministic and well-formed")
 {
     LayeredWorld& lw = testLayeredWorld();
     ChunkStore& store = lw.store();
@@ -1213,34 +1548,35 @@ TEST_CASE("chunk store: micro-detail is deterministic and follows edits")
     const SurfelRange rg = buildChunkSurfelsRange(store, ci, lo, hi, sp);
     REQUIRE(!rg.surfels.empty());
     CHECK(rg.keys.size() == rg.surfels.size());
-    const std::vector<Surfel> micros = buildMicroSurfels(rg.keys, rg.surfels);
-    CHECK(!micros.empty());
-    // deterministic: the same cell always yields the same micro geometry
-    CHECK(micros == buildMicroSurfels(rg.keys, rg.surfels));
-    // bounded fan-out (0-3 children per base surfel)
-    CHECK(micros.size() < rg.surfels.size() * 3u);
-    for (const Surfel& m : micros) {
-        CHECK(std::isfinite(m.pos_rU.x));
-        CHECK(std::isfinite(m.pos_rU.y));
-        CHECK(std::isfinite(m.pos_rU.z));
-        CHECK(m.pos_rU.w > 0.0f);
-        CHECK(m.normal_rV.w > 0.0f);
-        const float nl = glm::length(glm::vec3(m.normal_rV));
+    // deterministic: the same range always bakes the same run
+    const SurfelRange rg2 = buildChunkSurfelsRange(store, ci, lo, hi, sp);
+    CHECK(rg2.surfels == rg.surfels);
+    for (const Surfel& s : rg.surfels) {
+        CHECK(std::isfinite(s.pos_rU.x));
+        CHECK(std::isfinite(s.pos_rU.y));
+        CHECK(std::isfinite(s.pos_rU.z));
+        CHECK(s.pos_rU.w > 0.0f);
+        CHECK(s.normal_rV.w > 0.0f);
+        const float nl = glm::length(glm::vec3(s.normal_rV));
         CHECK(nl > 0.99f);
         CHECK(nl < 1.01f);
     }
-    // every micro sits on its parent cell (tangent offset + lift), never
-    // detached from the base surface
-    for (size_t i = 0; i < std::min<size_t>(micros.size(), 64); ++i) {
+    // every baked surfel sits near a parent cell, never detached
+    for (size_t i = 0; i < std::min<size_t>(rg.surfels.size(), 64); ++i) {
         float best = 1e9f;
-        for (const Surfel& b : rg.surfels)
-            best = std::min(best, glm::length(glm::vec3(micros[i].pos_rU) -
-                                              glm::vec3(b.pos_rU)));
-        CHECK(best < 0.15f);
+        for (size_t j = 0; j < rg.keys.size(); ++j) {
+            int gx2, gy2, gz2;
+            surfelUnpackKey(rg.keys[j], gx2, gy2, gz2);
+            const glm::vec3 cc(-51.2f + (gx2 + 0.5f) * VOXEL,
+                               -51.2f + (gy2 + 0.5f) * VOXEL,
+                               -51.2f + (gz2 + 0.5f) * VOXEL);
+            best = std::min(best, glm::length(glm::vec3(rg.surfels[i].pos_rU) - cc));
+        }
+        CHECK(best < 0.5f);
     }
 }
 
-TEST_CASE("chunk store: live editor keeps micro detail across stamps")
+TEST_CASE("chunk store: live editor patched run carries the stamp to the chunk")
 {
     LayeredWorld& lw = testLayeredWorld();
     ChunkStore& store = lw.store();
@@ -1258,7 +1594,10 @@ TEST_CASE("chunk store: live editor keeps micro detail across stamps")
     LiveEditor ed;
     ed.attach(&store);
     SurfelParams sp;
-    sp.microDetail = true;
+
+    // the pre-stamp run: chunkRun seeds from the store on first touch
+    const size_t preN = ed.chunkRun(ci, sp).size();
+    REQUIRE(preN > 0);
 
     std::vector<StoreEdit> edits;
     for (int dy = 1; dy <= 3; ++dy)
@@ -1275,14 +1614,17 @@ TEST_CASE("chunk store: live editor keeps micro detail across stamps")
     const std::vector<int> changed = ed.stamp(edits, sp);
     REQUIRE(std::find(changed.begin(), changed.end(), ci) != changed.end());
 
-    const uint32_t baseN = uint32_t(ed.chunkSurfels(ci, sp).size());
+    // the stamp reached the GPU-side chunk run: non-empty, changed by the
+    // stamp, and sealed (base parents + edge bridges regenerate together)
     const std::vector<Surfel>& run = ed.chunkRun(ci, sp);
-    CHECK(ed.microStartOf(ci) == baseN);
-    CHECK(run.size() > baseN); // a live-patched chunk keeps its micro tail
+    CHECK(!run.empty());
+    CHECK(run.size() != preN);
+    CHECK(run.size() ==
+          ed.chunkSurfels(ci, sp).size() + ed.edgeCountOf(ci));
     const std::vector<Surfel>* runPtr = &ed.chunkRun(ci, sp);
     CHECK(runPtr == &run); // cached, no spurious rebuild
 
-    // a second stamp re-marks the run dirty and regenerates base + micros
+    // a second stamp re-marks the run dirty and rebuilds a sealed run
     StoreEdit paint;
     paint.mode = StoreEdit::Mode::Paint;
     paint.x = gx + 1;
@@ -1295,13 +1637,527 @@ TEST_CASE("chunk store: live editor keeps micro detail across stamps")
     const std::vector<int> changed2 = ed.stamp({ paint }, sp);
     CHECK(std::find(changed2.begin(), changed2.end(), ci) != changed2.end());
     const std::vector<Surfel>& run2 = ed.chunkRun(ci, sp);
-    CHECK(ed.microStartOf(ci) <= run2.size());
-    CHECK(run2.size() > ed.microStartOf(ci));
+    CHECK(!run2.empty());
+    CHECK(run2.size() ==
+          ed.chunkSurfels(ci, sp).size() + ed.edgeCountOf(ci));
+}
 
-    // microDetail off: the same cache collapses to the base run
-    SurfelParams off = sp;
-    off.microDetail = false;
-    const std::vector<Surfel>& baseRun = ed.chunkRun(ci, off);
-    CHECK(baseRun.size() <= run2.size());
-    CHECK(ed.microStartOf(ci) == uint32_t(baseRun.size()));
+// --- re-derivation parity: a live edit must not re-aim untouched splats -----
+namespace {
+
+const int kFaceDir[6][3] = { { 1, 0, 0 },  { -1, 0, 0 }, { 0, 1, 0 },
+                             { 0, -1, 0 }, { 0, 0, 1 }, { 0, 0, -1 } };
+
+// Lattice cell of a surfel, recovered the way LiveEditor::keyFromSurfel does.
+uint64_t surfelCell(const Surfel& s)
+{
+    glm::vec3 n = glm::vec3(s.normal_rV);
+    const float l2 = glm::dot(n, n);
+    n = (l2 > 1e-12f) ? n / std::sqrt(l2) : glm::vec3(0.f, 1.f, 0.f);
+    const glm::vec3 c = glm::vec3(s.pos_rU) - n * (0.5f * VOXEL);
+    return (uint64_t(uint32_t(std::lround((c.x + 0.5f * WORLD) / VOXEL - 0.5f)))
+            << 20) |
+           (uint64_t(uint32_t(std::lround((c.y + 0.5f * WORLD) / VOXEL - 0.5f)))
+            << 10) |
+           uint64_t(uint32_t(std::lround((c.z + 0.5f * WORLD) / VOXEL - 0.5f)));
+}
+
+glm::vec3 surfelUnitNormal(const Surfel& s)
+{
+    const glm::vec3 n = glm::vec3(s.normal_rV);
+    const float l2 = glm::dot(n, n);
+    return l2 > 1e-12f ? n / std::sqrt(l2) : glm::vec3(0.f);
+}
+
+bool nearlyUp(const glm::vec3& n) { return n.y > 0.9999f; }
+
+// Bits of exposed lattice faces in the store: air is `sdfRaw > 0`, and
+// out-of-lattice counts as air, exactly as the surfelizer's own rule does.
+unsigned storeExposedFaces(const ChunkStore& s, int x, int y, int z)
+{
+    const int n = s.latN();
+    unsigned m = 0;
+    for (int d = 0; d < 6; ++d) {
+        const int nx = x + kFaceDir[d][0], ny = y + kFaceDir[d][1],
+                  nz = z + kFaceDir[d][2];
+        if (nx < 0 || nx >= n || ny < 0 || ny >= n || nz < 0 || nz >= n ||
+            s.cellAt(nx, ny, nz).sdfRaw > 0)
+            m |= 1u << d;
+    }
+    return m;
+}
+
+int exposedCount(unsigned m)
+{
+    int c = 0;
+    for (int d = 0; d < 6; ++d)
+        if (m & (1u << d))
+            ++c;
+    return c;
+}
+
+// True when no cell in the 3x3x3 neighbourhood carries the byte value 0.
+//
+// The brick SDF is int8 voxel units written by truncation, and `raw == 0`
+// counts as SOLID because the SVO DDA tests `sdf <= 0`. So a cell whose true
+// distance is a small positive number is stored as 0 and reads as solid here
+// while VoxelField calls it air. That is a one-sided quantisation floor of the
+// storage format (measured: 0.77 % of cabin cells), it predates live editing,
+// and it is not what this guard is about - so the angular comparison below
+// skips those cells and measures the normal RULE on its own.
+bool storeNeighbourhoodIsClean(const ChunkStore& s, int x, int y, int z)
+{
+    const int n = s.latN();
+    for (int dy = -1; dy <= 1; ++dy)
+        for (int dz = -1; dz <= 1; ++dz)
+            for (int dx = -1; dx <= 1; ++dx) {
+                const int nx = x + dx, ny = y + dy, nz = z + dz;
+                if (nx < 0 || nx >= n || ny < 0 || ny >= n || nz < 0 || nz >= n)
+                    continue;
+                if (s.cellAt(nx, ny, nz).sdfRaw == 0)
+                    return false;
+            }
+    return true;
+}
+
+// An object cell on a flat vertical wall face: exactly one exposed face, and
+// that face points sideways. This is the class the report is about - a wall
+// disk that used to come out of a live refresh pointing straight up.
+bool findFlatVerticalWallCell(const ChunkStore& s, int cx, int cy, int cz,
+                              glm::ivec3& out)
+{
+    for (int lz = 0; lz < CHUNK_N; ++lz)
+        for (int ly = 0; ly < CHUNK_N; ++ly)
+            for (int lx = 0; lx < CHUNK_N; ++lx) {
+                const int x = cx * CHUNK_N + lx, y = cy * CHUNK_N + ly,
+                          z = cz * CHUNK_N + lz;
+                const StoreCell c = s.cellAt(x, y, z);
+                if (c.sdfRaw > 0 || !c.obj)
+                    continue;
+                const unsigned m = storeExposedFaces(s, x, y, z);
+                if (m == 0 || (m & (m - 1)) != 0)
+                    continue;
+                if ((m & 0x30u) == 0)
+                    continue; // +-X or +-Z, not a floor / ceiling face
+                out = glm::ivec3(x, y, z);
+                return true;
+            }
+    return false;
+}
+
+} // namespace
+
+TEST_CASE("chunk store: live surfel normals follow the bake, never a fabricated up")
+{
+    LayeredWorld& lw = testLayeredWorld();
+    // The suite shares one world and earlier cases stamp into it. Re-adopt the
+    // baked pools so this case starts from the pristine world, and drop the
+    // store again on the way out so the next case is not handed this case's
+    // edits.
+    lw.invalidateStore();
+    const VoxelField& field = lw.field();
+    ChunkStore& store = lw.store();
+
+    SurfelParams sp;
+    sp.edgeShrink = 0.35f;
+    sp.edgeFill = true;
+    sp.anisotropy = true;
+    sp.lodRings = false;
+
+    // An OBJECT chunk. A terrain-only chunk cannot guard this: the divergence
+    // needs a thick object body, whose byte-quantised store SDF cancels to
+    // exactly zero deep inside - which is what used to hand those cells a
+    // fabricated straight-up normal while a wall's own disks were re-aimed.
+    int wallChunk = -1;
+    glm::ivec3 wall;
+    for (int cz = 0; cz < kChunkGridN && wallChunk < 0; ++cz)
+        for (int cy = 0; cy < kChunkGridN && wallChunk < 0; ++cy)
+            for (int cx = 0; cx < kChunkGridN; ++cx) {
+                if (!findFlatVerticalWallCell(store, cx, cy, cz, wall))
+                    continue;
+                wallChunk = chunkIndexOf(cx, cy, cz);
+                break;
+            }
+    REQUIRE(wallChunk >= 0);
+    REQUIRE(store.cellAt(wall.x, wall.y, wall.z).obj);
+    // Pin the class: the guard cell really is a flat vertical wall face.
+    REQUIRE(exposedCount(storeExposedFaces(store, wall.x, wall.y, wall.z)) == 1);
+    REQUIRE((storeExposedFaces(store, wall.x, wall.y, wall.z) & 0x30u) != 0);
+
+    const int cx = wallChunk % kChunkGridN;
+    const int cy = (wallChunk / kChunkGridN) % kChunkGridN;
+    const int cz = wallChunk / (kChunkGridN * kChunkGridN);
+    const glm::ivec3 clo(cx * CHUNK_N, cy * CHUNK_N, cz * CHUNK_N);
+
+    // 1) Parity. A live stamp re-derives the edit AABB plus a margin, so any
+    //    rule difference between the bake and the store path is applied to
+    //    cells the user never touched. Same cell, same direction - or the edit
+    //    moves splats across the world.
+    const SurfelSet baked = buildSurfels(field, sp);
+    std::map<uint64_t, int> bakeCount;
+    std::map<uint64_t, glm::vec3> bakeNormal;
+    for (const Surfel& sf : baked.surfels) {
+        if (!surfelIsObject(sf.mat_ao.w))
+            continue;
+        const uint64_t k = surfelCell(sf);
+        ++bakeCount[k];
+        bakeNormal.emplace(k, surfelUnitNormal(sf));
+    }
+    const SurfelRange full = buildChunkSurfelsRange(
+        store, wallChunk, clo, clo + glm::ivec3(CHUNK_N), sp);
+    REQUIRE(!full.surfels.empty());
+
+    int compared = 0, grossOff = 0, zeroNormal = 0, fabricatedUp = 0;
+    double angleSum = 0;
+    for (const Surfel& sf : full.surfels) {
+        if (!surfelIsObject(sf.mat_ao.w))
+            continue;
+        const uint64_t k = surfelCell(sf);
+        const int x = int((k >> 20) & 0x3FFu);
+        const int y = int((k >> 10) & 0x3FFu);
+        const int z = int(k & 0x3FFu);
+        REQUIRE(exposedCount(storeExposedFaces(store, x, y, z)) > 0);
+        const glm::vec3 n = surfelUnitNormal(sf);
+        if (glm::dot(n, n) < 0.5f) {
+            ++zeroNormal; // an unnormalisable normal would reach the GPU
+            continue;
+        }
+        const auto bit = bakeNormal.find(k);
+        if (bit == bakeNormal.end())
+            continue;
+        // The reported symptom, as a number: a disk that came out of the live
+        // path pointing straight up where the bake has it elsewhere. That is
+        // what a cancelled SDF gradient used to fabricate.
+        if (nearlyUp(n) && !nearlyUp(bit->second))
+            ++fabricatedUp;
+        // Only cells the bake emits ONCE enter the angular comparison: a thin
+        // plate is legitimately several axis-aligned entries on both sides.
+        // Cells on the SDF byte's 0 boundary are skipped for the reason above.
+        if (bakeCount[k] != 1 || !storeNeighbourhoodIsClean(store, x, y, z))
+            continue;
+        ++compared;
+        const float ang = std::acos(
+                              std::clamp(glm::dot(n, bit->second), -1.f, 1.f)) *
+                          57.2958f;
+        angleSum += ang;
+        if (ang > 30.f)
+            ++grossOff;
+    }
+    CHECK(zeroNormal == 0);
+    CHECK(compared > 0);
+    CHECK(fabricatedUp == 0);
+    CHECK(grossOff == 0);
+    CHECK(angleSum / double(compared) < 5.0);
+
+    // 2) The live half. The stamp goes 2 cells out along the wall's exposed
+    //    face: far enough that the wall cell keeps its own exposure (a cell
+    //    placed right against it would legitimately remove that face), but
+    //    still inside the +-3 refresh margin, so the wall IS re-derived.
+    const unsigned wallMask = storeExposedFaces(store, wall.x, wall.y, wall.z);
+    int face = 0;
+    while (!(wallMask & (1u << face)))
+        ++face;
+    const glm::ivec3 edit(wall.x + 2 * kFaceDir[face][0],
+                          wall.y + 2 * kFaceDir[face][1],
+                          wall.z + 2 * kFaceDir[face][2]);
+    REQUIRE(store.cellAt(edit.x, edit.y, edit.z).sdfRaw > 0); // really air
+
+    const uint64_t wallKey = (uint64_t(uint32_t(wall.x)) << 20) |
+                             (uint64_t(uint32_t(wall.y)) << 10) |
+                             uint64_t(uint32_t(wall.z));
+    const uint64_t editKey = (uint64_t(uint32_t(edit.x)) << 20) |
+                             (uint64_t(uint32_t(edit.y)) << 10) |
+                             uint64_t(uint32_t(edit.z));
+
+    LiveEditor ed;
+    ed.attach(&store);
+    ed.seedFromStore(wallChunk, sp);
+    glm::vec3 wallBefore(0.f);
+    bool editSurfelledBefore = false;
+    for (const Surfel& sf : ed.chunkSurfels(wallChunk, sp)) {
+        const uint64_t k = surfelCell(sf);
+        if (k == wallKey)
+            wallBefore = surfelUnitNormal(sf);
+        if (k == editKey)
+            editSurfelledBefore = true;
+    }
+    REQUIRE(glm::dot(wallBefore, wallBefore) > 0.5f);
+    REQUIRE(!editSurfelledBefore);
+
+    StoreEdit add;
+    add.mode = StoreEdit::Mode::Set;
+    add.x = edit.x;
+    add.y = edit.y;
+    add.z = edit.z;
+    add.mat = 6;
+    const std::vector<int> changed = ed.stamp({ add }, sp);
+    // Assert the instrument before the outcome: the stamp must have landed in
+    // the wall's chunk, or "nothing moved" would prove nothing.
+    REQUIRE(std::find(changed.begin(), changed.end(), wallChunk) !=
+            changed.end());
+    REQUIRE(store.cellAt(edit.x, edit.y, edit.z).solid);
+
+    // The region really was re-derived: the new cell is now part of the run.
+    bool editSurfelledAfter = false;
+    glm::vec3 wallAfter(0.f);
+    for (const Surfel& sf : ed.chunkSurfels(wallChunk, sp)) {
+        const uint64_t k = surfelCell(sf);
+        if (k == wallKey)
+            wallAfter = surfelUnitNormal(sf);
+        if (k == editKey)
+            editSurfelledAfter = true;
+    }
+    CHECK(editSurfelledAfter);
+    REQUIRE(glm::dot(wallAfter, wallAfter) > 0.5f);
+    // Same cell, same direction, bit for bit. The wall sits inside the refresh
+    // margin, so this is a re-derivation that has to be a no-op - not a cache
+    // that skipped the cell. The reported bug: an edit near a wall re-aimed
+    // the wall's disks and turned them all upwards.
+    CHECK(glm::dot(wallAfter, wallBefore) > 0.9999f);
+
+    lw.invalidateStore(); // leave the shared world as we found it
+}
+
+// UN-SKIPPED at the UBO-256 flip: bake and trigger both enumerate the
+// store now, so the flip contract is production-prefix coverage - every
+// field light (the old baked set) still has a store light within the thin
+// distance at the same intensity inside the production prefix (budget -
+// authored). The store's extras are submerged lava the pools already render
+// as lava (provenance: bricks-only recount also yields 169, exonerating the
+// box-face enumeration). The knee MESSAGE is the early warning: content
+// drift that pushes it past the production room re-fires this test instead
+// of silently darkening hearths.
+TEST_CASE("chunk store: collectEmissive covers the field variant")
+{
+    LayeredWorld& lw = testLayeredWorld();
+    REQUIRE(lw.loaded());
+    // palette emission table, no texture overrides in this content set
+    std::vector<glm::vec3> emission(kPaletteN, glm::vec3(0.0f));
+    for (int m = 0; m < kPaletteN; ++m)
+        emission[size_t(m)] = kEmissive[size_t(m)];
+    std::vector<VoxelField::EmissiveCluster> fromField, fromStore;
+    lw.field().collectEmissive(emission, fromField);
+    lw.store().collectEmissive(emission, fromStore,
+                               std::numeric_limits<int>::max());
+    MESSAGE("emissive clusters: field ", fromField.size(), " store ",
+            fromStore.size());
+    // The store reads pool bricks/boxes, which carry the bake's propagated
+    // interior mats; the field reads records + column tops only. So the
+    // store is a SUPERSET on baked content (measured: 19 field vs 169
+    // store on the hamlet). The flip contract is PREFIX coverage: every
+    // field light has a store light within the thin distance at the same
+    // intensity inside the production prefix (budget - authored), so the
+    // budget-truncated flip set loses no baked light.
+    REQUIRE(fromStore.size() >= fromField.size());
+    // Known field ghosts (probe-verified 2026-10-08, all in empty air):
+    //   (20.08,5.23,19.46) d=+4.25, (21.56,5.17,18.05) d=+4.05,
+    //   (20.05,4.48,19.62) d=+3.45 (mat=1, empty).
+    // Buried lava pockets whose bucket centroid lifted 3-4 m through solid
+    // to the surface: lights with no visible emitter. The store clusters
+    // the buried cells in place (occluded, correctly dark) instead, so the
+    // flip REMOVES these three - a fix, not a regression. Excluded from
+    // required coverage by exact position; any NEW field-only cluster still
+    // fails loudly below. Follow-up (needs shared-tail owner): cap
+    // liftToAir so buried buckets drop instead of surfacing.
+    const std::vector<glm::vec3> kKnownGhosts{
+        glm::vec3(20.0753f, 5.2251f, 19.4558f),
+        glm::vec3(21.5581f, 5.17027f, 18.0518f),
+        glm::vec3(20.047f, 4.47537f, 19.6172f),
+    };
+    auto isKnownGhost = [&](const glm::vec3& p) {
+        for (const glm::vec3& g : kKnownGhosts)
+            if (glm::distance(p, g) < 0.05f)
+                return true;
+        return false;
+    };
+    // Intensity match is relative (10%), not exact: a cluster's intensity
+    // is its bucket's mean max-component, and the field/store buckets hold
+    // slightly different cell sets, so exact equality evicts identical
+    // lights over sub-percent means (measured: 3.192 vs 3.200 at the same
+    // hearth). 10% is visually nil; the genuine divergences below differ
+    // by 25%+ at 4 m and still fire.
+    auto sameI = [](float a, float b) {
+        return std::abs(a - b) <= 0.1f * std::max({ a, b, 1e-6f });
+    };
+    auto coveredAt = [&](size_t prefix, std::vector<size_t>* skipped) {
+        for (size_t i = 0; i < fromField.size(); ++i) {
+            if (isKnownGhost(fromField[i].pos)) {
+                if (skipped)
+                    skipped->push_back(i);
+                continue;
+            }
+            bool matched = false;
+            for (size_t j = 0; j < std::min(prefix, fromStore.size());
+                 ++j) {
+                if (glm::distance(fromStore[j].pos, fromField[i].pos) <
+                        kEmissiveThinDist &&
+                    sameI(fromStore[j].intensity, fromField[i].intensity)) {
+                    matched = true;
+                    break;
+                }
+            }
+            if (!matched)
+                return false;
+        }
+        return true;
+    };
+    // Production room, derived from the manifests, never hardcoded: budget
+    // minus the world.json authored count (the courtyard lamps eat slots).
+    std::vector<worldfile::LightSource> authoredProd;
+    worldfile::loadLightManifest(std::string(VOXELFORGE_ASSET_DIR) +
+                                     "/world.json",
+                                 authoredProd);
+    const size_t prodRoom =
+        size_t(worldfile::kLightBudgetDefault) -
+        std::min<size_t>(authoredProd.size(),
+                         size_t(worldfile::kLightBudgetDefault));
+    MESSAGE("authored ", authoredProd.size(), " production room ", prodRoom);
+    // Eviction knee: sweep up from the field count so the log carries the
+    // minimal survivable room, not just a pass/fail at one budget. A zero
+    // knee means UNCOVERED even at the full list (never misread the
+    // fallback size as a passing knee). Known ghosts are skipped in the
+    // sweep but audited right after: any NEW field-only cluster fails.
+    std::vector<size_t> skipped;
+    size_t minRoom = 0;
+    for (size_t room = fromField.size(); room <= fromStore.size(); ++room) {
+        if (coveredAt(room, nullptr)) {
+            minRoom = room;
+            break;
+        }
+    }
+    if (minRoom > 0)
+        MESSAGE("hearths survive at room >= ", minRoom);
+    else
+        MESSAGE("hearths UNCOVERED even at full ", fromStore.size());
+    CHECK(minRoom > 0);
+    CHECK(minRoom <= prodRoom);
+    CHECK(coveredAt(prodRoom, &skipped));
+    for (size_t i : skipped)
+        MESSAGE("ghost skip field #", i, " pos (", fromField[i].pos.x, ",",
+                fromField[i].pos.y, ",", fromField[i].pos.z, ")");
+    // The skip set must equal the known ghosts exactly: a new field-only
+    // cluster is a regression hiding as a ghost, not drift to absorb.
+    CHECK(skipped.size() == kKnownGhosts.size());
+    // Diagnosis on RED: for every field cluster missed at the production
+    // room, report the nearest store cluster (index, distance, intensity
+    // pair) so the eviction reads as position-loss vs intensity-strictness.
+    if (!coveredAt(prodRoom, nullptr)) {
+        for (size_t i = 0; i < fromField.size(); ++i) {
+            bool inProd = false;
+            for (size_t j = 0; j < std::min(prodRoom, fromStore.size());
+                 ++j) {
+                if (glm::distance(fromStore[j].pos, fromField[i].pos) <
+                        kEmissiveThinDist &&
+                    sameI(fromStore[j].intensity,
+                          fromField[i].intensity)) {
+                    inProd = true;
+                    break;
+                }
+            }
+            if (inProd)
+                continue;
+            if (isKnownGhost(fromField[i].pos))
+                continue; // audited above, not an eviction
+            size_t best = 0;
+            float bestD = 1e30f;
+            for (size_t j = 0; j < fromStore.size(); ++j) {
+                const float d =
+                    glm::distance(fromStore[j].pos, fromField[i].pos);
+                if (d < bestD) {
+                    bestD = d;
+                    best = j;
+                }
+            }
+            MESSAGE("evicted field #", i, " pos (", fromField[i].pos.x,
+                    ",", fromField[i].pos.y, ",", fromField[i].pos.z,
+                    ") I=", fromField[i].intensity, " nearest store #",
+                    best, " d=", bestD, " I=", fromStore[best].intensity);
+        }
+    }
+}
+
+TEST_CASE("chunk store: collectEmissive reflects live emissive stamps")
+{
+    // isolated synthetic store: stamping here cannot pollute the shared
+    // testLayeredWorld other cases read
+    ChunkStore store = makeSyntheticStore(0, true);
+    std::vector<glm::vec3> emission(kPaletteN, glm::vec3(0.0f));
+    for (int m = 0; m < kPaletteN; ++m)
+        emission[size_t(m)] = kEmissive[size_t(m)];
+    std::vector<VoxelField::EmissiveCluster> before;
+    store.collectEmissive(emission, before, std::numeric_limits<int>::max());
+
+    // find a solid surface cell in chunk 0 and lay a 2x2 ember bed on it
+    int sx = -1, sy = -1, sz = -1;
+    for (int y = 1; y < CHUNK_N - 1 && sx < 0; ++y)
+        for (int z = 0; z < CHUNK_N && sx < 0; ++z)
+            for (int x = 0; x < CHUNK_N - 1; ++x)
+                if (store.cellAt(x, y, z).solid && !store.cellAt(x, y + 1, z).solid &&
+                    !store.cellAt(x + 1, y, z).solid) {
+                    sx = x;
+                    sy = y + 1;
+                    sz = z;
+                    break;
+                }
+    REQUIRE(sx >= 0);
+    std::vector<StoreEdit> edits;
+    for (int dz = 0; dz < 2; ++dz)
+        for (int dx = 0; dx < 2; ++dx) {
+            StoreEdit e;
+            e.mode = StoreEdit::Mode::Set;
+            e.x = sx + dx;
+            e.y = sy;
+            e.z = sz + dz;
+            e.mat = 9; // lava: kEmissive max component 3.0
+            edits.push_back(e);
+        }
+    store.apply(edits);
+    store.rebuildDirty();
+
+    std::vector<VoxelField::EmissiveCluster> after;
+    store.collectEmissive(emission, after, std::numeric_limits<int>::max());
+    // the synthetic content has no emitters, so the bed is exactly one new
+    // cluster (all four cells fall in one 1 m bucket, far from anything else)
+    REQUIRE(before.empty());
+    REQUIRE(after.size() == 1);
+    // bed-cell centres averaged: (sx+1, sy+0.5, sz+1) in grid units, then
+    // to world (the cluster lifts ~0.1 m off the bed into air on top)
+    const glm::vec3 bedW(-0.5f * WORLD + (float(sx) + 1.0f) * VOXEL,
+                         -0.5f * WORLD + (float(sy) + 0.5f) * VOXEL,
+                         -0.5f * WORLD + (float(sz) + 1.0f) * VOXEL);
+    CHECK(glm::distance(after[0].pos, bedW) < 1.5f);
+    CHECK(after[0].intensity == doctest::Approx(3.0f));
+    CHECK(after[0].radius >= 1.0f);
+    // radius cap raised 4.0 -> 8.0 for Victor's base+intensity formula
+    // (white-hot hits ~4.6); the 2x2 bed itself is ~1.1 either way.
+    CHECK(after[0].radius <= 8.0f);
+
+    // budget: capped output, and zero budget means empty
+    std::vector<VoxelField::EmissiveCluster> capped, none;
+    store.collectEmissive(emission, capped, 1);
+    CHECK(capped.size() == 1);
+    store.collectEmissive(emission, none, 0);
+    CHECK(none.empty());
+
+    // region == all chunks is bit-identical to the full enumeration (same
+    // cells in the same order through the same shared tail)
+    std::vector<int> all;
+    for (int ci = 0; ci < kChunkCount; ++ci)
+        all.push_back(ci);
+    std::vector<VoxelField::EmissiveCluster> full, regional;
+    store.collectEmissive(emission, full, std::numeric_limits<int>::max());
+    store.collectEmissiveRegion(emission, regional,
+                                std::numeric_limits<int>::max(), all);
+    REQUIRE(full.size() == regional.size());
+    for (size_t i = 0; i < full.size(); ++i) {
+        CHECK(regional[i].pos.x == doctest::Approx(full[i].pos.x));
+        CHECK(regional[i].pos.y == doctest::Approx(full[i].pos.y));
+        CHECK(regional[i].pos.z == doctest::Approx(full[i].pos.z));
+        CHECK(regional[i].intensity == doctest::Approx(full[i].intensity));
+    }
+    // region subset: only the stamped chunk's clusters come back
+    std::vector<VoxelField::EmissiveCluster> sub;
+    store.collectEmissiveRegion(emission, sub, std::numeric_limits<int>::max(),
+                                { 0 });
+    CHECK(sub.size() == full.size());
 }

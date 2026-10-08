@@ -1,7 +1,9 @@
 // The sidebar's render section: the render-flag bits, the surfel/LOD knobs, and the splat tuning.
 #include "app/app.hpp"
 
+#include "app/sun_angles.hpp"
 #include "app/ui/gizmo_math.hpp"
+#include "app/ui/sun_time.hpp"
 #include "app/ui/ui_primitives.hpp"
 
 #include <algorithm>
@@ -50,6 +52,113 @@ void App::drawPanelRender()
     ImGui::TextDisabled("gpu geo %.1f  post %.1f  fx %.1f  taa %.1f",
                         m_profAvg[0], m_profAvg[1], m_profAvg[2], m_profAvg[3]);
 
+    // ---- Sun: the one control for day / dusk / night -----------------------
+    // m_sunDir is the whole source of truth (it rides the per-frame push
+    // constant), so the sky and direct light follow the drag immediately;
+    // what lags is the CPU-baked per-surfel SUN SHADOW, which is rebuilt on
+    // release rather than per tick - a full world reload during a drag would
+    // stall the frame loop. Angles are read back out of m_sunDir rather than
+    // kept in parallel floats, so --sun / world.json "sun" and this slider can
+    // never disagree about where the sun is.
+    ImGui::SeparatorText("Sun");
+    {
+        float elev = glm::degrees(std::asin(glm::clamp(m_sunDir.y, -1.0f, 1.0f)));
+        float azim = glm::degrees(std::atan2(m_sunDir.x, m_sunDir.z));
+        if (azim < 0.0f)
+            azim += 360.0f;
+
+        // Coarse day/night switch; the sliders below stay the fine control.
+        // The active button is derived from m_sunDir rather than a parallel
+        // flag, so dragging the sliders can never leave the highlight lying -
+        // the same single-source-of-truth rule the angles above already use.
+        // Active state and the P hotkey both go through sunIsNight(), so the
+        // highlight cannot disagree with the key about the current phase.
+        const bool isNight = sunIsNight(elev);
+        if (ImGui::BeginTable("SunPhaseButtons", 2, ImGuiTableFlags_SizingStretchSame)) {
+            if (actionButton("Day", !isNight, ImVec2(-1.0f, 28.0f)))
+                setSunPhase(false);
+            ImGui::TableNextColumn();
+            if (actionButton("Night", isNight, ImVec2(-1.0f, 28.0f)))
+                setSunPhase(true);
+            ImGui::EndTable();
+        }
+        ImGui::TextDisabled("P toggles  |  session only, world.json untouched");
+
+        // Write-only clock: HH:MM commits through setSunTime (setSunAngles +
+        // one reload), exactly like the preset buttons. The readout below is
+        // a best-effort inverse of m_sunDir with "~" when the sun sits off
+        // the clock arc (presets, slider drags); it never feeds a write back.
+        // Note: submitting a displayed read-back always sets the ARC value,
+        // so Enter on the default sun's "15:52" moves it to 31.8 deg.
+        ImGui::SetNextItemWidth(-1.0f);
+        static char sunTimeBuf[8] = "";
+        if (ImGui::InputText("Time##sunTime", sunTimeBuf, sizeof(sunTimeBuf),
+                             ImGuiInputTextFlags_EnterReturnsTrue)) {
+            float h = 0.0f;
+            if (parseSunTime(sunTimeBuf, h))
+                setSunTime(h);
+            else
+                spdlog::warn("sun time '{}' ignored (use HH:MM)", sunTimeBuf);
+        }
+        {
+            float th = 0.0f;
+            bool approx = false;
+            sunTimeForAngles(elev, azim, th, approx);
+            char disp[8] = "";
+            formatSunTime(th, disp, sizeof(disp));
+            if (approx)
+                ImGui::TextDisabled("~%s (sun is off the clock arc)", disp);
+            else
+                ImGui::TextDisabled("%s", disp);
+        }
+
+        ImGui::SetNextItemWidth(-1.0f);
+        const bool elevEdit =
+            ImGui::SliderFloat("Elevation##sunElev", &elev, -60.0f, 90.0f, "%.1f deg");
+        const bool elevRel = ImGui::IsItemDeactivatedAfterEdit();
+        ImGui::SetNextItemWidth(-1.0f);
+        const bool azimEdit =
+            ImGui::SliderFloat("Azimuth##sunAzim", &azim, 0.0f, 360.0f, "%.1f deg");
+        const bool azimRel = ImGui::IsItemDeactivatedAfterEdit();
+
+        if (elevEdit || azimEdit) {
+            setSunAngles(elev, azim); // shared conversion, see run.cpp
+        }
+        if (elevRel || azimRel)
+            requestWorldReload(); // rebake sun shadows with the new sun
+
+        const char* phase = elev > kSunDayElevThreshold ? "Day"
+                           : elev > kSunNightElevThreshold ? "Dusk / dawn"
+                                                            : "Night";
+        ImGui::TextDisabled("%s  |  %.0f deg up, %.0f deg", phase, elev, azim);
+        if (sunIsNight(elev))
+            ImGui::TextDisabled("Moon + authored lights only (bit 8 keeps caves dark)");
+    }
+
+    ImGui::SeparatorText("Lights");
+    {
+        // Global emitter budget N + per-pixel nearest-K: both re-upload the
+        // binding-25 UBO only, so dragging never triggers a world reload.
+        // The per-pixel cost ceiling is K visibility marches, not N.
+        ImGui::SetNextItemWidth(-1.0f);
+        if (ImGui::SliderInt("Emitter budget##lightBudget", &m_lightBudget, 16, 256,
+                             "%d")) {
+            m_lightBudget = std::clamp(m_lightBudget, 1, 256);
+            uploadLightSources();
+        }
+        if (ImGui::IsItemHovered())
+            ImGui::SetTooltip("Global emitter cap: authored first, derived fill. "
+                              "UBO patch only, no reload.");
+        ImGui::SetNextItemWidth(-1.0f);
+        if (ImGui::SliderInt("Per-pixel lights##lightK", &m_lightK, 1, 8, "%d")) {
+            m_lightK = std::clamp(m_lightK, 1, 8);
+            uploadLightSources();
+        }
+        if (ImGui::IsItemHovered())
+            ImGui::SetTooltip("Nearest-K shaded per pixel: cost ceiling is K "
+                              "marches, independent of the budget.");
+    }
+
     if (m_hasSelection) {
         ImGui::SeparatorText("Selection");
         ImGui::Text("Voxel %d, %d, %d", m_selectedHit.voxel.x,
@@ -81,7 +190,7 @@ void App::drawPanelRender()
     if (ImGui::BeginTable("RenderToggles", 2, ImGuiTableFlags_SizingStretchSame)) {
         flagToggle("Ambient occlusion", 1 << 0);
         ImGui::TableNextColumn();
-        flagToggle("Sun shadows", 1 << 1);
+        flagToggle("Shadows", 1 << 1);
         ImGui::TableNextRow();
         ImGui::TableSetColumnIndex(0);
         flagToggle("Flora shading", 1 << 2);
@@ -125,8 +234,6 @@ void App::drawPanelRender()
     }
     ImGui::SetNextItemWidth(-1.0f);
     ImGui::SliderFloat("Exposure", &m_exposure, 0.1f, 4.0f, "%.2f");
-    if (ImGui::Checkbox("Micro geometry (M; rebuilds)", &m_microDetail))
-        requestWorldReload();
 
     if (m_scenePreview) {
         if (!m_sceneTexId)
@@ -146,7 +253,7 @@ void App::drawPanelRender()
         ImGui::BulletText("Rotate: click object, then drag a trackball ring");
         ImGui::BulletText("C: arm brush; F: renderer; N: TAA");
         ImGui::BulletText("B/G/H/J/K/L: visual effects");
-        ImGui::BulletText("[/]: splat radius; M: micro rebuild");
+        ImGui::BulletText("[/]: splat radius; M: Move brush");
         ImGui::BulletText("Ctrl+Z: undo last stroke");
         ImGui::BulletText("Window close button: quit");
     }

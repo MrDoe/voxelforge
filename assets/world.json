@@ -1,21 +1,30 @@
 {
   "version": 1,
   "layers": [
-    { "file": "ai_edits.vxw", "role": "object", "name": "ai_edits", "pos": [0.00, 0.00, 0.00], "rot": 0.0, "rotX": 0.0, "rotZ": 0.0, "enabled": false },
-    { "file": "CabinPart1.vxw", "role": "object", "name": "CabinPart1", "pos": [0.00, 0.00, 0.00], "rot": 0.0, "rotX": 0.0, "rotZ": 0.0, "enabled": true },
-    { "file": "landscape.vxw", "role": "landscape", "name": "landscape", "pos": [0.00, 0.00, 0.00], "rot": 0.0, "rotX": 0.0, "rotZ": 0.0, "enabled": true },
-    { "file": "hamlet_hall.vxw", "role": "object", "name": "hamlet_hall", "pos": [0.00, 0.00, 0.00], "rot": 0.0, "rotX": 0.0, "rotZ": 0.0, "enabled": false },
-    { "file": "hamlet_tower.vxw", "role": "object", "name": "hamlet_tower", "pos": [-8.65, -0.80, -7.40], "rot": 0.0, "rotX": 0.0, "rotZ": 0.0, "enabled": true },
-    { "file": "hamlet_pier.vxw", "role": "object", "name": "hamlet_pier", "pos": [0.00, 0.00, 0.00], "rot": 0.0, "rotX": 0.0, "rotZ": 0.0, "enabled": false },
-    { "file": "hamlet_boat.vxw", "role": "object", "name": "hamlet_boat", "pos": [0.00, 0.00, -2.20], "rot": -83.7, "rotX": -1.5, "rotZ": -1.2, "enabled": true },
-    { "file": "hamlet_well.vxw", "role": "object", "name": "hamlet_well", "pos": [0.00, 0.00, 0.00], "rot": 0.0, "rotX": 0.0, "rotZ": 0.0, "enabled": false },
-    { "file": "hamlet_market.vxw", "role": "object", "name": "hamlet_market", "pos": [0.00, 0.00, 0.00], "rot": 0.0, "rotX": 0.0, "rotZ": 0.0, "enabled": false },
-    { "file": "hamlet_garden.vxw", "role": "object", "name": "hamlet_garden", "pos": [0.00, 0.00, 0.00], "rot": 0.0, "rotX": 0.0, "rotZ": 0.0, "enabled": true },
-    { "file": "hamlet_trees.vxw", "role": "object", "name": "hamlet_trees", "pos": [0.00, 0.00, 0.00], "rot": 0.0, "rotX": 0.0, "rotZ": 0.0, "enabled": true },
-    { "file": "hamlet_props.vxw", "role": "object", "name": "hamlet_props", "pos": [0.00, 0.00, 0.00], "rot": 0.0, "rotX": 0.0, "rotZ": 0.0, "enabled": false },
-    { "file": "hamlet_reeds.vxw", "role": "object", "name": "hamlet_reeds", "pos": [0.00, 0.00, 0.00], "rot": 0.0, "rotX": 0.0, "rotZ": 0.0, "enabled": true },
-    { "file": "hamlet_reeds_far.vxw", "role": "object", "name": "hamlet_reeds_far", "pos": [0.00, 0.00, 0.00], "rot": 0.0, "rotX": 0.0, "rotZ": 0.0, "enabled": true }
-
+    { "file": "ai_edits.vxw", "role": "object", "name": "ai_edits",  "pos": [0.00, 0.00, 0.00], "rot": 0.0, "rotX": 0.0,  "rotZ": 0.0, "enabled": false },
+    { "file": "hamlet_cabin.vxw", "role": "object", "name": "hamlet_cabin",  "pos": [0.00, 0.00, 0.00], "rot": 0.0, "rotX": 0.0,  "rotZ": 0.0, "enabled": true },
+    { "file": "CabinPart1.vxw", "role": "object", "name": "CabinPart1",  "pos": [0.00, 0.00, 0.00], "rot": 0.0, "rotX": 0.0,  "rotZ": 0.0, "enabled": false },
+    { "file": "hamlet_nature.vxw", "role": "object", "name": "hamlet_nature",  "pos": [0.00, 0.00, 0.00], "rot": 0.0, "rotX": 0.0,  "rotZ": 0.0, "enabled": true },
+    { "file": "hamlet_forest.vxw", "role": "object", "name": "hamlet_forest",  "pos": [0.00, 0.00, 0.00], "rot": 0.0, "rotX": 0.0,  "rotZ": 0.0, "enabled": true },
+    { "file": "hamlet_tower_v2.vxw", "role": "object", "name": "hamlet_tower_v2",  "pos": [-4.90, -0.51, -3.90], "rot": 0.0, "rotX": 0.0,  "rotZ": 0.0, "enabled": true },
+    { "file": "hamlet_forest2.vxw", "role": "object", "name": "hamlet_forest2",  "pos": [0.00, 0.00, 0.00], "rot": 0.0, "rotX": 0.0,  "rotZ": 0.0, "enabled": true },
+    { "file": "vase.vxw", "role": "object", "name": "vase",  "pos": [0.00, 0.00, 0.00], "rot": 0.0, "rotX": 0.0,  "rotZ": 0.0, "enabled": true },
+    { "file": "landscape.vxw", "role": "landscape", "name": "landscape",  "pos": [0.00, 0.00, 0.00], "rot": 0.0, "rotX": 0.0,  "rotZ": 0.0, "enabled": true },
+    { "file": "hamlet_hall.vxw", "role": "object", "name": "hamlet_hall",  "pos": [0.00, 0.00, 0.00], "rot": 0.0, "rotX": 0.0,  "rotZ": 0.0, "enabled": false },
+    { "file": "hamlet_tower.vxw", "role": "object", "name": "hamlet_tower",  "pos": [-8.65, -0.80, -7.40], "rot": 0.0, "rotX": 0.0,  "rotZ": 0.0, "enabled": false },
+    { "file": "hamlet_pier.vxw", "role": "object", "name": "hamlet_pier",  "pos": [0.00, 0.00, 0.00], "rot": 0.0, "rotX": 0.0,  "rotZ": 0.0, "enabled": false },
+    { "file": "hamlet_boat.vxw", "role": "object", "name": "hamlet_boat",  "pos": [0.00, 0.00, -2.20], "rot": -83.7, "rotX": -1.5,  "rotZ": -1.2, "enabled": true },
+    { "file": "hamlet_well.vxw", "role": "object", "name": "hamlet_well",  "pos": [0.00, 0.00, 0.00], "rot": 0.0, "rotX": 0.0,  "rotZ": 0.0, "enabled": false },
+    { "file": "hamlet_market.vxw", "role": "object", "name": "hamlet_market",  "pos": [0.00, 0.00, 0.00], "rot": 0.0, "rotX": 0.0,  "rotZ": 0.0, "enabled": false },
+    { "file": "hamlet_garden.vxw", "role": "object", "name": "hamlet_garden",  "pos": [0.00, 0.00, 0.00], "rot": 0.0, "rotX": 0.0,  "rotZ": 0.0, "enabled": true },
+    { "file": "hamlet_trees.vxw", "role": "object", "name": "hamlet_trees",  "pos": [0.00, 0.00, 0.00], "rot": 0.0, "rotX": 0.0,  "rotZ": 0.0, "enabled": true },
+    { "file": "hamlet_props.vxw", "role": "object", "name": "hamlet_props",  "pos": [0.00, 0.00, 0.00], "rot": 0.0, "rotX": 0.0,  "rotZ": 0.0, "enabled": false },
+    { "file": "hamlet_reeds.vxw", "role": "object", "name": "hamlet_reeds",  "pos": [0.00, 0.00, 0.00], "rot": 0.0, "rotX": 0.0,  "rotZ": 0.0, "enabled": true },
+    { "file": "hamlet_reeds_far.vxw", "role": "object", "name": "hamlet_reeds_far",  "pos": [0.00, 0.00, 0.00], "rot": 0.0, "rotX": 0.0,  "rotZ": 0.0, "enabled": true }
+  ],
+  "lights": [
+    { "pos": [6.40, 4.20, 12.60], "color": [1.00, 0.72, 0.45], "radius": 8.0, "intensity": 1.5 },
+    { "pos": [3.60, 4.00, 11.60], "color": [1.00, 0.72, 0.45], "radius": 8.0, "intensity": 1.5 }
   ],
   "textures": [
     { "file": "textures/grass_dark.png", "mat": 0, "scale": 2.60 },
@@ -27,11 +36,14 @@
     { "file": "textures/wood_highres.png", "mat": 6, "scale": 1.00 },
     { "file": "textures/wooden_planks_dark.jpeg", "mat": 7, "scale": 0.90 },
     { "file": "textures/grass_light_high_res.png", "mat": 8, "scale": 1.20 },
-    { "file": "textures/proc_lava.png", "mat": 9, "scale": 0.50 },
+    { "file": "textures/proc_lava.png", "mat": 9, "scale": 0.50, "emissive": true, "emissiveScale": 0.10 },
+    { "file": "textures/linen_designer.png", "mat": 13, "scale": 1.00 },
+    { "file": "textures/light_rock.png", "mat": 14, "scale": 0.80 },
+    { "file": "textures/gravel.png", "mat": 15, "scale": 0.90 },
     { "file": "textures/snow_highres.jpeg", "mat": 16, "scale": 2.80 },
     { "file": "textures/bark_brown.png", "mat": 17, "scale": 0.40 },
     { "file": "textures/proc_moss.png", "mat": 18, "scale": 0.40 },
     { "file": "textures/proc_thatch.png", "mat": 19, "scale": 0.60 },
-    { "file": "textures/proc_plaster.png", "mat": 20, "scale": 1.00 }
+    { "file": "textures/stone_plaster.png", "mat": 20, "scale": 1.00 }
   ]
 }

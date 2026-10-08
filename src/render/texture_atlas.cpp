@@ -78,6 +78,8 @@ bool TexAtlas::load(const Context& ctx, const std::string& manifestPath)
     for (int m = 0; m < int(kLayers); ++m) {
         m_slot[m] = -1;
         m_scale[m] = kDefaultScale;
+        m_emis[m] = 0.0f;
+        m_mean[m] = glm::vec3(0.0f);
     }
     m_tableDirty = true;
     const bool disabled = haveTable && bindings.empty() ? false :
@@ -91,6 +93,15 @@ bool TexAtlas::load(const Context& ctx, const std::string& manifestPath)
         dir = slash == std::string::npos ? std::string() : dir.substr(0, slash + 1);
     }
     for (const auto& b : bindings) {
+        // VF_TEXTURES=0 skips the decode ENTIRELY. Decoding and then only
+        // clearing the slot table leaked the texture through the per-cell
+        // override: gTexOv wins over matTex in texSlotFor, so override cells
+        // kept sampling the decoded layer and the hatch left 0.83% of the
+        // hero frame showing the very checker it promises to remove
+        // (texture_check vf_off arm). Undecoded, every layer keeps the
+        // neutral filler - byte-identical to the no-table palette arm.
+        if (disabled)
+            break;
         if (b.mat < 0 || b.mat >= int(kLayers))
             continue;
         std::vector<uint8_t> raw;
@@ -109,13 +120,42 @@ bool TexAtlas::load(const Context& ctx, const std::string& manifestPath)
         resample(raw, w, h, layers[size_t(b.mat)]);
         m_slot[b.mat] = b.mat;
         m_scale[b.mat] = b.scale > 0.02f ? b.scale : kDefaultScale;
-        spdlog::info("texture atlas: material {} <- {} ({}x{}, {:.2f} m/tile)",
-                     b.mat, b.file, w, h, m_scale[b.mat]);
+        // emission is bound to the texture, not the material id: only after a
+        // successful decode, so a missing PNG neither glows nor lights
+        m_emis[b.mat] = b.emissive ? (b.emissiveScale > 0.0f ? b.emissiveScale : 1.0f)
+                                   : 0.0f;
+        spdlog::info("texture atlas: material {} <- {} ({}x{}, {:.2f} m/tile{})",
+                     b.mat, b.file, w, h, m_scale[b.mat],
+                     m_emis[b.mat] > 0.0f ? ", emissive" : "");
     }
     if (disabled)
         for (int& s : m_slot)
             s = -1;
+    // VF_TEXTURES=0 is the bit-exact escape hatch: it must disable emission
+    // as well as sampling, or an emissive binding would still add light.
+    if (disabled)
+        for (float& e : m_emis)
+            e = 0.0f;
     m_tableDirty = true;
+
+    // Mean colour of every decoded layer (linear 0..1): the COLOUR a derived
+    // point light uses for an emissive material, so a cyan-glowing texture
+    // lights the room cyan instead of in the palette's ember orange. A layer
+    // with no texture keeps black and therefore derives no light.
+    for (uint32_t m = 0; m < kLayers; ++m) {
+        m_mean[m] = glm::vec3(0.0f);
+        if (layers[m].empty())
+            continue;
+        double sr = 0.0, sg = 0.0, sb = 0.0;
+        const size_t px = size_t(kTexSize) * kTexSize;
+        for (size_t i = 0; i < px; ++i) {
+            sr += layers[m][4 * i + 0];
+            sg += layers[m][4 * i + 1];
+            sb += layers[m][4 * i + 2];
+        }
+        const float inv = 1.0f / (255.0f * float(px));
+        m_mean[m] = glm::vec3(float(sr), float(sg), float(sb)) * inv;
+    }
 
     // one-time resources: fixed layer count keeps the view stable across
     // reloads, so the descriptor only needs a single write.
@@ -233,7 +273,7 @@ void TexAtlas::fillTable(float* outNx4) const
         float* r = &outNx4[m * 4];
         r[0] = float(m_slot[m]);
         r[1] = m_scale[m];
-        r[2] = 0.0f;
+        r[2] = m_emis[m]; // emissive scale, 0 = the texture does not emit
         r[3] = 0.0f;
     }
 }

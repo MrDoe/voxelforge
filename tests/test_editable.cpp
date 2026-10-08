@@ -521,3 +521,296 @@ TEST_CASE("add dome grows out along the picked surface normal")
     };
     CHECK(hhas(512 + 20, 1023, 512));
 }
+
+TEST_CASE("falloff curves: full at the centre, zero at the rim, no cliff at zero")
+{
+    using C = EditableWorld::FalloffCurve;
+    const C all[] = { C::Constant, C::Sphere, C::Root, C::Smooth,
+                      C::Linear,   C::Sharp };
+    for (C c : all) {
+        // Every curve is full at the centre. Constant stays full out to the rim
+        // BY DEFINITION (it is the flat profile: "the whole footprint at full
+        // depth"), so the zero-at-the-rim anchor belongs to the tapering curves.
+        CHECK(EditableWorld::falloffCurveAt(c, 0.0f) == 1.0f);
+        if (c == C::Constant)
+            CHECK(EditableWorld::falloffCurveAt(c, 1.0f) == 1.0f);
+        else
+            CHECK(EditableWorld::falloffCurveAt(c, 1.0f) == 0.0f);
+        // Non-increasing, non-negative, and continuous enough that the
+        // "does this column emit" test is never on a floating-point knife edge.
+        float prev = 2.0f;
+        for (int i = 0; i <= 64; ++i) {
+            const float q = float(i) / 64.0f;
+            const float v = EditableWorld::falloffCurveAt(c, q);
+            CHECK(v <= prev + 1e-6f);
+            CHECK(v >= 0.0f);
+            CHECK(v <= 1.0f + 1e-6f);
+            if (i > 0)
+                CHECK(std::abs(v - prev) < 0.25f); // no step in the profile
+            prev = v;
+        }
+    }
+
+    // The six are genuinely DISTINCT, which is the whole point of naming them:
+    // the old single scalar had a cliff at 0 and then nothing usable. Measured
+    // at half radius they must be strictly ordered from flat to tight.
+    const float half[] = {
+        EditableWorld::falloffCurveAt(C::Constant, 0.5f), // 1.00
+        EditableWorld::falloffCurveAt(C::Sphere,   0.5f), // 0.87
+        EditableWorld::falloffCurveAt(C::Root,     0.5f), // 0.71
+        EditableWorld::falloffCurveAt(C::Smooth,   0.5f), // 0.50
+        EditableWorld::falloffCurveAt(C::Linear,   0.5f), // 0.50
+        EditableWorld::falloffCurveAt(C::Sharp,    0.5f), // 0.25
+    };
+    CHECK(half[0] == 1.0f);
+    for (int i = 1; i < 6; ++i)
+        CHECK(half[i] <= half[i - 1] + 1e-6f);
+    CHECK(half[1] > 0.8f);   // Sphere is the round dome
+    CHECK(half[2] > 0.6f);   // Root is a broad shoulder
+    CHECK(half[3] >= 0.4f);  // Smooth is the sculpt default
+    CHECK(half[5] < 0.3f);   // Sharp is the crease
+    // The trap the named set exists to remove: the old profile at its LOWEST
+    // non-zero setting was already 0.5 at half radius, i.e. there was nothing
+    // between "no taper" and "halved".
+    CHECK(half[1] > 0.5f);
+
+    // The legacy float entry point still maps 0 to "flat" and non-zero to a
+    // tapering curve, so an old saved value cannot silently become a spike.
+    CHECK(EditableWorld::radialFalloff(0.5f, 0.0f) == 1.0f);
+    CHECK(EditableWorld::radialFalloff(0.5f, 1.0f) > 0.0f);
+    CHECK(EditableWorld::radialFalloff(0.5f, 1.0f) < 1.0f);
+}
+
+namespace {
+// Growth profile of a tapered dome: how far along the axis the brush reaches
+// at each perpendicular offset from the footprint centre, in cells. Measured
+// rather than predicted, so the assertions below pin the SHAPE and not a
+// profile formula.
+std::vector<int> domeReachPerOffset(const std::vector<VoxelRecord>& recs,
+                                    const glm::ivec3& anchor, glm::vec3 axis,
+                                    const std::vector<int>& offsetsCells)
+{
+    std::vector<int> reach(offsetsCells.size(), -1);
+    for (const VoxelRecord& r : recs) {
+        const glm::ivec3 d(int(r.x) - anchor.x, int(r.y) - anchor.y,
+                           int(r.z) - anchor.z);
+        // Project onto the axis and onto the footprint plane (world Y/Z for an
+        // X axis) and bucket by the perpendicular offset magnitude.
+        const int along = std::abs(axis.x) > 0.5f ? d.x : d.y;
+        const int perpA = std::abs(axis.x) > 0.5f ? d.y : d.x;
+        const int perpB = std::abs(axis.x) > 0.5f ? d.z : d.z;
+        const int perp = std::max(std::abs(perpA), std::abs(perpB));
+        for (size_t i = 0; i < offsetsCells.size(); ++i)
+            if (offsetsCells[i] == perp)
+                reach[i] = std::max(reach[i], std::abs(along));
+    }
+    return reach;
+}
+} // namespace
+
+TEST_CASE("add dome falloff: full depth under the cursor, nothing at the rim")
+{
+    EditableWorld ed;
+    // Same wall + footprint as the flat-top test above; only the curve differs.
+    // axis = +X, so the growth runs along world X and the footprint plane is
+    // world Y/Z.
+    const glm::ivec3 anchor(512, 300, 512);
+    const float radius = 1.0f, height = 1.5f;
+    const std::vector<VoxelRecord> cone =
+        ed.makeDome(anchor, glm::vec3(1.f, 0.f, 0.f), radius, height, 6,
+                    EditableWorld::FalloffCurve::Sphere);
+    REQUIRE(!cone.empty());
+
+    // Reach at increasing perpendicular distance from the footprint centre.
+    const std::vector<int> offs = { 0, 2, 4, 6, 8, 9, 10 };
+    const std::vector<int> reach =
+        domeReachPerOffset(cone, anchor, glm::vec3(1.f, 0.f, 0.f), offs);
+    // The centre keeps the FULL brush depth: falloff scales the rim, never the
+    // reach of the stamp itself (1.5 m = 15 cells, less that column's fillet).
+    CHECK(reach[0] >= 13);
+    CHECK(!cone.empty());
+    // Monotone non-increasing away from the centre - the definition of
+    // "proportional", and the thing a plateau fails.
+    for (size_t i = 1; i < reach.size(); ++i)
+        CHECK(reach[i] <= reach[i - 1]);
+    // Strictly less away from the centre - that IS proportionality - and the
+    // mark stops short of the nominal width, which is inherent to a curve that
+    // reaches zero at q = 1: the last offset gets nothing but the base layer.
+    CHECK(reach[1] < reach[0]);
+    CHECK(reach[offs.size() - 2] < reach[0]);
+    CHECK(reach.back() < 0);
+
+    // The tapered stamp removes strictly less material than the hard-edged one,
+    // and Constant is the untouched original shape (bit-for-bit the default).
+    const std::vector<VoxelRecord> flat = ed.makeDome(
+        anchor, glm::vec3(1.f, 0.f, 0.f), radius, height, 6,
+        EditableWorld::FalloffCurve::Constant);
+    const std::vector<VoxelRecord> legacy = ed.makeDome(
+        anchor, glm::vec3(1.f, 0.f, 0.f), radius, height, 6);
+    CHECK(flat.size() == legacy.size());
+    CHECK(cone.size() < flat.size());
+}
+
+TEST_CASE("dome falloff rim ring: every tapered curve emits zero cells at q = 1")
+{
+    // Boundary-count companion to "nothing at the rim" above: that test pins
+    // the Sphere rim through the reach helper, this one counts the rim ring
+    // directly for every tapered curve, mirroring the carve's found==expected
+    // whole-disk count. The rim bucket is the Chebyshev ring at the nominal
+    // radius in cells; every column in it has Euclidean q >= 1, and every
+    // tapered curve reaches f = 0 at q = 1, so all of them must grade it to
+    // nothing. Without the graded-column kill the straight-disk branch still
+    // tests the ungraded perp2 <= r2 and the ring keeps its base cells.
+    EditableWorld ed;
+    const glm::ivec3 anchor(512, 300, 512);
+    const float radius = 1.0f, height = 1.5f;
+    const glm::vec3 axis(1.f, 0.f, 0.f);
+    const int rim = 10; // radius / VOXEL, same convention as offs above
+    auto rimCount = [&](const std::vector<VoxelRecord>& recs) {
+        int n = 0;
+        for (const VoxelRecord& r : recs) {
+            const int py = int(r.y) - anchor.y, pz = int(r.z) - anchor.z;
+            if (std::max(std::abs(py), std::abs(pz)) == rim)
+                ++n;
+        }
+        return n;
+    };
+    // The un-tapered rim exists to be killed: guards against a vacuous pass
+    // from a mis-bucketed ring.
+    const std::vector<VoxelRecord> legacy = ed.makeDome(anchor, axis, radius, height, 6);
+    CHECK(rimCount(legacy) > 0);
+    const EditableWorld::FalloffCurve tapered[] = {
+        EditableWorld::FalloffCurve::Sphere, EditableWorld::FalloffCurve::Root,
+        EditableWorld::FalloffCurve::Smooth, EditableWorld::FalloffCurve::Linear,
+        EditableWorld::FalloffCurve::Sharp,
+    };
+    for (auto c : tapered) {
+        const std::vector<VoxelRecord> recs = ed.makeDome(anchor, axis, radius, height, 6, c);
+        CHECK(rimCount(recs) == 0);
+    }
+}
+
+TEST_CASE("sphere falloff boundary: tapered curves stay strictly inside the nominal radius")
+{
+    // Boundary-count companion for the ball: the inclusion test grades both
+    // sides together (dist <= R * f(q)), so unlike the dome there is no
+    // ungraded branch to leak through - this test pins that property by
+    // measuring the farthest emitted cell in lattice space. Legacy keeps its
+    // boundary cells and nothing beyond; every tapered curve stops a full cell
+    // short of the nominal radius (the widest continuous boundary is the
+    // Sphere's at ~0.707 R, so a one-cell margin is nowhere near fp noise).
+    EditableWorld ed;
+    const glm::ivec3 anchor(512, 508, 512);
+    const float radius = 3.0f;
+    auto maxDist = [&](const std::vector<VoxelRecord>& recs) {
+        float m = 0.f;
+        for (const VoxelRecord& r : recs) {
+            const float d = VOXEL * std::hypot(float(int(r.x) - anchor.x),
+                                               float(int(r.y) - anchor.y),
+                                               float(int(r.z) - anchor.z));
+            m = std::max(m, d);
+        }
+        return m;
+    };
+    const std::vector<VoxelRecord> legacy = ed.makeSphere(anchor, radius, 2);
+    REQUIRE(!legacy.empty());
+    CHECK(maxDist(legacy) <= radius + 1e-4f);
+    const EditableWorld::FalloffCurve tapered[] = {
+        EditableWorld::FalloffCurve::Sphere, EditableWorld::FalloffCurve::Root,
+        EditableWorld::FalloffCurve::Smooth, EditableWorld::FalloffCurve::Linear,
+        EditableWorld::FalloffCurve::Sharp,
+    };
+    for (auto c : tapered) {
+        const std::vector<VoxelRecord> recs = ed.makeSphere(anchor, radius, 2, c);
+        REQUIRE(!recs.empty());
+        CHECK(maxDist(recs) < radius - VOXEL);
+        CHECK(maxDist(recs) < maxDist(legacy));
+    }
+    // Constant is the untouched original ball, bit for bit.
+    const std::vector<VoxelRecord> flat =
+        ed.makeSphere(anchor, radius, 2, EditableWorld::FalloffCurve::Constant);
+    CHECK(flat.size() == legacy.size());
+}
+
+TEST_CASE("add dome falloff never emits above the top of the lattice")
+{
+    EditableWorld ed;
+    const std::vector<VoxelRecord> cone =
+        ed.makeDome(glm::ivec3(512, 1023, 512), glm::vec3(0.f, 1.f, 0.f),
+                    2.0f, 0.3f, 6, EditableWorld::FalloffCurve::Sphere);
+    REQUIRE(!cone.empty());
+    for (const VoxelRecord& r : cone)
+        CHECK(int(r.y) <= 1023);
+}
+
+TEST_CASE("carve scoop falloff: graded sides, full depth under the cursor")
+{
+    EditableWorld ed;
+    const glm::ivec3 anchor(512, 508, 512);
+    const float radius = 3.0f, dig = 3.0f;
+    const std::vector<VoxelRecord> scoop =
+        ed.makeOrientedCylinder(anchor, glm::vec3(0.f, -1.f, 0.f), radius, dig,
+                                2, /*carve=*/true,
+                                EditableWorld::FalloffCurve::Sharp);
+    auto has = [&](int x, int y, int z) {
+        for (const VoxelRecord& v : scoop)
+            if (int(v.x) == x && int(v.y) == y && int(v.z) == z)
+                return true;
+        return false;
+    };
+    REQUIRE(!scoop.empty());
+
+    // Full depth straight down from the cursor: the taper is radial, so the
+    // axis is the deepest point and the floor is unchanged there.
+    CHECK(has(anchor.x, anchor.y - 30, anchor.z));
+    CHECK(!has(anchor.x, anchor.y - 31, anchor.z));
+
+    // The graded wall: how deep the scoop cuts at each lateral distance.
+    // Measured, not predicted from the profile formula.
+    const std::vector<int> offs = { 0, 5, 10, 15, 20, 25, 30 };
+    std::vector<int> dug(offs.size(), -1);
+    for (const VoxelRecord& v : scoop) {
+        const int dx = std::abs(int(v.x) - anchor.x);
+        const int dy = anchor.y - int(v.y); // positive = below the pick
+        for (size_t i = 0; i < offs.size(); ++i)
+            if (offs[i] == dx)
+                dug[i] = std::max(dug[i], dy);
+    }
+    CHECK(dug[0] >= 29);               // full depth under the cursor
+    for (size_t i = 1; i < dug.size(); ++i)
+        CHECK(dug[i] <= dug[i - 1]);   // monotone away from the axis
+    CHECK(dug[1] < dug[0]);          // and strictly graded, not a plateau
+
+    // The rim still opens the ground it starts at - the kCarveTopMargin band is
+    // never tapered, because fading it puts the one-cell roof back.
+    CHECK(has(anchor.x + 30, anchor.y + 2, anchor.z));
+    CHECK(has(anchor.x + 30, anchor.y, anchor.z));
+    CHECK(!has(anchor.x + 30, anchor.y - 5, anchor.z));
+
+    // The whole top layer is still opened, across the entire disk: that is the
+    // regression the degenerate glm::rotation(up, -up) axis caused, and a
+    // per-column reach must not reintroduce it.
+    int expected = 0, found = 0;
+    for (int dz = -31; dz <= 31; ++dz)
+        for (int dx = -31; dx <= 31; ++dx) {
+            if (VOXEL * std::hypot(float(dx), float(dz)) > radius + 1e-4f)
+                continue;
+            ++expected;
+            if (has(anchor.x + dx, anchor.y + 2, anchor.z + dz))
+                ++found;
+        }
+    CHECK(expected > 2700);
+    CHECK(found == expected);
+
+    // And Constant is the untouched original shape: same cell count as the
+    // default call, so the legacy path is bit-for-bit reachable.
+    const std::vector<VoxelRecord> flat =
+        ed.makeOrientedCylinder(anchor, glm::vec3(0.f, -1.f, 0.f), radius, dig,
+                                2, /*carve=*/true,
+                                EditableWorld::FalloffCurve::Constant);
+    const std::vector<VoxelRecord> legacy =
+        ed.makeOrientedCylinder(anchor, glm::vec3(0.f, -1.f, 0.f), radius, dig,
+                                2, /*carve=*/true);
+    CHECK(flat.size() == legacy.size());
+    CHECK(flat.size() > scoop.size()); // the taper really did remove material
+}

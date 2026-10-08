@@ -5,7 +5,7 @@ Two modes, because they solve different problems:
 
   --mode shots   (default, RECOMMENDED)
       Renders a keyframed tour of the hamlet through `--shotlist`. Each
-      "variant" (backend, splat radius, micro/LOD) is one app launch and
+      "variant" (backend, splat radius, LOD) is one app launch and
       therefore one world load, but all keyframes inside a variant share
       that single load. Deterministic: same input, same frames. Use this for
       anything you want to compare or publish. `--sheet` builds a per-shot
@@ -110,7 +110,6 @@ SHOTS = [
 #   VF_SPLAT_RADIUS  direct disk-scale multiplier, clamped 0.5..2.0 in
 #                    SplatPass::record (the same knob the sidebar slider and
 #                    the [ / ] keys drive)
-#   VF_MICRO=0       micro-surfel detail off (3.40M -> 2.13M surfels)
 #   VF_LOD=0         no merged-terrain LOD rings
 #   --mode svo       the chunked-SVO voxel raymarcher, the pixel reference for
 #                    the primary splat backend
@@ -119,7 +118,7 @@ VARIANTS = [
     ("voxel",      [],                          "svo"),
     ("radius_min", ["VF_SPLAT_RADIUS=0.5"],     "splat"),
     ("radius_max", ["VF_SPLAT_RADIUS=2.0"],     "splat"),
-    ("no_micro",   ["VF_MICRO=0", "VF_LOD=0"], "splat"),
+    ("no_lod",     ["VF_LOD=0"],                "splat"),
 ]
 
 
@@ -649,9 +648,9 @@ def run_live(args, outdir):
             ("hold A (strafe)", lambda: inp.hold("a", 1.2)),
             ("look down", lambda: (inp.look_begin(),
                                    inp.look(0, 160, 1.2), inp.look_end())),
-            ("open the Edit panel", lambda: inp.tap("c", settle=1.0)),
+            ("switch to Edit mode (Tab)", lambda: inp.tap("tab", settle=1.0)),
             ("hold S (back up)", lambda: inp.hold("s", 1.5)),
-            ("close the panel", lambda: inp.tap("c", settle=0.8)),
+            ("back to View mode (Tab)", lambda: inp.tap("tab", settle=0.8)),
         ]
         for label, fn in script:
             print(f"[live]   {label}")

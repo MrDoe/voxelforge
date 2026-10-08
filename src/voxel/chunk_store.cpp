@@ -265,6 +265,161 @@ StoreCell ChunkStore::cellAt(int x, int y, int z) const
     return out;
 }
 
+void ChunkStore::emitChunkEmitters(int ci,
+                                    const std::vector<glm::vec3>& matEmission,
+                                    std::vector<EmissiveCell>& cells) const
+{
+    if (ci < 0 || ci >= int(m_chunks.size()))
+        return;
+    auto emissionOf = [&](int mat) -> const glm::vec3* {
+        if (mat < 0 || mat >= int(matEmission.size()))
+            return nullptr;
+        const glm::vec3& e = matEmission[size_t(mat)];
+        return (e.r > 0.0f || e.g > 0.0f || e.b > 0.0f) ? &e : nullptr;
+    };
+    auto cellWorld = [](int g) {
+        return -0.5f * WORLD + (float(g) + 0.5f) * VOXEL;
+    };
+    // A buried emitter contributes nothing (its cluster lifts to air anyway),
+    // and the field enumerator only ever sees surface records — so an
+    // emitter cell counts only with air beside it. cellAt is only reached
+    // for emissive-mat cells, which are rare.
+    auto hasAirNeighbour = [&](int gx, int gy, int gz) {
+        static const int kD[6][3] = { { 1, 0, 0 },  { -1, 0, 0 }, { 0, 1, 0 },
+                                      { 0, -1, 0 }, { 0, 0, 1 },  { 0, 0, -1 } };
+        for (const auto& d : kD) {
+            if (!cellAt(gx + d[0], gy + d[1], gz + d[2]).solid)
+                return true;
+        }
+        return false;
+    };
+
+    {
+        const Chunk& c = m_chunks[size_t(ci)];
+        if (c.state == Chunk::State::Empty)
+            return;
+        int ccx, ccy, ccz;
+        chunkCoordsOf(ci, ccx, ccy, ccz);
+        const int ox = ccx * CHUNK_N, oy = ccy * CHUNK_N, oz = ccz * CHUNK_N;
+
+        // explicit bricks: mat byte + sign per cell, air skipped (raw == 0
+        // counts as solid, like the SVO DDA and decodeCell)
+        if (!c.bricks.empty()) {
+            for (uint32_t k = 0; k < kBricksPerChunk; ++k) {
+                const uint32_t slot = c.slotOf[k];
+                if (slot == kNoBrick)
+                    continue;
+                const uint32_t* w0 = c.bricks.data() + size_t(slot) * BRICK_WORDS;
+                const int bx = int(k & 7u) * BRICK_N,
+                          by = int((k >> 3) & 7u) * BRICK_N,
+                          bz = int((k >> 6) & 7u) * BRICK_N;
+                for (int dz = 0; dz < BRICK_N; ++dz)
+                    for (int dy = 0; dy < BRICK_N; ++dy)
+                        for (int dx = 0; dx < BRICK_N; ++dx) {
+                            const uint32_t* w =
+                                w0 + size_t((dz * BRICK_N + dy) * BRICK_N + dx) * 2;
+                            if (int8_t((w[0] >> 24) & 0xFFu) > 0)
+                                continue;
+                            const glm::vec3* e =
+                                emissionOf(int((w[1] >> 24) & 0x7Fu));
+                            if (!e)
+                                continue;
+                            const int gx = ox + bx + dx, gy = oy + by + dy,
+                                      gz = oz + bz + dz;
+                            if (!hasAirNeighbour(gx, gy, gz))
+                                continue;
+                            cells.push_back(
+                                { glm::vec3(cellWorld(gx), cellWorld(gy),
+                                            cellWorld(gz)),
+                                  *e });
+                        }
+            }
+        }
+
+        // solid boxes: faces only (interiors never emit). A face cell a
+        // brick covers is skipped so bricks win exactly like cellAt.
+        for (const SolidBox& b : c.boxes) {
+            const glm::vec3* boxEmis =
+                b.terrain ? nullptr : emissionOf(int(b.mat));
+            if (!b.terrain && !boxEmis)
+                continue; // whole box non-emissive: skip all six faces
+            const int x0 = b.x, x1 = b.x + b.side;
+            const int y0 = b.y, y1 = b.y + b.side;
+            const int z0 = b.z, z1 = b.z + b.side;
+            auto faceCell = [&](int lx, int ly, int lz) {
+                if (lx < 0 || ly < 0 || lz < 0 || lx >= CHUNK_N ||
+                    ly >= CHUNK_N || lz >= CHUNK_N)
+                    return;
+                if (blockKeyOf(lx, ly, lz) < c.slotOf.size() &&
+                    c.slotOf[blockKeyOf(lx, ly, lz)] != kNoBrick)
+                    return; // brick wins
+                const int gx = ox + lx, gy = oy + ly, gz = oz + lz;
+                const glm::vec3* e =
+                    boxEmis ? boxEmis
+                            : emissionOf(int(m_colMat[size_t(gz) * m_latN +
+                                                     size_t(gx)]));
+                if (!e)
+                    return;
+                if (!hasAirNeighbour(gx, gy, gz))
+                    return;
+                cells.push_back({ glm::vec3(cellWorld(gx), cellWorld(gy),
+                                            cellWorld(gz)),
+                                  *e });
+            };
+            for (int y = y0; y < y1; ++y)
+                for (int z = z0; z < z1; ++z) {
+                    faceCell(x0, y, z);
+                    faceCell(x1 - 1, y, z);
+                }
+            for (int x = x0; x < x1; ++x)
+                for (int z = z0; z < z1; ++z) {
+                    faceCell(x, y0, z);
+                    faceCell(x, y1 - 1, z);
+                }
+            for (int x = x0; x < x1; ++x)
+                for (int y = y0; y < y1; ++y) {
+                    faceCell(x, y, z0);
+                    faceCell(x, y, z1 - 1);
+                }
+        }
+    }
+}
+
+void ChunkStore::collectEmissive(const std::vector<glm::vec3>& matEmission,
+                                 std::vector<VoxelField::EmissiveCluster>& out,
+                                 int budget) const
+{
+    out.clear();
+    if (!m_loaded || matEmission.empty() || budget <= 0)
+        return;
+    std::vector<EmissiveCell> cells;
+    for (int ci = 0; ci < int(m_chunks.size()); ++ci)
+        emitChunkEmitters(ci, matEmission, cells);
+    clusterEmissiveCells(cells, budget,
+                         [&](const glm::vec3& p) {
+                             return sampleWorld(p).d >= 0.02f;
+                         },
+                         out);
+}
+
+void ChunkStore::collectEmissiveRegion(
+    const std::vector<glm::vec3>& matEmission,
+    std::vector<VoxelField::EmissiveCluster>& out, int budget,
+    const std::vector<int>& chunks) const
+{
+    out.clear();
+    if (!m_loaded || matEmission.empty() || budget <= 0)
+        return;
+    std::vector<EmissiveCell> cells;
+    for (int ci : chunks)
+        emitChunkEmitters(ci, matEmission, cells);
+    clusterEmissiveCells(cells, budget,
+                         [&](const glm::vec3& p) {
+                             return sampleWorld(p).d >= 0.02f;
+                         },
+                         out);
+}
+
 VoxelField::Sample ChunkStore::sample(int x, int y, int z) const
 {
     VoxelField::Sample s;
@@ -395,7 +550,8 @@ void ChunkStore::apply(const std::vector<StoreEdit>& edits)
 
 SmoothTerrainEdits ChunkStore::makeSmoothEdits(glm::ivec3 center,
                                                float radiusM,
-                                               float strength) const
+                                               float strength,
+                                               bool preserveVolume) const
 {
     SmoothTerrainEdits result;
     if (!m_loaded || m_latN <= 0 || !std::isfinite(radiusM) ||
@@ -412,6 +568,30 @@ SmoothTerrainEdits ChunkStore::makeSmoothEdits(glm::ivec3 center,
     const int cy = std::clamp(center.y, 0, m_latN - 1);
     const int cz = std::clamp(center.z, 0, m_latN - 1);
     const int radiusCells = std::max(1, int(std::ceil(radiusM / VOXEL)));
+
+    // --- the terrain smoothing kernel ------------------------------------
+    // A separable Gaussian whose sigma scales with the brush radius, capped at
+    // kSmoothMaxSigmaCells so a wide brush stays a wide FOOTPRINT over a local
+    // kernel rather than one stamp that averages the whole window. Truncated
+    // at 2*sigma; for a locally flat field the truncation is exactly nothing,
+    // because the normaliser below is the kernel's own (constant) total weight.
+    const int sigmaCells = std::clamp(radiusCells / 2, 1, kSmoothMaxSigmaCells);
+    const int reach = 2 * sigmaCells;
+    std::vector<float> kw(size_t(2 * reach + 1), 0.0f);
+    float kwSum = 0.0f;
+    for (int i = -reach; i <= reach; ++i) {
+        kw[size_t(i + reach)] =
+            std::exp(-float(i * i) / (2.0f * float(sigmaCells * sigmaCells)));
+        kwSum += kw[size_t(i + reach)];
+    }
+    // The normaliser is CONSTANT, not "the weight that happened to be valid".
+    // Renormalising by the valid weight (the old behaviour) AMPLIFIES the pull
+    // toward whichever side survived an obstacle: next to a building only the
+    // open side votes, the deviation is divided by a smaller denominator, and
+    // the terrain visibly erodes away from the wall. With a fixed denominator
+    // an obstacle simply contributes nothing - which is the same as mirroring
+    // the centre column there, the standard Neumann boundary condition.
+    const float fullW = kwSum * kwSum;
 
     // A picked object is smoothed with the SAME relaxation the terrain path
     // below uses, generalised to an arbitrary surface axis. The axis and the
@@ -577,9 +757,19 @@ SmoothTerrainEdits ChunkStore::makeSmoothEdits(glm::ivec3 center,
                     }
                 }
             }
-            // Full fallback, walked against the outward side so a surface far
-            // from the pick is still found.
-            for (int s = (sign > 0 ? m_latN - 1 : 0); s >= 0 && s < m_latN;
+            // Full fallback, bounded to the brush neighbourhood and walked
+            // against the outward side so the outermost NEARBY surface is
+            // found. It must share the local walk's horizon: an unbounded
+            // scan adopts alien features (measured 2026-10-08: a 1 m smooth
+            // brush inherited surfaces 85-200 cells from the pick, posRange
+            // [430,722]), and those far samples widen the neighbour clamps
+            // until clear/fill spans run tens of metres along the axis -
+            // the visible post-edit holes. Legitimate row surfaces for a
+            // radiusM brush sit within radiusCells of the pick.
+            const int horizon = radiusCells + kWalk;
+            const int sLo = std::max(0, s0 - horizon);
+            const int sHi = std::min(m_latN - 1, s0 + horizon);
+            for (int s = (sign > 0 ? sHi : sLo); s >= sLo && s <= sHi;
                  s -= sign) {
                 if (isSurface(u, s, v)) {
                     out.valid = true;
@@ -763,12 +953,13 @@ SmoothTerrainEdits ChunkStore::makeSmoothEdits(glm::ivec3 center,
         return result;
     }
 
-    // Include one ring outside the footprint for the height samples. The
-    // targets themselves are still restricted to the circular brush below.
-    const int x0 = std::max(0, cx - radiusCells - 1);
-    const int x1 = std::min(m_latN - 1, cx + radiusCells + 1);
-    const int z0 = std::max(0, cz - radiusCells - 1);
-    const int z1 = std::min(m_latN - 1, cz + radiusCells + 1);
+    // The sample window must reach past the footprint by the kernel's truncation
+    // radius, not by one ring: the targets themselves are still restricted to
+    // the circular brush below.
+    const int x0 = std::max(0, cx - radiusCells - reach);
+    const int x1 = std::min(m_latN - 1, cx + radiusCells + reach);
+    const int z0 = std::max(0, cz - radiusCells - reach);
+    const int z1 = std::min(m_latN - 1, cz + radiusCells + reach);
     const int nx = x1 - x0 + 1;
     const int nz = z1 - z0 + 1;
 
@@ -881,10 +1072,30 @@ SmoothTerrainEdits ChunkStore::makeSmoothEdits(glm::ivec3 center,
         return c;
     };
 
-    static constexpr int kNeighbour[8][2] = {
-        { -1, 0 }, { 1, 0 }, { 0, -1 }, { 0, 1 },
-        { -1, -1 }, { 1, -1 }, { -1, 1 }, { 1, 1 }
-    };
+    // Blur along z once per window column; the x half of the separable kernel
+    // is applied per target below. A Gaussian is separable, so this is
+    // numerically identical to the 2-D kernel at (2*reach+1) multiply-adds per
+    // column instead of (2*reach+1)^2 - the difference between a stamp that
+    // costs a millisecond and one that costs a hundred.
+    std::vector<float> zSum(size_t(nx) * size_t(nz), 0.0f);
+    std::vector<float> zWeight(size_t(nx) * size_t(nz), 0.0f);
+    for (int z = z0; z <= z1; ++z)
+        for (int x = x0; x <= x1; ++x) {
+            if (!columnAt(x, z).valid)
+                continue; // a void column stays a void sample, never terrain
+            const size_t at = size_t(z - z0) * size_t(nx) + size_t(x - x0);
+            float s = 0.0f, w = 0.0f;
+            for (int d = -reach; d <= reach; ++d) {
+                const float wd = kw[size_t(d + reach)];
+                const Column& sample = columnAt(x, z + d);
+                if (!sample.valid)
+                    continue;
+                s += float(sample.top) * wd;
+                w += wd;
+            }
+            zSum[at] = s;
+            zWeight[at] = w;
+        }
 
     result.edits.reserve(size_t(radiusCells * radiusCells) * 2u);
     int validColumns = 0;
@@ -917,38 +1128,63 @@ SmoothTerrainEdits ChunkStore::makeSmoothEdits(glm::ivec3 center,
                 observedMaxZ = z;
             }
 
-            float sum = 0.0f;
-            float weightSum = 0.0f;
-            int minTop = current.top;
-            int maxTop = current.top;
-            for (const auto& d : kNeighbour) {
-                const int nxSample = x + d[0];
-                const int nzSample = z + d[1];
-                const Column& sample = columnAt(nxSample, nzSample);
-                if (!sample.valid)
-                    continue;
-                const float w = (d[0] == 0 || d[1] == 0) ? 1.0f : 0.5f;
-                sum += float(sample.top) * w;
-                weightSum += w;
-                minTop = std::min(minTop, sample.top);
-                maxTop = std::max(maxTop, sample.top);
+            // The x half of the separable kernel. `acc` is the weighted sum of
+            // column tops and `validW` the weight of the VALID ones, so
+            // acc - validW*top is the kernel-weighted deviation from this
+            // column and dividing it by the constant fullW measures how far
+            // the terrain deviates from its own neighbourhood mean.
+            float acc = 0.0f;
+            float validW = 0.0f;
+            for (int d = -reach; d <= reach; ++d) {
+                const float wd = kw[size_t(d + reach)];
+                const size_t at = size_t(z - z0) * size_t(nx) +
+                                  size_t(x + d - x0);
+                acc += wd * zSum[at];
+                validW += wd * zWeight[at];
             }
-            if (weightSum <= 0.0f)
+            // Obstacle guard. A window that is mostly NOT valid terrain - a
+            // building, a cliff face, the world edge - is left untouched
+            // instead of being averaged over the surviving side, which is what
+            // used to drag the ground away from anything standing on it.
+            const float coverage = validW / fullW;
+            if (coverage < kSmoothMinCoverage)
                 continue;
             ++sampledColumns;
 
             float q = std::clamp(1.0f - distance / radiusM, 0.0f, 1.0f);
             const float falloff = q * q * (3.0f - 2.0f * q);
-            const float relaxed = float(current.top) +
-                (sum / weightSum - float(current.top)) * strength * falloff;
+            const float deviation = (acc - validW * float(current.top)) / fullW;
+            // Taubin's second step, expressed as a FRACTION of the smoothing step
+            // this column received, so the net gain is bounded to [0, s] and
+            // can never reverse into inflation. A constant offset would: see
+            // kSmoothTaubinReinflate for the measured moat-ring failure.
+            const float s = strength * falloff;
+            const float gain =
+                preserveVolume ? s * (1.0f - kSmoothTaubinReinflate) : s;
+            float delta = deviation * gain;
+            // One click cannot collapse a cliff. This replaces the old
+            // min/max clamp over the sample neighbourhood, which was dead code
+            // while the average was a 3x3 ring (strength*falloff kept the
+            // relaxed value inside that range) and would have become the
+            // binding constraint - silently clipping the wide kernel back to a
+            // single cell - as soon as the average widened.
+            delta = std::clamp(delta, -float(kSmoothStepCapCells),
+                               float(kSmoothStepCapCells));
+            const float relaxed = float(current.top) + delta;
             if (getenv("VF_TRACE") && x == cx && z == cz) {
-                spdlog::info("smooth centre sample: top={} avg={:.3f} min={} max={} "
-                             "falloff={:.3f} relaxed={:.3f}",
-                             current.top, sum / weightSum, minTop, maxTop,
-                             falloff, relaxed);
+                spdlog::info("smooth centre sample: top={} dev={:+.3f} "
+                             "sigma={} reach={} coverage={:.3f} falloff={:.3f} "
+                             "gain={:.3f} delta={:+.3f} relaxed={:.3f}",
+                             current.top, deviation, sigmaCells, reach,
+                             coverage, falloff, gain, delta, relaxed);
             }
-            int target = std::clamp(int(std::lround(relaxed)), minTop, maxTop);
-            target = std::clamp(target, 0, m_latN - 1);
+            int target = std::clamp(int(std::lround(relaxed)), 0, m_latN - 1);
+            if (getenv("VF_SMOOTH_PROBE")) {
+                spdlog::info("  col ({:+d},{:+d}) top={} dev={:+.3f} cov={:.3f} "
+                             "falloff={:.3f} gain={:.3f} target={}",
+                             x - cx, z - cz, current.top, deviation, coverage,
+                             falloff, gain, target);
+            }
             if (target == current.top)
                 continue;
 
@@ -997,6 +1233,26 @@ SmoothTerrainEdits ChunkStore::makeSmoothEdits(glm::ivec3 center,
                     result.edits.push_back(e);
                 }
             }
+        }
+    }
+    // Per-column dump. A relaxation stamp is invisible in a render when it
+    // "did nothing", and the interesting question - how far did each column
+    // move, and which ones refused to move - is exactly what a screenshot
+    // cannot answer. VF_SMOOTH_PROBE prints it; it is also the only way to
+    // measure the integer quantisation of the targets from a headless run.
+    if (getenv("VF_SMOOTH_PROBE")) {
+        auto modeName = [](StoreEdit::Mode m) {
+            switch (m) {
+            case StoreEdit::Mode::Set: return "set  ";
+            case StoreEdit::Mode::Clear: return "clear";
+            case StoreEdit::Mode::Paint: return "paint";
+            }
+            return "?";
+        };
+        spdlog::info("smooth probe: {} edits", result.edits.size());
+        for (const StoreEdit& e : result.edits) {
+            spdlog::info("  {} ({},{},{}) {}", modeName(e.mode), e.x, e.y, e.z,
+                         e.terrain ? "terrain" : "object");
         }
     }
     if (getenv("VF_TRACE")) {

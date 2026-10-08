@@ -236,9 +236,21 @@ TEST_CASE("manifest roundtrip and layered dedupe")
     CHECK(merged[1].materialId == 6);
     CHECK(merged[2].materialId == 2);
 
-    // meta mismatch must be rejected
-    expected.voxelSize = 0.5f;
-    CHECK_FALSE(worldfile::readLayered((dir / "world.json").string(), expected, merged));
+    // meta mismatch must still be rejected for non-object roles (object
+    // layers are resampled instead - covered by the resample test case)
+    {
+        WorldFileData land;
+        land.meta = { WORLD, VOXEL, WATER_LEVEL, uint32_t(GRID_N), 8 };
+        land.voxels = { mk(500, 3) };
+        REQUIRE(worldfile::write((dir / "land.vxw").string(), land));
+        worldfile::WorldLayer ll{ "land.vxw", "landscape", "land", {}, 0.f };
+        REQUIRE(worldfile::writeManifest((dir / "land.json").string(), { ll }));
+        WorldFileMeta bad = expected;
+        bad.voxelSize = 0.5f;
+        CHECK_FALSE(worldfile::readLayered((dir / "land.json").string(), bad, merged));
+        std::filesystem::remove(dir / "land.json");
+        std::filesystem::remove(dir / "land.vxw");
+    }
 
     std::filesystem::remove_all(dir);
 }
@@ -316,6 +328,78 @@ TEST_CASE("readLayered applies pitch and roll when yaw is zero")
     }
     CHECK(minY < 400);
     CHECK(maxY > 400);
+
+    fs::remove_all(dir);
+}
+
+TEST_CASE("fine-grid object layers are resampled into the world lattice")
+{
+    namespace fs = std::filesystem;
+    const fs::path dir = fs::temp_directory_path() / "vf_layer_resample_test";
+    fs::remove_all(dir);
+    fs::create_directories(dir);
+
+    // A 10x10x10 block authored on a 5 cm grid is a 0.5 m cube. In the
+    // 10 cm world it must land as a 5x5x5 cell block, not be rejected.
+    WorldFileData fine;
+    fine.meta = { WORLD, 0.05f, WATER_LEVEL, uint32_t(GRID_N) * 2, 8 };
+    for (uint16_t y = 512; y < 522; ++y)
+        for (uint16_t z = 512; z < 522; ++z)
+            for (uint16_t x = 512; x < 522; ++x) {
+                VoxelRecord v;
+                v.x = x; v.y = y; v.z = z;
+                v.materialId = 7;
+                fine.voxels.push_back(v);
+            }
+    REQUIRE(worldfile::write((dir / "fine.vxw").string(), fine));
+    worldfile::WorldLayer layer{ "fine.vxw", "object", "fine", {}, 0.f };
+    REQUIRE(worldfile::writeManifest((dir / "world.json").string(), { layer }));
+
+    const WorldFileMeta expected{ WORLD, VOXEL, WATER_LEVEL, uint32_t(GRID_N), 8 };
+    std::vector<VoxelRecord> merged;
+    REQUIRE(worldfile::readLayered((dir / "world.json").string(), expected, merged));
+    CHECK(merged.size() == 5 * 5 * 5);
+    for (const auto& v : merged) {
+        CHECK(v.x >= 256 + 0); // rough sanity: inside the world grid
+        CHECK(v.materialId == 7);
+    }
+    uint16_t mnx = 1 << 15, mxx = 0, mny = 1 << 15, mxy = 0;
+    for (const auto& v : merged) {
+        mnx = std::min(mnx, v.x); mxx = std::max(mxx, v.x);
+        mny = std::min(mny, v.y); mxy = std::max(mxy, v.y);
+    }
+    CHECK(mxx - mnx == 4);
+    CHECK(mxy - mny == 4);
+
+    // Manifest-level scale: the same (matching-meta) layer at scale 0.5 must
+    // shrink to a ~3-cell-wide core (5 m/2 = 2.5 m -> 25 cells, i.e. one 5-wide
+    // block becomes a 2..3-wide block).
+    WorldFileData coarse;
+    coarse.meta = expected;
+    for (uint16_t y = 512; y < 517; ++y)
+        for (uint16_t z = 512; z < 517; ++z)
+            for (uint16_t x = 512; x < 517; ++x) {
+                VoxelRecord v;
+                v.x = x; v.y = y; v.z = z;
+                v.materialId = 3;
+                coarse.voxels.push_back(v);
+            }
+    REQUIRE(worldfile::write((dir / "coarse.vxw").string(), coarse));
+    worldfile::WorldLayer scaled{ "coarse.vxw", "object", "scaled", {}, 0.f };
+    scaled.scale = 0.5f;
+    REQUIRE(worldfile::writeManifest((dir / "world.json").string(), { scaled }));
+    std::vector<worldfile::WorldLayer> loaded;
+    REQUIRE(worldfile::loadManifest((dir / "world.json").string(), loaded));
+    REQUIRE(loaded.size() == 1);
+    CHECK(loaded[0].scale == doctest::Approx(0.5f)); // manifest roundtrip
+    merged.clear();
+    REQUIRE(worldfile::readLayered((dir / "world.json").string(), expected, merged));
+    uint16_t snx = 1 << 15, sxx = 0;
+    for (const auto& v : merged) {
+        snx = std::min(snx, v.x);
+        sxx = std::max(sxx, v.x);
+    }
+    CHECK(sxx - snx <= 2); // 5-cell-wide block at 0.5 scale -> at most 3 cells
 
     fs::remove_all(dir);
 }
@@ -772,13 +856,14 @@ TEST_CASE("lights manifest parses and rejects non-positive lights")
     CHECK(lights[0].intensity == doctest::Approx(1.0f));
 
     // The std140 layout is shared verbatim with common_base.glsl's LightUBO:
-    // two vec4[16] arrays then the count at byte 512, total 528 = 33 vec4s.
+    // two vec4[256] arrays then count+K at byte 8192, total 8208.
     // If either side moves, the descriptor silently reads garbage count.
-    CHECK(sizeof(worldfile::LightUBO) == 528);
+    CHECK(sizeof(worldfile::LightUBO) == 8208);
     CHECK(offsetof(worldfile::LightUBO, posRadius) == 0);
-    CHECK(offsetof(worldfile::LightUBO, colorIntensity) == 256);
-    CHECK(offsetof(worldfile::LightUBO, count) == 512);
-    CHECK(worldfile::kMaxLights == 16);
+    CHECK(offsetof(worldfile::LightUBO, colorIntensity) == 4096);
+    CHECK(offsetof(worldfile::LightUBO, count) == 8192);
+    CHECK(offsetof(worldfile::LightUBO, perPixelK) == 8196);
+    CHECK(worldfile::kMaxLights == 256);
 
     fs::remove_all(dir);
 }
@@ -945,6 +1030,71 @@ TEST_CASE("writeLightManifest round-trips and preserves every key it does not ow
     // 5. No temp file is left behind - a failed rename must not accumulate
     //    world.json.tmp siblings next to the manifest.
     CHECK_FALSE(fs::exists(fs::path(p.string() + ".tmp")));
+
+    fs::remove_all(dir);
+}
+
+TEST_CASE("light follow-attachment round-trips through the manifest")
+{
+    namespace fs = std::filesystem;
+    const fs::path dir = fs::temp_directory_path() / "vf_light_follow_test";
+    fs::remove_all(dir);
+    fs::create_directories(dir);
+    const fs::path p = dir / "world.json";
+    {
+        std::ofstream out(p);
+        out << R"({ "version": 1 })";
+    }
+
+    // One carried lamp (pivot-relative offset) and one fixed lamp.
+    std::vector<worldfile::LightSource> lights;
+    {
+        worldfile::LightSource carried;
+        carried.pos = glm::vec3(0.5f, 1.2f, -0.3f);
+        carried.color = glm::vec3(1.0f, 0.55f, 0.18f);
+        carried.radius = 8.0f;
+        carried.intensity = 1.5f;
+        carried.follow = "hamlet_hall.vxw";
+        lights.push_back(carried);
+        worldfile::LightSource fixed;
+        fixed.pos = glm::vec3(12.0f, 3.0f, 8.0f);
+        fixed.color = glm::vec3(1.0f, 1.0f, 1.0f);
+        fixed.radius = 8.0f;
+        fixed.intensity = 1.5f;
+        lights.push_back(fixed);
+    }
+    REQUIRE(worldfile::writeLightManifest(p.string(), lights));
+
+    std::vector<worldfile::LightSource> back;
+    REQUIRE(worldfile::loadLightManifest(p.string(), back));
+    REQUIRE(back.size() == 2);
+    CHECK(back[0].follow == "hamlet_hall.vxw");
+    CHECK(back[0].pos.y == doctest::Approx(1.2f));
+    CHECK(back[0].radius == doctest::Approx(8.0f));
+    CHECK(back[1].follow.empty());
+    CHECK(back[1].pos.x == doctest::Approx(12.0f));
+
+    // The fixed lamp emits no follow key (identity manifests stay clean);
+    // the carried one emits exactly one.
+    std::ifstream in(p, std::ios::binary);
+    const std::string text((std::istreambuf_iterator<char>(in)),
+                           std::istreambuf_iterator<char>());
+    CHECK(text.find("\"follow\"") != std::string::npos);
+    CHECK(text.find("\"follow\"") == text.rfind("\"follow\""));
+
+    // A non-string follow is skipped, not fatal (loader tolerance class).
+    {
+        std::ofstream out(p);
+        out << R"({ "lights": [ { "pos": [1,2,3], "color": [1,1,1], )"
+                R"("radius": 5, "intensity": 1, "follow": null } ] })";
+    }
+    {
+        std::vector<worldfile::LightSource> tolerant;
+        REQUIRE(worldfile::loadLightManifest(p.string(), tolerant));
+        CHECK(tolerant.size() == 1);
+        CHECK(tolerant[0].follow.empty());
+        CHECK(tolerant[0].radius == doctest::Approx(5.0f));
+    }
 
     fs::remove_all(dir);
 }
@@ -1158,7 +1308,7 @@ TEST_CASE("writeLightManifest clamps to the UBO capacity")
         out << R"({ "layers": [] })";
     }
 
-    // 20 lamps: only kMaxLights can ever render, and loadLightManifest drops
+    // kMaxLights + 4 lamps: only kMaxLights can ever render, and loadLightManifest drops
     // the excess. Emitting all 20 would persist lights that silently never
     // appear - the manifest would disagree with the UBO with no error. The
     // writer spdlog::warn's on this (asserted in the test below by virtue of

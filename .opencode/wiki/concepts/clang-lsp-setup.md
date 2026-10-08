@@ -1,7 +1,7 @@
 ---
 title: clangd LSP for OpenCode (C++ language server)
 tags: [tooling, lsp, clangd, editor, diagnostics]
-sourceRefs: [.clangd, .opencode/opencode.json, build/compile_commands.json, CMakeLists.txt, docs/index.md]
+sourceRefs: [.clangd, .opencode/opencode.json, CMakeLists.txt, docs/index.md]
 lastReviewed: 2026-09-26
 ---
 

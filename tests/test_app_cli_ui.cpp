@@ -8,11 +8,14 @@
 // --smoke, --probe, --cam, --sun, --mode) is a switch in it, and a silently
 // dropped flag turns a whole gate into a test of nothing.
 #include "app/cli/args.hpp"
+#include "app/sun_angles.hpp"
+#include "app/ui/sun_time.hpp"
 #include "app/ui/ui_primitives.hpp"
 #include "app/ui/ui_types.hpp"
 
 #include <doctest/doctest.h>
 
+#include <cmath>
 #include <cstdio>
 #include <cstring>
 
@@ -227,4 +230,177 @@ TEST_CASE("the material combo names cover the palette")
     CHECK(std::strlen(kMatNames[20]) > 0);
     for (int i = 0; i < 21; ++i)
         CHECK(std::strncmp(kMatNames[i], std::to_string(i).c_str(), 1) == 0);
+}
+
+// ---------------------------------------------------------------- sun clock -
+
+TEST_CASE("sunAnglesForTime hits the four cardinal clock points")
+{
+    // 12 h analytic arc: sunrise 06:00 E, noon +60 S, sunset 18:00 W,
+    // midnight -60 N. Azimuth closes 360 deg in 24 h at 15 deg/h.
+    float e = 0.f, a = 0.f;
+    sunAnglesForTime(0.f, e, a);
+    CHECK(e == doctest::Approx(-60.f));
+    CHECK(a == doctest::Approx(0.f));
+    sunAnglesForTime(6.f, e, a);
+    CHECK(e == doctest::Approx(0.f));
+    CHECK(a == doctest::Approx(90.f));
+    sunAnglesForTime(12.f, e, a);
+    CHECK(e == doctest::Approx(60.f));
+    CHECK(a == doctest::Approx(180.f));
+    sunAnglesForTime(18.f, e, a);
+    CHECK(e == doctest::Approx(0.f));
+    CHECK(a == doctest::Approx(270.f));
+}
+
+TEST_CASE("sunAnglesForTime wraps out-of-range hours into the day")
+{
+    float e = 0.f, a = 0.f, e2 = 0.f, a2 = 0.f;
+    sunAnglesForTime(24.f, e, a);
+    sunAnglesForTime(0.f, e2, a2);
+    CHECK(e == doctest::Approx(e2));
+    CHECK(a == doctest::Approx(a2));
+    sunAnglesForTime(-1.f, e, a);
+    sunAnglesForTime(23.f, e2, a2);
+    CHECK(e == doctest::Approx(e2));
+    CHECK(a == doctest::Approx(a2));
+}
+
+TEST_CASE("parseSunTime accepts HH:MM and rejects garbage")
+{
+    float h = -1.f;
+    CHECK(parseSunTime("00:00", h));
+    CHECK(h == doctest::Approx(0.f));
+    CHECK(parseSunTime("6:30", h));
+    CHECK(h == doctest::Approx(6.5f));
+    CHECK(parseSunTime("23:59", h));
+    CHECK(h == doctest::Approx(23.f + 59.f / 60.f));
+    CHECK_FALSE(parseSunTime("24:00", h));
+    CHECK_FALSE(parseSunTime("12:60", h));
+    CHECK_FALSE(parseSunTime("noon", h));
+    CHECK_FALSE(parseSunTime("", h));
+    CHECK_FALSE(parseSunTime(nullptr, h));
+    CHECK_FALSE(parseSunTime("12:30 ", h)); // trailing text is not a time
+}
+
+TEST_CASE("sunTimeForAngles round-trips on-arc suns exactly")
+{
+    // Every hour mark lies on the arc by construction, so the inverse must
+    // come back without the ambiguity flag.
+    for (int hh = 0; hh < 24; ++hh) {
+        float e = 0.f, a = 0.f;
+        sunAnglesForTime(float(hh), e, a);
+        float back = -1.f;
+        bool approx = true;
+        sunTimeForAngles(e, a, back, approx);
+        CHECK_FALSE(approx);
+        CHECK(back == doctest::Approx(float(hh)).epsilon(1e-3));
+    }
+}
+
+TEST_CASE("sunTimeForAngles marks off-arc suns approximate")
+{
+    // The night preset (-30/96) decodes to 06:24, off by 36.3 deg of
+    // elevation: azimuth carries no elevation sign, so a below-horizon sun in
+    // the east reads as dawn. The "~" readout must say so, never a bare time.
+    float h = -1.f;
+    bool approx = false;
+    sunTimeForAngles(-30.f, 96.f, h, approx);
+    CHECK(approx);
+    CHECK(h == doctest::Approx(6.4f).epsilon(1e-3));
+    // The day preset (34/238) lands near the arc by luck (15:52, off 2.1 deg).
+    sunTimeForAngles(34.f, 238.f, h, approx);
+    CHECK_FALSE(approx);
+}
+
+TEST_CASE("formatSunTime prints zero-padded HH:MM and wraps")
+{
+    char buf[8] = "";
+    formatSunTime(0.f, buf, sizeof(buf));
+    CHECK(std::strcmp(buf, "00:00") == 0);
+    formatSunTime(6.5f, buf, sizeof(buf));
+    CHECK(std::strcmp(buf, "06:30") == 0);
+    formatSunTime(23.f + 59.f / 60.f, buf, sizeof(buf));
+    CHECK(std::strcmp(buf, "23:59") == 0);
+    formatSunTime(24.f, buf, sizeof(buf));
+    CHECK(std::strcmp(buf, "00:00") == 0);
+}
+
+// ---------------------------------------------------------------------------
+// The two-suns distinction the night gate depends on.
+//
+// The tree has THREE reachable "nights" and they are not the same frame:
+//   1. the Night preset   -> kSunNightElev / kSunNightAzim  (P key + button)
+//   2. the clock at 00:00 -> -60 / 0                          (VF_TEST_SUN_TIME)
+//   3. anywhere a slider drag lands
+// A reference that says "night mean luma = X" is therefore ambiguous unless it
+// names which one, so the preset is what the gate pins. These cases assert the
+// distinction on ANGLES, which are exact and deterministic -- not on luma, whose
+// two measured arms differ by 1.7 (inside the 1.3 spread that made the raw
+// means unusable in the first place).
+
+TEST_CASE("clock midnight and the night preset are DIFFERENT suns")
+{
+    float e = 0.f, a = 0.f;
+    sunAnglesForTime(0.f, e, a);
+    CHECK(e == doctest::Approx(-60.f).epsilon(1e-3));
+    CHECK(a == doctest::Approx(0.f).epsilon(1e-3));
+
+    // 30 deg of elevation and 96 deg of azimuth apart: not the same night
+    // spelled differently.
+    CHECK(std::fabs(e - kSunNightElev) > 25.f);
+    CHECK(std::fabs(a - kSunNightAzim) > 90.f);
+
+    // Both are "night" by the shared threshold, which is exactly what makes
+    // this a rendered difference rather than a label difference.
+    CHECK(sunIsNight(e));
+    CHECK(sunIsNight(kSunNightElev));
+
+    // The moon lifts the anti-solar direction by (-kSunDir.y * 0.75 + 0.30), so
+    // it clears the horizon higher at -60 than at -30. Deliberately NOT
+    // re-derived here: a second copy of shader constants is free to drift,
+    // which is the mistake this whole header exists to avoid.
+}
+
+TEST_CASE("sunIsNight is the ONE predicate for the button highlight and the P key")
+{
+    // The toggle is setSunPhase(!sunIsNight(elev)) and the highlight is
+    // sunIsNight(elev), so pressing P from either preset lands on the other.
+    // Before these moved into sun_angles.hpp this was a -2.0f literal in three
+    // places across two files -- they agreed by convention only.
+    CHECK(sunIsNight(kSunNightElev));      // night preset -> P goes to day
+    CHECK_FALSE(sunIsNight(kSunDayElev));  // day preset   -> P goes to night
+    CHECK(sunIsNight(kSunNightElevThreshold));      // boundary is inclusive
+    CHECK_FALSE(sunIsNight(kSunNightElevThreshold + 0.1f));
+}
+
+TEST_CASE("the day preset is the CLI default sun, so reference shots do not move")
+{
+    // 34/238 is what every reference shot was calibrated to. If the preset and
+    // the CLI default drift apart, snapping back to Day would no longer restore
+    // the frame the gates were measured against -- and nothing would fail,
+    // because both are "correct" on their own.
+    const Args a;
+    CHECK(a.sunElev == doctest::Approx(kSunDayElev).epsilon(1e-6));
+    CHECK(a.sunAzim == doctest::Approx(kSunDayAzim).epsilon(1e-6));
+}
+
+TEST_CASE("submitting the default sun's read-back moves it less than 3 deg")
+{
+    // Round-trip is NOT a no-op and the test pins that instead of hiding it:
+    // 34/238 decodes to 15:52 (unmarked, off by 2.2 deg), and pressing Enter
+    // on that commits the ARC value 31.8. Documented in sun_time.hpp: the
+    // display is a projection, not the stored state.
+    float h = -1.f;
+    bool approx = true;
+    sunTimeForAngles(34.f, 238.f, h, approx);
+    CHECK_FALSE(approx);
+    char buf[8] = "";
+    formatSunTime(h, buf, sizeof(buf));
+    float back = -1.f;
+    REQUIRE(parseSunTime(buf, back));
+    float e = 0.f, a = 0.f;
+    sunAnglesForTime(back, e, a);
+    CHECK(std::fabs(e - 34.f) < 3.f);
+    CHECK(e == doctest::Approx(31.8f).epsilon(1e-2));
 }

@@ -17,7 +17,7 @@ authored in seconds rather than frames.
 
 Usage:
     inp = VFInput()                 # finds the "Voxelforge" window
-    inp.tap('c')                    # toggle the edit tool
+    inp.tap('tab')                  # switch View/Edit mode
     inp.hold('w', 3.0)              # fly forward 3 s
     inp.look_begin(); inp.look(400, 0, 2.0); inp.look_end()
 """
@@ -39,6 +39,7 @@ KEYSYMS = {
     "ctrl": 0xFFE3,    # Control_L
     "esc": 0xFF1B,
     "space": 0x0020,
+    "tab": 0xFF09,     # Tab - the only View/Edit switch
     "lb": 0x005B,      # [
     "rb": 0x005D,      # ]
     "equal": 0x003D,   # = / +

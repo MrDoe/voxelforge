@@ -15,9 +15,49 @@
 namespace vf {
 namespace app {
 
+// The single mode-switch implementation, shared with the A/D/S/C/M hotkeys in
+// run_hotkeys.cpp. The guards matter: switching modes while a rotation/move is
+// staged (or a preview is committing) would either orphan the pending
+// transform or apply it to the wrong mode, so both callers must refuse the
+// same way. Declared in app.hpp.
+void App::chooseEditMode(EditBrush mode)
+{
+    if (m_rotationPreviewPending ||
+        (mode == EditBrush::Move && m_rotationStaged) ||
+        (mode == EditBrush::Rotate && m_moveStaged))
+        return;
+    m_editBrush = mode;
+    if (mode == EditBrush::Rotate) {
+        if (!m_rotationStaged || m_rotateLayer.empty())
+            m_rotateLayer = m_selectedLayer;
+        m_rotating = false;
+        m_rotateHandle = TrackballHandle::None;
+        if (!m_rotationStaged)
+            m_rotateDy = m_rotateDx = m_rotateDz = 0.f;
+        m_renderMode = RenderMode::Splats;
+        m_taaFirstFrame = true;
+    } else if (mode == EditBrush::Move) {
+        m_moveLayer = m_selectedLayer;
+        m_moving = false;
+        if (!m_moveStaged)
+            m_moveDelta = glm::vec3(0.f);
+    } else if (!m_rotationStaged) {
+        m_rotateLayer.clear();
+        m_rotateHandle = TrackballHandle::None;
+        m_rotateDy = m_rotateDx = m_rotateDz = 0.f;
+    }
+    if (mode != EditBrush::Move && !m_moveStaged) {
+        m_moving = false;
+        m_moveLayer.clear();
+    }
+    spdlog::info("edit mode -> {} ({})", brushName(mode),
+                 m_editActive ? "armed" : "disarmed");
+}
+
 void App::drawPanelEdit()
 {
-    sectionHeader("EDIT TOOLBOX", "C arms/disarms the brush");
+    sectionHeader("EDIT TOOLBOX",
+                  "Tab: View/Edit  |  A/D/S/C/M pick a mode  |  +/- size");
 
     if (m_rotationPreviewPending) {
         ImGui::SeparatorText("Pending");
@@ -50,36 +90,8 @@ void App::drawPanelEdit()
     if (ImGui::Checkbox("Brush armed##editArmed", &m_editActive))
         spdlog::info("edit tool -> {}", m_editActive ? "active" : "off");
 
-    auto chooseMode = [&](EditBrush mode) {
-        if (m_rotationPreviewPending ||
-            (mode == EditBrush::Move && m_rotationStaged) ||
-            (mode == EditBrush::Rotate && m_moveStaged))
-            return;
-        m_editBrush = mode;
-        if (mode == EditBrush::Rotate) {
-            if (!m_rotationStaged || m_rotateLayer.empty())
-                m_rotateLayer = m_selectedLayer;
-            m_rotating = false;
-            m_rotateHandle = TrackballHandle::None;
-            if (!m_rotationStaged)
-                m_rotateDy = m_rotateDx = m_rotateDz = 0.f;
-            m_renderMode = RenderMode::Splats;
-            m_taaFirstFrame = true;
-        } else if (mode == EditBrush::Move) {
-            m_moveLayer = m_selectedLayer;
-            m_moving = false;
-            if (!m_moveStaged)
-                m_moveDelta = glm::vec3(0.f);
-        } else if (!m_rotationStaged) {
-            m_rotateLayer.clear();
-            m_rotateHandle = TrackballHandle::None;
-            m_rotateDy = m_rotateDx = m_rotateDz = 0.f;
-        }
-        if (mode != EditBrush::Move && !m_moveStaged) {
-            m_moving = false;
-            m_moveLayer.clear();
-        }
-    };
+    // shared with the mode hotkeys - see chooseEditMode above
+    auto chooseMode = [&](EditBrush mode) { chooseEditMode(mode); };
 
     ImGui::SeparatorText("Mode");
     if (ImGui::BeginTable("BrushModes", 2, ImGuiTableFlags_SizingStretchSame)) {
@@ -125,10 +137,115 @@ void App::drawPanelEdit()
             ImGui::TextDisabled("Depth is ignored at 1 voxel.");
         ImGui::EndDisabled();
     }
+    if (m_editBrush == EditBrush::Carve || m_editBrush == EditBrush::Add ||
+        m_editBrush == EditBrush::Delete || m_editBrush == EditBrush::Paint) {
+        // Falloff is a NAMED CURVE, not a strength: it decides how influence
+        // decays from the cursor to the rim of Width. Constant is the original
+        // hard-edged footprint (and what makes a flat-bottomed dig); the rest
+        // taper. The curve is plotted underneath, because choosing a falloff by
+        // name alone is exactly what made the old scalar feel arbitrary.
+        using C = vf::voxel::EditableWorld::FalloffCurve;
+        const char* const names[] = { "Constant", "Sphere", "Root",
+                                      "Smooth",   "Linear", "Sharp" };
+        int cur = int(m_editFalloffCurve);
+        ImGui::SetNextItemWidth(-1.0f);
+        if (ImGui::Combo("Falloff##editFalloff", &cur, names,
+                         IM_ARRAYSIZE(names))) {
+            m_editFalloffCurve = C(std::clamp(cur, 0, int(C::Count) - 1));
+        }
+        if (ImGui::IsItemHovered())
+            ImGui::SetTooltip(
+                "Influence from cursor (centre) to the rim of Width.\n"
+                "Constant  flat - the whole footprint at full depth\n"
+                "Sphere    round dome    Root  broad shoulder\n"
+                "Smooth    default S     Linear cone\n"
+                "Sharp     tight, for creases");
+
+        // Profile plot: f(q) over the footprint. Cheap (ImGui draws it), and it
+        // is the difference between picking a name and seeing the shape.
+        {
+            const float w = ImGui::GetContentRegionAvail().x;
+            const float h = 44.0f;
+            const ImVec2 p0 = ImGui::GetCursorScreenPos();
+            ImGui::InvisibleButton("##falloffPlot", ImVec2(std::max(40.0f, w), h));
+            ImDrawList* dl = ImGui::GetWindowDrawList();
+            const ImU32 bg = ImGui::GetColorU32(ImGuiCol_FrameBg);
+            const ImU32 fg = ImGui::GetColorU32(ImGuiCol_PlotLines);
+            const ImU32 dim = ImGui::GetColorU32(ImGuiCol_TextDisabled);
+            dl->AddRectFilled(p0, ImVec2(p0.x + w, p0.y + h), bg, 3.0f);
+            // Axis guides: q = 0.5 and f = 0.5, so the half-radius value that
+            // actually distinguishes the curves is readable.
+            dl->AddLine(ImVec2(p0.x + w * 0.5f, p0.y),
+                        ImVec2(p0.x + w * 0.5f, p0.y + h), dim, 1.0f);
+            dl->AddLine(ImVec2(p0.x, p0.y + h * 0.5f),
+                        ImVec2(p0.x + w, p0.y + h * 0.5f), dim, 1.0f);
+            constexpr int kSteps = 64;
+            ImVec2 prev(p0.x, p0.y + h);
+            for (int i = 1; i <= kSteps; ++i) {
+                const float q = float(i) / float(kSteps);
+                const float f =
+                    vf::voxel::EditableWorld::falloffCurveAt(m_editFalloffCurve, q);
+                const ImVec2 pt(p0.x + w * q, p0.y + h * (1.0f - f));
+                dl->AddLine(prev, pt, fg, 2.0f);
+                prev = pt;
+            }
+        }
+
+        // The visible mark is SMALLER than Width whenever the curve tapers,
+        // because the curve reaches zero at the rim. Report the reach at which
+        // a column still receives half a voxel, so the number on the Width
+        // slider is not silently contradicted by what appears in the world.
+        if (m_editBrush == EditBrush::Carve || m_editBrush == EditBrush::Add) {
+            const float r = m_editDiameter * 0.5f;
+            // longest depth this stamp can place at the rim is m_editDepth, so
+            // find the largest q whose column still clears half a voxel
+            float q = 0.0f;
+            for (int i = 100; i >= 0; --i) {
+                const float t = float(i) / 100.0f;
+                if (m_editDepth *
+                        vf::voxel::EditableWorld::falloffCurveAt(
+                            m_editFalloffCurve, t) >=
+                    vf::voxel::VOXEL * 0.5f) {
+                    q = t;
+                    break;
+                }
+            }
+            ImGui::TextDisabled("reach %.2f m (%.2f m footprint)",
+                                r * q, r);
+        }
+    }
     if (m_editBrush == EditBrush::Smooth) {
         ImGui::SetNextItemWidth(-1.0f);
         ImGui::DragFloat("Strength##smoothStrength", &m_smoothStrength, 0.01f,
                          0.0f, 1.0f, "%.2f");
+        // The dead zone, stated rather than papered over. A stamp moves
+        // lround(|deviation| * strength) cells, so a feature only moves at all
+        // when strength >= 0.5 / |deviation|. Measured deviations: a 1-cell
+        // step reads ~0.5, a 2-cell step ~1.0, a 3-cell step ~1.5. So the
+        // default 0.65 CANNOT touch 1-cell noise no matter how many clicks -
+        // that is inherent to integer cells with one stamp per click, and a
+        // "floor" that turned a 0.1-cell intent into a whole cell would be a
+        // worse lie than the dead zone.
+        if (m_smoothStrength < 0.01f) {
+            ImGui::TextDisabled("strength 0: no effect");
+        } else {
+            const float need = 0.5f / m_smoothStrength;
+            ImGui::TextDisabled("moves features >= %.1f cells (%.2f m)", need,
+                                need * vf::voxel::VOXEL);
+            if (ImGui::IsItemHovered())
+                ImGui::SetTooltip(
+                    "A stamp moves round(deviation x strength) cells, so small\n"
+                    "features need more strength before they move AT ALL:\n"
+                    "one 0.1 m step needs strength 1.0, a 0.2 m step 0.5.\n"
+                    "Raise Strength (or repeat) to reach smaller detail.");
+        }
+        ImGui::SetNextItemWidth(-1.0f);
+        ImGui::Checkbox("Preserve volume##smoothPreserve",
+                        &m_smoothPreserveVolume);
+        if (ImGui::IsItemHovered())
+            ImGui::SetTooltip(
+                "Softens each stamp so a held brush shrinks relief less.\n"
+                "Off by default: it also makes the brush ~47%% weaker.");
     }
     if (m_editBrush == EditBrush::Add || m_editBrush == EditBrush::Paint) {
         int mat = int(m_editMat);

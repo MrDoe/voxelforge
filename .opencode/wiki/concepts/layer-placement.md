@@ -13,6 +13,17 @@ Identity is an exact passthrough; the placement hash dirties both the old and
 new occupied chunks. See [[entities/live-edit-brush]] for the surrounding
 editing workflow.
 
+**`scale` is a fifth placement field, available on the unmerged branch only.**
+Commit `a3144b6` (`feature/per-object-scale`, **not on `master`**) adds a
+per-layer `scale`: a unitless size ratio, default 1, **written only when `≠ 1`**,
+applied about the **same bottom-center pivot**. `LayeredWorld` folds it into the
+placement dirty hash (`layered_world.cpp` `curPlace`, ~481–485) and keys the
+parse cache on it (~399, ~420); the cache re-normalizes on a scale change.
+Verified against the commit — see [[concepts/per-object-voxel-size]].
+
+> **Until `a3144b6` merges, `master` has four placement fields, not five.** This
+> paragraph is the pending state, not a description of current behaviour.
+
 ## Exact ownership, not overlap
 
 `LayeredWorld` allocates each enabled placeable file a stable non-zero 8-bit

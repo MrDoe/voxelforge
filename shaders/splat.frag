@@ -30,7 +30,11 @@ layout(push_constant) uniform PC {
 // SplatPass::record like the SVO highlight feeds.
 layout(std140, set = 0, binding = 3) uniform SplatUBO {
     vec4 uSplat;  // x=buried, y=sigma2, z=quad extent, w=debug mode
-    vec4 uSplat2; // x=radius scale (hotkeys [/]), y=opacity, z=depth tol, w=spare
+    vec4 uSplat2; // x=radius scale (hotkeys [/]), y=opacity, z=depth tol,
+                       // w=splat edge window start (0 = off, default 0.6,
+                       // VF_SPLAT_EDGE): alpha rolls to 0 at the clip radius
+    vec4 uSplat3; // x=base-seal alpha threshold (VF_SPLAT_SEAL_ALPHA),
+                       // yzw=spare
 } sp;
 
 // Brush hover preview (bind 13): the app fills this with the active edit
@@ -67,7 +71,8 @@ layout(constant_id = 0) const int SKY_MODE = 0;
 //   0 = water path (full disk, planar water shading, uniform alpha),
 //   1 = opaque Gaussian band (full disk; straight colour + alpha),
 //   3 = depth-only prepass (nearest full-disk plane depth, no shading),
-//   4 = opaque base (exact nearest fragment, straight colour, alpha 1).
+//   4 = base seal (exact nearest fragment, straight colour, own kernel alpha -
+//       blended, so a lone silhouette splat fades instead of sealing opaque).
 layout(constant_id = 1) const int PASS_MODE = 0;
 
 const float kWaterLevel = -0.9;
@@ -146,7 +151,37 @@ void main()
     // core missed the fixed pixel grid. sigma2 sharpens/softens the kernel,
     // opacity caps the centre alpha so neighbours can still accumulate over it.
     const float sigma2 = max(sp.uSplat.y, 1e-3);
-    float alpha = sp.uSplat2.y * exp(-0.5 * d2 / sigma2);
+    // ---- splat edge window (uSplat2.w, default 0.6; 0 = off) --------------
+    // A disk is clipped at `extent` while its Gaussian is still carrying alpha
+    // (~0.32 at the default kernel), so the footprint ends in a STEP: alpha
+    // 0.32 -> nothing. That step is what makes a splat silhouette read as a
+    // hard-edged, opaque blob instead of a soft falloff.
+    //
+    // The window rolls the kernel to EXACTLY zero at the clip radius, so alpha
+    // runs 1 -> 0 across the outer band and the edge is a gradient by
+    // construction rather than by tuning a band that stops short of zero.
+    //
+    // Keyed on the ELLIPSE-normalised radius: u and v above are each divided by
+    // their own radius, so sqrt(d2) == 1 exactly on the rim along both the
+    // tangent and the bitangent axis (an anisotropic stretched blade fades at
+    // the same fraction at its minor and major tips). `extent` is only the
+    // corner clip, so VF_SPLAT_EXTENT still means what it says: the window
+    // spans [w*extent, extent] whatever the clip is. Scale-invariant too - a
+    // 1.4 cm foliage micro loses the same outer FRACTION as a 14 cm parent,
+    // which is the whole reason it is keyed on the normalised radius and not
+    // on a metric band.
+    const float rN = sqrt(d2) / max(extent, 1e-5); // 0 at centre, 1 at the clip
+    const bool edgeOn = sp.uSplat2.w > 0.0;
+    const float edgeStart = clamp(sp.uSplat2.w, 0.0, 0.999);
+    const float edge = edgeOn ? 1.0 - smoothstep(edgeStart, 1.0, rN) : 1.0;
+    // Kernel alpha BEFORE the window, kept separate on purpose. The base
+    // seal's "is this fragment substantial?" test must see the raw kernel, not
+    // the windowed one: testing the windowed value collapses the two decisions
+    // into a single radius test (the window dominates alpha at every radius, so
+    // the seal threshold stops being a threshold at all — measured: seal
+    // thresholds 0.65/0.8/0.9 all produced the same frame).
+    const float alphaKernel = sp.uSplat2.y * exp(-0.5 * d2 / sigma2);
+    float alpha = alphaKernel * edge;
     if (PASS_MODE == 3) {
         // depth-only prepass: the nearest full-disk plane depth (no core
         // threshold) seeds both the Hi-Z occlusion pyramid and the water
@@ -286,7 +321,7 @@ void main()
         float shB = ((gRenderFlags & 2) != 0 && dot(n, kSunDir) > 0.02) ? vShade.w : 1.0;
         float aoB = ((gRenderFlags & 1) != 0) ? clamp(aoBaked, 0.0, 1.0) : 1.0;
         vec3 bentB = normalize(vShade.xyz);
-        col = shadeSurfel(q, rd, alb, rr, ro, n, bentB, shB, aoB, mId);
+        col = shadeSurfel(q, rd, alb, rr, ro, n, bentB, shB, aoB, mId, vShade.w);
         float fog = 1.0 - exp(-t * 0.0016);
         vec3 fc = fogColor(rd, q);
         // valley mist over the stream + damp hollows (reference river mood)
@@ -328,18 +363,63 @@ void main()
     // and grazing surfaces, letting the sky (the initial colour target)
     // bleed through as pale fringes. The PASS_MODE 4 base pass fixes that:
     // it EQUAL-tests against the prepass depth (same hardware interpolation,
-    // bit-exact), so exactly the nearest fragment at every covered pixel
-    // writes an OPAQUE (alpha 1, no blend) surface colour. The band then
-    // softens that base; the sky can never show through a resolved surface.
+    // bit-exact), so the nearest fragment at every covered pixel seeds the
+    // surface colour, and the band then accumulates the overlapping disks on
+    // top of it until the pixel is sealed.
     // Neither pass writes gl_FragDepth, so both keep early-Z: only the
     // nearest fragment (base) and the front surface band (band) shade
     // instead of every overlapping disk fragment.
-    // Band fragments contribute straight (non-premultiplied) Gaussian
-    // colour + alpha (SRC_ALPHA / ONE_MINUS_SRC_ALPHA source-over); the base
-    // fragment writes opaque colour; water stays premultiplied.
-    if (PASS_MODE == 4)
+    // Both passes contribute straight (non-premultiplied) colour + alpha
+    // (SRC_ALPHA / ONE_MINUS_SRC_ALPHA source-over). The base contributes
+    // its OWN kernel alpha, not alpha 1: sealing at alpha 1 is what turned a
+    // lone silhouette splat into a hard-edged opaque blob, and sealing at its
+    // own alpha is indistinguishable in the interior - there the band sum
+    // reaches 1 either way. Water stays premultiplied.
+    if (PASS_MODE == 4) {
+        // uSplat3.x = base-seal alpha threshold (VF_SPLAT_SEAL_ALPHA, 0 =
+        // seal everything = the previous behaviour exactly).
+        const float sealAlpha = max(sp.uSplat3.x, 0.0);
+        // The base pass seals the surface at alpha 1 so the sky can never
+        // bleed through a low-alpha disk rim. It is doing two jobs: it is the
+        // surface's colour, AND it stands in for EVERYTHING BEHIND the front
+        // depth band — the band pass rejects anything behind `nearest + tol`,
+        // so no occluded geometry is ever drawn and the seal is the only thing
+        // covering it.
+        //
+        // That second job is why a fragment can be too THIN to seal. A rim or
+        // overhang fragment sits at the edge of its own disk, with nothing of
+        // its own behind it; sealing it at alpha 1 paints the whole outer band
+        // of every disk opaque, which is exactly the hard-edged blob
+        // silhouette splats used to read as. Sealing is only legitimate while
+        // the fragment is substantial, so below sealAlpha the base declines
+        // and the band pass draws the fragment at its own (windowed) alpha —
+        // a gradient from opaque centre to zero at the clip.
+        //
+        // This is NOT free, and the cost is not tunable away: the base pass
+        // only ever sees the single NEAREST fragment at a pixel, so it cannot
+        // know that a different, higher-alpha fragment covers the same pixel.
+        // Measured on the reference view (noise floor 0.18/255, interior =
+        // pixels >=6px inside the footprint): sealAlpha 0.5 gives the silhouette
+        // 1.28x more transparency for interior +5.6/255, 57% of it blue-
+        // dominant (the sky showing through). Thresholds 0.65/0.8/0.9 give the
+        // SAME frame, and VF_MICRO=0 does not help. Hence DEFAULT OFF; doing it
+        // properly needs a coverage count, and the unused D24_S8 stencil
+        // (allocated, bound, cleared; see recreateDepth) is where that goes.
+        // Thresholding on alpha rather than radius is still right — it decouples
+        // the two decisions, since a radius test is what the window already is
+        // — but it is not by itself enough to keep the interior untouched.
+        //
+        // It declines rather than blends the seal down, so the interior keeps
+        // the opaque replace bit-for-bit; the fade comes from the band pass,
+        // which was already drawing these fragments.
+        //
+        // sealAlpha is the run-time threshold (uSplat3.x / VF_SPLAT_SEAL_ALPHA,
+        // 0 = seal everything = the old behaviour exactly); see the shared
+        // common_surfel.glsl note on why it cannot be a literal here.
+        if (sealAlpha > 0.0 && alphaKernel < sealAlpha)
+            discard;
         oHdr = vec4(col, 1.0);
-    else
+    } else
         oHdr = (PASS_MODE == 1) ? vec4(col, alpha) : vec4(col * alpha, alpha);
     oGPos = vec4(q, hitType);
     // Shading normal for the screen-space effects (SSAO/SSR). Water writes

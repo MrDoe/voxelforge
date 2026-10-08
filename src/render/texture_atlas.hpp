@@ -1,4 +1,5 @@
 #pragma once
+#include <glm/glm.hpp>
 // TexAtlas: optional PNG texture overrides for surfel shading.
 //
 // world.json may declare a top-level "textures" table (see
@@ -62,8 +63,22 @@ public:
     VkBuffer tableUbo() const { return m_tableBuf.buf; }
 
     // mat -> (slot, scale) packed as the shader's matTex[mId]: x = layer or
-    // -1 (no texture), y = metres per tile.
+    // -1 (no texture), y = metres per tile, z = emissive scale (0 = the
+    // texture does not emit).
     void fillTable(float* outNx4) const;
+
+    // Emission strength of the texture bound to `mat` (0 = none). The shader
+    // reads the same value from the table's .z; the CPU side needs it to turn
+    // emissive materials into point lights.
+    float emissiveScale(int mat) const {
+        return (mat >= 0 && mat < int(kLayers)) ? m_emis[mat] : 0.0f;
+    }
+    // Mean colour of the texture bound to `mat` (black when untextured) -
+    // the light COLOUR a derived point light uses, so a cyan glow lights the
+    // room cyan rather than in the palette's ember orange.
+    glm::vec3 meanColor(int mat) const {
+        return (mat >= 0 && mat < int(kLayers)) ? m_mean[mat] : glm::vec3(0.0f);
+    }
 
     // Release the GPU resources. Must be called before the Vulkan device dies
     // (App::destroy calls it explicitly); the destructor calls it too, so a
@@ -86,6 +101,10 @@ private:
     // per-material: layer index (== mat id) or -1, and metres per tile
     int m_slot[kLayers] = { -1 };
     float m_scale[kLayers] = { kDefaultScale };
+    // per-material emission (0 = non-emissive) and mean colour of its
+    // texture, both fed from the manifest's "emissive"/"emissiveScale"
+    float m_emis[kLayers] = { 0.0f };
+    glm::vec3 m_mean[kLayers] = {};
 };
 
 } // namespace vf

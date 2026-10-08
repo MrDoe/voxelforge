@@ -407,9 +407,10 @@ set it so an interactive session's painting cannot change reference shots.
 
 `tests/live_edit_check.py` (headless PPM, hermetic via `VF_NO_OVERLAY` /
 `VF_OVERLAY_PATH`):
-Add in splat **and** `--mode svo`; Delete/Paint in splat with `VF_MICRO=0` so
-the measured diff is geometry, not the dropped micro tail; the micro-detail
-check reuses the splat edit run's log; carve-hover tint must be visible and
+Add in splat **and** `--mode svo`; Delete/Paint in splat (the measured diff is
+geometry only since the micro removal 2026-10-08 — the old `VF_MICRO=0` arm and
+its micro-tail comparison are gone; the patched-run check asserts a non-empty
+run naming no micro); carve-hover tint must be visible and
 warm, the Add preview must tint green, and neither may touch water-plane
 pixels; water plane: a 6 m ball delete below the level must read as water
 against `VF_SPLAT_NOWATER=1`, and a channel that reaches the river must match

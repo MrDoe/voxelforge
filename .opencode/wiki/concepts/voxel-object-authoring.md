@@ -13,7 +13,12 @@ operational checklist lives in the `voxel-object` skill
 (`.opencode/skills/voxel-object/SKILL.md`); this page records the why and the
 tool landscape.
 
-## Why SDF-in-code (no mesh import)
+## Why SDF-in-code is the primary path
+
+Mesh import **does** exist — STL/OBJ via the sidebar's **Mesh** section, the
+`vf_mesh2vox` CLI and the `import_mesh` MCP tool
+([[entities/mesh-to-voxel]]). It is a *secondary* path, and the reasons below are
+why SDF-in-code stays primary rather than why import is unavailable:
 
 - Materials are first-class: every primitive returns `ObjHit{d, mat}`, which
   flows into brick packing, `kMaterialReflection`, and shading. STL/OBJ
@@ -26,14 +31,26 @@ tool landscape.
   downstream (`VoxelField`, SVO synthesis, probe, tests) consumes records.
 
 A converter was considered and rejected for now; if organic hero assets ever
-demand Blender sculpting, the right shape is an *offline* mesh->stamp-table
-generator emitting C++ `StampCell` arrays back into `common.hpp`, keeping the
-bake sweeps the single source of truth.
+demand Blender sculpting, the right shape is an *offline* mesh→stamp-table
+generator emitting C++ `StampCell` arrays back into `common.hpp`.
 
-A converter was considered and rejected for now; if organic hero assets ever
-demand Blender sculpting, the right shape is an *offline* mesh->stamp-table
-generator emitting C++ `StampCell` arrays back into `common.hpp`, keeping
-`scene()` the single source of truth.
+> **Correction (2026-10-08): `scene()` no longer exists.** This page previously
+> said the generator would keep `scene()` as the single source of truth. That is
+> stale — the dense reference raymarcher and **all analytic runtime geometry are
+> gone**, and geometry derives *solely* from `.vxw` records via `VoxelField`
+> (see `docs/history/rework.md`). Verified: the only remaining mentions of
+> `scene()` in `src/` and `tools/` are comments recording its removal.
+>
+> The corrected framing: `common.hpp` is the **authoring-side** SDF vocabulary,
+> not a runtime source of truth. The analytic `houseAt` / `treesAt` /
+> `alpacaAt` / `fenceAt` shapes still exist there (19 references) but are
+> **test fixtures only** — they are not in the baker, whose object sweeps were
+> removed. Runtime placement is manifest-driven; see
+> [[concepts/layer-placement]].
+
+The SDF building blocks below were verified still present on 2026-10-08
+(`sdCapsule`, `sdEllipsoid`, `sdConeY`, `smin`, `StampCell`/`stampAt`), so the
+rest of this page's tooling guidance stands.
 
 ## Verification ladder (cheap first)
 

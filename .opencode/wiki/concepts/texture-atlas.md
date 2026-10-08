@@ -58,6 +58,61 @@ Triplanar means the texture is **world-locked** (resolution-independent, no
 UV unwrap) but cannot do unique per-face art — a decal mechanism would be
 needed for that.
 
+## `VF_TEXTURES=0` is the bit-exact escape hatch — and it was not, on the override path
+
+`VF_TEXTURES=0` zeroes the slot table and is documented as a **bit-exact** escape
+hatch (measured 0.002 % diff). It is the one control that lets a gate prove a
+texture change did nothing, so its correctness is load-bearing in a way an
+ordinary feature's is not.
+
+**It was broken on the per-cell override path** (found 2026-10-08, fixed by
+George, **verified green**: `texture_check` passes with the `vf_off` residual now
+**0** and bit-exact). The old code decoded every texture and *then* cleared the
+slot table.
+That is sufficient for the material path — `matTex[mId].x` becomes `-1`, so
+`sampleTex` returns `vec3(-1)` and the palette is used. It is **not** sufficient
+for the per-cell override, because `texSlotFor` gives `gTexOv` precedence:
+
+```glsl
+return gTexOv > 0.5 ? floor(gTexOv + 0.5) : uTex.matTex[mId].x;
+```
+
+Override cells therefore kept sampling the **decoded** layer with the slot table
+already cleared, and the hatch left **0.83 % of the hero frame** showing the very
+checker it promises to remove — caught by the `texture_check` `vf_off` arm.
+
+The fix is to skip the decode entirely (`if (disabled) break;` before the
+decode loop), so every layer keeps the neutral filler and the result is
+byte-identical to the no-table palette arm.
+
+**Why this class of bug is expensive rather than merely wrong:** the escape
+hatch is only ever exercised when someone thinks to check it, and its entire
+value is that it is *provably* identical. A hole in it is invisible in normal
+use, and it silently invalidates every A/B that relied on it as a control —
+including any measurement that used `VF_TEXTURES=0` as its "textures off" arm.
+See [[concepts/per-cell-texture]] for the override path and
+[[concepts/measurement-discipline]] for why a control that can fail quietly is
+worse than no control.
+
+**`VF_TEXTURES=0` is a bit-exact escape hatch, NOT a lights-only control.** It
+kills the derived lights *and* swaps photo→palette albedo in **both** arms, so
+any delta it produces is unattributable to either cause. Found 2026-10-08 when
+it was used as the positive control for "does the night gate see the emissive
+feature": the numbers moved, but house's night went **up** (+1.82) while its day
+also went up (+3.6) — and removing light sources cannot raise night luma, so the
+sign itself rules out the lights-only explanation. A two-variable control is not
+a control; it answers a different question than the one asked, which is the
+dangerous version because the result looks like an attribution.
+
+**A lights-only control needs its own switch** — an env hook in
+`uploadLightSources` that skips *only* the derived-light derivation while leaving
+textures fully on (e.g. `VF_NO_EMISSIVE_LIGHTS=1`). Then the three arms are
+clean: textures-on + lights-on (baseline), textures-on + lights-off (lights-only
+delta), and `VF_TEXTURES=0` (both off — still the bit-exact hatch, but not a
+lights control). The hook should carry a one-line comment saying it exists
+because `VF_TEXTURES=0` is not a lights-only control, or the next session reaches
+for the wrong switch.
+
 ## Conformance
 
 Any PNG dropped into `assets/textures/` is a candidate, but the tiling and

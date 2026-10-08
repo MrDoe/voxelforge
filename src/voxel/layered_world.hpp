@@ -219,6 +219,7 @@ private:
         unsigned long long mtime = 0;
         unsigned long long size = 0;
         bool valid = false;                                // false = parse failed before
+        float scale = 1.0f;                                // placement scale used for the resample
         std::vector<VoxelRecord> voxels;
     };
     std::map<std::string, LayerCacheEntry> m_layerCache;

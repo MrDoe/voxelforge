@@ -59,6 +59,19 @@ void App::drawPanelTextures()
                 textureChanged = true;
             ImGui::SameLine();
             ImGui::TextDisabled("m / tile");
+            // The material EMITS: its own texels glow (veins, lamp glass
+            // instead of a flat colour) and cells of this material become
+            // real point lights derived at upload time. Palette materials
+            // 9-15 are emissive without a texture; this flag makes any
+            // material emissive. Saved to world.json's textures entry.
+            if (ImGui::Checkbox("Emissive", &binding->emissive))
+                textureChanged = true;
+            if (binding->emissive) {
+                ImGui::SetNextItemWidth(-1.0f);
+                if (ImGui::DragFloat("##emissiveScale", &binding->emissiveScale,
+                                     0.05f, 0.1f, 8.0f, "%.2f x strength"))
+                    textureChanged = true;
+            }
         }
         if (missing)
             ImGui::TextColored(kWarn, "File is not in the scanned folder");

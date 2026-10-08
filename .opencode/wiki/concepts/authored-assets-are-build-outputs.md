@@ -1,7 +1,7 @@
 ---
 title: The authored scene is registered as build OUTPUTS — any clean deletes it
 tags: [assets, build, cmake, ninja, hazard, incident, world, gotcha]
-sourceRefs: [CMakeLists.txt, tools/heightmap_gen.cpp, build/build.ninja, AGENTS.md, docs/world-format.md, docs/tooling.md]
+sourceRefs: [CMakeLists.txt, tools/heightmap_gen.cpp, AGENTS.md, docs/world-format.md, docs/tooling.md]
 lastReviewed: 2026-09-26
 ---
 

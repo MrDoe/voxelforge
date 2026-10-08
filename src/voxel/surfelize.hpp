@@ -75,6 +75,18 @@ struct SurfelParams {
     // (mat 8) is exempt. Default OFF (unit tests pin exact base values); the
     // app enables it (VF_ANISO=0 disables).
     bool anisotropy = false;
+    // Drop splats that no other splat reaches (they render as specks hanging
+    // in space), UNLESS the cell is a genuinely single solid voxel in space -
+    // a lone voxel IS meant to be visible. Requires the whole surfel set to be
+    // visible at once: a chunk-local test calls every disk on a chunk boundary
+    // floating, because its neighbours live in the adjacent chunk's run.
+    //
+    // DEFAULT OFF, and it must stay off until LiveEditor::chunkRun applies the
+    // SAME rule. Filtering the bake alone re-diverges bake from live, which is
+    // how the cabin read hollow (the store's surface/crease classification does
+    // not match the bake's). Measured bake-side: 31 of 3,394,756 surfels
+    // (0.0009%), all sub-centimetre foliage micros.
+    bool dropFloating = false;
 };
 
 struct Surfel {
@@ -132,6 +144,48 @@ inline bool operator==(const Surfel& a, const Surfel& b)
            a.tan_aspect == b.tan_aspect;
 }
 
+// Lattice cell <-> packed key. 10 bits per axis (0..1023 covers the 1024-cell
+// lattice at VOXEL 0.1 over WORLD 102.4). The bake keeps its own copies in an
+// anonymous namespace; these are the public ones for callers that need to name
+// a cell (the surfel report, the live-edit layer book-keeping).
+inline uint64_t surfelPackKey(int x, int y, int z)
+{
+    return (uint64_t(std::uint32_t(x)) << 20) | (uint32_t(y) << 10) |
+           uint32_t(z);
+}
+
+inline void surfelUnpackKey(uint64_t k, int& x, int& y, int& z)
+{
+    x = int((k >> 20) & 0x3FFu);
+    y = int((k >> 10) & 0x3FFu);
+    z = int(k & 0x3FFu);
+}
+
+// Stable identity for ONE emitted splat.
+//
+// The 80-byte Surfel record has no spare field (mat_ao.w packs AO + water +
+// owner, tan_aspect.w is the per-cell texture override), so the ID is derived
+// rather than stored: the GPU can recompute the cell from the disk position
+// (floor((pos + WORLD/2) / VOXEL)), and the CPU knows the cell plus which
+// segment the splat came from. FNV-1a over (cell, segment, sub) keeps it
+// stable across rebuilds and live patches - unlike an index into the surfel
+// array, which shifts whenever a chunk is re-derived.
+//
+// segment: 0 = base parent, 1 = hard-edge bridge, 2 = material micro child.
+inline uint32_t surfelId(uint64_t cellKey, uint32_t segment, uint32_t sub)
+{
+    uint32_t h = 2166136261u;
+    for (int i = 0; i < 8; ++i) {           // the 30 significant key bits
+        h ^= uint32_t((cellKey >> (i * 4)) & 0xFFu);
+        h *= 16777619u;
+    }
+    h ^= segment;
+    h *= 16777619u;
+    h ^= sub;
+    h *= 16777619u;
+    return h;
+}
+
 struct SurfelSet {
     std::vector<Surfel> surfels;
     // chunkRange[0..GRID_N^3-1] = start index into surfels for each
@@ -165,6 +219,9 @@ struct SurfelSet {
     size_t objectCount = 0;
     size_t edgeParentCount = 0;
     size_t edgeBridgeCount = 0;
+    // Splats removed by SurfelParams::dropFloating (surfels that no other
+    // splat reached and whose cell was not a lone voxel).
+    size_t droppedFloating = 0;
 };
 
 // Build one parent surfel per outer voxel surface cell from the
@@ -174,15 +231,21 @@ SurfelSet buildSurfels(const VoxelField& field, const SurfelParams& params = {})
 
 // Live-edit path: build the surfels of ONE chunk from the runtime store.
 // The store is the merged base world + runtime edits, so the output reflects
-// terrain and object edits alike. Normals come from the store's SDF gradient;
-// sun shadow + AO reuse the same bakes as buildSurfels. Deterministic order
-// (packed cell key). Returns empty for an empty/nonexistent chunk.
+// terrain and object edits alike. Normals follow the BAKE's pipeline exactly
+// (exposed-face mean -> per-face expansion for thin/cancelling cells ->
+// face-neighbour smoothing), never a local SDF gradient: a live stamp
+// re-derives the whole edit region, so a rule of its own would re-aim splels
+// the user never touched. sun shadow + AO reuse the same bakes as
+// buildSurfels. Deterministic order (packed cell key). Returns empty for an
+// empty/nonexistent chunk.
 std::vector<Surfel> buildChunkSurfels(const ChunkStore& store, int chunk,
                                       const SurfelParams& params = {});
 
 // Region variant for the live editor: only cells inside the lattice AABB
 // [lo, hi) are considered (clamped to the chunk). `keys` are the packed
-// lattice cells parallel to the one-surfel-per-parent `surfels` array.
+// lattice cells parallel to the one-surfel-per-parent `surfels` array; a cell
+// expanded per exposed face (thin plate / cancelling exposure) contributes one
+// entry per face under the same repeated key, as in the bake.
 // `edgeKeys`/`edgeSurfels` hold the small derived crease bridges separately;
 // multiple edge children may refer to the same parent key.
 struct SurfelRange {

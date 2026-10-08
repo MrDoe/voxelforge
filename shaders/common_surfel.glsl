@@ -13,6 +13,36 @@
 #ifndef VOXELFORGE_COMMON_SURFEL_GLSL
 #define VOXELFORGE_COMMON_SURFEL_GLSL
 
+// SplatUBO contract shared by the forward (splat.frag), vertex and tile
+// (splat_tile_render.comp) stages - they must never disagree about which
+// pixels get sealed.
+//
+//   uSplat3.x = base-seal alpha threshold (VF_SPLAT_SEAL_ALPHA, DEFAULT 0 =
+//               seal every fragment = the long-standing behaviour).
+//
+// The base pass (PASS_MODE 4) seals the nearest fragment at alpha 1, which is
+// not only the surface's colour: it also stands in for every fragment the
+// depth band rejects behind it, because nothing occluded is ever drawn. A
+// fragment too thin to stand in for anything - a disk rim, an overhang - is
+// therefore better left unsealed, letting the band draw it at its own alpha so
+// it fades to zero at the clip instead of ending in an opaque step.
+//
+// The test reads the UN-WINDOWED kernel alpha (alphaKernel), not the windowed
+// alpha: the edge window (uSplat2.w) dominates alpha at every radius, so
+// testing the windowed value collapses this into a plain radius test and the
+// threshold stops being a threshold (measured: 0.65/0.8/0.9 all render the
+// same frame).
+//
+// It is a run-time field rather than a literal because the correct value is a
+// property of the scene's coverage, not of these constants - and it cannot be
+// reasoned out: the base pass only sees the single nearest fragment at a pixel
+// and cannot know a different fragment covers the same pixel. Measured cost of
+// enabling it (threshold 0.5): silhouette 1.28x more transparent for interior
+// +5.6/255 with 57% of it blue-dominant, i.e. the sky showing through. Note
+// this is NOT the sub-centimetre micros - VF_MICRO=0 measures 5.96 vs 5.60.
+// A real fix needs a coverage count, which the unused D24_S8 stencil (already
+// allocated, bound and cleared) is the natural home for.
+
 struct Surfel {
     vec4 pos_rU;    // xyz = centre (m), w = radiusU (m)
     vec4 normal_rV; // xyz = geometric normal, w = radiusV (m)
@@ -64,6 +94,21 @@ bool surfelBelongsToLayer(float packedAo, uint layerId)
 //   bAxis:   xyz = unit axis, w = half length m (0 = ball/box, <0 = dome)
 //   bTint:   rgb = tint colour, a = strength (a <= 0 disables the preview)
 //   bMeta:   x   = optional owning layer ID; 0 = spatial volume only
+//            y   = radial falloff CURVE index (0 = Constant, i.e. no taper)
+
+// The CPU's EditableWorld::FalloffCurve set, indexed by bMeta.y. Duplicated
+// here so the hover tint marks the volume the stamp actually emits; the two
+// must agree curve for curve, and test-preview is the gate.
+float brushFalloffCurve(int idx, float q)
+{
+    q = clamp(q, 0.0, 1.0);
+    if (idx == 1) return sqrt(max(0.0, 1.0 - q * q));       // Sphere
+    if (idx == 2) return sqrt(max(0.0, 1.0 - q));           // Root
+    if (idx == 3) return 1.0 - q * q * (3.0 - 2.0 * q);     // Smooth
+    if (idx == 4) return 1.0 - q;                           // Linear
+    if (idx == 5) return (1.0 - q) * (1.0 - q);             // Sharp
+    return 1.0;                                             // Constant
+}
 //
 // w == 0 on the volume with w != 0 on the axis is a BOX (axis.xyz are half
 // extents) - the rotate/move trackball preview tints a whole layer AABB.
@@ -85,8 +130,16 @@ bool sharedInBrushVolume(vec3 p, float packedAo, vec4 bVolume, vec4 bAxis,
         vec3 he = bAxis.xyz;
         return all(lessThanEqual(abs(rel), he));
     }
-    if (bAxis.w == 0.0)
-        return dot(rel, rel) <= r2;
+    if (bAxis.w == 0.0) {
+        // ball (Delete/Paint): a tapering curve grades the RADIUS, matching
+        // EditableWorld::makeSphere. Constant is the original hard sphere.
+        const int fo = int(bMeta.y + 0.5);
+        if (fo == 0)
+            return dot(rel, rel) <= r2;
+        const float d = sqrt(dot(rel, rel));
+        const float q = d / max(bVolume.w, 1e-6);
+        return d <= bVolume.w * brushFalloffCurve(fo, q);
+    }
     const float along = dot(rel, bAxis.xyz);
     const vec3 perp = rel - bAxis.xyz * along;
     if (bAxis.w < 0.0) {
@@ -98,8 +151,19 @@ bool sharedInBrushVolume(vec3 p, float packedAo, vec4 bVolume, vec4 bAxis,
         const float r = bVolume.w;
         if (along < -voxelSize)
             return false;
-        const float c = 0.5 * min(r, h);
-        const float lipY = h - c;
+        // Radial falloff (bMeta.y = curve index): the same profile as
+        // EditableWorld::falloffCurveAt, applied per column with the fillet
+        // shrinking to match, so the tint marks the tapered growth rather than
+        // the full-depth one. Constant (0) grades nothing, which keeps the
+        // legacy flat-top footprint exact.
+        const int fo = int(bMeta.y + 0.5);
+        const float qq = sqrt(dot(perp, perp)) / max(r, 1e-6);
+        const float prof = brushFalloffCurve(fo, qq);
+        const float hf = h * prof;
+        if (hf < 0.5 * voxelSize)
+            return dot(perp, perp) <= r2; // tapered to nothing past the base layer
+        const float c = 0.5 * min(r, hf);
+        const float lipY = hf - c;
         if (along <= lipY)
             return dot(perp, perp) <= r2;
         const float k = along - lipY;
@@ -108,7 +172,14 @@ bool sharedInBrushVolume(vec3 p, float packedAo, vec4 bVolume, vec4 bAxis,
         const float rr = (r - c) + sqrt(max(0.0, c * c - k * k));
         return dot(perp, perp) <= rr * rr;
     }
-    return abs(along) <= bAxis.w && dot(perp, perp) <= r2;
+    // Carve cylinder. The near end (kCarveTopMargin above the hit) is NOT
+    // tapered - it is what opens the ground the scoop starts at - so the far
+    // end alone is scaled by the profile, mapping [−w, +w] onto
+    // [−w, w·f] as f goes 0 → 1.
+    const int fo = int(bMeta.y + 0.5);
+    const float qq = sqrt(dot(perp, perp)) / max(bVolume.w, 1e-6);
+    const float far = mix(-bAxis.w, bAxis.w, brushFalloffCurve(fo, qq));
+    return along >= -bAxis.w && along <= far && dot(perp, perp) <= r2;
 }
 
 #endif

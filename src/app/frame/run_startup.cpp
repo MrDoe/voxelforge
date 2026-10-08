@@ -61,6 +61,22 @@ bool App::runProbe()
 // fall through into a screenshot that quietly says nothing about it.
 int App::runStartupTestHooks()
 {
+    // --probe-surfel X Y Z (LATTICE cell): name the splats that make up that
+    // cell. Same report the Ctrl+LMB pick prints, so a splat can be identified
+    // from a script as well as by clicking it. Runs here (not in the --probe
+    // path) because it needs THIS app's m_layers store, not a throwaway world.
+    if (m_args.probeSurfelSet) {
+        // "list" (or a negative sentinel) enumerates instead of naming one cell.
+        if (m_args.probeSurfel.x == -1) {
+            spdlog::info("probe-surfel list");
+            listFloatingSurfels();
+            return 1;
+        }
+        spdlog::info("probe-surfel cell {} {} {}", m_args.probeSurfel.x,
+                     m_args.probeSurfel.y, m_args.probeSurfel.z);
+        describeSurfelsAt(m_args.probeSurfel);
+        return 1;   // the report is the whole point; do not fall through
+    }
     // Headless exercise of the exact GUI import path.  The comma-separated
     // form is: file,name,x,y,z,fit,mat,rotY,solid (the last three are
     // optional).  It is useful for CI and for re-authoring a known model
@@ -333,6 +349,14 @@ void App::applyStartupEnvOverrides(FrameInputs& fx)
     // lag); if it tears instead, the G-buffer reprojection itself is broken.
     if (const char* e = getenv("VF_TAA_BLEND"))
         m_taaBlend = std::clamp(float(atof(e)), 0.0f, 1.0f);
+    // Point-light budget (adjustable cost control): global emitter cap N and
+    // per-pixel nearest-K. Applied here at startup, then re-uploaded so the
+    // first frame already uses them; the GUI owns the members afterwards.
+    if (const char* e = getenv("VF_LIGHT_BUDGET"))
+        m_lightBudget = std::clamp(atoi(e), 1, vf::voxel::kMaxLights);
+    if (const char* e = getenv("VF_LIGHT_K"))
+        m_lightK = std::clamp(atoi(e), 1, vf::voxel::worldfile::kLightKMax);
+    uploadLightSources();
 }
 
 } // namespace app

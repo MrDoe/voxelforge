@@ -103,6 +103,9 @@ void App::applyWorldReload()
     // an external manifest edit must not leave a stale picker table behind
     // (a pending GUI pick is applied after this, so it still wins the frame)
     vf::voxel::worldfile::loadTextureManifest(m_manifestPath, m_texBindings);
+    // explicit light edits ride the same poll; they are tiny, so reload them
+    // with the manifest rather than waiting for a restart.
+    uploadLightSources();
     rebuildSurfels();       // splat backend follows the same live field
     // the reload re-adopted the store: re-apply the persisted live overlay
     m_liveEditor.clear();

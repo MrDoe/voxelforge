@@ -213,9 +213,19 @@ void App::drawSidebarFooter()
         ImGui::Text("%s  %.1f ms", mode, m_avgMs);
     if (m_editActive) {
         if (m_editBrush == EditBrush::Smooth)
-            ImGui::TextColored(kAccent, "%.0f CPU | geo %.1f | smooth %dvox %.0f%%",
+            ImGui::TextColored(kAccent, "%.0f CPU | geo %.1f | smooth %dvox %.0f%% | "
+                                        "%d col, %d vox run, +%d up",
                                m_lastFrameMs, m_profAvg[0], brushVoxels(),
-                               m_smoothStrength * 100.0f);
+                               m_smoothStrength * 100.0f, m_smoothLastColumns,
+                               m_smoothLastMaxDelta, m_smoothLastRise);
+        else if (m_editBrush == EditBrush::Carve ||
+                 m_editBrush == EditBrush::Add)
+            ImGui::TextColored(kAccent, "%.0f CPU | geo %.1f | %s %dvox d%.1f "
+                                        "%s",
+                               m_lastFrameMs, m_profAvg[0], mode,
+                               brushVoxels(), m_editDepth,
+                               vf::voxel::EditableWorld::falloffCurveName(
+                                   m_editFalloffCurve));
         else if (brushIsPerVoxel() &&
                  (m_editBrush == EditBrush::Add || m_editBrush == EditBrush::Carve))
             ImGui::TextColored(kAccent, "%.0f CPU | geo %.1f | %s 1 voxel",
@@ -237,8 +247,10 @@ void App::drawSidebarFooter()
         ImGui::TextDisabled("%.0f CPU  |  geo %.1f", m_lastFrameMs, m_profAvg[0]);
     }
     if (ImGui::IsItemHovered())
-        ImGui::SetTooltip("Tab collapses the sidebar; Ctrl+1..6 switch section; "
-                          "C arms the brush");
+        ImGui::SetTooltip("Ctrl+B collapses the sidebar; Ctrl+1..6 switch section\n"
+                          "Tab switches View/Edit mode; in Edit mode A/D/S/C/M pick a mode\n"
+                          "The hotkey bar at the bottom lists the keys that "
+                          "apply right now");
 }
 
 } // namespace app

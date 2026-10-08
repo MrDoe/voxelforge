@@ -2,8 +2,19 @@
 title: Voxelforge PBR shading model
 tags: [shading, pbr, ggx, ao, gi, fog, grade]
 sourceRefs: [shaders/svo_raymarch.comp, docs/rendering.md]
-lastReviewed: 2026-08-26
+lastReviewed: 2026-10-08
 ---
+
+> **Provenance (2026-10-08):** this page describes the **SVO reference backend**
+> only, as it existed before the Gaussian-surfel rasterizer became primary. The
+> splat backend now has an exact twin of every function here — `shadeSurfel`
+> mirrors `shadeTerrain`, `splatAO` mirrors `sdfAO`, `skyVisibilitySPlat` mirrors
+> `skyVisibilitySvo` — and the shared helpers (`skyIrradiance`, `fogColor`,
+> `pbrSpec`, `emissiveTerm`) live in `common_base.glsl` and serve both. Read this
+> page for the *lighting model*, not for *which backend runs it*. The splat
+> backend's own contract is [[concepts/baked-sun-shadow-contract]]; the
+> measurement discipline these functions need is
+> [[concepts/measurement-discipline]].
 
 # PBR Shading Model
 

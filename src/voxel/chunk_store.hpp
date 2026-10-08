@@ -103,17 +103,82 @@ public:
     // Cells outside the explicit band read +kFar (3.2 m) / their Solid box.
     VoxelField::Sample sample(int x, int y, int z) const;
     VoxelField::Sample sampleWorld(glm::vec3 p) const;
+    // Live-store mirror of VoxelField::collectEmissive for the dynamic-light
+    // trigger: enumerate the store's current bricks + solid-box faces (so a
+    // stamp that adds/removes/paints emitters is reflected) through the same
+    // shared cluster tail. `budget` caps the output clusters (<= 0 = empty);
+    // pass the remaining LightUBO slots after the authored lights.
+    // NOTE: on baked content the store is a SUPERSET of the field (pool
+    // bricks carry propagated interior mats the record enumerator never
+    // sees), so this must not replace the bake enumerator under a capped
+    // UBO — use collectEmissiveRegion for stroke-local refreshes instead.
+    void collectEmissive(const std::vector<glm::vec3>& matEmission,
+                         std::vector<VoxelField::EmissiveCluster>& out,
+                         int budget) const;
+    // Same, restricted to the listed chunks (stroke-local refresh): the
+    // shared tail runs over the region's cells only. Region == all chunks
+    // is bit-identical to collectEmissive.
+    void collectEmissiveRegion(const std::vector<glm::vec3>& matEmission,
+                               std::vector<VoxelField::EmissiveCluster>& out,
+                               int budget, const std::vector<int>& chunks) const;
 
     // --- edits --------------------------------------------------------------
     // Queue a cell mutation. Does not rebuild; call rebuildDirty() once after
     // a batch so neighbouring edits coalesce.
     void apply(const StoreEdit& e);
     void apply(const std::vector<StoreEdit>& edits);
+    // --- terrain relaxation tuning (makeSmoothEdits) -----------------------
+    // The smoothing kernel is a Gaussian whose sigma scales with the brush
+    // radius, but is capped here. A brush that averaged only its immediate 3x3
+    // ring was a despeckler, not a smoother: the radius set the footprint and
+    // the falloff but never the averaging scale, so a 1 m brush could not move
+    // a 6-cell ridge (measured on a synthetic ridge: the crest's 3x3 average
+    // was exactly its own top, so the batch contained NO edit at the crest).
+    // Uncapped, sigma = radius/2 would turn one 6 m stamp into ~50M multiply-adds
+    // (the kernel cost grows as radius^2 * sigma^2); the cap keeps a wide brush
+    // wide-footprint-but-local instead, which is also what makes a held drag
+    // converge instead of digging a world-sized pit in one stamp.
+    static constexpr int kSmoothMaxSigmaCells = 16; // 1.6 m of kernel reach
+    // Hard ceiling on one stamp's movement, in cells. This REPLACES the old
+    // min/max clamp over the sample neighbourhood: with strength*falloff in
+    // [0,1] the relaxed value already lay inside that range, so the clamp was
+    // dead code on open terrain - but it would have become the binding
+    // constraint the moment the average was widened (a ridge's wide average
+    // falls below its 4-ring minimum), silently clipping the kernel back to one
+    // cell. A step cap states the real intent: one click cannot collapse a cliff.
+    // It must clear the deviation of a BRUSH-SIZED feature, or a spike takes
+    // two clicks and a pit takes two: measured on the synthetic spike/pit
+    // fixtures the kernel deviation is 2.53 cells, so a cap of 2 silently
+    // halved every stamp. 4 keeps a single stamp to 0.4 m.
+    static constexpr int kSmoothStepCapCells = 4;
+    // A column whose kernel window is mostly NOT valid terrain (a building, a
+    // deep void, the world edge) is left alone. Without this the average is
+    // taken over the surviving side only and the clamp snaps the column toward
+    // that one direction - terrain visibly eroding away from any obstacle.
+    static constexpr float kSmoothMinCoverage = 0.6f;
+    // Taubin's re-inflation fraction: a plain relaxation is a Laplacian
+    // contraction, so a held brush slowly sinks peaks and fills pits. This
+    // UNDOES part of what the smoothing step removed.
+    // It MUST be applied as a fraction of the smoothing step this column
+    // actually received, never as a constant offset. Measured: with a constant
+    // mu, gain = s + mu*(1-s) goes NEGATIVE wherever the brush falloff is small
+    // (s -> 0 gives gain = mu), and the tool then INFLATES the rim of every bump
+    // into a moat - on the synthetic spike, dev -2.514 * gain -0.516 = +1.30,
+    // a 1-cell RAISE on the column that should have been cut. Scaling by s
+    // bounds the gain to [0, s]: the pass can only ever soften a relaxation,
+    // never reverse it.
+    // Default is OFF until it is measured end-to-end on a real render: it is a
+    // 47% reduction in effective smoothing strength, and shrinking relief is
+    // not a defect anyone has complained about - the moat ring was.
+    static constexpr float kSmoothTaubinReinflate = 0.53f;
     // Build one non-mutating height-relaxation batch for the circular terrain
     // footprint around `center`. Only terrain columns are changed; object
     // surfaces are treated as protected samples and are never overwritten.
+    // `preserveVolume` softens each stamp by kSmoothTaubinReinflate so a held
+    // brush shrinks relief less. OFF by default: see the constant's note.
     SmoothTerrainEdits makeSmoothEdits(glm::ivec3 center, float radiusM,
-                                       float strength) const;
+                                       float strength,
+                                       bool preserveVolume = false) const;
     // Rebuild every dirty chunk (SDF band + octree pool).
     void rebuildDirty();
     // Force the full-chunk rebuild path for one chunk (ignores the recorded
@@ -176,6 +241,10 @@ private:
     void ensureExplicit(int ci);
     uint32_t ensureBrick(int ci, Chunk& c, uint32_t blockKey);
     void decodeCell(const Chunk& c, uint32_t slot, int lx, int ly, int lz, StoreCell& out) const;
+    // Append one chunk's surface emitter cells (bricks + solid-box faces) to
+    // `cells`; shared by collectEmissive and collectEmissiveRegion.
+    void emitChunkEmitters(int ci, const std::vector<glm::vec3>& matEmission,
+                           std::vector<EmissiveCell>& cells) const;
     void encodeCell(uint32_t* words, const StoreCell& cell);
     void markDirty(int ci, int x, int y, int z);
     void rebuildChunk(int ci);

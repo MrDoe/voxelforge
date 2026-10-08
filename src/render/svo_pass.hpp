@@ -2,6 +2,7 @@
 #include "rhi/context.hpp"
 #include "rhi/resources.hpp"
 #include "voxel/world.hpp"
+#include "voxel/worldfile.hpp"
 #include <cstdint>
 #include <glm/glm.hpp>
 #include <vector>
@@ -44,6 +45,12 @@ public:
     // Texture atlas (bindings 22/23, shared detailAlbedo). Writes once into
     // the SVO set; null handles bind nothing (palette path).
     void setTexAtlas(VkImageView view, VkSampler sampler, VkBuffer tableUbo);
+    // Coarse irradiance volume (binding 26, sampler3D, common_irradiance.glsl).
+    // Mirrors setTexAtlas: the view is App's (one 64^3 image, created once,
+    // only re-uploaded), the sampler is created here once and destroyed with
+    // the pass, and the write happens only after the pixels are in - so the
+    // descriptor never references an image that has not been uploaded.
+    void setIrrVolView(VkImageView view);
     // Highlight feeds written to a persistently mapped UBO (binding 8):
     // slot 0 = selected voxel (strong warm), slot 1 = hover preview (faint).
     // xyz = voxel center (world), w = active flag.
@@ -53,14 +60,20 @@ public:
     // both backends show the same volume. SVO previously had no preview at all,
     // so in --mode svo every brush size/depth change was invisible. Layout is
     // identical to the splat BrushUBO: volume/axis/tint/meta.
+    // `falloff` rides bMeta.y (0..1) and is the radial profile the CPU
+    // rasterizers apply to Add/Carve: the shader repeats it so the hover tint
+    // marks the tapered volume, not the full-depth one. 0 = hard edge.
     void setBrush(const glm::vec4& volume, const glm::vec4& axis,
-                  const glm::vec4& tint, uint8_t layerId = 0)
+                  const glm::vec4& tint, uint8_t layerId = 0,
+                  float falloff = 0.0f)
     {
         m_brush[0] = volume;
         m_brush[1] = axis;
         m_brush[2] = tint;
-        m_brush[3] = glm::vec4(float(layerId), 0.f, 0.f, 0.f);
+        m_brush[3] = glm::vec4(float(layerId), falloff, 0.f, 0.f);
     }
+    void setLights(const vf::voxel::LightUBO& lights);
+
     void record(VkCommandBuffer cmd, const RaymarchPush& push);
 
 private:
@@ -94,6 +107,7 @@ private:
     std::vector<uint32_t> m_capPayload, m_capHandles, m_capBricks; // per chunk
     uint32_t m_highPayload = 0, m_highHandles = 0, m_highBricks = 0;
     VkImageView m_heightView = VK_NULL_HANDLE;
+    VkSampler m_irrSampler = VK_NULL_HANDLE; // irradiance volume (binding 26)
     VkImageView m_objVolView = VK_NULL_HANDLE;
 
     // persistently mapped 32 B uniform buffer: selection + hover feeds
@@ -105,5 +119,8 @@ private:
     Buffer m_brushBuf {};
     glm::vec4 m_brush[4] { glm::vec4(0.f), glm::vec4(0.f), glm::vec4(0.f),
                            glm::vec4(0.f) };
+    // Point light UBO (binding 25), written by setLights().
+    Buffer m_lightsBuf {};
+
 };
 } // namespace vf

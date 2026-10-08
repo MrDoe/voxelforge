@@ -29,6 +29,11 @@ namespace app {
 bool App::updateCamera(float dt)
 {
     bool chatCaptures = m_chatInitialized && m_chatUi.wantsCaptureKeyboard();
+    // A/D/S are also brush-mode shortcuts while the brush is armed, but they
+    // remain camera keys: movement is never taken away. The two uses do not
+    // conflict because the mode keys are edge-triggered (one action per press)
+    // while flying is level-triggered (continuous while held), so holding A to
+    // strafe selects Add once and then just strafes.
     if (chatCaptures) {
         // block camera move while typing; consume mouse delta to avoid jump
         double _dx, _dy;
@@ -117,6 +122,10 @@ void App::processInput(bool chatCaptures, bool rotateLiveTest)
                 m_selectedHit.voxel.x, m_selectedHit.voxel.y, m_selectedHit.voxel.z,
                 w.x,w.y,w.z, int(m_selectedHit.mat),
                 pickedLayer.empty() ? "<terrain/unowned>" : pickedLayer);
+            // Identify the splats at the picked cell. A splat whose disk does
+            // not reach any neighbour is the "floating in space" case; the
+            // report prints its stable id so it can be named.
+            describeSurfelsAt(m_selectedHit.voxel);
         }
         // Edit tool: plain LMB stamps at the hover point. With "Live patch"
         // on, holding LMB keeps painting (stamp spacing = a quarter brush
@@ -200,10 +209,16 @@ void App::processInput(bool chatCaptures, bool rotateLiveTest)
             // explicit Apply/Cancel controls remain meaningful. It is
             // cleared only by Apply, Cancel, or target loss.
             if (!m_rotationStaged) {
-                m_rotateLayer.clear();
-                m_rotateHandle = TrackballHandle::None;
-                m_rotateLastMouse = {};
-                m_rotateDy = m_rotateDx = m_rotateDz = 0.f;
+                if (!m_rotateLayer.empty() || m_previewLightsShifted) {
+                    m_rotateLayer.clear();
+                    m_rotateHandle = TrackballHandle::None;
+                    m_rotateLastMouse = {};
+                    m_rotateDy = m_rotateDx = m_rotateDz = 0.f;
+                    // The drag-pushed geometry preview is gone with the
+                    // target: restore the base light set to splat (no-op
+                    // when the overlay was never pushed).
+                    refreshPreviewLights();
+                }
             }
         }
         if (m_editBrush != EditBrush::Move && !m_moveStaged) {
@@ -313,6 +328,7 @@ void App::processInput(bool chatCaptures, bool rotateLiveTest)
                     const glm::mat3 R = nextR * glm::transpose(oldR);
                     m_splatPass.setRotatePreview(
                         pivot, R, true, m_layers.layerId(m_rotateLayer));
+                    refreshPreviewLights(); // carried lamps + derived clusters ride the drag
                 }
             }
         }
@@ -370,6 +386,7 @@ void App::processInput(bool chatCaptures, bool rotateLiveTest)
                 m_splatPass.setRotatePreview(
                     pivot, glm::mat3(1.f), m_moveDelta, true,
                     m_layers.layerId(m_moveLayer));
+                refreshPreviewLights(); // carried lamps + derived clusters ride the drag
             }
         }
 

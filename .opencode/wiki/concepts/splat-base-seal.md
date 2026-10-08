@@ -64,9 +64,10 @@ any per-fragment threshold is a guess:
   This is why the test must read the **un-windowed** kernel alpha
   (`alphaKernel`): with the window folded in, the window dominates alpha at
   every radius and the "threshold" stops being a threshold.
-- `VF_MICRO=0` does not help (interior 5.96 vs 5.60), so the sub-centimetre
+- `VF_MICRO=0` did not help (interior 5.96 vs 5.60; run predates the micro
+  removal, when the knob still existed), so the sub-centimetre
   foliage grains are **not** the cause — they were the obvious suspect and they
-  are innocent.
+  are innocent (doubly so now: the grains no longer exist).
 
 ### What would actually fix it
 

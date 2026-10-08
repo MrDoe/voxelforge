@@ -21,6 +21,12 @@ bool App::reloadTexAtlas()
     vkDeviceWaitIdle(m_ctx.device());
     if (!m_texAtlas.load(m_ctx, m_manifestPath))
         return false;
+    // The atlas owns the per-material emissiveScale/meanColor that lights
+    // DERIVED from emissive materials read, so a reload can change the light
+    // set (picker flag toggle, on-disk image edit, VF_TEXTURES flip). Both
+    // callers come through here, so re-deriving once here keeps the rule
+    // un-forgettable; the wait above also makes the descriptor write safe.
+    uploadLightSources();
     return true;
 }
 

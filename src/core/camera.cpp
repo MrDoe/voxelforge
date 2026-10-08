@@ -28,6 +28,11 @@ void Camera::applyLook(float& yaw, float& pitch, float dxPx, float dyPx)
     pitch = std::clamp(pitch - dyPx * kSensitivity, -1.5533f, 1.5533f);
 }
 
+// A/D/S are ALSO brush-mode shortcuts while the edit tool is armed, and they
+// stay camera keys regardless: pressing A selects Add and strafes, holding A
+// keeps strafing. Movement is never taken away from the user - an earlier
+// version yielded these keys to the brush while armed and it was the wrong
+// trade, because flying is how you aim the brush in the first place.
 glm::vec3 Camera::computeMove(bool fwdKey, bool backKey, bool leftKey, bool rightKey,
                               bool upKey, bool downKey, const glm::vec3& f,
                               const glm::vec3& r)

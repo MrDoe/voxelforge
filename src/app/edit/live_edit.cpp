@@ -5,9 +5,12 @@
 
 #include "app/ui/ui_types.hpp"
 #include "app/world/store_overlay.hpp"
+#include "render/texture_atlas.hpp"
+#include "voxel/chunk_index.hpp"
 
 #include <algorithm>
 #include <cmath>
+#include <limits>
 
 #include <spdlog/spdlog.h>
 
@@ -54,7 +57,45 @@ void App::applyEditLive()
         // helper keeps the two ownership classes separate: terrain never
         // becomes an object, and object surface edits never overwrite terrain.
         vf::voxel::SmoothTerrainEdits smooth =
-            store.makeSmoothEdits(m_hoverHit.voxel, radius, m_smoothStrength);
+            store.makeSmoothEdits(m_hoverHit.voxel, radius, m_smoothStrength,
+                                  m_smoothPreserveVolume);
+        // Publish what the planner decided. The tint in the preview can only
+        // mark geometry that already exists, so a relaxation that moved every
+        // column by less than a voxel looks identical to one that did nothing;
+        // these three numbers are what makes the difference legible in the
+        // footer without a debug overlay.
+        {
+            // "N columns, widest run D cells" is what a relaxation actually
+            // did, and a sub-voxel relaxation is otherwise invisible.
+            // SINGLE PASS, no grouping container: the planner emits each
+            // column's run contiguously (its loops are for-z { for-x { emit
+            // this column's span } }), so a run ends exactly when the (x,z)
+            // key changes. The first version grouped with a linear scan per
+            // edit - O(n^2), i.e. tens of millions of comparisons on a 6 m
+            // stamp's ~11k edits, added to every stamp for a readout. If the
+            // planner ever interleaves columns this over-counts columns rather
+            // than crashing, which is the right failure for a diagnostic.
+            int columns = 0, widest = 0, lo = 0, hi = 0;
+            // Lattice coords are >= 0, so -1 is a sentinel that cannot collide
+            // (and needs no <climits>).
+            int px = -1, pz = -1;
+            for (const vf::voxel::StoreEdit& e : smooth.edits) {
+                if (e.x != px || e.z != pz) {
+                    widest = std::max(widest, hi - lo + 1);
+                    ++columns;
+                    lo = hi = e.y;
+                    px = e.x;
+                    pz = e.z;
+                } else {
+                    lo = std::min(lo, e.y);
+                    hi = std::max(hi, e.y);
+                }
+            }
+            widest = columns > 0 ? std::max(widest, hi - lo + 1) : 0;
+            m_smoothLastColumns = columns;
+            m_smoothLastMaxDelta = widest;
+            m_smoothLastRise = smooth.riseCells;
+        }
         edits = std::move(smooth.edits);
         riseCells = std::max(2, smooth.riseCells + 2);
         if (smooth.objectSurface)
@@ -77,11 +118,11 @@ void App::applyEditLive()
             case EditBrush::Carve:
                 recs = m_carve.makeOrientedCylinder(
                     m_hoverHit.voxel, -n, radius, length, m_editMat,
-                    /*carve=*/true);
+                    /*carve=*/true, m_editFalloffCurve);
                 break;
             case EditBrush::Add:
                 recs = m_add.makeDome(m_hoverHit.voxel, n, radius, length,
-                                      m_editMat);
+                                      m_editMat, m_editFalloffCurve);
                 break;
             case EditBrush::Rotate:
             case EditBrush::Move:
@@ -90,7 +131,8 @@ void App::applyEditLive()
             case EditBrush::Paint:
                 // brush ball centred on the hit cell: delete clears it, paint
                 // recolours
-                recs = m_carve.makeSphere(m_hoverHit.voxel, radius, m_editMat);
+                recs = m_carve.makeSphere(m_hoverHit.voxel, radius, m_editMat,
+                                          m_editFalloffCurve);
                 break;
             case EditBrush::Smooth:
                 return; // handled above; keeps the switch exhaustive
@@ -187,37 +229,34 @@ void App::commitStoreEdits(std::vector<vf::voxel::StoreEdit>& edits, int riseCel
     sp.edgeShrink = m_edgeShrink;
     sp.edgeFill = m_edgeFill;
     sp.sunDir = glm::vec3(m_sunDir);
-    // Live patches keep micro detail: LiveEditor regenerates the chunk's micro
-    // tail with the same deterministic hash the bake uses (VF_MICRO=0 off).
-    sp.microDetail = m_microDetail;
     sp.lodRings = false;
     sp.anisotropy = true;
     if (const char* e = getenv("VF_ANISO"))
         sp.anisotropy = atoi(e) != 0;
     m_strokeMargin = margin; // undo must replay the same region
     std::vector<int> changed = m_liveEditor.stamp(edits, sp, margin);
+    // The light trigger consumes these at stroke end (finishStroke/undo):
+    // accumulate across the dabs of one drag.
+    m_lastChangedChunks.insert(m_lastChangedChunks.end(), changed.begin(),
+                               changed.end());
     const auto t1 = std::chrono::steady_clock::now();
 
-    size_t nRunSurfels = 0, nRunParents = 0, nRunEdges = 0, nRunMicros = 0;
+    size_t nRunSurfels = 0, nRunParents = 0, nRunEdges = 0;
     for (int ci : changed) {
         const std::vector<vf::voxel::Surfel>& surfels = m_liveEditor.chunkRun(ci, sp);
         nRunSurfels += surfels.size();
         {
             // split the run by segment: a live edit that inflates a chunk shows
             // up here as parents/edges drifting apart from the baked counts
-            const uint32_t ms = m_liveEditor.microStartOf(ci);
             const uint32_t ec = m_liveEditor.edgeCountOf(ci);
             const uint32_t n = uint32_t(surfels.size());
-            const uint32_t parents = std::min(n, ms >= ec ? ms - ec : 0u);
-            nRunParents += parents;
+            nRunParents += n >= ec ? n - ec : 0u;
             nRunEdges += std::min(n, ec);
-            nRunMicros += n - std::min(n, ms);
         }
         if (!getenv("VF_LIVE_NOSPLAT"))
             m_splatPass.patchChunkSurfels(uint32_t(ci), surfels.data(),
                                           surfels.size() * sizeof(vf::voxel::Surfel),
                                           surfels.size(),
-                                          m_liveEditor.microStartOf(ci),
                                           m_liveEditor.edgeCountOf(ci));
         // SVO reference backend follows the same edit (chunk-local pool patch)
         const auto& pool = store.pool(ci);
@@ -237,21 +276,114 @@ void App::commitStoreEdits(std::vector<vf::voxel::StoreEdit>& edits, int riseCel
         patchHeightTexture(hx0 - 3, hz0 - 3, hx1 + 3, hz1 + 3, riseCells);
     }
     m_taaFirstFrame = true; // no history across a geometry change
-    const auto t2 = std::chrono::steady_clock::now();
-    auto ms = [](auto a, auto b) {
+    const auto t2 = std::chrono::steady_clock::now();    auto ms = [](auto a, auto b) {
         return std::chrono::duration<double, std::milli>(b - a).count();
     };
     m_lastEditMs = float(ms(t0, t2));
     m_lastEditSurfels = nRunSurfels;
     if (!m_dragging || getenv("VF_TRACE"))
         spdlog::info("live edit{}: {} cells, {} chunks, {} run surfels "
-                     "({} parents + {} edges + {} micros), pick {}, "
+                     "({} parents + {} edges), pick {}, "
                      "{:.1f} ms (stamp {:.1f}, gpu {:.1f})",
                      what, edits.size(), changed.size(), nRunSurfels,
-                     nRunParents, nRunEdges, nRunMicros,
+                     nRunParents, nRunEdges,
                      m_lastPickObject < 0 ? "none"
                                           : (m_lastPickObject ? "object" : "terrain"),
                      m_lastEditMs, ms(t0, t1), ms(t1, t2));
+}
+
+void App::refreshLiveLights()
+{
+    if (m_lastChangedChunks.empty() || !m_layers.loaded())
+        return;
+    auto& store = m_layers.store();
+    const auto t0 = std::chrono::steady_clock::now();
+    const std::vector<glm::vec3> emission =
+        buildEmissionTable(m_texBindings, m_texAtlas);
+    std::vector<vf::voxel::LightSource> rawAuthored;
+    vf::voxel::worldfile::loadLightManifest(m_manifestPath, rawAuthored);
+    // Same follow resolution as the bake upload (silent here - the bake
+    // owns the loud warning, a per-stroke warn would spam every release).
+    const std::vector<vf::voxel::LightSource> authored =
+        resolveFollowLights(rawAuthored, false);
+    const int budget =
+        std::clamp(m_lightBudget, 1, vf::voxel::kMaxLights);
+
+    // First trigger ever: seed the splice base (shared helper: exactly the
+    // field-enumerated set the bake upload derives), so the first stroke
+    // refreshes instead of replacing the binding contents.
+    ensureDerivedBase();
+
+    std::vector<int> region = m_lastChangedChunks;
+    m_lastChangedChunks.clear();
+    std::sort(region.begin(), region.end());
+    region.erase(std::unique(region.begin(), region.end()), region.end());
+
+    // region clusters through the full shared tail (thin+lift inside the
+    // region, deterministic like the bake)
+    std::vector<vf::voxel::VoxelField::EmissiveCluster> fresh;
+    store.collectEmissiveRegion(emission, fresh,
+                                std::numeric_limits<int>::max(), region);
+
+    // splice: drop cached clusters whose centroid falls in the touched
+    // region (they are recomputed below); survivors keep slots verbatim,
+    // so unrelated strokes can never flicker the light set.
+    const int latN = store.latN();
+    auto centroidChunk = [&](const glm::vec3& p) {
+        const int gx = int(std::floor((p.x + 0.5f * vf::voxel::WORLD) /
+                                      vf::voxel::VOXEL));
+        const int gy = int(std::floor((p.y + 0.5f * vf::voxel::WORLD) /
+                                      vf::voxel::VOXEL));
+        const int gz = int(std::floor((p.z + 0.5f * vf::voxel::WORLD) /
+                                      vf::voxel::VOXEL));
+        if (gx < 0 || gy < 0 || gz < 0 || gx >= latN || gy >= latN || gz >= latN)
+            return -1;
+        return vf::voxel::chunkIndexOfCell(gx, gy, gz);
+    };
+    using Cluster = vf::voxel::VoxelField::EmissiveCluster;
+    std::vector<Cluster> merged;
+    merged.reserve(m_derivedClusters.size() + fresh.size());
+    for (const Cluster& c : m_derivedClusters) {
+        const int cc = centroidChunk(c.pos);
+        if (cc >= 0 && std::binary_search(region.begin(), region.end(), cc))
+            continue; // recomputed from the live store below
+        merged.push_back(c);
+    }
+    // thin fresh against survivors (drop, never displace: survivors stable)
+    const float thin2 = vf::voxel::kEmissiveThinDist * vf::voxel::kEmissiveThinDist;
+    for (const Cluster& f : fresh) {
+        bool tooClose = false;
+        for (const Cluster& c : merged) {
+            const glm::vec3 d = c.pos - f.pos;
+            if (glm::dot(d, d) < thin2) {
+                tooClose = true;
+                break;
+            }
+        }
+        if (!tooClose)
+            merged.push_back(f);
+    }
+    m_derivedClusters = merged;
+
+    // fill binding 25 authored-first via the shared fill (same order, gain
+    // and budget as the bake; truncation is silent here — the bake path
+    // owns the loud warning, a per-stroke warn would spam every release)
+    vf::voxel::LightUBO ubo{};
+    const int n = vf::voxel::fillLightUBO(authored, merged, budget, ubo, false);
+    const int nAuthored =
+        std::min<int>(int(authored.size()), budget);
+    ubo.perPixelK =
+        std::clamp(m_lightK, 1, vf::voxel::worldfile::kLightKMax);
+    m_svoPass.setLights(ubo);
+    m_splatPass.setLights(ubo);
+    const auto t1 = std::chrono::steady_clock::now();
+    spdlog::info("live lights: {} authored + {} derived in {} chunks, {}/{} slots ({:.1f} ms)",
+                 nAuthored, n - nAuthored, region.size(), n, budget,
+                 std::chrono::duration<double, std::milli>(t1 - t0).count());
+    // A staged move/rotate preview survives strokes: the both-pass upload
+    // above just restored base to splat, so re-apply the overlay (no-op
+    // when no preview is staged).
+    refreshPreviewLights();
 }
 
 void App::finishStroke()
@@ -312,6 +444,7 @@ void App::finishStroke()
     m_strokeMargin = vf::voxel::LiveEditor::kStampMargin;
     m_lastStampWroteCell = glm::ivec3(-1, -1, -1);
     m_undoOverflow = false;
+    refreshLiveLights();
 }
 
 void App::undoEdit()
@@ -338,6 +471,7 @@ void App::undoEdit()
     // instant; the touched chunks keep the live path's store-derived shading
     // until the next reload, exactly like a painted stroke).
     m_overlayWriter.queue(m_layers.store(), overlayPath());
+    refreshLiveLights();
 }
 
 void App::clearLiveEdits()
@@ -375,7 +509,6 @@ void App::clearLiveEdits()
     sp.edgeShrink = m_edgeShrink;
     sp.edgeFill = m_edgeFill;
     sp.sunDir = glm::vec3(m_sunDir);
-    sp.microDetail = m_microDetail;
     sp.lodRings = false;
     sp.anisotropy = true;
     if (const char* e = getenv("VF_ANISO"))
@@ -389,7 +522,6 @@ void App::clearLiveEdits()
             m_splatPass.patchChunkSurfels(uint32_t(ci), surfels.data(),
                                           surfels.size() * sizeof(vf::voxel::Surfel),
                                           surfels.size(),
-                                          m_liveEditor.microStartOf(ci),
                                           m_liveEditor.edgeCountOf(ci));
         const auto& pool = fresh.pool(ci);
         if (pool && !getenv("VF_LIVE_NOSVO"))

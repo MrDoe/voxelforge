@@ -104,7 +104,7 @@ TEST_CASE("surfelize cube: 8 surfels with unit normals")
     }
 }
 
-TEST_CASE("surfelize preserves exact layer ownership through micro detail")
+TEST_CASE("surfelize preserves exact layer ownership")
 {
     constexpr uint8_t kLayer = 37;
     const VoxelField f = cubeField(kLayer);
@@ -116,9 +116,8 @@ TEST_CASE("surfelize preserves exact layer ownership through micro detail")
     SurfelParams p;
     p.smoothNormals = false;
     p.terrainHeightfieldNormals = false;
-    p.microDetail = true;
     const SurfelSet set = buildSurfels(f, p);
-    REQUIRE(set.surfels.size() > 8u); // micro children were emitted
+    REQUIRE(!set.surfels.empty());
     for (const Surfel& s : set.surfels) {
         CHECK(surfelLayerId(s.mat_ao.w) == kLayer);
         CHECK(surfelBakedAo(s.mat_ao.w) >= 0.0f);
@@ -276,7 +275,7 @@ TEST_CASE("surfelize chunk bucketing covers every surfel exactly once")
     CHECK(total == set.surfels.size());
 }
 
-TEST_CASE("surfelize micro-detail: deterministic texture-geometry")
+TEST_CASE("surfelize default bake: sane count, ranges and finite surfels")
 {
     LayeredWorld& lw = allLayersWorld();
     REQUIRE(lw.loaded());
@@ -286,25 +285,18 @@ TEST_CASE("surfelize micro-detail: deterministic texture-geometry")
     SurfelParams p;
     p.smoothNormals = true;
     p.terrainHeightfieldNormals = true;
-    p.microDetail = false;
-    const SurfelSet base = buildSurfels(field, p);
-    p.microDetail = true;
-    const SurfelSet micro = buildSurfels(field, p);
-    const SurfelSet micro2 = buildSurfels(field, p);
-    REQUIRE(!base.surfels.empty());
-    REQUIRE(!micro.surfels.empty());
-    // micros only add geometry (base set is a prefix per chunk, same order)
-    CHECK(micro.surfels.size() > base.surfels.size());
-    CHECK(micro.surfels.size() < base.surfels.size() * 3u);
-    CHECK(micro2.surfels == micro.surfels);
-    CHECK(micro2.chunkRange == micro.chunkRange);
+    const SurfelSet set = buildSurfels(field, p);
+    const SurfelSet set2 = buildSurfels(field, p);
+    REQUIRE(!set.surfels.empty());
+    CHECK(set2.surfels == set.surfels);
+    CHECK(set2.chunkRange == set.chunkRange);
     size_t total = 0;
-    for (size_t c = 0; c + 1 < micro.chunkRange.size(); ++c) {
-        CHECK(micro.chunkRange[c + 1] >= micro.chunkRange[c]);
-        total += micro.chunkRange[c + 1] - micro.chunkRange[c];
+    for (size_t c = 0; c + 1 < set.chunkRange.size(); ++c) {
+        CHECK(set.chunkRange[c + 1] >= set.chunkRange[c]);
+        total += set.chunkRange[c + 1] - set.chunkRange[c];
     }
-    CHECK(total == micro.surfels.size());
-    for (const auto& s : micro.surfels) {
+    CHECK(total == set.surfels.size());
+    for (const auto& s : set.surfels) {
         const float* f = &s.pos_rU.x;
         for (int k = 0; k < 20; ++k)
             CHECK(std::isfinite(f[k]));
@@ -317,27 +309,6 @@ TEST_CASE("surfelize micro-detail: deterministic texture-geometry")
     }
 }
 
-TEST_CASE("surfelize: object chunks are flagged for micro-distance selection")
-{
-    LayeredWorld& lw = allLayersWorld();
-    REQUIRE(lw.loaded());
-    const VoxelField& field = lw.field();
-    REQUIRE(field.valid());
-
-    SurfelParams p;
-    p.microDetail = false;
-    p.lodRings = false;
-    const SurfelSet set = buildSurfels(field, p);
-    const size_t kChunks = size_t(GRID_N) * GRID_N * GRID_N;
-    REQUIRE(set.objectChunks.size() == kChunks);
-    CHECK(set.objectCount > 0);
-    size_t flagged = 0;
-    for (uint8_t f : set.objectChunks)
-        flagged += f ? 1 : 0;
-    CHECK(flagged > 0);
-    CHECK(flagged < kChunks); // terrain-only chunks stay unflagged
-}
-
 TEST_CASE("surfelize: anisotropic footprints follow creases")
 {
     LayeredWorld& lw = allLayersWorld();
@@ -347,7 +318,6 @@ TEST_CASE("surfelize: anisotropic footprints follow creases")
 
     SurfelParams p;
     p.lodRings = false;
-    p.microDetail = false;
     p.anisotropy = false;
     const SurfelSet iso = buildSurfels(field, p);
     p.anisotropy = true;
@@ -439,7 +409,6 @@ TEST_CASE("surfelize: hard-edge parents tighten and small crease bridges fill th
     SurfelParams p;
     p.smoothNormals = false;
     p.terrainHeightfieldNormals = false;
-    p.microDetail = false;
     p.lodRings = false;
     p.anisotropy = false;
     p.edgeFill = false;

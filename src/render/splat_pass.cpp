@@ -3,6 +3,7 @@
 #include "voxel/surfelize.hpp"
 #include <core/log.hpp>
 #include <algorithm>
+#include <cassert>
 #include <cstdio>
 #include <cstring>
 #include <fstream>
@@ -43,7 +44,7 @@ bool SplatPass::init(const Context& ctx)
     m_ctx = &ctx;
     VkDevice dev = ctx.device();
 
-    VkDescriptorSetLayoutBinding b[17] = {};
+    VkDescriptorSetLayoutBinding b[19] = {};
     b[0] = { 0, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1,
              VK_SHADER_STAGE_VERTEX_BIT, nullptr };
     b[1] = { 1, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 1,
@@ -87,8 +88,20 @@ bool SplatPass::init(const Context& ctx)
     b[13 + 3] = { 14, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, 1,
                  VkShaderStageFlags(VK_SHADER_STAGE_VERTEX_BIT |
                                     VK_SHADER_STAGE_COMPUTE_BIT), nullptr };
+    // explicit point lights (same binding as the SVO backend)
+    b[17] = { 25, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, 1,
+             VkShaderStageFlags(VK_SHADER_STAGE_FRAGMENT_BIT | VK_SHADER_STAGE_COMPUTE_BIT),
+             nullptr };
+    // coarse irradiance volume (sampler3D, common_irradiance.glsl) - stage
+    // mask mirrors binding 25 because the same shared header declares it and
+    // both consumers (shadeSurfel in the fragment stage, shadeTerrain in the
+    // SVO/tile compute stages) live behind it
+    b[18] = { 26, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1,
+              VkShaderStageFlags(VK_SHADER_STAGE_FRAGMENT_BIT |
+                                 VK_SHADER_STAGE_COMPUTE_BIT),
+              nullptr };
     VkDescriptorSetLayoutCreateInfo li { VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO };
-    li.bindingCount = 17;
+    li.bindingCount = 19;
     li.pBindings = b;
     if (vkCreateDescriptorSetLayout(dev, &li, nullptr, &m_setLayout) != VK_SUCCESS)
         return false;
@@ -110,8 +123,10 @@ bool SplatPass::init(const Context& ctx)
 
     VkDescriptorPoolSize sizes[4] = { { VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 4 },
                                           { VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 4 },
-                                          { VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, 6 },
-                                          { VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 3 } };
+                                          { VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, 7 },
+                                          // 10 (Hi-Z sampled) + 12 (depth) +
+                                          // 22 (atlas) + 26 (irradiance volume)
+                                          { VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 4 } };
     VkDescriptorPoolCreateInfo pi { VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO };
     pi.maxSets = 1;
     pi.poolSizeCount = 4;
@@ -126,13 +141,14 @@ bool SplatPass::init(const Context& ctx)
     if (vkAllocateDescriptorSets(dev, &ai, &m_set) != VK_SUCCESS)
         return false;
 
-    m_paramsBuf = makeBuffer(ctx, 2 * sizeof(glm::vec4),
+    m_paramsBuf = makeBuffer(ctx, 3 * sizeof(glm::vec4),
                              VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT,
                              VMA_MEMORY_USAGE_AUTO_PREFER_HOST, true);
     if (!m_paramsBuf.buf || !m_paramsBuf.mapped)
         return false;
     {
-        glm::vec4 init[2] = { m_params, glm::vec4(m_radiusScale, 0.0f, 0.0f, 0.0f) };
+        glm::vec4 init[3] = { m_params, glm::vec4(m_radiusScale, 0.0f, 0.0f, 0.0f),
+                               glm::vec4(0.0f, 0.0f, 0.0f, 0.0f) };
         memcpy(m_paramsBuf.mapped, init, sizeof(init));
     }
     VkDescriptorBufferInfo pi3 { m_paramsBuf.buf, 0, VK_WHOLE_SIZE };
@@ -253,7 +269,7 @@ bool SplatPass::initTileResources(const Context& ctx)
         x.stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
         return x;
     };
-    VkDescriptorSetLayoutBinding tb[25] = {
+    VkDescriptorSetLayoutBinding tb[27] = {
         ssbo(0), simage(1), simage(2), ubo(3), ssbo(4), ssbo(5), ssbo(6),
         ssbo(7), ubo(8), ssbo(9), ssbo(10), sampler(11), sampler(12),
         ssbo(13), simage(14), simage(15), ssbo(16), ssbo(17), ssbo(18),
@@ -263,15 +279,20 @@ bool SplatPass::initTileResources(const Context& ctx)
         sampler(22), ubo(23),
         // tile path cannot reuse forward binding 14 (HDR storage image), so
         // the same rotation UBO is mirrored at compute-only binding 24.
-        ubo(24)
+        ubo(24),
+        // explicit point lights (same UBO/binding number as the forward set)
+        ubo(25),
+        // coarse irradiance volume - same binding number as the forward set
+        // so common_irradiance.glsl's single declaration serves both
+        sampler(26)
     };
     // live bindings: 0 surfels, 1 height, 2 objvol, 3 splatUBO, 4 sel,
     // 5 counts/bases matrix, 6 tile offsets, 7 tile ends, 8 frame UBO,
     // 9 tile totals, 10 dup vals, 11/12 IBL (black parity), 14/15 hdr/gpos,
     // 20 slot-tripled dup total, 21 G-buffer normal, 22/23 texture atlas,
-    // 24 selected-layer rotation UBO
+    // 24 selected-layer rotation UBO, 25 lights, 26 irradiance volume
     VkDescriptorSetLayoutCreateInfo tli { VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO };
-    tli.bindingCount = 25;
+    tli.bindingCount = 27;
     tli.pBindings = tb;
     if (vkCreateDescriptorSetLayout(dev, &tli, nullptr, &m_tileSetLayout) != VK_SUCCESS)
         return false;
@@ -290,8 +311,9 @@ bool SplatPass::initTileResources(const Context& ctx)
 
     VkDescriptorPoolSize tps[4] = { { VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 13 },
                                     { VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 5 },
-                                    { VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, 4 },
-                                    { VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 3 } };
+                                    { VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, 5 },
+                                    // 11/12 IBL + 22 atlas + 26 irradiance
+                                    { VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 4 } };
     VkDescriptorPoolCreateInfo tpi { VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO };
     tpi.maxSets = 1;
     tpi.poolSizeCount = 4;
@@ -571,10 +593,11 @@ bool SplatPass::createPipelines(VkFormat hdrFormat)
     bool ok =
         makePipe(1, 0, false, false, VK_COMPARE_OP_LESS, false,
                  false, true, VK_FORMAT_UNDEFINED, &m_skyPipe) &&
-        // Opaque base: exactly the nearest fragment (EQUAL against the
-        // prepass depth), opaque replace, no blend — seals the surface so
-        // the sky can never bleed through the Gaussian band's low-alpha rims.
-        // Early-Z drops every non-nearest fragment before shading.
+        // Base seal: the nearest fragment (EQUAL against the prepass depth),
+        // opaque replace, no blend. It also stands in for the geometry the
+        // depth band rejects behind it, so the shader declines to seal
+        // fragments too thin to do that (rims/overhangs) and lets the band
+        // fade them. Early-Z drops every non-nearest fragment before shading.
         makePipe(0, 4, true, false, VK_COMPARE_OP_EQUAL, false,
                  false, true, kDepthFmt, &m_opaqueBasePipe) &&
         // Opaque band: pure Gaussian alpha, source-over; depth-tested against
@@ -633,14 +656,79 @@ void SplatPass::setTexAtlas(VkImageView view, VkSampler sampler, VkBuffer tableU
     vkUpdateDescriptorSets(m_ctx->device(), 2, w, 0, nullptr);
 }
 
+void SplatPass::setLights(const vf::voxel::LightUBO& lights)
+{
+    if (!m_ctx)
+        return;
+    if (!m_lightsBuf.buf)
+        m_lightsBuf = makeBuffer(*m_ctx, sizeof(vf::voxel::LightUBO),
+                                 VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT,
+                                 VMA_MEMORY_USAGE_AUTO_PREFER_HOST, true);
+    if (!m_lightsBuf.buf || !m_lightsBuf.mapped)
+        return;
+    memcpy(m_lightsBuf.mapped, &lights, sizeof(lights));
+    VkDescriptorBufferInfo info{ m_lightsBuf.buf, 0, sizeof(lights) };
+    if (m_set) {
+        VkWriteDescriptorSet w { VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, nullptr, m_set, 25,
+                                 0, 1, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, nullptr, &info, nullptr };
+        vkUpdateDescriptorSets(m_ctx->device(), 1, &w, 0, nullptr);
+    }
+    if (m_tileReady) {
+        VkWriteDescriptorSet w { VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, nullptr, m_tileSet, 25,
+                                 0, 1, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, nullptr, &info, nullptr };
+        vkUpdateDescriptorSets(m_ctx->device(), 1, &w, 0, nullptr);
+    }
+}
+
+// Coarse irradiance volume (binding 26) into both descriptor sets. The view is
+// owned by App (one 64^3 image, created once and only ever re-uploaded - see
+// App::uploadIrradianceVolume); this owns the sampler. Called once, right
+// after the first upload, so the descriptor never references an image whose
+// pixels are not there yet.
+void SplatPass::setIrrVolView(VkImageView view)
+{
+    if (!m_ctx || view == VK_NULL_HANDLE)
+        return;
+    if (!m_irrSampler) {
+        VkSamplerCreateInfo sci { VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO };
+        // LINEAR, not NEAREST: the bake stores one value per 1.6 m cell and
+        // the shader asks for the irradiance at an arbitrary point, so a
+        // NEAREST sampler would stair-step the term into visible blocks at
+        // exactly the frequency the volume exists to smooth. CLAMP_TO_EDGE
+        // matches irrVolumeUVW's own clamp, so a texel at the world edge
+        // extends instead of wrapping to the opposite side.
+        sci.magFilter = VK_FILTER_LINEAR;
+        sci.minFilter = VK_FILTER_LINEAR;
+        sci.mipmapMode = VK_SAMPLER_MIPMAP_MODE_NEAREST;
+        sci.addressModeU = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
+        sci.addressModeV = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
+        sci.addressModeW = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
+        sci.maxLod = 0.0f;
+        if (vkCreateSampler(m_ctx->device(), &sci, nullptr, &m_irrSampler) != VK_SUCCESS) {
+            spdlog::error("irradiance volume: sampler creation failed - binding 26 "
+                          "left unbound (the term will read as absent)");
+            m_irrSampler = VK_NULL_HANDLE;
+            return;
+        }
+    }
+    const VkDescriptorImageInfo img { m_irrSampler, view,
+                                      VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL };
+    VkWriteDescriptorSet w { VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, nullptr, m_set, 26,
+                             0, 1, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, &img,
+                             nullptr, nullptr };
+    vkUpdateDescriptorSets(m_ctx->device(), 1, &w, 0, nullptr);
+    // same binding in the tile set: the tile compute path includes the same
+    // common_base.glsl declaration, so both sets must carry it
+    w.dstSet = m_tileSet;
+    vkUpdateDescriptorSets(m_ctx->device(), 1, &w, 0, nullptr);
+}
+
 void SplatPass::setSurfels(const void* data, size_t bytes, size_t count,
                            const std::vector<uint32_t>& chunkRange, uint32_t waterStart,
                            const std::vector<uint32_t>& waterChunkRange,
-                           const std::vector<uint32_t>& microStart,
                            const std::vector<uint32_t>& edgeStart,
                            const std::vector<uint32_t>& lod1Range,
-                           const std::vector<uint32_t>& lod2Range,
-                           const std::vector<uint8_t>& objectChunks)
+                           const std::vector<uint32_t>& lod2Range)
 {
     if (m_surfelBuf) {
         vmaDestroyBuffer(m_ctx->allocator(), m_surfelBuf, m_surfelAlloc);
@@ -653,13 +741,11 @@ void SplatPass::setSurfels(const void* data, size_t bytes, size_t count,
     m_chunkCount.clear();
     m_chunkCap.clear();
     m_edgeStart.clear();
-    m_microStart.clear();
     m_waterChunkRange.clear();
     m_lod1Range.clear();
     m_lod2Range.clear();
     m_lod1Valid.clear();
     m_lod2Valid.clear();
-    m_objectChunks.clear();
     m_opaqueCap = 0;
     m_opaqueHigh = 0;
     m_bufSlots = 0;
@@ -670,12 +756,9 @@ void SplatPass::setSurfels(const void* data, size_t bytes, size_t count,
     const void* src = haveData ? data : &dummy;
     size_t up = haveData ? bytes : sizeof(dummy);
     std::vector<uint8_t> repack;
-    if (objectChunks.size() == kChunks)
-        m_objectChunks = objectChunks; // per chunk, no buffer-offset relocation
-
     if (haveData && chunkRange.size() == kChunks + 1) {
         // --- paged repack: per-chunk slots with reserved capacity ----------
-        const uint32_t baseMicroTotal =
+        const uint32_t opaqueTotal =
             std::min<uint32_t>(chunkRange[kChunks], uint32_t(count));
         const uint32_t waterStartC = std::min<uint32_t>(waterStart, uint32_t(count));
         // VF_SPLAT_NOPAD=1 lays chunks out contiguously (A/B for the paged
@@ -697,7 +780,7 @@ void SplatPass::setSurfels(const void* data, size_t bytes, size_t count,
         }
         m_opaqueCap = cursor + (pad ? std::max<uint32_t>(65536u, uint32_t(count) / 16) : 0);
         m_opaqueHigh = cursor;
-        const uint32_t delta = m_opaqueCap - baseMicroTotal;
+        const uint32_t delta = m_opaqueCap - opaqueTotal;
         const size_t slots = size_t(count) + delta;
         repack.resize(slots * kSurfelBytes);
         std::memset(repack.data(), 0, repack.size());
@@ -712,24 +795,15 @@ void SplatPass::setSurfels(const void* data, size_t bytes, size_t count,
         }
         // LOD ring + water tail moves by `delta` (it stays contiguous after
         // the padded opaque region)
-        if (count > baseMicroTotal)
-            std::memcpy(repack.data() + (size_t(baseMicroTotal) + delta) * kSurfelBytes,
-                        srcBytes + size_t(baseMicroTotal) * kSurfelBytes,
-                        size_t(count - baseMicroTotal) * kSurfelBytes);
+        if (count > opaqueTotal)
+            std::memcpy(repack.data() + (size_t(opaqueTotal) + delta) * kSurfelBytes,
+                        srcBytes + size_t(opaqueTotal) * kSurfelBytes,
+                        size_t(count - opaqueTotal) * kSurfelBytes);
         src = repack.data();
         up = repack.size();
         m_bufSlots = uint32_t(slots);
         m_count = slots;
         m_waterStart = waterStartC + delta;
-        if (microStart.size() == kChunks + 1) {
-            m_microStart.resize(kChunks + 1);
-            for (uint32_t c = 0; c < kChunks; ++c) {
-                const uint32_t baseCnt =
-                    microStart[c] > chunkRange[c] ? microStart[c] - chunkRange[c] : 0;
-                m_microStart[c] = m_chunkStart[c] + std::min(baseCnt, m_chunkCount[c]);
-            }
-            m_microStart[kChunks] = uint32_t(slots);
-        }
         if (edgeStart.size() == kChunks + 1) {
             m_edgeStart.resize(kChunks + 1);
             for (uint32_t c = 0; c < kChunks; ++c) {
@@ -761,7 +835,6 @@ void SplatPass::setSurfels(const void* data, size_t bytes, size_t count,
         m_count = count;
         m_bufSlots = uint32_t(up / kSurfelBytes);
         m_edgeStart = edgeStart;
-        m_microStart = microStart;
         m_waterChunkRange = waterChunkRange;
         m_lod1Range = lod1Range;
         m_lod2Range = lod2Range;
@@ -852,8 +925,6 @@ uint32_t SplatPass::readChunkSurfels(uint32_t chunk, std::vector<uint8_t>& out,
         return 0;
     uint32_t start = m_chunkStart[chunk];
     uint32_t end = start + m_chunkCount[chunk];
-    if (m_microStart.size() == 16 * 16 * 16 + 1)
-        end = std::min(end, m_microStart[chunk]); // base+edge run only
     if (edgeCount && m_edgeStart.size() == 16 * 16 * 16 + 1) {
         const uint32_t edge = std::min(std::max(m_edgeStart[chunk], start), end);
         *edgeCount = end - edge;
@@ -955,8 +1026,7 @@ void SplatPass::writeCompactIdentity(uint32_t first, uint32_t count)
 }
 
 void SplatPass::patchChunkSurfels(uint32_t chunk, const void* data, size_t bytes,
-                                  size_t count, uint32_t microOffset,
-                                  uint32_t edgeCount)
+                                  size_t count, uint32_t edgeCount)
 {
     constexpr size_t kSurfelBytes = sizeof(vf::voxel::Surfel); // layout lives in surfelize.hpp
     if (!m_surfelBuf || bytes != count * kSurfelBytes ||
@@ -972,8 +1042,6 @@ void SplatPass::patchChunkSurfels(uint32_t chunk, const void* data, size_t bytes
         m_chunkCount[chunk] = 0;
         if (m_edgeStart.size() == 16 * 16 * 16 + 1)
             m_edgeStart[chunk] = m_chunkStart[chunk];
-        if (m_microStart.size() == 16 * 16 * 16 + 1)
-            m_microStart[chunk] = m_chunkStart[chunk];
         if (m_lod1Valid.size() == 16 * 16 * 16)
             m_lod1Valid[chunk] = 0;
         if (m_lod2Valid.size() == 16 * 16 * 16)
@@ -1016,21 +1084,13 @@ void SplatPass::patchChunkSurfels(uint32_t chunk, const void* data, size_t bytes
     // per-frame cull pass rewrites them for drawn ranges anyway)
     writeCompactIdentity(base, uint32_t(count));
     m_chunkCount[chunk] = uint32_t(count);
-    // LiveEditor sends [base parents | edge bridges | material micros]. Only
-    // the latter is distance-culled; the edge bridges stay in the always-on
-    // base draw and carry the same owner metadata as their parents.
+    // LiveEditor sends [base parents | edge bridges]. The edge bridges stay
+    // in the always-on base draw and carry the same owner metadata as their
+    // parents.
     if (m_edgeStart.size() == 16 * 16 * 16 + 1) {
         const uint32_t edgeEnd =
-            edgeCount == UINT32_MAX
-                ? (microOffset == UINT32_MAX ? uint32_t(count) : microOffset)
-                : edgeCount;
+            edgeCount == UINT32_MAX ? uint32_t(count) : edgeCount;
         m_edgeStart[chunk] = base + std::min(edgeEnd, uint32_t(count));
-    }
-    if (m_microStart.size() == 16 * 16 * 16 + 1) {
-        const uint32_t microBegin =
-            microOffset == UINT32_MAX ? uint32_t(count)
-                                      : std::min(microOffset, uint32_t(count));
-        m_microStart[chunk] = base + microBegin;
     }
     if (m_lod1Valid.size() == 16 * 16 * 16)
         m_lod1Valid[chunk] = 0;
@@ -1591,6 +1651,46 @@ bool SplatPass::chunkVisible(const glm::vec4 planes[6], uint32_t chunk) const
     return true;
 }
 
+void SplatPass::refreshEnvCache()
+{
+    if (m_env.init)
+        return;
+    m_env.init = true;
+    m_env.noCull = getenv("VF_SPLAT_NOCULL") != nullptr;
+    m_env.noWaterCull = getenv("VF_SPLAT_NOWATERCULL") != nullptr;
+    m_env.direct = getenv("VF_SPLAT_DIRECT") != nullptr;
+    m_env.noGpuCull = getenv("VF_NO_GPU_CULL") != nullptr;
+    m_env.noIndirectBarrier = getenv("VF_NO_INDIRECT_BARRIER") != nullptr;
+    m_env.noOccl = getenv("VF_NO_OCCL") != nullptr;
+    m_env.noWater = getenv("VF_SPLAT_NOWATER") != nullptr;
+    m_env.trace = getenv("VF_TRACE") != nullptr;
+    if (const char* e = getenv("VF_SPLAT_DEBUG")) {
+        m_env.debugSet = true;
+        m_env.debugVal = float(atof(e));
+    }
+    if (const char* e = getenv("VF_LOD1"))
+        m_env.lod1Dist = float(atof(e));
+    if (const char* e = getenv("VF_LOD2"))
+        m_env.lod2Dist = float(atof(e));
+    if (const char* e = getenv("VF_SPLAT_SIGMA"))
+        m_env.sigma = float(atof(e));
+    if (const char* e = getenv("VF_SPLAT_EXTENT"))
+        m_env.extent = float(atof(e));
+    if (const char* e = getenv("VF_SPLAT_RADIUS"))
+        m_env.radius = glm::clamp(float(atof(e)), 0.5f, 2.0f);
+    if (const char* e = getenv("VF_SPLAT_OPACITY"))
+        m_env.opacity = glm::clamp(float(atof(e)), 0.0f, 1.0f);
+    if (const char* e = getenv("VF_SPLAT_DEPTH_TOL"))
+        m_env.depthTol = glm::clamp(float(atof(e)), 0.0f, 0.05f);
+    if (const char* e = getenv("VF_SPLAT_EDGE"))
+        m_env.edgeStart = glm::clamp(float(atof(e)), 0.0f, 0.999f);
+    if (const char* e = getenv("VF_SPLAT_SEAL_ALPHA"))
+        m_env.sealAlpha = glm::clamp(float(atof(e)), 0.0f, 1.0f);
+    if (const char* e = getenv("VF_TILE"))
+        m_env.tile = atoi(e) != 0;
+    m_drawScratch.reserve(1024);
+}
+
 void SplatPass::computeDraws(const RaymarchPush& push)
 {
     m_cpuDraws.clear();
@@ -1613,54 +1713,26 @@ void SplatPass::computeDraws(const RaymarchPush& push)
     // Gaussian disks source-over with no depth write, so far must composite
     // before near. 4096 distance evaluations + sort per frame is ~100 us;
     // within-chunk order errors are bounded by the 6.4 m chunk size.
-    struct Draw {
-        float dist2;
-        uint32_t first, count;
-    };
-    std::vector<Draw> draws;
-    draws.reserve(1024);
+    refreshEnvCache();
+    auto& draws = m_drawScratch;
+    draws.clear();
     const glm::vec3 camPos = glm::vec3(push.camPos);
     // A live layer can move outside its source chunk AABB. Per-surfel GPU
     // culling applies the exact transform, but the conservative CPU chunk
     // gate cannot know which chunks contain the target; bypass it only for
     // the short preview/commit window.
     const bool rotating = m_rot[0].x > 0.5f;
-    const bool cull = !getenv("VF_SPLAT_NOCULL") && !rotating;
+    const bool cull = !m_env.noCull && !rotating;
     // LOD ring selection: chunks past VF_LOD1 (default 30 m) draw their
-    // merged-terrain LOD1 run instead of base+micro; past VF_LOD2 (90 m) the
+    // merged-terrain LOD1 run instead of base; past VF_LOD2 (90 m) the
     // LOD2 run. Object-only chunks (empty merged runs) fall back to the base
     // range. 0 disables the ring.
-    float lod1Dist = 30.0f, lod2Dist = 90.0f;
-    if (const char* e = getenv("VF_LOD1"))
-        lod1Dist = float(atof(e));
-    if (const char* e = getenv("VF_LOD2"))
-        lod2Dist = float(atof(e));
+    const float lod1Dist = m_env.lod1Dist;
+    const float lod2Dist = m_env.lod2Dist;
     const bool hasLod1 = m_lod1Range.size() == 16 * 16 * 16 + 1 &&
                          m_lod1Valid.size() == 16 * 16 * 16 && lod1Dist > 0.0f;
     const bool hasLod2 = m_lod2Range.size() == 16 * 16 * 16 + 1 &&
                          m_lod2Valid.size() == 16 * 16 * 16 && lod2Dist > 0.0f;
-    // Micro-detail cull distance: micro disks (0.04-0.09 m) are sub-pixel
-    // beyond ~20 m (1-2 px at 720p) and hide inside their base footprint, so
-    // distant chunks draw base only. Object chunks (foliage/props) read as
-    // blobs when their micros vanish, so they keep them out to
-    // VF_MICRO_DIST_OBJ (default 35 m). Measured cost of 20-40 m micros:
-    // ~19 ms/frame at the reference view; visual diff 0.45% pixels >10
-    // (hero view). VF_MICRO_DIST=0 / VF_MICRO_DIST_OBJ=0 keep all micros.
-    float microDist2 = 20.0f * 20.0f;
-    if (const char* e = getenv("VF_MICRO_DIST"))
-        microDist2 = float(atof(e)) * float(atof(e));
-    float microDistObj2 = 35.0f * 35.0f;
-    if (const char* e = getenv("VF_MICRO_DIST_OBJ"))
-        microDistObj2 = float(atof(e)) * float(atof(e));
-    const bool hasMicroSplit = m_microStart.size() == 16 * 16 * 16 + 1;
-    const bool hasObjChunks = m_objectChunks.size() == 16 * 16 * 16;
-    auto microVisible = [&](uint32_t c, float d2) {
-        if (rotating)
-            return true; // source-chunk distance is stale for the target layer
-        const float md2 =
-            (hasObjChunks && m_objectChunks[c]) ? microDistObj2 : microDist2;
-        return md2 <= 0.0f || d2 < md2;
-    };
     const float cs = 102.4f / 16.0f;
     for (uint32_t c = 0; c < 16 * 16 * 16; ++c) {
         const uint32_t first = m_chunkStart[c];
@@ -1689,55 +1761,50 @@ void SplatPass::computeDraws(const RaymarchPush& push)
             ncp = glm::clamp(camPos, mn, mn + glm::vec3(cs));
         }
         const float nearDist = std::sqrt(glm::dot(ncp - camPos, ncp - camPos));
-        uint32_t split = last;
-        if (hasMicroSplit)
-            split = std::min(m_microStart[c], last);
-        if (split < first)
-            split = first;
         // LOD ring selection replaces the chunk's base terrain run; object
         // surfels ride along unmerged inside the ring (trees must never
-        // vanish). The chunk's micro tail still applies on top, gated by
-        // the same micro distance as base chunks.
+        // vanish).
         if (hasLod2 && m_lod2Valid[c] && nearDist >= lod2Dist &&
             m_lod2Range[c + 1] > m_lod2Range[c]) {
             draws.push_back({ dist2, m_lod2Range[c],
                               m_lod2Range[c + 1] - m_lod2Range[c] });
-            if (hasMicroSplit && microVisible(c, dist2)) {
-                const uint32_t mf = std::min(m_microStart[c], last);
-                if (last > mf)
-                    draws.push_back({ dist2, mf, last - mf });
-            }
             continue;
         }
         if (hasLod1 && m_lod1Valid[c] && nearDist >= lod1Dist &&
             m_lod1Range[c + 1] > m_lod1Range[c]) {
             draws.push_back({ dist2, m_lod1Range[c],
                               m_lod1Range[c + 1] - m_lod1Range[c] });
-            if (hasMicroSplit && microVisible(c, dist2)) {
-                const uint32_t mf = std::min(m_microStart[c], last);
-                if (last > mf)
-                    draws.push_back({ dist2, mf, last - mf });
-            }
             continue;
         }
-        draws.push_back({ dist2, first, split > first ? split - first : 0 });
-        // near chunks also draw their micro tail (same sort key: stable
-        // sort below keeps base-then-micro order within the chunk)
-        if (last > split && microVisible(c, dist2))
-            draws.push_back({ dist2, split, last - split });
+        draws.push_back({ dist2, first, last > first ? last - first : 0 });
     }
-    // stable: equal keys (base + micro of one chunk) keep insertion order
+    // stable: equal keys keep insertion order
     std::stable_sort(draws.begin(), draws.end(),
-                     [](const Draw& a, const Draw& b) { return a.dist2 > b.dist2; });
+                     [](const ScratchDraw& a, const ScratchDraw& b) { return a.dist2 > b.dist2; });
+    // ---- shared entry budget (see note on kMaxChunkDraws) ---------------
+    // Everything downstream is sized from kMaxChunkDraws: the indirect command
+    // streams, the selection buffer (kMaxChunkDraws entries of 4 uint32) and
+    // the tile counts matrix, whose stride IS nDraws + m_waterDraws. One
+    // chunk can emit one opaque entry (base or LOD ring) and water
+    // adds one more, so the combined maximum is 2 * GRID_N^3 and the bound is
+    // NOT automatic. Enforce it once, here: an overrun writes past a
+    // host-visible selection buffer and indexes past the counts matrix.
+    // Sorted far->near, so trimming from the front keeps the near field.
+    const size_t kEntryBudget = kMaxChunkDraws;
+    if (draws.size() > kEntryBudget) {
+        spdlog::warn("splat: {} opaque draw entries exceed the {} budget - "
+                     "trimming the farthest", draws.size(), kEntryBudget);
+        draws.erase(draws.begin(), draws.end() - std::ptrdiff_t(kEntryBudget));
+    }
     m_cpuDraws.reserve(draws.size());
-    for (const Draw& dr : draws) {
+    for (const ScratchDraw& dr : draws) {
         if (dr.count == 0)
             continue;
         m_cpuDraws.push_back({ 4, dr.count, 0, dr.first });
     }
-    if (getenv("VF_TRACE") && int(push.b.w) % 60 == 0) {
+    if (m_env.trace && int(push.b.w) % 60 == 0) {
         double b[4] = {}; // <10, 10-20, 20-40, >40 m: quads per band
-        for (const Draw& dr : draws) {
+        for (const ScratchDraw& dr : draws) {
             if (dr.count == 0)
                 continue;
             const float d = std::sqrt(dr.dist2);
@@ -1751,8 +1818,15 @@ void SplatPass::computeDraws(const RaymarchPush& push)
     // water chunks: same frustum cull, no sorting needed (single
     // blended pass, depth-tested). Off-screen lake chunks emit no
     // commands at all instead of rasterizing thousands of quads.
+    // Shares the opaque entry budget: the tile path writes the selection
+    // stream and the counts-matrix stride from nDraws + m_waterDraws, and the
+    // selection buffer only holds kMaxChunkDraws entries. Opaque geometry wins
+    // any contention, so water takes what is left.
+    const size_t waterBudget = kEntryBudget - m_cpuDraws.size();
+    size_t waterKept = 0;
+    bool waterTrimmed = false;
     if (m_waterStart > 0 && uint64_t(m_waterStart) < m_count &&
-        !getenv("VF_SPLAT_NOWATERCULL")) {
+        !m_env.noWaterCull) {
         if (m_waterChunkRange.size() == 16 * 16 * 16 + 1) {
             for (uint32_t c = 0; c < 16 * 16 * 16; ++c) {
                 uint32_t first = m_waterChunkRange[c];
@@ -1761,49 +1835,101 @@ void SplatPass::computeDraws(const RaymarchPush& push)
                     continue;
                 if (cull && !chunkVisible(planes, c))
                     continue;
+                if (waterKept >= waterBudget) {
+                    waterTrimmed = true;
+                    break;
+                }
                 m_cpuWaterDraws.push_back({ 4, last - first, 0, first });
+                ++waterKept;
             }
         }
     }
+    if (waterTrimmed)
+        spdlog::warn("splat: water draw entries hit the remaining budget of {} "
+                     "after {} opaque - later lake chunks are not drawn",
+                     waterBudget, m_cpuDraws.size());
     if (m_cpuWaterDraws.empty() && m_waterStart > 0 &&
-        uint64_t(m_waterStart) < m_count) {
+        uint64_t(m_waterStart) < m_count && waterBudget > 0) {
         // legacy: unbucketed water draws in one call
         // (record() still gates on VF_SPLAT_NOWATER)
         m_cpuWaterDraws.push_back(
             { 4, uint32_t(m_count) - m_waterStart, 0, m_waterStart });
     }
     m_waterDraws = uint32_t(m_cpuWaterDraws.size());
+    // Tripwire for the invariant the selection buffer and the tile counts
+    // matrix both depend on. Unreachable today (measured max 350 + 192), but
+    // the failure mode is a silent host OOB write, so assert at the point of
+    // the write rather than relying on the trim above being correct.
+    assert(m_cpuDraws.size() + m_cpuWaterDraws.size() <= kMaxChunkDraws &&
+           "splat: draw entries exceed the selection-buffer budget");
 }
 
 void SplatPass::record(VkCommandBuffer cmd, const RaymarchPush& push, VkExtent2D extent)
 {
+    refreshEnvCache();
     glm::vec4 params = m_params;
     params.x = m_buried ? 1.0f : 0.0f;
-    if (const char* e = getenv("VF_SPLAT_SIGMA"))
-        params.y = float(atof(e));
-    if (const char* e = getenv("VF_SPLAT_EXTENT"))
-        params.z = float(atof(e));
+    if (m_env.sigma >= 0.0f)
+        params.y = m_env.sigma;
+    if (m_env.extent >= 0.0f)
+        params.z = m_env.extent;
     // debug view modes (FS): 1 = flat white coverage, 2 = normal->rgb,
     // 3 = plane-depth heat. VS skips backface collapse when != 0.
-    if (const char* e = getenv("VF_SPLAT_DEBUG"))
-        params.w = float(atof(e));
-    if (const char* e = getenv("VF_SPLAT_RADIUS"))
-        m_radiusScale = glm::clamp(float(atof(e)), 0.5f, 2.0f);
-    float opacity = 0.9f;
-    if (const char* e = getenv("VF_SPLAT_OPACITY"))
-        opacity = glm::clamp(float(atof(e)), 0.0f, 1.0f);
+    if (m_env.debugSet)
+        params.w = m_env.debugVal;
+    if (m_env.radius >= 0.0f)
+        m_radiusScale = m_env.radius;
+    float opacity = m_env.opacity >= 0.0f ? m_env.opacity : 0.9f;
     // depth-resolve tolerance in NDC depth units (the same 1-exp(-0.02t)
     // metric gl_Position.z carries): the opaque band keeps
     // [nearest, nearest + tol], so only the front surface band accumulates.
     // ~0.002 = ~10 cm. Applied per frame as a rasterizer depth bias (see
     // vkCmdSetDepthBias before the band draw); uSplat2.z is kept in the UBO
     // for the tile path's software resolve.
-    float depthTol = 0.002f;
-    if (const char* e = getenv("VF_SPLAT_DEPTH_TOL"))
-        depthTol = glm::clamp(float(atof(e)), 0.0f, 0.05f);
+    float depthTol = m_env.depthTol >= 0.0f ? m_env.depthTol : 0.002f;
+    // Splat edge window (uSplat2.w): the fraction of the disk's clip radius
+    // where alpha starts rolling off to EXACTLY zero at the clip. A disk is
+    // clipped while its Gaussian still carries alpha (~0.32 at the default
+    // kernel), so the footprint used to end in a step - that step is the hard
+    // silhouette edge. Keyed on the ellipse-normalised radius, so it is scale
+    // invariant: a small leaflet disk loses the same outer FRACTION as a parent.
+    //
+    // DEFAULT OFF. It is not free: measured interior cost +3.19/255 over 69k
+    // px (neutral - ~0% of those px are blue-dominant, so it is a slight
+    // shading shift, not a sky leak). And on its own it buys NOTHING
+    // (silhouette bleed 1.00x), because the opaque base seal still covers the
+    // whole disk including the faded band. It only means anything together
+    // with the seal decline below, which is what actually uncovers the
+    // silhouette. So it stays 0 until both are wanted at once.
+    // VF_SPLAT_EDGE=0.6 enables it.
+    float edgeStart = m_env.edgeStart >= 0.0f ? m_env.edgeStart : 0.0f;
+    // Base-seal decline (uSplat3.x). 0 = the base pass seals every fragment at
+    // alpha 1, which is the previous behaviour exactly (verified: 0.0000 mean
+    // diff, 0 px changed against the pre-change build). Non-zero lets the base
+    // decline to seal fragments thinner than the threshold, so the band pass
+    // draws them at their own alpha and a silhouette splat fades to zero at the
+    // clip instead of ending in an opaque step.
+    //
+    // DEFAULT OFF because this is a measured frontier, not a tuning problem:
+    // the base pass only ever sees the single NEAREST fragment at a pixel, so
+    // it cannot know that a different, higher-alpha fragment covers the same
+    // pixel. Measured on the reference view (noise floor 0.18/255, interior =
+    // pixels >=6px inside the footprint):
+    //   0.5 -> silhouette bleed 1.28x, interior +5.6/255, 57% of changed px
+    //          blue-dominant (sky showing through, not a shading shift)
+    //   0.65/0.8/0.9 -> the same frame (interior +6.8..7.3); the seal test
+    //          must read the UN-windowed kernel alpha or the window dominates
+    //          it and the threshold stops being a threshold.
+    // VF_MICRO=0 did not help (interior 5.96 vs 5.60), so it is not the
+    // sub-centimetre grains. Doing this without paying that cost needs a real
+    // coverage count: the D24_S8 stencil is already allocated, bound and
+    // cleared in both render scopes, and recreateDepth's comment names this
+    // exact use ("stencil to tell interior rims apart from silhouette rims").
+    float sealAlpha = m_env.sealAlpha >= 0.0f ? m_env.sealAlpha : 0.0f;
     if (m_paramsBuf.mapped) {
-        glm::vec4 words[2] = { params,
-                               glm::vec4(m_radiusScale, opacity, depthTol, 0.0f) };
+        glm::vec4 words[3] = { params,
+                               glm::vec4(m_radiusScale, opacity, depthTol, edgeStart),
+                               glm::vec4(sealAlpha, 0.0f, 0.0f, 0.0f) };
         memcpy(m_paramsBuf.mapped, words, sizeof(words));
     }
     // brush hover preview feed (fragment tint of the splats the edit brush
@@ -1822,26 +1948,23 @@ void SplatPass::record(VkCommandBuffer cmd, const RaymarchPush& push, VkExtent2D
     // the image is unchanged - only vertex/clipper work disappears.
     computeDraws(push);
     const uint32_t nDraws = uint32_t(m_cpuDraws.size());
-    if (getenv("VF_TRACE") && int(push.b.w) % 60 == 0) {
+    if (m_env.trace && int(push.b.w) % 60 == 0) {
         uint32_t nTotal = 0;
         for (const auto& d : m_cpuDraws)
             nTotal += d.instanceCount;
         spdlog::info("splat pre-cull: {} quads in {} draws, water {}",
                      nTotal, nDraws, m_waterDraws);
     }
-    const bool direct = getenv("VF_SPLAT_DIRECT") != nullptr;
+    const bool direct = m_env.direct;
     const bool gpuCull =
-        !direct && !getenv("VF_NO_GPU_CULL") && nDraws > 0 && m_cullPipe &&
+        !direct && !m_env.noGpuCull && nDraws > 0 && m_cullPipe &&
         m_compactBuf.buf && m_selBufs[0].buf && m_planesBuf.buf;
     // Tile path (VF_TILE=1): bin + sort + register-blend instead of the
     // two forward raster passes. Debug views (VF_SPLAT_DEBUG) stay on the
     // forward path; oversized extents fall back (tile table is fixed-size).
-    bool tile = m_tileReady && !m_tileDisabled && !direct;
-    if (const char* e = getenv("VF_TILE"))
-        tile = tile && atoi(e) != 0;
-    else
-        tile = false; // default off until per-scene parity is proven
-    if (getenv("VF_SPLAT_DEBUG"))
+    // Cached: env is per-process, default off until per-scene parity is proven.
+    bool tile = m_tileReady && !m_tileDisabled && !direct && m_env.tile;
+    if (m_env.debugSet)
         tile = false;
     {
         const uint32_t tx = (extent.width + kTilePx - 1) / kTilePx;
@@ -1850,7 +1973,7 @@ void SplatPass::record(VkCommandBuffer cmd, const RaymarchPush& push, VkExtent2D
             tile = false;
     }
     if (tile) {
-        if (getenv("VF_TRACE") && int(push.b.w) % 60 == 0)
+        if (m_env.trace && int(push.b.w) % 60 == 0)
             spdlog::info("splat: tile path ({} opaque + {} water entries)",
                          nDraws, m_waterDraws);
         recordTile(cmd, push, extent, nDraws);
@@ -1872,7 +1995,7 @@ void SplatPass::record(VkCommandBuffer cmd, const RaymarchPush& push, VkExtent2D
             memcpy(wdst, m_cpuWaterDraws.data(), m_cpuWaterDraws.size() * stride);
     }
     // host-written draw commands -> indirect-command read
-    if (!direct && (nDraws > 0 || m_waterDraws > 0) && !getenv("VF_NO_INDIRECT_BARRIER")) {
+    if (!direct && (nDraws > 0 || m_waterDraws > 0) && !m_env.noIndirectBarrier) {
         VkMemoryBarrier2 mb { VK_STRUCTURE_TYPE_MEMORY_BARRIER_2 };
         mb.srcStageMask = VK_PIPELINE_STAGE_2_HOST_BIT;
         mb.srcAccessMask = VK_ACCESS_2_HOST_WRITE_BIT;
@@ -1889,7 +2012,7 @@ void SplatPass::record(VkCommandBuffer cmd, const RaymarchPush& push, VkExtent2D
     // test), the water pipe's depth test reference and, when occlusion
     // culling is on, the Hi-Z pyramid source. Always runs when there are
     // opaque draws; VF_NO_OCCL=1 only skips the pyramid + cull.
-    const bool occlOn = !getenv("VF_NO_OCCL");
+    const bool occlOn = !m_env.noOccl;
     const bool prepassOk =
         nDraws > 0 && m_prepassPipe && m_depth.img != VK_NULL_HANDLE;
     const bool doOccl = occlOn && prepassOk && m_hiz.img != VK_NULL_HANDLE &&
@@ -2176,7 +2299,7 @@ void SplatPass::record(VkCommandBuffer cmd, const RaymarchPush& push, VkExtent2D
         }
     };
     if (!direct && !gpuCull && (nDraws > 0 || m_waterDraws > 0) &&
-        !getenv("VF_NO_INDIRECT_BARRIER")) {
+        !m_env.noIndirectBarrier) {
         // host-written commands -> indirect-command read (barrier only;
         // memcpy already happened above for the prepass; gpuCull overwrites
         // with compacted counts later if active)
@@ -2219,7 +2342,7 @@ void SplatPass::record(VkCommandBuffer cmd, const RaymarchPush& push, VkExtent2D
     }
     // water surfels: blended over, depth-tested, no depth write.
     // Culled per chunk like opaque (off-screen lake chunks emit nothing).
-    if (!getenv("VF_SPLAT_NOWATER") && m_waterDraws > 0) {
+    if (!m_env.noWater && m_waterDraws > 0) {
         vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, m_waterPipe);
         if (direct) {
             for (const auto& d : m_cpuWaterDraws)
@@ -2289,6 +2412,8 @@ void SplatPass::destroy()
         vkDestroyImageView(dev, m_hizSampledView, nullptr);
     if (m_hizSampler)
         vkDestroySampler(dev, m_hizSampler, nullptr);
+    if (m_irrSampler)
+        vkDestroySampler(dev, m_irrSampler, nullptr);
     if (m_depthSampler)
         vkDestroySampler(dev, m_depthSampler, nullptr);
     destroyImage3D(*m_ctx, m_hiz);

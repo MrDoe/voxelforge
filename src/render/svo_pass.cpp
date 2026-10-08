@@ -75,7 +75,9 @@ bool SvoPass::init(const Context& ctx)
     // Note: binding 0 is intentionally absent (an unwritten binding in the
     // layout invalidates the whole descriptor set on this driver). uHdr lives
     // at 9, uGPos at 10; the shader no longer references binding 0.
-    VkDescriptorSetLayoutBinding b[15] = {};
+    // b[17]: bindings 1-5, 6-12, 22, 23, 13, 25, 26. The count is load-bearing -
+    // one more entry than this overflows the array with NO error anywhere.
+    VkDescriptorSetLayoutBinding b[17] = {};
     int n = 0;
     for (uint32_t i = 1; i < 6; ++i)
         b[n++] = { i, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1,
@@ -98,6 +100,13 @@ bool SvoPass::init(const Context& ctx)
     // layout as SplatPass's binding 13, so one declaration in the shared
     // header serves both pipelines.
     b[n++] = { 13, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, 1,
+               VK_SHADER_STAGE_COMPUTE_BIT, nullptr };
+    // explicit point lights (shared with the splat backend)
+    b[n++] = { 25, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, 1,
+               VK_SHADER_STAGE_COMPUTE_BIT, nullptr };
+    // coarse irradiance volume - same binding number as the splat sets, so
+    // common_irradiance.glsl's single declaration serves every backend
+    b[n++] = { 26, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1,
                VK_SHADER_STAGE_COMPUTE_BIT, nullptr };
 
     VkDescriptorSetLayoutCreateInfo li { VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO };
@@ -139,13 +148,13 @@ bool SvoPass::init(const Context& ctx)
     // Pool sizes must cover every binding in the set layout above:
     // STORAGE_IMAGE 6/7/9/10/12 (5), STORAGE_BUFFER 1-5/11 (6),
     // UNIFORM_BUFFER 8 (selection) + 13 (brush preview) + 23 (atlas table)
-    // (3), COMBINED_IMAGE_SAMPLER 22 (1). The uniform count and the missing
-    // sampler were both under-specified; the allocation happened to succeed on
+    // + 25 (lights) (4), COMBINED_IMAGE_SAMPLER 22 (atlas) + 26 (irradiance volume) (2). The uniform count and the missing
+                                       // sampler were both under-specified; the allocation happened to succeed on
     // this driver, but a spec-conforming pool must be able to back the set.
     VkDescriptorPoolSize sizes[4] = { { VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 6 },
                                        { VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 6 },
-                                       { VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, 3 },
-                                       { VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1 } };
+                                       { VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, 4 },
+                                       { VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 2 } };
     VkDescriptorPoolCreateInfo pi { VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO };
     pi.maxSets = 1;
     pi.poolSizeCount = 4;
@@ -404,6 +413,61 @@ void SvoPass::setTexAtlas(VkImageView view, VkSampler sampler, VkBuffer tableUbo
              VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, nullptr, &buf, nullptr };
     vkUpdateDescriptorSets(m_ctx->device(), 2, w, 0, nullptr);
 }
+
+// Coarse irradiance volume (binding 26). Same contract as the splat side: the
+// view belongs to App (one 64^3 image, created once, only re-uploaded), the
+// sampler belongs to the pass, and App calls this only after the pixels are
+// uploaded - the descriptor must never reference an image that has no contents.
+void SvoPass::setIrrVolView(VkImageView view)
+{
+    if (!m_ctx || view == VK_NULL_HANDLE)
+        return;
+    if (!m_irrSampler) {
+        VkSamplerCreateInfo sci { VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO };
+        // LINEAR so the 1.6 m cells interpolate instead of showing as blocks
+        // (the header promises trilinear irradiance); CLAMP_TO_EDGE matches
+        // irrVolumeUVW's own clamp at the world boundary.
+        sci.magFilter = VK_FILTER_LINEAR;
+        sci.minFilter = VK_FILTER_LINEAR;
+        sci.mipmapMode = VK_SAMPLER_MIPMAP_MODE_NEAREST;
+        sci.addressModeU = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
+        sci.addressModeV = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
+        sci.addressModeW = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
+        sci.maxLod = 0.0f;
+        if (vkCreateSampler(m_ctx->device(), &sci, nullptr, &m_irrSampler) != VK_SUCCESS) {
+            spdlog::error("irradiance volume: sampler creation failed - binding 26 "
+                          "left unbound (the term will read as absent)");
+            m_irrSampler = VK_NULL_HANDLE;
+            return;
+        }
+    }
+    const VkDescriptorImageInfo img { m_irrSampler, view,
+                                      VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL };
+    VkWriteDescriptorSet w { VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, nullptr, m_set, 26,
+                             0, 1, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, &img,
+                             nullptr, nullptr };
+    vkUpdateDescriptorSets(m_ctx->device(), 1, &w, 0, nullptr);
+}
+
+void SvoPass::setLights(const vf::voxel::LightUBO& lights)
+{
+    if (!m_ctx)
+        return;
+    if (!m_lightsBuf.buf)
+        m_lightsBuf = makeBuffer(*m_ctx, sizeof(vf::voxel::LightUBO),
+                                 VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT,
+                                 VMA_MEMORY_USAGE_AUTO_PREFER_HOST, true);
+    if (!m_lightsBuf.buf || !m_lightsBuf.mapped)
+        return;
+    memcpy(m_lightsBuf.mapped, &lights, sizeof(lights));
+    if (m_set) {
+        VkDescriptorBufferInfo info{ m_lightsBuf.buf, 0, sizeof(lights) };
+        VkWriteDescriptorSet w { VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, nullptr, m_set, 25,
+                                 0, 1, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, nullptr, &info, nullptr };
+        vkUpdateDescriptorSets(m_ctx->device(), 1, &w, 0, nullptr);
+    }
+}
+
 void SvoPass::setObjVolumeView(VkImageView view) { m_objVolView = view; }
 
 void SvoPass::updateDescriptors(const Image3D& hdrImage, const Image3D& gposImage,
@@ -463,6 +527,9 @@ void SvoPass::destroy()
         destroyBuffer(*m_ctx, m_selection);
     if (m_brushBuf.buf)
         destroyBuffer(*m_ctx, m_brushBuf);
+    if (m_irrSampler)
+        vkDestroySampler(dev, m_irrSampler, nullptr);
+    m_irrSampler = VK_NULL_HANDLE;
     if (m_pool)
         vkDestroyDescriptorPool(dev, m_pool, nullptr);
     if (m_setLayout)

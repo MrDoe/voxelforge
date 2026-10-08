@@ -30,6 +30,16 @@ Two things make this read as a *lighting* assertion when it is not:
    framing question, and it will fail for any shot whose upper third is filled
    by a hillside, a roof or a tree line.
 
+## Known scene-content shortfall (2026-10-08, not a regression)
+
+The `house`/`water` top strips read 0.445/0.452 against the 0.5 gate. Cause:
+cabin occlusion filling the top eighth — scene content, not shading and not
+coverage loss. Closed by measurement: the micro-removal contribution was
+audited at 0.000% (`microDetail` is set nowhere, so zero micro surfels exist
+in any gate render; exact-count units green), and the isolation flip
+attributes the gap to the cabin. Do not "fix" by touching surfels, lights,
+or thresholds; fix by moving the camera or the cabin.
+
 ## Measured, with the shading switched off (2026-10-06)
 
 One `--shotlist` process per configuration, `VF_NO_OVERLAY=1`,
@@ -69,17 +79,135 @@ failure is in the camera and the scene content rather than the lighting.
 ## The probe cannot even see the sun go down (2026-10-06)
 
 The strongest confirmation of the claim above is not the strip classification —
-it is a time-of-day sweep. Arms below are **reported by the shading session on
-its tree at 640x360, hero cam `1.0 2.0 1.5 → 5.3 1.0 11.3`, splat backend**
-(not measured by me alongside my 480x270 numbers above; the two sets are from
-different trees and different resolutions, so compare within a column, never
-across them):
+it is a time-of-day sweep. Arms below are **reported by the shading session**,
+on its tree, splat backend (not measured by me; not comparable to my 480x270
+numbers above — different trees and resolutions, so compare within a column,
+never across them):
+
+> ⚠ **The camera attribution here is UNSOURCED (flagged 2026-10-07).** This page
+> previously stated these arms were shot at *640x360, hero cam `1.0 2.0 1.5 →
+> 5.3 1.0 11.3`*. **Nothing backs that line.** It was written from recollection,
+> and the shading session — who produced the numbers — could not quote the
+> camera either, because the scripts lived in `/tmp` and a reboot erased them.
+>
+> It is **unsourced, not disproved**: that tuple *is* the reference camera in
+> `AGENTS.md` and the arms were plausibly run by hand, so the attribution may
+> well be correct. Nobody can currently prove it, so treat it as a hypothesis,
+> not a setup. I then chose my own re-measurement's camera **by reading this
+> very line**, which is the real damage — the two sets are not independently
+> matched and their gap is unexplained. The rule this broke: a number is not a
+> gate without its command, its metric definition and its tree state — see
+> [[concepts/measurement-provenance]].
 
 | sun | mean luma | dark % | top-eighth blue % |
 |---|---|---|---|
 | no key / CLI 34°-238° (null control) | 120.43 | 0.01 | 32.1 % |
 | elev 4, azim 240 | 100.60 | 0.03 | 46.1 % |
 | **elev −30, azim 96 (night)** | 32.92 | **23.49** | **56.7 %** |
+
+### A second, independent pair (2026-10-07) — do not merge the two
+
+Re-measured after the day/night switch landed, through
+`VF_TEST_SUN_PHASE=day|night`, which drives the **same** `App::setSunPhase()`
+the Render-panel buttons and the `P` hotkey use, so it exercises the real path:
+
+```
+VF_TEST_SUN_PHASE=day|night VF_NO_OVERLAY=1 \
+VF_OVERLAY_PATH=/tmp/opencode/sunphase/overlay_<phase>.vxw \
+./build/voxelforge --shot <phase>.ppm \
+  --cam 1.0 2.0 1.5 5.3 1.0 11.3 --width 640 --height 360
+```
+
+| arm | mean luma | dark % | top-eighth blue % |
+|---|---|---|---|
+| day 34/238 | 113.84 | 0.98 | 73.4 % |
+| night −30/96 | 31.63 | 69.68 | 84.7 % |
+
+Metric definitions, which the first pair never recorded and without which the
+columns are not comparable: **mean luma** = mean of `(r+g+b)/3` over every pixel;
+**dark %** = share with `(r+g+b)/3 < 30`; **top-eighth blue %** = share of the
+top `H/8` rows with `b >= r`.
+
+**Tree state (rule 3, and the one I nearly skipped).** Measured on the working
+tree at **22:45 on 2026-10-07**, *before* the clock field landed. The clock is
+write-only and leaves the default 34/238 startup path untouched, so these two arms
+should still reproduce — but the tree has since moved (the clock added
+`App::setSunTime`, `src/app/ui/sun_time.hpp` and a `VF_TEST_SUN_TIME` hook to the
+same files), so treat the tree hash as part of the setup rather than as implicit.
+Per the shading session's own settling criterion, **no `visual_check` baseline in
+this tree is currently trustworthy**: all three active sessions have edited
+`shaders/`, `panel_render.cpp` and `run.cpp` since his last green run, so any
+coverage / black-in-silhouette figure in the suite is stale for everyone, not
+just for these two rows.
+
+**What this pair does establish.** The night/day luma *ratio* is 0.278 here
+against 0.273 in the first pair — 2 % agreement, and a ratio is the one thing a
+camera difference or content drift cannot fake, because both roughly cancel. The
+switch moves the sun, and night shading is at the settled brightness: night came
+back at 31.63, nowhere near the ~46 band that a `kMoonCol` regression to 0.62
+would produce.
+
+**What it does not.** The absolute columns disagree with the first pair
+(luma ~5 %, but dark % 0.98 vs 0.01 and blue % 73.4 vs 32.1), and the blue-share
+gap is far too large for content drift alone. **The overlay hypothesis for this
+gap was raised here and is now REFUTED** (2026-10-07): it proposed that one pair
+loaded `assets/runtime_edits.vxw` (24,636,160 B of real interactive content,
+gitignored, so invisible in `git status` — see
+[[concepts/overlay-silent-write-trap]]) while the other did not. But all three
+sets were confirmed overlay-**suppressed** — this pair and the clock-session
+curve arms ran `VF_NO_OVERLAY=1` with an isolated `VF_OVERLAY_PATH` (md5
+verified unchanged), and the shading session recalls pointing
+`VF_OVERLAY_PATH` at a non-existent `/tmp` scratch file, which loads nothing
+either. Recollection, not an artifact — but it is the same state, so the
+hypothesis is dead.
+
+**The residual is UNEXPLAINED ON BOTH ARMS** (settled 2026-10-07). The honest
+summary splits the metrics:
+
+| metric | status |
+|---|---|
+| mean luma, day | **corroborated** — 113.84 vs 120.43 (~5 %), two independent setups, each measured by its own author |
+| mean luma, night | **corroborated** — 31.63 vs 32.92, likewise independent |
+| night/day luma **ratio** | **corroborated** — 0.278 vs 0.273, 2 %, and a ratio is what camera/content drift cannot fake |
+| dark % | **disputed, unresolved** — day 0.98 vs 0.01; night 69.68 vs 23.49 |
+| top-eighth blue % | **disputed, unresolved** — day 73.4 vs 32.1; night 84.7 vs 56.7 |
+
+So: *luma corroborated across two independent setups; luminance-distribution
+metrics disputed and unresolved.* Note this is **not** "the night arm settled and
+only the day arm disagrees" — an earlier draft of this page leaned that way on the
+hope that the night columns would converge. They did not: each author has a night
+column roughly 3x the other's in dark %.
+
+The unresolved cause is **camera and tree state** (the shading session's camera
+is unsourced — see the `⚠ UNSOURCED` box above; mine is recorded verbatim with
+its command). Both pairs are overlay-suppressed, so the overlay explanation is
+dead (see the refutation above). Keep the sets separate and do not average them.
+
+Do **not** re-run this as an overlay-on/off A/B — that was the one experiment the
+refutation made unnecessary, and it is the only arm in this exchange whose
+failure mode was data loss (a headless run with neither `VF_NO_OVERLAY` nor
+`VF_OVERLAY_PATH` loads *and rewrites* `assets/runtime_edits.vxw`, having once
+shrunk a session from 3.26 MB to 619 KB with no warning). The safe form, if
+anyone ever does want the arm: `cp assets/runtime_edits.vxw /tmp/…`, point
+`VF_OVERLAY_PATH` at the copy with **no** `VF_NO_OVERLAY`, and md5 the original
+before and after.
+
+> ⚠ **An instance of the provenance bug, in its mirror-image form — log this.**
+> Mid-exchange the shading session wrote *"my settled night frame is dark% ~70
+> and blue% ~85"*. **Those were the numbers from the pair in the row above, not
+> its own** — which it confirmed on request. It had attached its name to another
+> session's measurement while arguing *against* that measurement. This is the
+> inverse of the unsourced-camera mistake, and easier to miss because it looks
+> like a citation rather than an omission: an **attributed measurement** is
+> measured by nobody in that form, and it is laundered by being repeated
+> confidently. Ask "did you measure that, or are you quoting it?" before any
+> number enters a durable record. See [[concepts/measurement-provenance]].
+
+A genuinely matched pair — same quoted command, same camera, current tree,
+metric definitions inline — is still the only thing that would settle the
+residual, and it is worth doing **only** as the prerequisite for adding night
+arms to `visual_check` (see the daylight-calibration table below), not to
+reconcile two numbers that gate nothing.
 
 At night the blue share goes **up**, not down, so the probe still passes. The
 pixel values say why — night sky `(12.5, 23.4, 37.0)`, day sky

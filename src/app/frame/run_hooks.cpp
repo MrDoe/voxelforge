@@ -55,6 +55,45 @@ void App::runPreInputTestHooks()
             spdlog::info("VF_TEST_SELECT {} {} {}", v.x, v.y, v.z);
         }
     }
+
+    // VF_TEST_SUN_PHASE_DEFERRED="day"|"night": apply the sun preset AFTER the
+    // world has loaded, which is the only way to measure the real sun-change
+    // stall. The startup VF_TEST_SUN_PHASE fires inside App::run before
+    // initWindow/initVulkan, so it coalesces with the initial load and can only
+    // ever report the STARTUP decomposition - never "sun moves on a loaded
+    // world". This hook runs in the frame loop (before pollWorldAndTextures, so
+    // the reload is consumed the same frame).
+    //
+    // Gate: the FIRST frame after the first loaded frame. Arm on the first
+    // frame where m_layers.loaded() is true, fire on the next one, so exactly
+    // one whole frame has elapsed with the world resident - enough for the
+    // initial load's applyWorldReload/rebuildSurfels to have completed, and
+    // enough for the deferred change to be a genuinely separate reload.
+    //
+    // This was a magic `m_frameIdx >= 20` before, copied from VF_GUI_TEST
+    // without checking it: that threshold is only reachable interactively or
+    // under --selftest, because --shot exits at m_frameIdx == 3
+    // (record_headless.cpp:175) and m_frameIdx increments at :169, i.e. AFTER
+    // this hook runs. A --shot therefore never fires it. Any frame-count gate
+    // is the wrong shape here; the condition the hook actually means is "the
+    // world is up and a frame has passed", which is what this tests.
+    static const char* deferredPhase = getenv("VF_TEST_SUN_PHASE_DEFERRED");
+    static bool deferredSunArmed = false;
+    static bool deferredSunDone = false;
+    if (!deferredSunDone && deferredPhase && *deferredPhase) {
+        if (deferredSunArmed) {
+            deferredSunDone = true;
+            const bool night = strcmp(deferredPhase, "night") == 0;
+            // Same entry point as the Render panel's preset buttons and the P
+            // hotkey, so the measured path is the shipped one.
+            spdlog::info(
+                "VF_TEST_SUN_PHASE_DEFERRED {} at frame {} (one frame after load)",
+                deferredPhase, m_frameIdx);
+            setSunPhase(night);
+        } else if (m_layers.loaded()) {
+            deferredSunArmed = true;
+        }
+    }
 }
 
 // The hooks that run after input. All three are PREVIEW-ONLY by construction:
@@ -131,15 +170,45 @@ void App::runPostInputTestHooks(const char* testRotateLive)
                         m_rotateLayer = l.file;
                         break;
                     }
-            if (!m_rotateLayer.empty()) {
+            if (m_rotateLayer.empty()) {
+                // Loud, not silent: a hook that arms nothing renders a
+                // pixel-identical frame, which reads as "rotation does
+                // nothing" instead of "the subject layer is gone". Both
+                // failure modes below (stale name, disabled layer) cost a
+                // debug session each before this warning existed.
+                static bool loggedNoLayer = false;
+                if (!loggedNoLayer) {
+                    loggedNoLayer = true;
+                    spdlog::warn("VF_TEST_ROTATE_LIVE: no enabled object "
+                                 "layer to select - preview not armed");
+                }
+            } else {
                 const auto layer = std::find_if(
                     m_worldLayers.begin(), m_worldLayers.end(),
                     [&](const vf::voxel::worldfile::WorldLayer& l) {
                         return l.file == m_rotateLayer;
                     });
                 glm::vec3 pivot;
-                if (layer != m_worldLayers.end() &&
-                    m_layers.layerPivot(m_rotateLayer, pivot)) {
+                if (layer == m_worldLayers.end()) {
+                    static bool loggedMissing = false;
+                    if (!loggedMissing) {
+                        loggedMissing = true;
+                        spdlog::warn(
+                            "VF_TEST_ROTATE_LIVE: layer '{}' not in world "
+                            "layers (disabled in world.json or removed?) - "
+                            "preview not armed",
+                            m_rotateLayer);
+                    }
+                } else if (!m_layers.layerPivot(m_rotateLayer, pivot)) {
+                    static bool loggedNoPivot = false;
+                    if (!loggedNoPivot) {
+                        loggedNoPivot = true;
+                        spdlog::warn(
+                            "VF_TEST_ROTATE_LIVE: layer '{}' has no pivot "
+                            "(disabled in world.json?) - preview not armed",
+                            m_rotateLayer);
+                    }
+                } else {
                     m_rotating = true;
                     m_rotateDy = y; m_rotateDx = p; m_rotateDz = r;
                     const glm::mat3 R =
@@ -149,6 +218,7 @@ void App::runPostInputTestHooks(const char* testRotateLive)
                             layer->rotZ + r);
                     m_splatPass.setRotatePreview(
                         pivot, R, true, m_layers.layerId(m_rotateLayer));
+                    refreshPreviewLights(); // carried lamps + derived clusters ride the synthetic pose
                 }
             }
         }
@@ -188,13 +258,29 @@ void App::runPostInputTestHooks(const char* testRotateLive)
                     }
             }
             glm::vec3 pivot;
-            if (!m_moveLayer.empty() &&
-                m_layers.layerPivot(m_moveLayer, pivot)) {
+            if (m_moveLayer.empty()) {
+                static bool loggedMoveNoLayer = false;
+                if (!loggedMoveNoLayer) {
+                    loggedMoveNoLayer = true;
+                    spdlog::warn("VF_TEST_MOVE_LIVE: no enabled object "
+                                 "layer to select - preview not armed");
+                }
+            } else if (!m_layers.layerPivot(m_moveLayer, pivot)) {
+                static bool loggedMoveNoPivot = false;
+                if (!loggedMoveNoPivot) {
+                    loggedMoveNoPivot = true;
+                    spdlog::warn("VF_TEST_MOVE_LIVE: layer '{}' not in "
+                                 "world layers or has no pivot (disabled or "
+                                 "removed?) - preview not armed",
+                                 m_moveLayer);
+                }
+            } else {
                 m_moveDelta = glm::vec3(dx, dy, dz);
                 m_moveStaged = true;
                 m_splatPass.setRotatePreview(
                     pivot, glm::mat3(1.f), m_moveDelta, true,
                     m_layers.layerId(m_moveLayer));
+                refreshPreviewLights(); // carried lamps + derived clusters ride the synthetic pose
             }
         }
     }

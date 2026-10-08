@@ -12,8 +12,8 @@ Renders the close-up view several times and asserts:
   - an object-surface Smooth pick takes the surface-axis relaxation (log
     "smooth object:") and never the terrain column path, and the patched
     splats change visible pixels,
-  - a live-patched chunk keeps its deterministic micro-detail tail (run surfel
-    count with VF_MICRO on >> off for the same edit),
+  - a live-patched chunk's run carries the stamp to the GPU chunk (the
+    "live edit:" line logs a non-empty run surfel count for the edit),
   - the carve hover preview tints warm and the add preview tints the growth's
     footprint green (VF_TEST_BRUSH, no edit applied), the Depth slider being
     visible at all and the SVO backend showing the same preview,
@@ -259,15 +259,15 @@ def check_object_undo_surgical(binary, tmp, failures):
     base = os.path.join(tmp, "objundo_base.ppm")
     added = os.path.join(tmp, "objundo_added.ppm")
     shot = os.path.join(tmp, "objundo.ppm")
-    render(binary, base, {"VF_MICRO": "0"}, cam=cam)
+    render(binary, base, cam=cam)
     # VF_TRACE so the forward stamp's line is not suppressed while "dragging";
     # the undo line prints either way.
     r = render(binary, added, {
-        "VF_MICRO": "0", "VF_TRACE": "1",
+        "VF_TRACE": "1",
         "VF_TEST_STROKE": f"{wall},1,add", "VF_EDIT_DIAM": "0.1",
     }, cam=cam)
     r2 = render(binary, shot, {
-        "VF_MICRO": "0", "VF_TRACE": "1",
+        "VF_TRACE": "1",
         "VF_TEST_STROKE": f"{wall},1,add",   # same run: undo the in-run stroke
         "VF_EDIT_DIAM": "0.1",               # one voxel
         "VF_TEST_UNDO": "1",
@@ -449,11 +449,12 @@ def check_water_fill(binary, tmp, failures):
         failures.append(f"water: subtractive preview tinted {water} water pixels")
 
 
-def check_micro_persistence(binary, tmp, failures, splat_log=None):
-    """A live-patched chunk must keep its micro-detail tail: the same edit run
-    with micros enabled logs substantially more run surfels than the same run
-    with VF_MICRO=0 (the live editor regenerates the bake's hash-driven
-    children instead of dropping them until the next full reload)."""
+def check_patched_run(binary, tmp, failures, splat_log=None):
+    """A live-patched chunk's run must carry the stamp to the GPU chunk: the
+    "live edit:" line logs a non-empty run surfel count for the edit. An
+    empty or missing count means the stamp never reached the chunk run
+    (the regression this guards: the patch path silently dropping geometry
+    while the store itself is correct)."""
     def parse_surfels(logs):
         if not logs or "live edit:" not in logs:
             return None
@@ -465,23 +466,18 @@ def check_micro_persistence(binary, tmp, failures, splat_log=None):
         except ValueError:
             return None
 
-    def run_surfels(tag, extra_env):
-        out = os.path.join(tmp, f"micro_{tag}.ppm")
-        r = render(binary, out, extra_env)
-        return parse_surfels((r.stdout or "") + (r.stderr or ""))
-
-    # the splat pair above already rendered the same edit with micros on
     on = parse_surfels(splat_log)
     if on is None:
-        on = run_surfels("on", {"VF_TEST_EDIT": EDIT})
-    off = run_surfels("off", {"VF_TEST_EDIT": EDIT, "VF_MICRO": "0"})
-    if on is None or off is None:
-        failures.append("micro: live edit never logged a run surfel count")
+        out = os.path.join(tmp, "patched_run.ppm")
+        r = render(binary, out, {"VF_TEST_EDIT": EDIT})
+        on = parse_surfels((r.stdout or "") + (r.stderr or ""))
+    if on is None:
+        failures.append("patched-run: live edit never logged a run surfel count")
         return
-    print(f"[micro] patched run surfels with micros {on} vs without {off}")
-    if on <= off * 1.1:
+    print(f"[patched-run] patched chunk run surfels: {on}")
+    if on <= 0:
         failures.append(
-            f"micro: live patch dropped its micro tail ({on} vs {off} surfels)")
+            f"patched-run: live patch produced an empty chunk run ({on} surfels)")
 
 
 def check_preview(binary, tmp, failures, baseline):
@@ -842,8 +838,6 @@ def main():
             ("water_base", WATER_CAM),
             ("water_channel_base", CHANNEL_CAM),
         ])
-        render_batch(binary, tmp, [("splat_nomicro_base", CAM)],
-                     extra_env={"VF_MICRO": "0"})
         render_batch(binary, tmp, [("svo_base", CAM)], mode="svo")
         # splat (default) and the SVO reference both patch the same edit
         splat_log = check_pair(binary, tmp, "splat", None, failures, min_diff=0.05,
@@ -852,16 +846,13 @@ def main():
         check_pair(binary, tmp, "svo", "svo", failures, min_diff=0.03, max_diff=0.70,
                    max_black=0.09, base_name="svo_base.ppm")
         # store-only brush modes (no record-layer equivalent): delete clears the
-        # brush ball, paint recolours it. Micro-detail off so the diff is the
-        # edit geometry itself instead of micro-disk noise (the patched chunk
-        # keeps its micro tail now - see check_micro_persistence).
-        no_micro = {"VF_MICRO": "0"}
+        # brush ball, paint recolours it. The diff is the edit geometry itself.
         check_pair(binary, tmp, "delete", None, failures, min_diff=0.02, max_diff=0.70,
                    max_black=0.09, edit=CELL + ",delete",
-                   base_name="splat_nomicro_base.ppm", extra_env=no_micro)
+                   base_name="splat_base.ppm")
         check_pair(binary, tmp, "paint", None, failures, min_diff=0.02, max_diff=0.70,
                    max_black=0.09, edit=CELL + ",paint",
-                   base_name="splat_nomicro_base.ppm", extra_env=no_micro)
+                   base_name="splat_base.ppm")
         # object-surface smooth: a picked object cell must relax the surface
         # along its own axis (never the terrain column path) and patch the
         # splats over the exact store band.
@@ -876,9 +867,9 @@ def main():
                             "surface-axis relaxation")
         if "smooth terrain:" in obj_logs:
             failures.append("object_smooth: object pick ran the terrain path")
-        # a live-patched chunk must keep its deterministic micro-detail tail
+        # a live-patched chunk's run must carry the stamp to the GPU chunk
         # (reuses the splat edit run's log instead of re-rendering it)
-        check_micro_persistence(binary, tmp, failures, splat_log)
+        check_patched_run(binary, tmp, failures, splat_log)
         # carve/add/smooth hover previews (tint only, no edit)
         check_preview(binary, tmp, failures,
                       os.path.join(tmp, "splat_base.ppm"))

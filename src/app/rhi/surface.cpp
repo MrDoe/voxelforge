@@ -11,6 +11,7 @@
 #include <imgui.h>
 #include <imgui_impl_vulkan.h>
 
+#include <limits>
 #include <spdlog/spdlog.h>
 
 namespace vf {
@@ -105,6 +106,100 @@ void App::handleResize()
     ensureAcquireSemaphores();
 }
 
+// Read the optional top-level "lights" array from world.json AND derive
+// point lights from emissive materials, then push both into the backends'
+// LightUBO. A missing/empty table still uploads a valid zero-count UBO, so
+// applyLights() is a no-op and never reads a dangling descriptor.
+// Budget rule (adjustable, not fixed): the global emitter budget N
+// (m_lightBudget, 1..kMaxLights) caps the UBO fill and the per-pixel
+// nearest-K (m_lightK, 1..kLightKMax) caps the marches. AUTHORED lights
+// fill the array first - they are explicit intent - and emissive-derived
+// lights fill the remainder, with truncation logged loudly. Otherwise
+// emissive content could silently evict an authored lamp and the manifest
+// would disagree with the GPU with nothing said.
+// Derived lights are a function of CONTENT, never persisted: this only
+// uploads, writeLightManifest must not learn about them.
+// Emission table: palette emitters (mats 9-15, CPU mirror of the
+// shader's kEmissive) + any texture flagged "emissive" in world.json.
+// The texture part is read from the ATLAS, not the manifest, so
+// VF_TEXTURES=0 (which zeroes m_emis) kills the derived light together
+// with the glow - the bit-exact escape hatch must stay bit-exact.
+std::vector<glm::vec3> App::buildEmissionTable(
+    const std::vector<vf::voxel::worldfile::TextureBinding>& bindings,
+    const vf::TexAtlas& atlas)
+{
+    std::vector<glm::vec3> emission(vf::voxel::kPaletteN, glm::vec3(0.0f));
+    for (int m = 0; m < vf::voxel::kPaletteN; ++m)
+        emission[size_t(m)] = vf::voxel::kEmissive[size_t(m)];
+    for (const vf::voxel::worldfile::TextureBinding& b : bindings) {
+        if (b.mat < 0 || b.mat >= vf::voxel::kPaletteN)
+            continue;
+        const float es = atlas.emissiveScale(b.mat);
+        if (es <= 0.0f)
+            continue;
+        // texture mean colour; the 3.0 puts a full-bright (scale 1) texture
+        // at roughly a palette emitter's strength, so one gain fits both
+        emission[size_t(b.mat)] = atlas.meanColor(b.mat) * (3.0f * es);
+    }
+    return emission;
+}
+
+void App::uploadLightSources()
+{
+    std::vector<vf::voxel::LightSource> rawAuthored;
+    vf::voxel::worldfile::loadLightManifest(m_manifestPath, rawAuthored);
+    // Follow-attachment resolves here (bake truth: current placement), and
+    // identically in the trigger seed - one helper, no drift.
+    const std::vector<vf::voxel::LightSource> lightSources =
+        resolveFollowLights(rawAuthored, true);
+
+    const std::vector<glm::vec3> emission =
+        buildEmissionTable(m_texBindings, m_texAtlas);
+    // FLIP (UBO-256): the bake enumerates the STORE, not the field. The
+    // store sees the propagated interior mats the pools render (submerged
+    // lava included), so this is a superset of the old field set; the
+    // budget (default 192) keeps the whole tail live. Uncapped
+    // enumeration here - fillLightUBO owns the single truncation.
+    std::vector<vf::voxel::VoxelField::EmissiveCluster> clusters;
+    m_layers.store().collectEmissive(emission, clusters,
+                                     std::numeric_limits<int>::max());
+
+    vf::voxel::LightUBO ubo{};
+    const int budget =
+        std::clamp(m_lightBudget, 1, vf::voxel::kMaxLights);
+    const int n = vf::voxel::fillLightUBO(lightSources, clusters, budget,
+                                          ubo, true);
+    const int nAuthored =
+        std::min<int>(int(lightSources.size()), budget);
+
+    ubo.perPixelK =
+        std::clamp(m_lightK, 1, vf::voxel::worldfile::kLightKMax);
+    m_svoPass.setLights(ubo);
+    m_splatPass.setLights(ubo);
+    if (n > 0)
+        spdlog::info("lighting: {} authored (world.json), {} derived from emissive "
+                     "materials, {}/{} budget used, K={}",
+                     nAuthored, n - nAuthored, n, budget, ubo.perPixelK);
+
+    // Indirect term from the SAME ubo, at the tail, so the direct and the
+    // baked-indirect term can never be derived from different emitter sets
+    // (one of them stale by a frame or a reload). Every call site of
+    // uploadLightSources therefore refreshes the volume too: init, world
+    // reload and atlas reload. On the first call (init, after every pass
+    // init) the image is created, zero-uploaded and bound; later calls only
+    // re-upload pixels through the same view.
+    uploadIrradianceVolume(ubo);
+    // The binding now holds exactly this upload's set: drop the trigger's
+    // splice base (a layer toggle or atlas swap may have moved baked
+    // content under it; the next stroke re-seeds from the field, which is
+    // always cheaper than a wrong splice). The preview overlay state goes
+    // with it: both passes hold the resolved set, so there is nothing
+    // shifted left to restore and no commit hold left to honour.
+    m_derivedClusters.clear();
+    m_previewLightsShifted = false;
+    m_previewLightsHold = false;
+}
+
 bool App::initVulkan()
 {
     if (!m_ctx.init(m_window.handle(), true))
@@ -187,6 +282,15 @@ bool App::initVulkan()
     // seed the GUI picker from the manifest + whatever is on disk
     vf::voxel::worldfile::loadTextureManifest(m_manifestPath, m_texBindings);
     rescanTextureFiles();
+    // Explicit point lights (world.json "lights" + lights DERIVED from
+    // emissive materials). MUST come after every pass init - setLights()
+    // writes a descriptor of a set that does not exist until then, and a
+    // silent no-op there is exactly the bug where the lamp is in the manifest
+    // but contributes nothing in the splat backend - AND after the atlas +
+    // manifest texture bindings are loaded, because the derived-light emission
+    // table reads the atlas' per-material emissiveScale/meanColor (which
+    // VF_TEXTURES=0 zeroes: the escape hatch must kill derived lights too).
+    uploadLightSources();
     // headless hook: stage one GUI pick (VF_TEST_TEX_SWAP="mat,file", empty
     // file = palette) so a --shot run exercises the exact pending-apply path
     // the picker uses: write world.json + re-upload the atlas on frame 1.
@@ -207,11 +311,6 @@ bool App::initVulkan()
     if (!createOffscreen(m_swapchain.extent().width, m_swapchain.extent().height))
         return false;
 
-    // Micro-surfel detail is baked into the surfel stream, so its launch-time
-    // override has to be read BEFORE the first bake (the M key flips the same
-    // member at runtime and re-runs the surfelizer).
-    if (const char* e = getenv("VF_MICRO"))
-        m_microDetail = atoi(e) != 0;
     // Hard-edge fit and crease bridges are baked into the stream. Read launch
     // overrides before the first surfel pass; the GUI uses the same members
     // and requests a reload after a committed edit.
@@ -342,6 +441,7 @@ void App::destroy()
         vkDestroyQueryPool(m_ctx.device(), m_profPool, nullptr);
     vf::destroyImage3D(m_ctx, m_objVolImg);
     vf::destroyImage3D(m_ctx, m_heightImg);
+    vf::destroyImage3D(m_ctx, m_irrImg);
     vf::destroyImage3D(m_ctx, m_offscreen);
     vf::destroyImage3D(m_ctx, m_hdr);
     vf::destroyImage3D(m_ctx, m_gpos);

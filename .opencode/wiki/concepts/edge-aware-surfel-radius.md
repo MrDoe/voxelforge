@@ -45,14 +45,15 @@ edge emits one bridge; a trihedral corner can emit up to three.
 Each chunk is assembled as:
 
 ```text
-[base parents | edge bridges | material micro-surfels]
+[base parents | edge bridges]
 ```
 
 The edge segment remains inside the always-on opaque range, so it introduces no
-extra draw call and is not removed by `VF_MICRO_DIST`. `SurfelSet::edgeStart`
+extra draw call. (`VF_MICRO_DIST` and the former third `material micro-surfels`
+segment left with the micro removal 2026-10-08 — see
+[[concepts/detail-pipeline]] §3.) `SurfelSet::edgeStart`
 and `LiveEditor::edgeCountOf()` preserve the CPU split for GPU-seeded live
-patches. `ChunkStore` recomputes parents and bridges in a region refresh;
-material micros are regenerated from parents only. Object bridges also ride
+patches. `ChunkStore` recomputes parents and bridges in a region refresh. Object bridges also ride
 along unmerged in LOD1/LOD2.
 
 ## Controls
@@ -68,7 +69,7 @@ along unmerged in LOD1/LOD2.
 `tests/test_surfelize.cpp` proves that flat interiors and terrain keep their
 radius, hard edges tighten, bridge geometry is smaller/tangent-aligned, and
 the full stream remains deterministic. `tests/test_store.cpp` pins live segment
-refresh and placement outside the material micro tail.
+refresh and placement outside the bridge range.
 
 On the current hamlet (`VF_EDGE_SHRINK=0.35`, fill on), the bake emitted
 20,252 bridges for 20,252 edge parents. The opaque/LOD stream rose from

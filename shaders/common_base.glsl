@@ -1,3 +1,11 @@
+// Coarse irradiance volume (binding 26) - included FIRST, but that is only
+// safe because every entry point that includes this file (splat.frag,
+// splat_tile_render.comp, svo_raymarch.comp) declares `pc` and its own
+// resource bindings BEFORE including it; common_irradiance.glsl reads
+// pc.b.x (world size) from inside its functions. It must NOT move into
+// common_surfel.glsl, which is included before the push block exists.
+#include "common_irradiance.glsl"
+
 int gRenderFlags = 31;
 
 vec3 kSunDir = normalize(vec3(0.42, 0.78, 0.30)); // set from push in main()
@@ -133,7 +141,8 @@ float causticAt(vec2 xz, float t)
 // gTexOv (phase 2) overrides the material slot per surfel: > 0 = atlas layer.
 layout(set = 0, binding = 22) uniform sampler2DArray uTexAtlas;
 layout(std140, set = 0, binding = 23) uniform TexTable {
-    vec4 matTex[21]; // x = layer index (-1 = none, palette), y = m/tile
+    vec4 matTex[21]; // x = layer index (-1 = none, palette), y = m/tile,
+                     // z = emissive scale (0 = this texture does not emit)
 } uTex;
 float gTexOv = 0.0;
 
@@ -154,13 +163,46 @@ vec3 texTriplanar(vec3 p, vec3 n, float scale, float slot)
          + w.z * texture(uTexAtlas, vec3(p.xy / scale, slot)).rgb;
 }
 
+// Atlas slot backing a material: the per-cell override when one is set,
+// otherwise the material's own binding. Split out so callers that need the
+// slot's OTHER properties (not its texels) cannot drift from sampleTex.
+float texSlotFor(uint mId)
+{
+    return gTexOv > 0.5 ? floor(gTexOv + 0.5) : uTex.matTex[mId].x;
+}
+
 // returns the sampled texture colour, or vec3(-1) when the material has none
 vec3 sampleTex(vec3 p, vec3 n, uint mId)
 {
-    float slot = gTexOv > 0.5 ? floor(gTexOv + 0.5) : uTex.matTex[mId].x;
+    float slot = texSlotFor(mId);
     if (slot < 0.0)
         return vec3(-1.0);
     return texTriplanar(p, n, max(uTex.matTex[mId].y, 0.01), slot);
+}
+
+// Self-illumination for a surface, ADDED after the lighting terms.
+// Two independent sources:
+//  * palette emitters (mats 9-15): the hardcoded kEmissive colour, always on;
+//  * a texture flagged "emissive" in world.json: its OWN texel colour times
+//    the binding's emissiveScale, so lava veins glow and the dark crust
+//    between them does not - where a flat kEmissive would wash the whole
+//    material out in one hue. Emission follows the slot that produced the
+//    albedo (per-cell override included), because emission belongs to what
+//    the surface actually shows.
+// Bounds on the override: a mis-authored tex byte must not index uTex out of
+// range (sampleTex inherits that exposure already; this path must not add it).
+vec3 emissiveTerm(vec3 p, vec3 n, uint mId, vec3 alb)
+{
+    vec3 e = (mId >= 9u && mId <= 15u) ? kEmissive[mId] : vec3(0.0);
+    const float slot = texSlotFor(mId);
+    if (slot >= 0.0 && slot < 21.0) {
+        const float em = uTex.matTex[int(slot)].z;
+        if (em > 0.0) {
+            const vec3 t = sampleTex(p, n, mId);
+            e += (t.r >= 0.0 ? t : alb) * em;
+        }
+    }
+    return e;
 }
 
 // ---- landscape helpers ------------------------------------------------------
@@ -514,6 +556,112 @@ float waterHit(vec3 ro, vec3 rd, float tMax)
     return tw;
 }
 
+// ---- Day / night ------------------------------------------------------------
+// Everything below derives from ONE number: the sun's own elevation in
+// kSunDir. There is no time-of-day state anywhere in the app - the scene sets
+// a sun ("sun": {"elev": -14, "azim": 96} in world.json, or --sun) and the
+// shader decides day, dusk or night from it. That keeps headless renders and
+// the interactive frame identical.
+//
+// smoothstep window: full day above y=0.06, full night below y=-0.14.
+// 0.56 at the default 34 deg -> night = 0, so nothing changes for the gates.
+float nightFactor()
+{
+    return 1.0 - smoothstep(-0.14, 0.06, kSunDir.y);
+}
+
+// Direct sun fades out as the sun sinks: below the horizon ndl is still
+// positive for downward-tilted faces, so the gate has to be explicit.
+float sunFade()
+{
+    return smoothstep(-0.06, 0.04, kSunDir.y);
+}
+
+vec3 sunCol()
+{
+    return kSunCol * sunFade();
+}
+
+// How much of the NOON sky is still lit, as a function of sun elevation.
+// This exists because the sky used to be dimmed by nothing at all: measured
+// away from the sun it read 164 -> 172 -> 161 -> 141 across 34/12/4/0 deg,
+// i.e. as bright at the horizon as at noon, merely desaturated to grey.
+//
+// Shape requirements (all three are load-bearing):
+//   * EXACTLY 1.0 at the default 34 deg (kSunDir.y = 0.559), so every
+//     reference shot and every visual_check gate stays bit-identical -
+//     smoothstep clamps to 1 above y = 0.35, and mix(0.5, 1.0, 1.0) is 1.0.
+//   * Monotonically DECREASING as the sun sinks, with no recovery before the
+//     horizon: an earlier two-sided bump peaked at 5.7 deg and opened back up
+//     to 1.0 at y = 0, which would have made the sky brighten as it set.
+//   * It may keep falling below the horizon with no night penalty, because
+//     applyNight REPLACES the sky outright once nightFactor() reaches 1 (y <=
+//     -0.14), so this factor has no effect on the moonlit night at all. That
+//     is what lets the ramp be monotonic instead of having to squeeze a
+//     recovery into the twilight band.
+// The floor is 0.36, not 0.50: AgX compresses hard, so a scene-space 0.60 at
+// the horizon came out at 0.87 of the day value on screen - measured against
+// the required 0.75. The floor has to be set in OUTPUT space and then
+// converted, which is why it is deeper than a glance at the curve suggests.
+float sunDaylight()
+{
+    return mix(0.36, 1.0, smoothstep(-0.14, 0.35, kSunDir.y));
+}
+
+// Roughly anti-solar, lifted so it clears the horizon exactly as the sun goes
+// under it (moon rises when the sun sets). Shared by the sky disc and the
+// surface term, so the lit faces match the disc.
+vec3 moonDir()
+{
+    return normalize(vec3(-kSunDir.x, -kSunDir.y * 0.75 + 0.30, -kSunDir.z));
+}
+
+const vec3 kMoonCol = vec3(0.62, 0.70, 0.92) * 0.14;
+
+// Moonlight: a second, much dimmer directional light that takes over at night.
+// It uses AO only, NEVER the baked sun shadow - the CPU bake marches the sun's
+// direction, so applying it to light from the opposite side would put the
+// moonlit faces into shadow.
+vec3 moonLight(vec3 n, float ao)
+{
+    float night = nightFactor();
+    if (night <= 0.001)
+        return vec3(0.0);
+    float ndl = max(dot(n, moonDir()), 0.0);
+    return kMoonCol * ndl * night * mix(0.35, 1.0, ao);
+}
+
+// Day sky -> night sky, plus moon disc/halo and stars. Applied last in both
+// sky variants so the cloud deck, golden-hour tint and sun disc all fade with
+// it. `withDetail` skips the per-star hash for the cheap irradiance variant.
+vec3 applyNight(vec3 d, vec3 col, bool withDetail)
+{
+    float night = nightFactor();
+    if (night <= 0.001)
+        return col;
+    // Keep a faint horizon glow: silhouettes must stay readable against it.
+    vec3 nightBase = mix(vec3(0.030, 0.045, 0.078), vec3(0.005, 0.010, 0.026),
+                         pow(max(d.y, 0.0), 0.55));
+    col = mix(col, nightBase, night);
+
+    vec3 md = moonDir();
+    float cdm = max(dot(d, md), 0.0);
+    col += vec3(0.95, 0.96, 1.00) * 1.7 * pow(cdm, 20000.0) * night;   // disc
+    col += vec3(0.55, 0.62, 0.85) * 0.30 * pow(cdm, 900.0) * night;    // corona
+    col += vec3(0.26, 0.34, 0.58) * 0.05 * pow(cdm, 10.0) * night;     // wash
+
+    if (withDetail && d.y > 0.0) {
+        vec3 ip = floor(d * 190.0);
+        vec3 fp = fract(d * 190.0) - 0.5;
+        float h = fract(sin(dot(ip, vec3(127.1, 311.7, 74.7))) * 43758.5453);
+        float star = smoothstep(0.997, 1.0, h) * (1.0 - smoothstep(0.0, 0.5, length(fp)));
+        star *= smoothstep(0.02, 0.22, d.y);                        // horizon haze
+        star *= 1.0 - smoothstep(0.0, 0.5, pow(cdm, 4.0));          // moon washout
+        col += vec3(0.75, 0.82, 1.0) * star * 0.9 * night;
+    }
+    return col;
+}
+
 vec3 skyColor(vec3 d)
 {
     // Preetham / Hosek-inspired sky with turbidity-controlled Perez distribution
@@ -538,11 +686,25 @@ vec3 skyColor(vec3 d)
     col += vec3(1.0, 0.85, 0.6) * 0.48 * pow(cosGamma, 6.0) * clamp(Y * 0.06, 0.2, 1.2);
     // ---- golden-hour warmth: low sun tints the horizon amber/pink ----
     // kSunDir.y ~ sin(elev): 0.56 at 34 deg, ~0.31 at 18 deg, ~0.17 at 10 deg.
+    // Measured baseline (before this block was strengthened): peak R-B toward
+    // the sun was only +12.6/255 at elev 2 against a high sky at R-B -38, i.e.
+    // the gradient had the right SIGN and ~1/3 the magnitude needed to read as
+    // a sunset rather than as haze. horizBand was pow(...,3.0), confining the
+    // warmth to a band too thin to see.
+    // The two FLOORS below (0.20 and 0.15) are the anti-solar terms: they used
+    // to be 0.55 and 0.35, which lit the whole horizon ring regardless of where
+    // the sun was and made the away-from-sun sky BRIGHTER than the daylight
+    // dimming took out (measured: away luma rose 155 -> 160 from 34 to 12 deg,
+    // so the golden hour brightened the sky opposite the sun). Warmth must be
+    // directional; the sums are kept at 1.95/1.00 so the toward-sun glow is
+    // unchanged by this rebalance.
     float lowSun = 1.0 - smoothstep(0.08, 0.55, kSunDir.y);
-    float horizBand = pow(1.0 - cosTheta, 3.0);
-    vec3 sunsetTint = mix(vec3(1.0, 0.62, 0.32), vec3(0.95, 0.45, 0.45), clamp(cosGamma, 0.0, 1.0) * 0.5);
-    col += sunsetTint * horizBand * lowSun * (0.25 + 0.55 * pow(cosGamma, 2.0));
-    col = mix(col, col * vec3(1.06, 0.94, 0.86) + vec3(0.03, 0.01, 0.0), lowSun * 0.45 * horizBand);
+    float horizBand = pow(1.0 - cosTheta, 1.9);
+    vec3 sunsetTint = mix(vec3(1.0, 0.47, 0.12), vec3(1.0, 0.34, 0.26),
+                          clamp(cosGamma, 0.0, 1.0) * 0.5);
+    col += sunsetTint * horizBand * lowSun * (0.20 + 1.75 * pow(cosGamma, 2.0));
+    col = mix(col, col * vec3(1.16, 0.87, 0.72) + vec3(0.07, 0.02, 0.0),
+              lowSun * 0.80 * horizBand * (0.15 + 0.85 * clamp(cosGamma, 0.0, 1.0)));
     // ---- procedural clouds: fbm deck, thin at zenith (keeps sky probe blue),
     // thick toward the horizon like a valley overcast with a sunset break ----
     if (d.y > -0.02) {
@@ -563,7 +725,8 @@ vec3 skyColor(vec3 d)
         cloudCol *= 0.85 + 0.30 * cm;
         col = mix(col, cloudCol, clamp(cweight, 0.0, 1.0) * 0.85);
     }
-    return col;
+    col *= sunDaylight(); // after the clouds, so the deck dims with the sky
+    return applyNight(d, col, true);
 }
 
 // Cloud-free sky variant for indirect taps (irradiance / fog): the fbm
@@ -591,12 +754,25 @@ vec3 skyColorFast(vec3 d)
     col += kSunCol * 0.55 * pow(cosGamma, 1150.0) * clamp(Y * 0.15, 0.0, 2.0);
     col += vec3(1.0, 0.85, 0.6) * 0.48 * pow(cosGamma, 6.0) * clamp(Y * 0.06, 0.2, 1.2);
     // ---- golden-hour warmth: low sun tints the horizon amber/pink ----
+    // Kept byte-identical in shape to skyColor's block: this variant feeds
+    // skyIrradiance / fog, so an ambient that did not follow the visible sky
+    // would light the ground at noon while the sky it came from had set.
+    // The two FLOORS below (0.20 and 0.15) are the anti-solar terms: they used
+    // to be 0.55 and 0.35, which lit the whole horizon ring regardless of where
+    // the sun was and made the away-from-sun sky BRIGHTER than the daylight
+    // dimming took out (measured: away luma rose 155 -> 160 from 34 to 12 deg,
+    // so the golden hour brightened the sky opposite the sun). Warmth must be
+    // directional; the sums are kept at 1.95/1.00 so the toward-sun glow is
+    // unchanged by this rebalance.
     float lowSun = 1.0 - smoothstep(0.08, 0.55, kSunDir.y);
-    float horizBand = pow(1.0 - cosTheta, 3.0);
-    vec3 sunsetTint = mix(vec3(1.0, 0.62, 0.32), vec3(0.95, 0.45, 0.45), clamp(cosGamma, 0.0, 1.0) * 0.5);
-    col += sunsetTint * horizBand * lowSun * (0.25 + 0.55 * pow(cosGamma, 2.0));
-    col = mix(col, col * vec3(1.06, 0.94, 0.86) + vec3(0.03, 0.01, 0.0), lowSun * 0.45 * horizBand);
-    return col;
+    float horizBand = pow(1.0 - cosTheta, 1.9);
+    vec3 sunsetTint = mix(vec3(1.0, 0.47, 0.12), vec3(1.0, 0.34, 0.26),
+                          clamp(cosGamma, 0.0, 1.0) * 0.5);
+    col += sunsetTint * horizBand * lowSun * (0.20 + 1.75 * pow(cosGamma, 2.0));
+    col = mix(col, col * vec3(1.16, 0.87, 0.72) + vec3(0.07, 0.02, 0.0),
+              lowSun * 0.80 * horizBand * (0.15 + 0.85 * clamp(cosGamma, 0.0, 1.0)));
+    col *= sunDaylight();
+    return applyNight(d, col, false);
 }
 
 bool rayAABB(vec3 ro, vec3 invRd, out float t0, out float t1)
@@ -689,6 +865,124 @@ vec3 pbrSpec(vec3 n, vec3 v, vec3 l, vec3 f0, float rough)
     float vdh = max(dot(v, h), 0.0);
     float a2 = rough * rough * rough * rough;
     return fresnelSchlick(f0, vdh) * ggxD(ndh, a2) * smithV(ndl, ndv, a2);
+}
+
+// ---- Explicit point light sources -----------------------------------------
+// The exterior scene is sun/sky driven, but caves/interiors need emitters
+// (torches, lanterns, lava) routed through the same PBR model. The app
+// uploads them as a tiny std140 UBO bound to binding 25 so both backends
+// sample the same data.
+layout(std140, set = 0, binding = 25) uniform LightUBO {
+    vec4 lightPosRadius[256];   // x/y/z = metres, w = falloff radius
+    vec4 lightColorIntensity[256]; // x/y/z = linear-ish colour, w = intensity
+    int  lightCount;
+    int  lightK;   // per-pixel nearest-K, 1..8 (CPU-clamped)
+    int  _lightPad1;
+    int  _lightPad2;
+} lights;
+
+// Defined later by common_svo.glsl / common_splat.glsl.
+#ifdef SPLAT_BACKEND
+float lightVisibilitySPlat(vec3 ro, vec3 rd, float maxDist);
+#else
+float lightVisibilitySvo(vec3 ro, vec3 rd, float maxDist);
+#endif
+
+// Enclosure estimated from the two fields every backend already has. A cave
+// is BOTH fully sun-shadowed and locally occluded; an outdoor alcove is
+// shadowed but still sees the sky (AO stays high), and open ground is neither.
+// The product therefore isolates "no direct light AND no local sky exposure"
+// without any extra data — and, crucially, WITHOUT the heightfield, which the
+// splat backend cannot trust for cavities carved into terrain.
+float aoShEnclosure(float ao, float sh)
+{
+    // Needs BOTH the master enclosure switch (bit 8) and the two fields it is
+    // derived from (bits 0/1). Without the bit-8 term VF_RENDER_FLAGS=255 did
+    // NOT restore the pre-enclosure behaviour: this proxy kept darkening every
+    // shadowed+occluded surface, and a cave A/B came back identical either way
+    // (measured 45.26 mean luma, bit 8 on vs off).
+    if ((gRenderFlags & (256 | 3)) != (256 | 3))
+        return 0.0;
+    return clamp((1.0 - ao) * (1.0 - sh), 0.0, 1.0);
+}
+
+vec3 applyLights(vec3 p, vec3 n, vec3 V, vec2 reflRough, vec3 alb)
+{
+    int count = clamp(lights.lightCount, 0, 256);
+    if (count <= 0)
+        return vec3(0.0);
+    // Adjustable cost control: shade at most K nearest in-range lights.
+    // Phase 1 is pure ALU (distance + facing); only the K winners pay the
+    // 16-step visibility march in phase 2, so the worst case is K marches
+    // no matter how large the global emitter budget grows.
+    int K = clamp(lights.lightK, 1, 8);
+    int sel[8];
+    float selD[8];
+    for (int s = 0; s < 8; ++s) { sel[s] = -1; selD[s] = 1e30; }
+    for (int i = 0; i < 256; ++i) {
+        if (i >= count)
+            break;
+        vec3 toLight = lights.lightPosRadius[i].xyz - p;
+        float radius = max(lights.lightPosRadius[i].w, 0.001);
+        float dist = length(toLight);
+        if (dist <= 0.001 || dist >= radius)
+            continue;
+        if (max(dot(n, toLight / dist), 0.0) <= 0.0)
+            continue;
+        // insertion into the K-nearest set (K <= 8, linear is cheapest)
+        for (int s = 0; s < 8; ++s) {
+            if (s >= K)
+                break;
+            if (dist < selD[s]) {
+                for (int t = 7; t > s; --t) {
+                    sel[t] = sel[t - 1];
+                    selD[t] = selD[t - 1];
+                }
+                sel[s] = i;
+                selD[s] = dist;
+                break;
+            }
+        }
+    }
+    if (sel[0] < 0)
+        return vec3(0.0);
+    float rough = clamp(reflRough.y, 0.05, 1.0);
+    vec3 f0 = vec3(0.04) + vec3(reflRough.x) * 0.70;
+    vec3 total = vec3(0.0);
+    for (int s = 0; s < 8; ++s) {
+        if (s >= K || sel[s] < 0)
+            break;
+        int i = sel[s];
+        vec3 lightPos = lights.lightPosRadius[i].xyz;
+        float radius = max(lights.lightPosRadius[i].w, 0.001);
+        vec3 toLight = lightPos - p;
+        float dist = length(toLight);
+        vec3 l = toLight / dist;
+        float ndl = max(dot(n, l), 0.0);
+        float atten = clamp(1.0 - dist / radius, 0.0, 1.0);
+        atten *= atten;
+        vec3 ro = p + n * 0.15;
+        // "Shadows" (bit 1) governs EVERY occlusion march, not only the sun's.
+        // Point lights used to march unconditionally, so the toggle could be
+        // off with every lamp still casting - a label saying Shadows would
+        // have been untrue. Off = the light passes through geometry, the same
+        // reading the sun march has when the bit is clear.
+        float vis = 1.0;
+        if ((gRenderFlags & 2) != 0) {
+#ifdef SPLAT_BACKEND
+            vis = lightVisibilitySPlat(ro, l, dist);
+#else
+            vis = lightVisibilitySvo(ro, l, dist);
+#endif
+        }
+        if (vis <= 0.0)
+            continue;
+        vec3 spec = pbrSpec(n, V, l, f0, rough);
+        vec3 colLight = lights.lightColorIntensity[i].rgb *
+                        lights.lightColorIntensity[i].w;
+        total += (alb * ndl * 0.55 + spec * ndl) * colLight * atten * vis;
+    }
+    return total;
 }
 
 // 3-tap analytic-sky irradiance: full hemisphere integral approximated by

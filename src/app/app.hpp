@@ -110,10 +110,54 @@ private:
     void drawPanelAI();
     void drawSidebarFooter();
     void drawSceneOverlays();
+    // Bottom-of-screen reminder of the currently available hotkeys. Shows the
+    // edit keys while the brush is armed and the flight keys while it is not,
+    // because A/D/S mean different things in the two states.
+    void drawHotkeyBar();
     bool runSelftest();
     void syncWorldLayerList();
     bool uploadTerrainTexture();
     bool uploadObjVolTexture();
+    // world.json "lights" -> both backends' LightUBO (binding 25).
+    void uploadLightSources();
+    // Emission table shared by the bake upload and the live trigger:
+    // palette emitters + emissive-flagged atlas textures (read from the
+    // ATLAS, so VF_TEXTURES=0 kills derived lights with the glow).
+    static std::vector<glm::vec3> buildEmissionTable(
+        const std::vector<vf::voxel::worldfile::TextureBinding>& bindings,
+        const vf::TexAtlas& atlas);
+    // Stroke-end derived-light refresh (binding 25 in RAM, no reload): redo
+    // the derived set for the stroke's changed chunks from the live store and
+    // re-upload. Flicker-free by construction: untouched chunks keep their
+    // cached clusters verbatim.
+    void refreshLiveLights();
+    // Follow-attachment (moving light sources): resolve authored lights with
+    // `follow` set to world positions at the layers' CURRENT manifest
+    // placement (placedPivot + placementR * storedOffset). Both the bake
+    // upload and the live trigger resolve through here, so a carried lamp
+    // agrees everywhere. Unknown follow targets resolve to a zero offset
+    // (warned only when `warn` - the trigger passes false to avoid
+    // per-stroke spam).
+    std::vector<vf::voxel::worldfile::LightSource>
+    resolveFollowLights(const std::vector<vf::voxel::worldfile::LightSource>& authored,
+                        bool warn) const;
+    // Move/rotate preview light overlay (splat backend ONLY): rigid-shift the
+    // followed lights + derived clusters of the previewed layer by the staged
+    // delta and re-upload binding 25 to the splat pass. SVO is deliberately
+    // untouched - it ignores the geometry preview too, so its unmoved
+    // geometry stays consistent with unmoved lights. No-op when no preview
+    // is staged; restores the base set to splat when a preview just ended.
+    void refreshPreviewLights();
+    // Idempotent bake-seed for the splice base (field enumeration truncated
+    // to the authored room); shared by the trigger and the preview overlay.
+    void ensureDerivedBase();
+    // Coarse irradiance volume (binding 26) -> both backends. Takes the SAME
+    // LightUBO uploadLightSources() just built and is called at its tail, so
+    // the volume can never be baked from a stale copy of the emitter set -
+    // the direct term and the indirect term are derived from one upload.
+    // Also the single place that creates the image (once, at init) and writes
+    // the descriptor (once); reloads only re-upload pixels.
+    void uploadIrradianceVolume(const vf::voxel::worldfile::LightUBO& lights);
     bool reloadTexAtlas();
     void persistWorldLayers();
     void rescanWorldLayers();
@@ -129,6 +173,30 @@ private:
     void pollTextureFiles();
     void applyWorldReload();
     void rebuildSurfels(); // (re)build the surfel set from the live field
+    // Sun: m_sunDir is the single source of truth for where the sun is (it
+    // rides the per-frame push constant), so every control that moves the sun
+    // funnels through setSunAngles and nothing keeps parallel angle floats.
+    void setSunAngles(float elevDeg, float azimDeg);
+    // Snap to a measured day/night preset and rebake the CPU-baked per-surfel
+    // sun shadows for it. Session-only: it deliberately does NOT write the
+    // choice back to world.json (see the "sun" manifest key), so the shared
+    // manifest is never rewritten by a runtime toggle.
+    void setSunPhase(bool night);
+    // Snap to a clock time on the 12 h analytic arc (ui/sun_time.hpp) and
+    // rebake, exactly like the presets. Write-only like them: the panel shows
+    // a best-effort read-back ("~HH:MM" when the sun sits off the arc) that
+    // never feeds a write. Session-only, no world.json write; an untouched
+    // startup stays at 34/238.
+    void setSunTime(float hours);
+    // Log every splat belonging to one lattice cell: stable id, segment, radii,
+    // and whether its disk connects to any neighbour (the floating-splat
+    // verdict). Pure - builds a throwaway 3x3x3 range, touches no live state.
+    void describeSurfelsAt(const glm::ivec3& cell);
+    // List every splat in the edited chunks (plus a 1-chunk ring, so boundary
+    // disks see their neighbours) that no other splat reaches, with its stable
+    // id. A detached disk cannot be CLICKED - the pick ray passes through it -
+    // so this is how one gets named.
+    void listFloatingSurfels();
     void cancelRotation();
     void commitMove();
     void cancelMove();
@@ -203,6 +271,9 @@ private:
     vf::Image3D m_ssaoAo;  // SSAO scratch: raw AO term (ssao.comp -> ssao_apply.comp)
     vf::Image3D m_heightImg;
     vf::Image3D m_objVolImg;
+    vf::Image3D m_irrImg; // 64^3 irradiance volume (binding 26): created once,
+                          // never recreated - replacing it would free the view
+                          // the descriptor set already references
     vf::SvoPass m_svoPass;
     vf::SplatPass m_splatPass;
     vf::TaaPass m_taaPass;
@@ -263,6 +334,22 @@ private:
     bool m_texReloadPending = false;
     float m_texPollT = 0.f;
     std::map<std::string, unsigned long long> m_texSig;
+    // Dynamic derived lights (refreshLiveLights): last uploaded derived set
+    // (splice base: survivors keep their slots) and the chunks the current
+    // stroke touched (set by commitStoreEdits, consumed+cleared by the
+    // trigger). The emission table + authored lights are rebuilt per trigger
+    // from the atlas/manifest (microsecond lookups, always current).
+    std::vector<vf::voxel::VoxelField::EmissiveCluster> m_derivedClusters;
+    std::vector<int> m_lastChangedChunks;
+    // Preview overlay state (refreshPreviewLights): true while the splat
+    // pass holds the shifted set and the SVO pass the base set. Cleared by
+    // any both-pass upload (bake/trigger) and by the overlay restore itself.
+    bool m_previewLightsShifted = false;
+    // Commit window: set by commitMove/commitRotation alongside the final
+    // overlay push, cleared by any both-pass upload. While held, the overlay
+    // keeps the shifted set (the final geometry preview stays visible until
+    // the reload swaps in, so the lights must not restore early).
+    bool m_previewLightsHold = false;
 
     // Direction TOWARD the sun, derived from --sun elevation/azimuth (degrees).
     glm::vec4 m_sunDir { 0.449f, 0.8338f, 0.3207f, 0.0f };
@@ -291,10 +378,13 @@ private:
     // visual_check black-in-silhouette 0.15-0.32 % vs the 5 % gate). Bit 7 =
     // texture detail normals (B): a Sobel of the material albedo perturbs the
     // shading normal, so photo textures read as surfaces. It is a no-op for
-    // untextured materials, so VF_TEXTURES=0 stays bit-exact. VolFog /
-    // motion blur / DoF stay opt-in (separate toggles; volfog is WIP - see
-    // shaders/volumetric_fog.comp).
-    int m_renderFlags = 255;
+    // untextured materials, so VF_TEXTURES=0 stays bit-exact. Bit 8 =
+    // enclosed-space sky occlusion: attenuates sky/IBL ambient where a ray
+    // along the bent normal hits geometry, so caves/interiors stop reading as
+    // open-sky daylight; authored lights (world.json "lights") take over there.
+    // VolFog / motion blur / DoF stay opt-in (separate toggles; volfog is WIP -
+    // see shaders/volumetric_fog.comp).
+    int m_renderFlags = 511;
     float m_exposure = 1.15f;
     // SSAO tuning (VF_SSAO_*): world-scale two-band AO, opt-in via H / bit 6.
     float m_ssaoStrength = 0.6f;
@@ -302,15 +392,17 @@ private:
     int m_ssaoDebug = 0;       // 1 = raw AO, 2 = G-buffer normal
     bool m_ssaoBlur = true;    // cross-bilateral denoise before applying
     bool m_volFogEnabled = false;
-    // Micro-surfel detail (M key). Changing it changes the SURFEL STREAM, not
-    // just a draw-time flag, so a toggle re-runs the surfelizer via the world
-    // reload path (same as a layer toggle). Initial value from VF_MICRO.
-    bool m_microDetail = true;
     // Tighten only genuine hard-edge object parents; small tangent-aligned
     // bridge splats preserve crease coverage. Both are baked, so changing
     // either setting requests a world reload.
     float m_edgeShrink = 0.25f;
     bool m_edgeFill = true;
+    // Point-light budget: global emitter cap N (VF_LIGHT_BUDGET, 1..256,
+    // default kLightBudgetDefault) + per-pixel nearest-K (VF_LIGHT_K, 1..8,
+    // default 4).
+    // Both re-upload the binding-25 UBO only - dragging never reloads.
+    int m_lightBudget = vf::voxel::worldfile::kLightBudgetDefault;
+    int m_lightK = 4;
     bool m_motionBlurEnabled = false;
     bool m_dofEnabled = false;
     float m_dofFocusDist = 10.0f;
@@ -377,6 +469,13 @@ private:
     // adjustable via +/-; mode is selected in the sidebar's Edit section.
     bool m_editActive = false;
     EditBrush m_editBrush = EditBrush::Carve;
+    // The ONE place a brush mode changes - the sidebar's mode buttons and the
+    // A/D/S/C/M hotkeys both go through this, so a pending rotate/move stage
+    // can never be silently discarded by one caller and honoured by the other.
+    // Refuses the switch while a transform preview is in flight or would orphan
+    // a staged transform (that guard is the reason it is a function and not a
+    // bare m_editBrush write).
+    void chooseEditMode(EditBrush mode);
     float m_editDiameter = 2.0f; // meters (brush ball/cylinder/smooth footprint)
     // The brush is a lattice tool, so its width is a whole number of voxels
     // (VOXEL = 0.1 m) and the slider speaks voxels. 1 voxel is the per-voxel
@@ -431,6 +530,25 @@ private:
     }
     float m_editDepth = 1.5f;    // meters (carve depth / add length)
     float m_smoothStrength = 0.65f; // 0..1 surface relaxation per stamp
+    // Radial falloff curve for Add, Carve, Delete and Paint: how influence
+    // decays from the cursor to the rim of Width. Constant is the original
+    // hard-edged footprint (and makes flat-bottomed digs); the rest taper.
+    // A NAMED curve rather than a scalar, because the old 0..1 slider had a
+    // cliff at 0 (exactly flat) and no usable middle (its lowest non-zero
+    // setting was already 0.5 at half radius, and its top end a spike).
+    // See EditableWorld::falloffCurveAt for the table.
+    vf::voxel::EditableWorld::FalloffCurve m_editFalloffCurve =
+        vf::voxel::EditableWorld::FalloffCurve::Smooth;
+    // Smooth: soften each stamp by ChunkStore::kSmoothTaubinReinflate so a held
+    // brush shrinks relief less. Off by default - it is a 47% reduction in
+    // effective smoothing strength and nothing has measured it end-to-end yet.
+    bool m_smoothPreserveVolume = false;
+    // Footer readout of the last Smooth planner batch (columns touched, largest
+    // single move). A relaxation that "did nothing" is invisible in a render,
+    // and a number is the difference between legible and broken.
+    int m_smoothLastColumns = 0;
+    int m_smoothLastMaxDelta = 0;
+    int m_smoothLastRise = 0;
     uint8_t m_editMat = 6;       // palette id for Add and Paint
     // Rotate trackball: m_rotateLayer is the object activated by one click.
     // A subsequent press on the yaw/pitch/roll ring starts the live drag;

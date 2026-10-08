@@ -96,3 +96,42 @@ TEST_CASE("computeMove normalizes and respects keys")
     // nothing pressed
     CHECK(approxVec(mv(false, false, false, false, false, false, f, r), glm::vec3(0.0f)));
 }
+
+// A/D/S are brush-mode shortcuts while the edit tool is armed AND stay camera
+// keys. An earlier version yielded them to the brush while armed; that was
+// reversed because flying is how you aim the brush. This pins the property that
+// matters: the move keys are live in every edit-tool state.
+TEST_CASE("movement keys stay live while the edit brush is armed")
+{
+    glm::vec3 f(0, 0, -1), r(1, 0, 0);
+    auto mv = [&](bool fwd, bool back, bool left, bool rightIn, bool up, bool down) {
+        return Camera::computeMove(fwd, back, left, rightIn, up, down, f, r);
+    };
+
+    SUBCASE("W/A/S/D each move the camera on their own") {
+        CHECK(approxVec(mv(true, false, false, false, false, false), f));
+        CHECK(approxVec(mv(false, true, false, false, false, false), -f));
+        CHECK(approxVec(mv(false, false, true, false, false, false), -r));
+        CHECK(approxVec(mv(false, false, false, true, false, false), r));
+    }
+
+    SUBCASE("Q/E still move vertically") {
+        CHECK(approxVec(mv(false, false, false, false, true, false),
+                        glm::vec3(0, 1, 0)));
+        CHECK(approxVec(mv(false, false, false, false, false, true),
+                        glm::vec3(0, -1, 0)));
+    }
+
+    SUBCASE("a mode key held while flying still produces movement") {
+        // The mode key is down and the brush is armed: the press selected the
+        // mode, the hold must still fly. Diagonals stay unit length.
+        glm::vec3 m = mv(true, false, true, false, false, false);
+        CHECK(approxVec(glm::length(m), 1.0f));
+        CHECK_LT(m.z, -0.6f);
+        CHECK_LT(m.x, -0.6f);
+    }
+
+    SUBCASE("opposing keys still cancel rather than drift") {
+        CHECK(approxVec(mv(true, true, true, true, true, true), glm::vec3(0.0f)));
+    }
+}

@@ -17,3 +17,8 @@ opencode-rag.json
 # the live-edit session overlay: the app rewrites it on every brush stroke and
 # restores it at startup, so it is state, not content.
 assets/runtime_edits.vxw
+
+# Convenience symlink into build/ output + local scratch screenshots.
+/voxelforge
+.opencode/scratch/
+.opencode/sidebar-*.png

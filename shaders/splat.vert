@@ -36,6 +36,7 @@ layout(push_constant) uniform PC {
 layout(std140, set = 0, binding = 3) uniform SplatUBO {
     vec4 uSplat;  // x=buried, y=sigma2 (fragment), z=quad extent, w=debug mode
     vec4 uSplat2; // x=radius scale (hotkeys [/]), y=opacity, z/w=spare
+    vec4 uSplat3; // x=base-seal alpha threshold (VF_SPLAT_SEAL_ALPHA), yzw=spare
 } sp;
 
 // Live trackball rotation (drag preview): only surfels whose packed layer ID

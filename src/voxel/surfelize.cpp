@@ -701,19 +701,24 @@ SurfelSet buildSurfels(const VoxelField& field, const SurfelParams& params) {
     // Pass 1: raw mean normals (sharded). Smoothing lookups below use
     // binary search over the sorted keys (lock-free, no hash build).
     {
-        // meanNormal() is 6 lock-free field samples per cell: shard it
+        // meanNormal() is 6 lock-free field samples per cell: shard it in
+        // batches to avoid one atomic per surfel (1M+ fetch_adds).
         std::atomic<int> next{ 0 };
         unsigned hc = std::max(1u, std::thread::hardware_concurrency());
         std::vector<std::thread> threads;
+        constexpr int kBatch = 256;
         for (unsigned t = 0; t < hc; ++t)
             threads.emplace_back([&] {
                 for (;;) {
-                    const int i = next.fetch_add(1);
-                    if (i >= n)
+                    const int begin = next.fetch_add(kBatch);
+                    if (begin >= n)
                         return;
+                    const int end = std::min(begin + kBatch, n);
+                    for (int i = begin; i < end; ++i) {
                     int x, y, z;
                     unpackKey(keys[i], x, y, z);
                     rawNormals[i] = meanNormal(field, x, y, z);
+                    }
                 }
             });
         for (auto& th : threads)
@@ -1029,18 +1034,28 @@ SurfelSet buildSurfels(const VoxelField& field, const SurfelParams& params) {
             shPrev[i] = surfels[i].bent_sh.w;
             aoPrev[i] = surfels[i].mat_ao.w;
         }
+        // O(1) neighbour lookup: keys are sorted-unique, so a hash gives the
+        // same index as the old lower_bound with no log factor. Built once,
+        // read-only across threads. Same averaging, bit-identical results.
+        std::unordered_map<uint64_t, int> keyToIdx;
+        keyToIdx.reserve(size_t(n) * 2);
+        for (int i = 0; i < n; ++i)
+            keyToIdx.emplace(keys[i], i);
         std::atomic<int> next{ 0 };
         unsigned hc = std::max(1u, std::thread::hardware_concurrency());
         std::vector<std::thread> threads;
         const int faceDirs[6][3] = { { 1, 0, 0 }, { -1, 0, 0 },
                                      { 0, 1, 0 }, { 0, -1, 0 },
                                      { 0, 0, 1 }, { 0, 0, -1 } };
+        constexpr int kBatch = 256;
         for (unsigned t = 0; t < hc; ++t)
             threads.emplace_back([&] {
                 for (;;) {
-                    const int i = next.fetch_add(1);
-                    if (i >= n)
+                    const int begin = next.fetch_add(kBatch);
+                    if (begin >= n)
                         break;
+                    const int end = std::min(begin + kBatch, n);
+                    for (int i = begin; i < end; ++i) {
                     int x, y, z;
                     unpackKey(keys[i], x, y, z);
                     float acc = shPrev[i];
@@ -1048,9 +1063,9 @@ SurfelSet buildSurfels(const VoxelField& field, const SurfelParams& params) {
                     float wsum = 1.0f;
                     for (auto& d : faceDirs) {
                         const uint64_t nk = packKey(x + d[0], y + d[1], z + d[2]);
-                        auto it = std::lower_bound(keys.begin(), keys.end(), nk);
-                        if (it != keys.end() && *it == nk) {
-                            const size_t j = size_t(it - keys.begin());
+                        auto it = keyToIdx.find(nk);
+                        if (it != keyToIdx.end()) {
+                            const int j = it->second;
                             acc += shPrev[j];
                             aoAcc += aoPrev[j];
                             ++wsum;
@@ -1058,6 +1073,7 @@ SurfelSet buildSurfels(const VoxelField& field, const SurfelParams& params) {
                     }
                     surfels[i].bent_sh.w = acc / wsum;
                     surfels[i].mat_ao.w = aoAcc / wsum;
+                    }
                 }
             });
         for (auto& th : threads)
@@ -1072,6 +1088,68 @@ SurfelSet buildSurfels(const VoxelField& field, const SurfelParams& params) {
     for (int i = 0; i < n; ++i)
         surfels[i].mat_ao.w = packSurfelAo(surfelBakedAo(surfels[i].mat_ao.w),
                                             layerId[i]);
+
+    // ---- TRACE audit: how many surfels are geometrically unsupported? -------
+    // A surfel whose 3x3x3 lattice neighbourhood holds no OTHER surfel has no
+    // disk within one cell of it, so it cannot visually connect to anything and
+    // renders as a detached blob. `keys` is still key-sorted here (the chunk
+    // bucketing below destroys that order), so the probe is a binary search.
+    // Sampled: this is a diagnostic, not a production pass.
+    if (getenv("VF_TRACE")) {
+        const int kProbe[26][3] = {
+            {-1,-1,-1},{0,-1,-1},{1,-1,-1},{-1,0,-1},{1,0,-1},{-1,1,-1},{0,1,-1},{1,1,-1},
+            {-1,-1, 0},{1,-1, 0},{-1, 1, 0},{1, 1, 0},
+            {-1,-1, 1},{0,-1, 1},{1,-1, 1},{-1,0, 1},{1,0, 1},{-1,1, 1},{0,1, 1},{1,1, 1},
+            {-1, 0, 0},{1, 0, 0},{0,-1, 0},{0, 1, 0},{0, 0,-1},{0, 0, 1}};
+        const int latN = field.latN();
+        size_t probed = 0, detached = 0, detachedLoneVoxel = 0;
+        int shown = 0;
+        for (int i = 0; i < n; i += 37) {
+            int x, y, z;
+            unpackKey(keys[i], x, y, z);
+            ++probed;
+            bool supported = false;
+            for (int d = 0; d < 26 && !supported; ++d) {
+                const int nx = x + kProbe[d][0], ny = y + kProbe[d][1],
+                          nz = z + kProbe[d][2];
+                if (nx < 0 || nx >= latN || ny < 0 || ny >= latN || nz < 0 ||
+                    nz >= latN)
+                    continue;
+                const uint64_t nk = packKey(nx, ny, nz);
+                auto it = std::lower_bound(keys.begin(), keys.end(), nk);
+                if (it != keys.end() && *it == nk)
+                    supported = true;
+            }
+            if (supported)
+                continue;
+            ++detached;
+            // The user's exception: a genuinely lone solid voxel in space IS
+            // meant to be visible. Count it separately.
+            bool lone = true;
+            for (int d = 0; d < 6 && lone; ++d) {
+                static const int sd[6][3] = {{1,0,0},{-1,0,0},{0,1,0},
+                                             {0,-1,0},{0,0,1},{0,0,-1}};
+                const int nx = x + sd[d][0], ny = y + sd[d][1], nz = z + sd[d][2];
+                if (nx < 0 || nx >= latN || ny < 0 || ny >= latN || nz < 0 ||
+                    nz >= latN || field.sample(nx, ny, nz).d <= 0.0f)
+                    lone = false;
+            }
+            if (lone)
+                ++detachedLoneVoxel;
+            if (shown < 10) {
+                ++shown;
+                spdlog::info("  detached surfel #{} cell ({},{},{}) mat {} r {:.3f} "
+                             "pos ({:.2f},{:.2f},{:.2f}) loneVoxel={}",
+                             shown, x, y, z, int(surfels[i].mat_ao.x + 0.5f),
+                             surfels[i].pos_rU.w, surfels[i].pos_rU.x,
+                             surfels[i].pos_rU.y, surfels[i].pos_rU.z, lone);
+            }
+        }
+        spdlog::info("unsupported-surfel audit: {} detached of {} probed "
+                     "({:.3f}%), of which {} are lone voxels",
+                     detached, probed, probed ? 100.0 * detached / probed : 0.0,
+                     detachedLoneVoxel);
+    }
 
     std::vector<uint64_t> order(n);
     std::iota(order.begin(), order.end(), 0u);
@@ -1420,26 +1498,285 @@ SurfelSet buildSurfels(const VoxelField& field, const SurfelParams& params) {
         }
         set.lod2Range[kChunks] = uint32_t(surfels.size());
     }
-    set.surfels = std::move(surfels);    const auto t1 = std::chrono::steady_clock::now();
+    set.surfels = std::move(surfels);
+    // ---- drop unsupported (floating) surfels ------------------------------
+    // A splat no other splat reaches renders as a speck hanging in space next
+    // to the surface it belongs to. Measured on an edited region: 2 of 229,747
+    // (both seg=micro foliage, mat 8, radius 0.0143-0.0219 m) missed their
+    // nearest neighbour by 2.7-4.2 mm -- at 2 cm across that gap is plainly
+    // visible. They are suppressed UNLESS the cell is a genuinely single solid
+    // voxel in space, which is the one case where a lone disk is the point.
+    //
+    // Scope: the base+edge+micro region only (chunkRange's span). The LOD rings
+    // are appended after this point and are left alone - a merged ring disk is
+    // a coarse stand-in for a whole block, and dropping one would punch a hole
+    // at LOD distance rather than remove a speckle.
+    if (params.dropFloating && !set.chunkRange.empty() &&
+        set.chunkRange[kSurfGridN * kSurfGridN * kSurfGridN] <= set.surfels.size()) {
+        const float halfF = 0.5f * vf::voxel::WORLD;
+        const float vsF = voxel;
+        auto cellKeyF = [](int cx, int cy, int cz) {
+            return (uint64_t(std::uint32_t(cx)) << 20) | (uint32_t(cy) << 10) |
+                   uint32_t(cz);
+        };
+        const uint32_t kChunks3 = kSurfGridN * kSurfGridN * kSurfGridN;
+        const uint32_t span = set.chunkRange[kChunks3];
+        std::unordered_map<uint64_t, std::vector<int>> bucket;
+        bucket.reserve(span);
+        for (uint32_t i = 0; i < span; ++i)
+            bucket[cellKeyF(int((set.surfels[i].pos_rU.x + halfF) / vsF),
+                           int((set.surfels[i].pos_rU.y + halfF) / vsF),
+                           int((set.surfels[i].pos_rU.z + halfF) / vsF))]
+                .push_back(int(i));
+        static const int kProbeF[27][3] = {
+            {-1,-1,-1},{0,-1,-1},{1,-1,-1},{-1,0,-1},{1,0,-1},{-1,1,-1},{0,1,-1},{1,1,-1},
+            {-1,-1, 0},{1,-1, 0},{-1, 1, 0},{1, 1, 0},
+            {-1,-1, 1},{0,-1, 1},{1,-1, 1},{-1,0, 1},{1,0, 1},{-1,1, 1},{0,1, 1},{1,1, 1},
+            {-1, 0, 0},{1, 0, 0},{0,-1, 0},{0, 1, 0},{0, 0,-1},{0, 0, 1},{0, 0, 0}};
+        std::vector<uint8_t> keep(span, 1);
+        uint32_t dropped = 0;
+        for (uint32_t i = 0; i < span; ++i) {
+            const Surfel& a = set.surfels[i];
+            const float ra = std::max(a.pos_rU.w, a.normal_rV.w);
+            int ex = int((a.pos_rU.x + halfF) / vsF);
+            int ey = int((a.pos_rU.y + halfF) / vsF);
+            int ez = int((a.pos_rU.z + halfF) / vsF);
+            bool touch = false;
+            for (int d = 0; d < 27 && !touch; ++d) {
+                auto bt = bucket.find(
+                    cellKeyF(ex + kProbeF[d][0], ey + kProbeF[d][1], ez + kProbeF[d][2]));
+                if (bt == bucket.end())
+                    continue;
+                for (int bi : bt->second) {
+                    if (uint32_t(bi) == i)
+                        continue;
+                    const Surfel& b = set.surfels[size_t(bi)];
+                    if (glm::distance(a.pos_rU, b.pos_rU) <
+                        ra + std::max(b.pos_rU.w, b.normal_rV.w)) {
+                        touch = true;
+                        break;
+                    }
+                }
+            }
+            if (touch)
+                continue;
+            // Exception: a single solid voxel in space is meant to be visible.
+            bool lone = field.sample(ex, ey, ez).d <= 0.0f;
+            static const int sdF[6][3] = {{1,0,0},{-1,0,0},{0,1,0},
+                                          {0,-1,0},{0,0,1},{0,0,-1}};
+            const int latNF = field.latN();
+            for (int d = 0; d < 6 && lone; ++d) {
+                const int nx = ex + sdF[d][0], ny = ey + sdF[d][1], nz = ez + sdF[d][2];
+                if (nx < 0 || nx >= latNF || ny < 0 || ny >= latNF || nz < 0 ||
+                    nz >= latNF || field.sample(nx, ny, nz).d <= 0.0f)
+                    lone = false;
+            }
+            if (!lone) {
+                keep[i] = 0;
+                ++dropped;
+            }
+        }
+        if (dropped) {
+            // Compact the kept entries and rebuild every per-chunk index array:
+            // the layout is [base | edge bridges | material micros], so all
+            // three offsets shift once anything is removed.
+            std::vector<Surfel> out;
+            out.reserve(span);
+            std::vector<uint32_t> nRange(kChunks3 + 1, 0), nEdge(kChunks3 + 1, 0),
+                                   nMicro(kChunks3 + 1, 0);
+            for (uint32_t c = 0; c < kChunks3; ++c) {
+                const uint32_t b0 = set.chunkRange[c], b1 = set.chunkRange[c + 1];
+                const uint32_t e0 = std::min(set.edgeStart.empty() ? b1
+                                                                 : set.edgeStart[c], b1);
+                const uint32_t m0 = std::min(set.microStart.empty() ? b1
+                                                                   : set.microStart[c], b1);
+                const size_t base0 = out.size();
+                for (uint32_t i = b0; i < e0; ++i) if (keep[i]) out.push_back(set.surfels[i]);
+                const size_t edge0 = out.size();
+                for (uint32_t i = e0; i < m0; ++i) if (keep[i]) out.push_back(set.surfels[i]);
+                const size_t mic0 = out.size();
+                for (uint32_t i = m0; i < b1; ++i) if (keep[i]) out.push_back(set.surfels[i]);
+                nRange[c] = uint32_t(base0);
+                nEdge[c] = uint32_t(edge0);
+                nMicro[c] = uint32_t(mic0);
+            }
+            nRange[kChunks3] = uint32_t(out.size());
+            nEdge[kChunks3] = uint32_t(out.size());
+            nMicro[kChunks3] = uint32_t(out.size());
+            // keep the tail (LOD rings + water) that starts at span
+            out.insert(out.end(), set.surfels.begin() + span, set.surfels.end());
+            set.surfels = std::move(out);
+            set.chunkRange = std::move(nRange);
+            set.edgeStart = std::move(nEdge);
+            set.microStart = std::move(nMicro);
+        }
+        set.droppedFloating = dropped;
+    }
+    // ---- TRACE audit: geometric support over the FINAL surfel set ---------
+    // The cell-adjacency probe above only proves a neighbouring CELL exists.
+    // That is not support: on a one-cell-thick plate the front and back face
+    // disks are ~0.2 m apart with 0.1 m radii, so they never touch, and a disk
+    // can sit alone in space while still having neighbours in the lattice.
+    // This buckets every FINAL surfel (base + edge bridges + micros + LOD
+    // rings) by its cell and asks the real question: does any other disk's
+    // footprint come within reach? Circumradius is used, so this
+    // over-detects contact rather than under-detecting it.
+    if (getenv("VF_TRACE")) {
+        const auto& S = set.surfels;
+        const float half = 0.5f * vf::voxel::WORLD;
+        // Does every surfel in [chunkRange[c], chunkRange[c+1]) actually live
+        // in chunk c? This is the invariant the live path depends on: it SEEDS
+        // a chunk's cache from exactly that GPU slot (SplatPass::
+        // readChunkSurfels), so a mis-bucketed slot poisons every live patch of
+        // that chunk with a neighbour's geometry.
+        {
+            size_t wrong = 0, checked = 0;
+            int firstBad = -1;
+            for (uint32_t c = 0; c < kSurfGridN * kSurfGridN * kSurfGridN; ++c) {
+                const uint32_t b0 = set.chunkRange[c], b1 = set.chunkRange[c + 1];
+                for (uint32_t i = b0; i < b1 && i < S.size(); ++i) {
+                    ++checked;
+                    const int lx = int((S[i].pos_rU.x + half) / voxel);
+                    const int ly = int((S[i].pos_rU.y + half) / voxel);
+                    const int lz = int((S[i].pos_rU.z + half) / voxel);
+                    // chunkIndex() already divides by the chunk size.
+                    if (chunkIndex(lx, ly, lz) != int(c)) {
+                        if (firstBad < 0)
+                            firstBad = int(c);
+                        ++wrong;
+                    }
+                }
+            }
+            spdlog::info("chunk-bucket audit: {} of {} surfels in the WRONG chunk "
+                         "slot{}", wrong, checked,
+                         firstBad >= 0 ? std::to_string(firstBad) : std::string());
+        }
+        auto cellOf = [&](const Surfel& s) {
+            return packKey(int((s.pos_rU.x + half) / voxel),
+                           int((s.pos_rU.y + half) / voxel),
+                           int((s.pos_rU.z + half) / voxel));
+        };
+        std::unordered_map<uint64_t, std::vector<int>> bucket;
+        bucket.reserve(S.size());
+        for (size_t i = 0; i < S.size(); ++i)
+            bucket[cellOf(S[i])].push_back(int(i));
+        const int kProbe[26][3] = {
+            {-1,-1,-1},{0,-1,-1},{1,-1,-1},{-1,0,-1},{1,0,-1},{-1,1,-1},{0,1,-1},{1,1,-1},
+            {-1,-1, 0},{1,-1, 0},{-1, 1, 0},{1, 1, 0},
+            {-1,-1, 1},{0,-1, 1},{1,-1, 1},{-1,0, 1},{1,0, 1},{-1,1, 1},{0,1, 1},{1,1, 1},
+            {-1, 0, 0},{1, 0, 0},{0,-1, 0},{0, 1, 0},{0, 0,-1},{0, 0, 1}};
+        size_t probed = 0, floating = 0;
+        int shown = 0;
+        std::vector<int> byMat(kPaletteN, 0);
+        for (size_t i = 0; i < S.size(); i += 53) {
+            const Surfel& a = S[i];
+            int x, y, z;
+            unpackKey(cellOf(a), x, y, z);
+            const float ra = std::max(a.pos_rU.w, a.normal_rV.w);
+            ++probed;
+            bool touch = false;
+            // 27 probes: the 26 neighbours PLUS the cell's own bucket. A micro
+            // child's parent lives in the SAME lattice cell, so omitting it
+            // reports every micro as floating.
+            for (int d = 0; d < 27 && !touch; ++d) {
+                const int dx = d < 26 ? kProbe[d][0] : 0;
+                const int dy = d < 26 ? kProbe[d][1] : 0;
+                const int dz = d < 26 ? kProbe[d][2] : 0;
+                const uint64_t nk = packKey(x + dx, y + dy, z + dz);
+                auto it = bucket.find(nk);
+                if (it == bucket.end())
+                    continue;
+                for (int j : it->second) {
+                    if (size_t(j) == i)
+                        continue;
+                    const Surfel& b = S[j];
+                    const float rb = std::max(b.pos_rU.w, b.normal_rV.w);
+                    if (glm::distance(a.pos_rU, b.pos_rU) < ra + rb) {
+                        touch = true;
+                        break;
+                    }
+                }
+            }
+            if (touch)
+                continue;
+            ++floating;
+            const int m = int(a.mat_ao.x + 0.5f);
+            if (m >= 0 && m < kPaletteN)
+                ++byMat[m];
+            if (shown < 12) {
+                ++shown;
+                // Nearest other surfel: separates "parent is ABSENT" (a real
+                // emitter bug) from "parent is present but just out of reach"
+                // (radius tuning). Also report same-cell occupancy, which is
+                // where a micro's own parent would live.
+                float best = 1e9f;
+                float bestR = 0.0f;
+                int sameCell = 0;
+                for (int d = 0; d < 27; ++d) {
+                    const int dx = d < 26 ? kProbe[d][0] : 0;
+                    const int dy = d < 26 ? kProbe[d][1] : 0;
+                    const int dz = d < 26 ? kProbe[d][2] : 0;
+                    const uint64_t nk = packKey(x + dx, y + dy, z + dz);
+                    auto jt = bucket.find(nk);
+                    if (jt == bucket.end())
+                        continue;
+                    for (int j : jt->second) {
+                        if (size_t(j) == i)
+                            continue;
+                        if (d == 26)
+                            ++sameCell;
+                        const Surfel& b = S[j];
+                        const float dist = glm::distance(a.pos_rU, b.pos_rU);
+                        if (dist < best) {
+                            best = dist;
+                            bestR = std::max(b.pos_rU.w, b.normal_rV.w);
+                        }
+                    }
+                }
+                spdlog::info("  FLOATING #{} cell ({},{},{}) mat {} r {:.3f} "
+                             "pos ({:.2f},{:.2f},{:.2f}) | nearest {:.3f} (its r "
+                             "{:.3f}, need {:.3f}) sameCell={}",
+                             shown, x, y, z, m, a.pos_rU.w, a.pos_rU.x,
+                             a.pos_rU.y, a.pos_rU.z, best, bestR, ra + bestR,
+                             sameCell);
+            }
+        }
+        spdlog::info("geometric-support audit: {} unconnected of {} probed "
+                     "({:.4f}%)", floating, probed,
+                     probed ? 100.0 * floating / probed : 0.0, byMat.size());
+        std::string mats;
+        for (int m = 0; m < kPaletteN; ++m)
+            if (byMat[m])
+                mats += " mat" + std::to_string(m) + "=" + std::to_string(byMat[m]);
+        spdlog::info("  unconnected by material:{}", mats);
+    }    const auto t1 = std::chrono::steady_clock::now();
     auto ms = [](const auto& a, const auto& b) {
         return std::chrono::duration_cast<std::chrono::milliseconds>(b - a).count();
     };
     set.buildMs = float(ms(t0, t1));
     spdlog::info("surfelize: {} surfels ({} terrain, {} object, edge {} / {}, "
-                 "lod1 {} lod2 {}), {} ms (enum+surface {} ms, shade+bucket {} ms)",
+                 "lod1 {} lod2 {}, dropped-floating {}), {} ms (enum+surface {} ms, "
+                 "shade+bucket {} ms)",
                  set.surfels.size(), set.terrainCount, set.objectCount,
                  set.edgeBridgeCount, set.edgeParentCount, set.lod1Count,
-                 set.lod2Count, set.buildMs, ms(t0, tEnum), ms(tEnum, t1));
+                 set.lod2Count, set.droppedFloating, set.buildMs, ms(t0, tEnum),
+                 ms(tEnum, t1));
     return set;
 }
 
 namespace {
 
 // Candidate surface cell for the store-based live surfelizer.
+//
+// One CELL can own several candidates: a cell whose mean normal cancels to zero
+// (a one-cell-thick plate) or a thin corner is expanded into one candidate per
+// exposed face, exactly as the bake does, each carrying that face's axis normal.
+// `keys` is therefore not one-per-cell, and the repeated key marks the group.
 struct SurfelCand {
     uint64_t key;
     glm::vec3 pos;
-    glm::vec3 n;
+    glm::vec3 n;     // final normal: smoothed, or the axis normal of a face entry
+    glm::vec3 rawN;  // pre-smoothing mean normal (the bake's meanNormal rule)
     StoreCell cell;
     float aspect = 1.0f;  // 1 = isotropic; >1 stretches along `tan`
     glm::vec3 tan { 0.0f };
@@ -1449,6 +1786,8 @@ struct SurfelCand {
     float thinNarrow = 0.0f;
     uint8_t layer = 0; // source .vxw owner, resolved by ChunkStore provenance
     EdgeInfo edge;      // exposed-face hard-edge pairs only
+    unsigned exposedFaces = 0; // lattice faces whose neighbour is air
+    bool faceEntry = false;    // per-face expansion: never smoothed
 };
 
 // Store-space twins of solidDepthCells/solidRunCells: same world-space probe
@@ -1462,48 +1801,62 @@ inline bool storeSolidAt(const ChunkStore& store, glm::vec3 p)
     return store.cellAt(cx, cy, cz).solid;
 }
 
-// Store-space neighbour pass: compute the edge metric used by
-// `SurfelParams::edgeShrink` and, when enabled, the same anisotropy/thin-
-// footprint rule as the bake. The 6 lattice neighbours are found by binary
-// search over the key-sorted candidate list; edge detection remains active
-// when anisotropy is disabled, while the thin probe is skipped.
+// Store-space neighbour pass, in the bake's order. The 6 lattice neighbours
+// are found by binary search over the key-sorted candidate list, exactly as
+// buildSurfels looks them up in its own key array, so one cell yields the same
+// normal on both paths:
+//   1. normal smoothing (the bake's `smoothNormals` block): a non-expanded cell
+//      averages its own normal with the RAW normals of the face neighbours
+//      that are candidates too. Per-face entries are skipped - smoothing them
+//      off their voxel face is what the bake refuses to do.
+//   2. the optional anisotropy tangent, from that same raw-normal bend sum.
+//   3. the hard-edge mask, from the exposed faces recorded at enumeration.
+//   4. the thin-footprint probe, using the final normal.
 void computeCandidateAnisotropy(const ChunkStore& store,
-                                std::vector<SurfelCand>& cands, bool enabled)
+                                std::vector<SurfelCand>& cands,
+                                const SurfelParams& params)
 {
     if (cands.empty())
         return;
     const int dirs[6][3] = { { 1, 0, 0 },  { -1, 0, 0 }, { 0, 1, 0 },
-                             { 0, -1, 0 }, { 0, 0, 1 },  { 0, 0, -1 } };
+                             { 0, -1, 0 }, { 0, 0, 1 }, { 0, 0, -1 } };
     for (SurfelCand& cd : cands) {
         int x, y, z;
         unpackKey(cd.key, x, y, z);
-        glm::vec3 bendSum(0.0f);
-        unsigned exposedFaces = 0;
-        for (int d = 0; d < 6; ++d) {
-            const int nx = x + dirs[d][0], ny = y + dirs[d][1],
-                      nz = z + dirs[d][2];
-            if (cd.cell.obj && store.cellAt(nx, ny, nz).sdfRaw > 0)
-                exposedFaces |= 1u << d;
-            const uint64_t nk = packKey(nx, ny, nz);
-            auto it = std::lower_bound(
-                cands.begin(), cands.end(), nk,
-                [](const SurfelCand& c, uint64_t k) { return c.key < k; });
-            if (it != cands.end() && it->key == nk)
-                bendSum += it->n - cd.n;
+        cd.edge = cd.cell.obj ? edgeInfoFromMask(cd.exposedFaces) : EdgeInfo {};
+        if (cd.faceEntry)
+            continue; // an axis-aligned face entry has nothing to smooth
+        if (params.smoothNormals) {
+            glm::vec3 bendSum(0.0f);
+            glm::vec3 acc = cd.n;
+            float wsum = 1.0f;
+            for (const auto& d : dirs) {
+                const uint64_t nk = packKey(x + d[0], y + d[1], z + d[2]);
+                auto it = std::lower_bound(
+                    cands.begin(), cands.end(), nk,
+                    [](const SurfelCand& c, uint64_t k) { return c.key < k; });
+                if (it == cands.end() || it->key != nk)
+                    continue;
+                acc += it->rawN;
+                ++wsum;
+                bendSum += it->rawN - cd.rawN;
+            }
+            const glm::vec3 avg = acc / wsum;
+            // A cancellation this deep is a symmetric exposure, not a surface:
+            // keep the cell's own mean normal rather than fabricate a
+            // direction. A fabricated +Y is exactly what turned untouched
+            // cabin walls upwards after a live edit.
+            cd.n = glm::dot(avg, avg) > 1e-12f ? safeNormalize(avg) : cd.rawN;
+            if (params.anisotropy)
+                anisotropyFromBend(bendSum, cd.n, cd.aspect, cd.tan);
         }
-        cd.edge = cd.cell.obj ? edgeInfoFromMask(exposedFaces) : EdgeInfo {};
-        if (enabled) {
-            anisotropyFromBend(bendSum, cd.n, cd.aspect, cd.tan);
-
+        if (params.anisotropy) {
             // Same long-thin rule as the bake, so a live edit inside a reed bed
             // matches the surrounding baked geometry (probed from the CELL
             // CENTRE, never the normal-offset surfel position).
-            const glm::vec3 cellCentre(-51.2f + (x + 0.5f) * VOXEL,
-                                       -51.2f + (y + 0.5f) * VOXEL,
-                                       -51.2f + (z + 0.5f) * VOXEL);
             const ThinFootprint fp = thinFootprintAt(
                 [&](glm::vec3 q) { return storeSolidAt(store, q); },
-                cellCentre, cd.n, x, y, z);
+                cd.pos, cd.n, x, y, z);
             if (fp.thin) {
                 cd.thinTall = fp.along;
                 cd.thinNarrow = fp.across;
@@ -1513,8 +1866,86 @@ void computeCandidateAnisotropy(const ChunkStore& store,
     }
 }
 
+// Enumerate the range's surface cells and derive each one's RAW normal with
+// the bake's own rule (meanNormal): the mean of the outward directions of the
+// exposed faces, out-of-lattice counting as air. A cell with no exposed face is
+// buried and gets no entry.
+//
+// The normal MUST come from this rule and not from a local SDF gradient. A live
+// stamp re-derives the whole edit AABB plus a margin, so every rule difference
+// between the bake and this path is applied to cells the user never touched:
+// measured on the cabin, a central difference of the quantised store SDF put
+// 27.8 % of its object surfels more than 30 deg off the bake (mean 22.4 deg) and
+// silently turned 1191 of them into straight-up disks, because the store's
+// byte-quantised nearest-sampled distance cancels to exactly zero deep inside a
+// thick wall. The occupancy rule reproduces the bake to within 1.2 % / 3.8 deg
+// unsmoothed, and within 0.6 % / 1.1 deg once the neighbour pass smooths it.
+//
+// A cell whose exposed directions cancel to zero, or a thin corner of a thin
+// object, is EXPANDED into one axis-aligned candidate per exposed face, as the
+// bake does. Dropping it would delete the body of every one-cell-thick stem;
+// inventing a single direction would render it as one diagonal disk and leave
+// the flat faces it stands for uncovered.
+// --- store-side heightfield normal -----------------------------------------
+// The BAKE blends every terrain-top normal 0.55 of the way toward a two-scale
+// gradient of the height TEXTURE, i.e. of a bilinearly interpolated FLOAT top
+// field. The store path had no such blend, so it shaded terrain tops from
+// exposed faces alone. That is a parity break in the direction this file's
+// parity rule cares about (the live path must equal the bake): an identical
+// slope shades smooth after a bake and faceted after a live edit, and a Smooth
+// stamp - whose whole purpose is to fair the surface - produced geometry the
+// normal estimator could not describe at all.
+//
+// The store has no height texture, so the top is found by walking DOWN from a
+// hint cell to the first solid, non-object cell. Bounded, because the two-scale
+// gradient only samples within +-0.35 m (4 cells) of the surfel, and the caller
+// passes the surfel's own cell as the hint.
+constexpr float kStoreTopMissing = -1e8f;
+
+float storeTopAt(const ChunkStore& store, float wx, float wz, int hintY)
+{
+    const int n = store.latN();
+    if (n <= 0)
+        return kStoreTopMissing;
+    const int cx = std::clamp(int(std::floor((wx + 0.5f * WORLD) / VOXEL)), 0, n - 1);
+    const int cz = std::clamp(int(std::floor((wz + 0.5f * WORLD) / VOXEL)), 0, n - 1);
+    const int yHi = std::min(n - 1, hintY + 2);
+    const int yLo = std::max(0, hintY - 18);
+    for (int y = yHi; y >= yLo; --y) {
+        const StoreCell c = store.cellAt(cx, y, cz);
+        if (c.solid && !c.obj)
+            return (float(y) + 0.5f) * VOXEL - 0.5f * WORLD;
+    }
+    return kStoreTopMissing; // no terrain in the window
+}
+
+// Exactly the bake's two-scale construction (e = 0.35 m wide, 0.10 m fine,
+// mixed 0.55), so the two paths agree on the same surface. Returns a zero
+// vector when any tap is missing, which tells the caller to keep the face
+// normal rather than blend toward a partial field.
+glm::vec3 storeHeightfieldNormal(const ChunkStore& store, glm::vec3 p, int hintY)
+{
+    const float e = 0.35f, e2 = 0.10f;
+    auto H = [&](float dx, float dz) {
+        return storeTopAt(store, p.x + dx, p.z + dz, hintY);
+    };
+    const float wx0 = H(-e, 0.f), wx1 = H(e, 0.f);
+    const float wz0 = H(0.f, -e), wz1 = H(0.f, e);
+    const float fx0 = H(-e2, 0.f), fx1 = H(e2, 0.f);
+    const float fz0 = H(0.f, -e2), fz1 = H(0.f, e2);
+    if (wx0 <= kStoreTopMissing || wx1 <= kStoreTopMissing ||
+        wz0 <= kStoreTopMissing || wz1 <= kStoreTopMissing ||
+        fx0 <= kStoreTopMissing || fx1 <= kStoreTopMissing ||
+        fz0 <= kStoreTopMissing || fz1 <= kStoreTopMissing)
+        return glm::vec3(0.0f);
+    const glm::vec3 nWide = safeNormalize(glm::vec3(wx0 - wx1, 2.0f * e, wz0 - wz1));
+    const glm::vec3 nFine = safeNormalize(glm::vec3(fx0 - fx1, 2.0f * e2, fz0 - fz1));
+    return safeNormalize(glm::mix(nFine, nWide, 0.55f));
+}
+
 std::vector<SurfelCand> collectChunkCandidates(const ChunkStore& store, int chunk,
-                                               glm::ivec3 lo, glm::ivec3 hi)
+                                               glm::ivec3 lo, glm::ivec3 hi,
+                                               const SurfelParams& params)
 {
     std::vector<SurfelCand> cands;
     if (chunk < 0 || chunk >= kChunkCount)
@@ -1524,6 +1955,7 @@ std::vector<SurfelCand> collectChunkCandidates(const ChunkStore& store, int chun
     const int x0 = std::max(ccx * CHUNK_N, lo.x), x1 = std::min(ccx * CHUNK_N + CHUNK_N, hi.x);
     const int y0 = std::max(ccy * CHUNK_N, lo.y), y1 = std::min(ccy * CHUNK_N + CHUNK_N, hi.y);
     const int z0 = std::max(ccz * CHUNK_N, lo.z), z1 = std::min(ccz * CHUNK_N + CHUNK_N, hi.z);
+    const int latN = store.latN();
     const int dirs[6][3] = { { 1, 0, 0 },  { -1, 0, 0 }, { 0, 1, 0 },
                              { 0, -1, 0 }, { 0, 0, 1 },  { 0, 0, -1 } };
     for (int z = z0; z < z1; ++z)
@@ -1533,39 +1965,84 @@ std::vector<SurfelCand> collectChunkCandidates(const ChunkStore& store, int chun
                 // raw == 0 counts as solid here: the SVO DDA tests `sdf <= 0`
                 if (c.sdfRaw > 0)
                     continue;
-                bool surface = false;
-                for (const auto& d : dirs) {
-                    const StoreCell nb = store.cellAt(x + d[0], y + d[1], z + d[2]);
-                    if (nb.sdfRaw > 0) {
-                        surface = true;
-                        break;
-                    }
-                }
-                if (!surface)
-                    continue;
-                // SDF-gradient normal (store distances are locally smooth)
                 const glm::vec3 wp(-51.2f + (x + 0.5f) * VOXEL,
                                    -51.2f + (y + 0.5f) * VOXEL,
                                    -51.2f + (z + 0.5f) * VOXEL);
-                const float e = 0.15f;
-                glm::vec3 n(
-                    store.sampleWorld(wp + glm::vec3(e, 0, 0)).d -
-                        store.sampleWorld(wp - glm::vec3(e, 0, 0)).d,
-                    store.sampleWorld(wp + glm::vec3(0, e, 0)).d -
-                        store.sampleWorld(wp - glm::vec3(0, e, 0)).d,
-                    store.sampleWorld(wp + glm::vec3(0, 0, e)).d -
-                        store.sampleWorld(wp - glm::vec3(0, 0, e)).d);
-                if (glm::dot(n, n) < 1e-8f)
-                    n = glm::vec3(0.0f, 1.0f, 0.0f);
-                else
-                    n = glm::normalize(n);
+                unsigned exposed = 0;
+                glm::vec3 raw(0.0f);
+                for (int d = 0; d < 6; ++d) {
+                    const int nx = x + dirs[d][0], ny = y + dirs[d][1],
+                              nz = z + dirs[d][2];
+                    const bool air = nx < 0 || nx >= latN || ny < 0 ||
+                                     ny >= latN || nz < 0 || nz >= latN ||
+                                     store.cellAt(nx, ny, nz).sdfRaw > 0;
+                    if (!air)
+                        continue;
+                    exposed |= 1u << d;
+                    raw += glm::vec3(float(dirs[d][0]), float(dirs[d][1]),
+                                     float(dirs[d][2]));
+                }
+                if (exposed == 0)
+                    continue; // buried: no face is visible from outside
                 const VoxelField::Sample provenance = store.sample(x, y, z);
-                cands.push_back({ packKey(x, y, z), wp, n, c, 1.0f,
-                                  glm::vec3(0.0f), 0.0f, 0.0f,
-                                  provenance.obj ? provenance.layer : uint8_t(0) });
+                SurfelCand base;
+                base.key = packKey(x, y, z);
+                base.pos = wp;
+                base.cell = c;
+                base.exposedFaces = exposed;
+                base.layer = provenance.obj ? provenance.layer : uint8_t(0);
+                base.rawN = safeNormalize(raw); // a cancelling sum stays zero
+                const bool degenerate = glm::dot(raw, raw) < 1e-6f;
+                bool thinCorner = false;
+                if (!degenerate && c.obj) {
+                    const glm::vec3 an = glm::abs(base.rawN);
+                    const int nonZero = (an.x > 1e-3f) + (an.y > 1e-3f) +
+                                        (an.z > 1e-3f);
+                    thinCorner = nonZero >= 2 &&
+                                 thinCellAt(
+                                     [&](glm::vec3 q) {
+                                         return storeSolidAt(store, q);
+                                     },
+                                     wp);
+                }
+                if (degenerate || thinCorner) {
+                    for (int d = 0; d < 6; ++d) {
+                        if (!(exposed & (1u << d)))
+                            continue;
+                        SurfelCand face = base;
+                        face.n = glm::vec3(float(dirs[d][0]), float(dirs[d][1]),
+                                           float(dirs[d][2]));
+                        face.faceEntry = true;
+                        cands.push_back(face);
+                    }
+                    continue;
+                }
+                base.n = base.rawN;
+                // Terrain tops blend toward the store's own two-scale
+                // heightfield gradient, mirroring the bake's
+                // terrainHeightfieldNormals block. Object cells are excluded:
+                // their surfaces are not a height field, and the bake excludes
+                // them too (it keys on `y == colTop`).
+                if (params.terrainHeightfieldNormals && !c.obj &&
+                    (exposed & (1u << 2))) { // air directly above
+                    const glm::vec3 hn = storeHeightfieldNormal(store, wp, y);
+                    if (glm::dot(hn, hn) > 1e-6f)
+                        base.n = safeNormalize(
+                            glm::mix(base.n, hn, params.heightfieldBlend));
+                    // rawN is deliberately LEFT UNBLENDED: the bake applies the
+                    // heightfield mix to `n` but its smoothing stage reads the
+                    // separate `rawNormals[]`, so blending rawN here would make
+                    // the store path disagree with the bake on the very stage
+                    // the parity rule is about.
+                }
+                cands.push_back(base);
             }
-    std::sort(cands.begin(), cands.end(),
-              [](const SurfelCand& a, const SurfelCand& b) { return a.key < b.key; });
+    // Key-sorted, stable: the neighbour pass binary-searches this order, and a
+    // cell's face entries must stay adjacent so one key lookup finds the group.
+    std::stable_sort(cands.begin(), cands.end(),
+                     [](const SurfelCand& a, const SurfelCand& b) {
+                         return a.key < b.key;
+                     });
     return cands;
 }
 
@@ -1663,11 +2140,11 @@ SurfelRange buildChunkSurfelsRange(const ChunkStore& store, int chunk, glm::ivec
                                    glm::ivec3 hi, const SurfelParams& params)
 {
     SurfelRange out;
-    std::vector<SurfelCand> cands = collectChunkCandidates(store, chunk, lo, hi);
+    std::vector<SurfelCand> cands = collectChunkCandidates(store, chunk, lo, hi, params);
     out.keys.reserve(cands.size());
     for (const SurfelCand& c : cands)
         out.keys.push_back(c.key);
-    computeCandidateAnisotropy(store, cands, params.anisotropy);
+    computeCandidateAnisotropy(store, cands, params);
     out.surfels.resize(cands.size());
     shadeCandidates(store, cands, params, out.surfels, 0, cands.size());
     appendCandidateEdgeBridges(cands, out.surfels, params,
@@ -1707,7 +2184,7 @@ std::vector<std::vector<Surfel>> buildChunksSurfels(
                         return;
                     glm::ivec3 lo, hi;
                     chunkBounds(chunks[i], lo, hi);
-                    cands[i] = collectChunkCandidates(store, chunks[i], lo, hi);
+                    cands[i] = collectChunkCandidates(store, chunks[i], lo, hi, params);
                     out[i].resize(cands[i].size());
                 }
             });
@@ -1715,10 +2192,11 @@ std::vector<std::vector<Surfel>> buildChunksSurfels(
             th.join();
     }
 
-    // Phase 1.5: per-chunk anisotropy (same rule as the bake). Cheap and
-    // sequential; the list is already key-sorted per chunk.
+    // Phase 1.5: per-chunk neighbour pass (normal smoothing + edge mask +
+    // anisotropy, same rules as the bake). Cheap and sequential; the list is
+    // already key-sorted per chunk.
     for (size_t c = 0; c < cands.size(); ++c)
-        computeCandidateAnisotropy(store, cands[c], params.anisotropy);
+        computeCandidateAnisotropy(store, cands[c], params);
 
     // Phase 2: shade a flat (chunk, slice) task list: no nested pools, every
     // index writes exactly one output element (deterministic per chunk).
@@ -1789,6 +2267,11 @@ std::vector<Surfel> buildMicroSurfels(const std::vector<uint64_t>& keys,
         return micros;
     micros.reserve(base.size() / 2);
     for (size_t i = 0; i < base.size(); ++i) {
+        // A face-expanded cell contributes several entries under one key; the
+        // bake emits ONE micro set for it, so skip the repeats. Keys are
+        // key-sorted, so equal keys are adjacent.
+        if (i > 0 && keys[i] == keys[i - 1])
+            continue;
         int x, y, z;
         unpackKey(keys[i], x, y, z);
         const size_t before = micros.size();

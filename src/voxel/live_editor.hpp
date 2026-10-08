@@ -32,8 +32,7 @@ public:
     // Optional source of a chunk's current GPU base+edge run. When set,
     // first-touch seeding splices from what the GPU already renders instead of
     // re-baking the whole chunk (no first-stamp hitch). The source returns the
-    // parent and derived hard-edge segments separately; micro detail is
-    // regenerated locally and is never seeded.
+    // parent and derived hard-edge segments separately.
     using SeedFn = std::function<SurfelRange(int chunk)>;
     void setSeedSource(SeedFn fn) { m_seedFn = std::move(fn); }
     void clearSeedSource() { m_seedFn = nullptr; }
@@ -62,14 +61,10 @@ public:
     // or after seed()). The reference stays valid until the next stamp().
     const std::vector<Surfel>& chunkSurfels(int chunk, const SurfelParams& params);
 
-    // Combined base + micro-detail run (what the GPU should draw). The micro
-    // tail is regenerated from the cached base run with the shared bake hash
-    // (buildMicroSurfels) whenever the base changed and params.microDetail is
-    // on, so a live-patched chunk keeps its texture geometry. microStartOf()
-    // returns the index where the micro tail begins (== run size when there is
-    // no split). References stay valid until the next stamp()/seed().
+    // Combined base + edge-bridge run (what the GPU should draw), rebuilt
+    // whenever the base changed so a live-patched chunk seals.
+    // References stay valid until the next stamp()/seed().
     const std::vector<Surfel>& chunkRun(int chunk, const SurfelParams& params);
-    uint32_t microStartOf(int chunk) const;
     uint32_t edgeCountOf(int chunk) const;
     bool hasChunk(int chunk) const { return m_cache.count(chunk) != 0; }
 
@@ -86,20 +81,16 @@ private:
         std::vector<uint64_t> keys; // one parent key per base surfel, sorted
         std::vector<Surfel> surfels;
         // Derived hard-edge bridges, kept separate so region refreshes remove
-        // them with their parent and material micros remain parent-only.
+        // them with their parent.
         std::vector<uint64_t> edgeKeys; // repeated when a corner has >1 pair
         std::vector<Surfel> edgeSurfels;
-        std::vector<Surfel> micros;     // deterministic material micro tail
-        std::vector<Surfel> run;        // base + edge + micros, rebuilt lazily
-        uint32_t microStart = 0;        // index of the micro tail inside `run`
+        std::vector<Surfel> run;        // base + edge, rebuilt lazily
         bool runDirty = true;
-        bool runMicroDetail = false;    // params.microDetail used for `run`
     };
     void seed(int chunk, const SurfelParams& params);
     void splice(int chunk, const SurfelRange& rg);
-    // Regenerate the cached chunk's micro tail (buildMicroSurfels) and
-    // re-assemble `run`. Called lazily by chunkRun().
-    void rebuildRun(int chunk, const SurfelParams& params);
+    // Re-assemble `run` from base + edge. Called lazily by chunkRun().
+    void rebuildRun(int chunk);
 
     ChunkStore* m_store = nullptr;
     SeedFn m_seedFn;

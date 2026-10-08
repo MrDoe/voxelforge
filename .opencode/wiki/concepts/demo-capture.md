@@ -90,7 +90,7 @@ The shipped variants:
 | `voxel` | **svo** | defaults | the raymarcher vs the splat raster |
 | `radius_min` | splat | `VF_SPLAT_RADIUS=0.5` | small disks |
 | `radius_max` | splat | `VF_SPLAT_RADIUS=2.0` | large disks |
-| `no_micro` | splat | `VF_MICRO=0 VF_LOD=0` | micro detail and LOD rings off |
+| `no_lod` | splat | `VF_LOD=0` | LOD rings off (renamed from `no_micro` when the micro removal 2026-10-08 deleted the `VF_MICRO=0` half — micro detail is unconditionally off now; the variant differs from `splats` only by `VF_LOD=0`) |
 
 `VF_SPLAT_RADIUS` sets `m_radiusScale`, clamped to 0.5..2.0 in
 `SplatPass::record` — the same knob the sidebar slider and the `[` / `]`

@@ -79,6 +79,11 @@ Args parseArgs(int argc, char** argv)
             a.tonemap = atoi(argv[++i]);
         } else if (s == "--mode" && i + 1 < argc) {
             a.mode = argv[++i];
+        } else if (s == "--probe-surfel" && i + 3 < argc) {
+            a.probeSurfel = { int(atof(argv[i + 1])), int(atof(argv[i + 2])),
+                              int(atof(argv[i + 3])) };
+            i += 3;
+            a.probeSurfelSet = true;
         } else if (s == "--probe" && i + 3 < argc) {
             a.probe = { float(atof(argv[i + 1])), float(atof(argv[i + 2])),
                         float(atof(argv[i + 3])) };

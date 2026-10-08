@@ -1,4 +1,227 @@
 # log
+Append-only timeline — 164 entries, 4577 lines. Entries are appended
+in **session order, not date order**, so this index is the only chronological view.
+Do not infer causation from vertical position in the file itself.
+
+> **A log entry is a pointer with provenance, not a restatement of the page** —
+> whatever lives on a content page does not belong again here. See
+> [[concepts/measurement-discipline]].
+
+## Index
+
+### 2026-10-08
+- **ingest** — Dynamic sun shadows: the 13 s stall is not the sun's fault
+- **ingest** — baked-sun-shadow-contract — the splat sun-shadow bake rule (CPU shadowMarch, backface skip, neighbour averaging), plus why bit 1 widening to point lights changes enclosure
+- **lint** — catalog/link sweep: 1 missing Pages entry found and fixed, 1 benign dangling link
+- **decision** — Sun shadow-map pass chosen for dynamic shadows; "Shadows" (bit 1) widened to gate point-light occlusion
+- **lint** — Hedge sweep across content pages: zero asserting hedges; one rule was missing, not one habit
+- **ingest** — Emissive-derived point lights landed (seam closed); night ratio band marked STALE; verified shader A/B harness
+- **lint** — `test-night` was missing from the group table, and group independence was never stated
+- **finding** — `VF_TEXTURES=0` was not bit-exact on the per-cell override path; `ninja -k1` masquerades as a skip
+- **lint** — Systematic sweep: 44/52 pages reference changed files, 2 real defects found and fixed
+- **correction** — The night band is NOT stale — re-derived unchanged, and now empirically confirmed blind
+- **ingest** — Renderer improvement roadmap filed; EDT-batching state verified in code
+- **query** — Per-object voxel size for detailed objects
+- **ingest** — irradiance-volume page — emitter-lit indirect, and why frame means cannot verify it
+- **correction** — Night band re-derived unchanged and empirically confirmed blind; surfel counts reconciled
+- **ingest** — GPU-perspective analysis: per-object finer voxels have three independent blockers
+- **coordination** — Ownership map settled across five sessions
+- **correction** — My bridge line to the normalizing layer-load was wrong; filed the correction
+- **finding** — Per-object voxel sizes: analysis consolidated, the "minimal honest change" landed
+- **fix** — irradiance volume: origin-centred cell frame (51.2 m / 32-cell misregistration)
+- **lint** — Structural-lint rules filed (three axes); log ordering caveat
+- **rule** — A guard defined relative to its feature disappears with the feature (standing review question from the micro removal)
+- **finding** — Only the carve could have caught the rim class (monotonicity vs exact count); dome/sphere boundary-count proposals authorized
+- **status** — Victor Phase 1 reported green on its own cases (429 assertions); slicesWithSky attribution routed to Vega
+- **verify** — Falloff-curve contract implemented-and-verified (13/13 cases, 3013/3013 assertions); dome graded-column-kill filed, sphere structurally exempt, 3053→3013 explained
+- **verify** — Slice-stride lead promoted: vf_core green via ninja, irradiance 7/7-180/180, test-world 2/2 (110.66 s), md5 untouched; labelled current-tree until Vega's 4 files commit
+- **verify** — Dome/sphere boundary gap closed (15/15, 3037/3037); every tapered boundary proven
+- **status** — Victor Phase 1 settlement part one: 5 port files + importLayer landed in worktree uncommitted; slicesWithSky + texture-header still open
+- **finding** — Checkout-loss recurrence instance two: TextureBinding::emissive taken by port checkout, re-implemented from usage sites; attribution prime-suspect-unconfirmed, durable gate open
+- **lint** — lastReviewed bumps owed and paid: detail-pipeline + uncommitted-edit-is-not-yours both substantively edited 2026-10-08 but still stamped older
+- **decision** — Emissive-lights spec change ordered (every emissive voxel a shadow-casting point light, supersedes thinning + 16-cap); filed pending, effective on Wiki landing
+- **decision** — Full dynamic lighting ordered as priority after micro green (live re-derive, no baked shadow/stall/16-cap); owners Victor shadow-map / Wiki cells-emission, both greener paths are prerequisite gates
+- **verify** — Micro removal landed in tree (app surface deleted, bake emitter retained off, guard replaced micro-free); banners down, cost table restated as history; labelled current-tree until commit
+- **status** — Dynamic lighting in progress (N=64/K=4 unbounded-adjustable, sole priority); visibility proof required on user zero-visible-change report
+- **lint** — Wiki cleanup sweep: micro-as-current scrubbed (11 files), 16-cap/thinning marked interim, layout contract rewritten two-live-ranges, N/K verified in-tree at worldfile.hpp:147; two items routed back unresolvable
+- **lint** — Quirk hygiene: 10 quirks updated (5 rewritten, 5 amended) for micro landing + N/K flip; demo-capture variant corrected to tool truth (`no_lod`)
+- **lint** — Ad-hoc scanner promoted to `wiki/lint.py` (multiline sourceRefs, index uniqueness, self-test controls, staleness as ranked-advisory); first run removed 2 build-output sourceRefs, gate green
+
+### 2026-10-07
+- **fix** — the day/night switch page claimed "async reload" — it is a stall
+- **decision** — editing lights needs a writer that does not exist yet
+- **gotcha** — writeTextureManifest is not atomic — the precedent's failure mode was the trap
+- **lint** — svo-render.md: schema bug plus two stale claims
+- **measure** — sunset/sunrise: the gradient is right, the magnitude is not
+- **verify** — sunset lane closed green; wiki lint clean at 50 pages
+- **gotcha** — a shader edit does not touch the binary — verify identity, not health
+- **ingest** — Day/night switch implemented (uncommitted); measurement-provenance page filed
+- **ingest** — Night gate: test-night group + night-gate-thresholds page; sun_angles.hpp hoist
+
+### 2026-10-06
+- **ingest** — Enclosed-space shading and light sources
+- **ingest** — The visual_check sky probe is a camera + content assertion
+- **lint** — Wiki link check: 42/42 resolve; the one dangling link is closed by decision
+- **ingest** — sun-direction-pipeline — kSunDir production & consumers
+- **ingest** — overlay-silent-write-trap — harness can destroy ignored state
+- **ingest** — sun-key A/B measured — which gate catches day/night
+- **ingest** — heightfield-blindness-enclosure + uncommitted-edit-is-not-yours
+
+### 2026-10-04
+- **ingest** — + / - bound by keycap, not by key position
+- **update** — Tab is the only View/Edit switch
+- **ingest** — decision-driven navigation (vf_nav) + ascii_view
+- **ingest** — Tower/cabin rebuilds + nature layers + the surfel thin-rule roof bug
+- **lint** — visual_check house sky-probe failure is pre-existing
+- **ingest** — Rebuilds re-filed as new layers (hamlet_cabin, hamlet_tower_v2)
+- **ingest** — Dense forest + tower moved into it
+- **ingest** — Denser forest, gravel path, forest-floor litter
+- **ingest** — Soil watermark stripped; Designer textures imported
+- **ingest** — Second wood, cabin->tower path, cobblestone river street
+
+### 2026-10-03
+- **ingest** — Smooth brush quality + proportional Add/Carve
+- **ingest** — Falloff curves, and what the surfel-normal measurement actually says
+- **ingest** — edit-mode hotkeys + bottom hotkey bar
+- **ingest** — Contention voids a measurement in BOTH directions; interactive UI is untested
+
+### 2026-10-01
+- **ingest** — clang LSP status, and a log signal that outlived its binary
+- **ingest** — Brush preview visibility (depth inert, preview blinked out under sidebar hover, SVO had none)
+- **ingest** — Narrow `test-preview` group so a preview change stops implying the whole live-edit matrix
+- **ingest** — The new depth gate caught a too-faint marker, and caught me measuring it wrong
+- **lint** — Closing out the brush-preview session
+- **ingest** — Both follow-ups closed: depth no longer saturates, and the tree is committed
+- **ingest** — splat base-seal architecture + the silhouette-fade frontier
+
+### 2026-09-26
+- **ingest** — a click is one edit (per-voxel brush stamped two voxels)
+- **review** — verified the live-edit-brush session's changes; corrected a stale brush page
+- **lint** — the uncommitted multi-author tree is now committed under a tooling-only message
+- **ingest** — the click gate's "no seam" is an in-app-only limit — XTEST already reaches it
+- **ingest** — Undo/"hollow cabin" filed as UNDER INVESTIGATION; the real finding is a test coverage gap
+- **lint** — CORRECTION: the 8M surfel bound is not the live-edit session's
+- **ingest** — dead-disc finding caused a revert; Undo bug now has a measured signature
+- **ingest** — Undo root cause MEASURED: a refresh-margin bug, and wider is not safer
+- **lint** — margin class now gated — but the gate can pass while testing nothing
+- **lint** — a frozen test constant has TWO vacuity paths, not one
+- **lint** — my assertion caught the reviewer's own false premise — and the fix is better than mine
+- **lint** — RE-CORRECTION: the cell is object, the reader was broken, and a new log field is a new instrument
+- **ingest** — vf_slice was never broken: opposite failures, one cause — the mistake is in the reading
+- **lint** — FINAL: both crossed groups green; I declined test-surfel, and here is the evidence for that
+- **ingest** — the forced-failure test found a real bug; and "never taken" beats "behind an unset guard"
+- **ingest** — paired lesson: the expensive silent failures are the ones with no compiler behind them
+- **lint** — src/app was split per subsystem: every main.cpp line number in this wiki is now stale
+- **lint** — CORRECTION: I documented a mid-flight layout as verified, and dropped call sites I already had
+- **lint** — incident: tracked assets/ files deleted mid-gate, and assets/ is not read-only anyway
+- **ingest** — clang-lsp-setup — clangd LSP for OpenCode (installed, verified, tuned)
+- **lint** — RESOLVED: the assets deletion was `ninja -t clean`, and the documented recovery is itself a regen
+- **lint** — build-dir hazard corrected, wiki link check
+- **ingest** — app split verified: wiki re-anchored to symbols, and a new gate proved it can fire
+- **lint** — I counted a definition as a call site, and the frame loop's one real change
+- **verify** — clang-lsp-setup — tuning confirmed by real LSP session
+- **ingest** — m_shots shadowing + "green signal that does not cover the change"
+- **ingest** — the split's one real bug, and what the verification was structurally unable to see
+- **lint** — the LSP session was right and my rule was the weaker one
+- **lint** — full link/orphan check after the split re-anchor: clean, one known-benign dangling ref
+- **ingest** — live-edit surfel parity
+
+### 2026-09-25
+- **ingest** — exact selected-layer rotation + editor dashboard
+- **fix** — preview hook cannot commit; pitch/roll merge parity
+- **lint** — rotation/provenance wiki current
+- **fix** — compact dual-panel HUD at 960x540
+- **fix** — click-activated bounds-centered rotation trackball
+- **fix** — logical input space and panel-safe ring capture
+- **verification** — final trackball gates
+- **fix** — camera-aligned gizmo and independent projection oracle
+- **fix** — local-axis ring rotation
+- **fix** — staged transforms and Move mode
+- **perf** — short smoke test profile
+- **verify** — final staged-transform and smoke-profile gates
+- **ingest** — edge-aware surfel radius GUI control
+- **verify** — edge-shrink release gate
+- **fix** — edge-shrink live-path anisotropy guard
+- **fix** — explicit multi-axis roof-edge detection
+- **verify** — refined edge metric fast gate
+- **decision** — focused test groups replace all-tests workflow
+- **verify** — focused CTest group wiring
+- **ingest** — GUI STL/OBJ importer + cabin reimport
+- **harden** — shared mesh conversion + OBJ material paths
+- **lint** — pre-existing missing wiki target
+- **fix** — MCP import schema JSON
+- **fix** — deterministic GUI mesh-import test hook
+- **fix** — surfel-range API compatibility during concurrent edit
+- **verify** — final mesh GUI and cabin gates
+- **ingest** — hard-edge-only surfel fit + crease bridges
+- **ingest** — HUD sidebar (single editor panel)
+- **ingest** — X11 input injection for GUI verification
+- **ingest** — demo capture tooling
+- **fix** — flush, horizontally resizable docked sidebar
+- **ingest** — smooth terrain edit brush
+- **lint** — broken link in log.md
+- **update** — input mechanism validated green; demo reel rendered
+- **fix** — Smooth undo height-texture headroom
+- **fix** — Smooth reload and terrain-texture hardening
+- **ingest** — demo reel: hamlet keyframes + voxel/splat A/B variants
+- **ingest** — Smooth generalises to object surfaces (surface-position relaxation)
+- **ingest** — Add brush grows the surface along the picked normal
+- **ingest** — tool-calling conventions
+- **ingest** — per-voxel Add/Carve + a brush sized in voxels
+- **lint** — frozen content names in visual_check (fixed at the class level)
+
+### 2026-09-21
+- **ingest** — live arcball rotation (GPU transform, no rebuild)
+
+### 2026-09-20
+- **ingest** — arcball layer rotation (full 3-axis placement)
+- **ingest** — procedural tree generator (space colonization)
+- **ingest** — mesh-to-voxel converter
+
+### 2026-09-19
+- **ingest** — per-cell texture (phase 2) wired end to end
+- **ingest** — texture atlas (phase 1) documented
+- **ingest** — photo textures shipped + GUI picker
+- **decision** — assets are tracked now
+- **ingest** — surfel holes on walls + stepped roof fixed
+- **ingest** — texture resolution vs relief: measured
+- **ingest** — texture detail normals (render flag bit 7)
+- **ingest** — texture conformance gate + AI texture repair
+- **ingest** — volumetric fog rewrite (J)
+- **ingest** — water caustics + shoreline detail content
+
+### 2026-09-18
+- **fix** — Undo + "Clear live edits" (the emptied-chunk GPU patch), Add preview
+
+### 2026-09-17
+- **ingest** — Screen-space AO (world-scale) + the normal G-buffer
+- **fix** — River water reaches carved channels (flood + carve scoop)
+- **rework** — One fixed-level water plane (no flood, no water-grid patch)
+
+### 2026-09-16
+- **ingest** — detail roadmap + micros survive live edits (Phase 1)
+- **ingest** — new default world: lakeside hamlet + old-scenery cleanup
+
+### 2026-09-15
+- **ingest** — edit-brush hover preview + Delete/Paint modes
+- **lint** — stale pages after the surfel rework
+- **ingest** — edits always live + water level respected when carving
+- **ingest** — edits always live, digs below the water plane are flooded
+
+### 2026-08-24
+- **ingest** — PBR shading pass (ggx + sdf ao + sky ambient + aerial fog)
+- **ingest** — realistic grass & foliage field
+- **ingest** — high-res grass sprite cards
+- **ingest** — grass disabled by LOD t0 bug + coverage rework
+- **ingest** — voxel-object authoring skill + verification tooling
+- **ingest** — layered world files (vxw split + manifest)
+- **ingest** — alpaca paddock at the cabin
+- **ingest** — world-layers GUI (ImGui) + hud capture hooks
+- **ingest** — MCP server (vf_mcp) + gemma tool-bridge fixes
+- **ingest** — AI edits are scene truth now (visibility fix)
+- **ingest** — llama.cpp server support for the in-game chat
+
+
 
 ## 2026-09-21 ingest | live arcball rotation (GPU transform, no rebuild)
 The Rotate drag is now truly live: instead of accumulating angles and
@@ -3450,3 +3673,1406 @@ worth not repeating in the next window.
 
 Third time in this exchange that a **bit-identical control** (the 123.88 day
 denominator here) is what made a small delta interpretable instead of alarming.
+
+## [2026-10-08] ingest | Dynamic sun shadows: the 13 s stall is not the sun's fault
+Answered George's "dynamic shadows" ask (sun shadows are CPU-baked per surfel, so
+a sun move forces a re-bake). Two findings, from source, **no renders**:
+
+1. **The stall is wasted work.** `setSunAngles` → `requestWorldReload()` →
+   `m_layers.requestReload` (run_poll.cpp:35-37) re-runs the full `LayeredWorld`
+   reload including `VoxelField::build` — the ~13 s per-component padded-bbox
+   EDT from [[concepts/load-time-field-build]] — and **the field has no sun in
+   it**. The only sun-dependent work is `rebuildSurfels`, which already reads
+   the resident field (`buildSurfels(m_layers.field(), sp)`,
+   surfel_stream.cpp:359). Caveats filed: the live-edit overlay would not be
+   re-applied (that is `applyWorldReload`'s job, not `rebuildSurfels`), and the
+   SVO reference never needed any of this — splat-only.
+2. **The per-fragment alternative loses twice.** `softShadowSplat` marches
+   `heightAt` (smoothed) + `objDist`, and `objDist` is the coarse `r8_snorm`
+   256³ volume — 0.4 m texels — against a bake that marches the exact 10 cm
+   lattice. So it is ~4x coarser *and* up to 32 dependent taps shaded twice per
+   covered pixel (base EQUAL pass + blended band pass). The bake is the
+   higher-quality path, not a workaround. Sun-space depth map is the shape to
+   use if a GPU shadow is ever actually wanted.
+
+Page: [[concepts/dynamic-sun-shadows]]. The measurement table is deliberately
+**empty** — `rebuildSurfels()` wall time and the GPU-ms A/B are unmeasured, per
+[[concepts/measurement-discipline]], and filling them with an estimate is the
+failure this repo keeps paying for.
+
+**Harness built and baseline proven.** Scratch clone of `shaders/` + `-I<scratch>`
++ `VOXELFORGE_SHADER_DIR=<scratch>` gives a variant tree with **no edit to the
+shared sources** (every pass reads that env at init). The scratch
+`splat.frag.spv` is md5 **identical** to `build/shaders/splat.frag.spv`
+(`2d3202cd42bc32dff4c1b6cf7a67a9f3`) — the instrument's identity is confirmed,
+not its health, which is the lesson of [[concepts/measurement-discipline]] and
+of the `kMoonCol` window entry above.
+
+**Probe bug worth remembering (twice in one session).** The first stale-`.spv`
+sweep reported *every* shader `MISSING`, which looked alarming and was entirely
+my own filename derivation: `${f%.*}` strips the stage suffix (`splat.vert` →
+`splat.spv`). The real name is `$(basename $f).spv`. And `common_base.glsl` has
+**no** `.spv` by design — the four `common_*.glsl` are `#include`d via `-I` and
+appear only in `DEPENDS`. "Missing" was the correct answer for all four. A probe
+that cannot tell a broken build from a correct one is not a probe.
+
+Scoped with Wendy: she took the bake *rule* (`baked-sun-shadow-contract.md`),
+this page keeps the cost/feasibility side and cites hers.
+
+## [2026-10-08] ingest | baked-sun-shadow-contract — the splat sun-shadow bake rule (CPU shadowMarch, backface skip, neighbour averaging), plus why bit 1 widening to point lights changes enclosure
+
+Page filed by Wendy ([[concepts/baked-sun-shadow-contract]]); catalog entry added
+here to avoid a second lease cycle. It is the **rule** half of the pair with
+[[concepts/dynamic-sun-shadows]]: that page is the cost/feasibility of not
+re-baking every frame, this one is the bake the splat path actually reads. The
+link matters in both directions — a sun-space shadow map would have to reproduce
+this rule exactly, and `sh = 1` from the backface skip means *unmeasured*, not
+*lit*, which is the trap that made `aoShEnclosure` silently pin to 0 on cave
+walls.
+
+## [2026-10-08] lint | catalog/link sweep: 1 missing Pages entry found and fixed, 1 benign dangling link
+
+Machine-checked both directions now that Vega and I were both in the catalog at
+once (the contention is what surfaced the gap).
+
+**Direction 1 — every page must be in the catalogue.** `concepts/brush-preview-visibility.md`
+existed, was linked from "How to navigate", was cited from `AGENTS.md`, and was
+**absent from the Pages list**. That is the worst shape for a wiki page: fully
+reachable *if you already know it exists*, invisible to a reader who is looking
+for what it covers. Entry added.
+
+**Direction 2 — every link must resolve.** One dangling link in the whole tree:
+`log.md` cites `[[concepts/water-flooding]]`, a page that no longer exists.
+
+Leaving it. Two reasons, and the distinction matters more than the fix:
+
+- `log.md` is **append-only**, so editing that line would falsify the record of
+  what a past session actually believed. Correcting history is worse than a dead
+  link.
+- The page is genuinely **superseded, not lost**: water became one fixed-level
+  plane (`WATER_LEVEL = -0.9`) with no per-column bookkeeping and no flood
+  machinery at all, so the concept dissolved into
+  [[concepts/water-plane]]. The dangling link is an accurate timestamp of when
+  the flood design stopped existing.
+
+So the rule this sets: a dangling link inside `log.md` is evidence, not a defect.
+A dangling link in a **content** page is a defect and gets fixed in place. The
+sweep counted 51 pages; after the fix there is no gap in either direction except
+this one deliberate exception.
+
+Method note: the check is a link-set difference both ways (`rglob('*.md')` minus
+`index.md` versus the wiki-link targets). Cheap enough to re-run after any
+ingest — it is the mechanical form of "is this page findable", which is the
+question a reader asks first and the one an authoring session never asks about
+its own work.
+
+**A detector blind spot this very entry created.** The first re-run reported a
+dangling link with the target `...` — which was this paragraph's own literal
+example of the link syntax, quoted inside inline code. A regex that scans raw
+text cannot tell a real link from a documented one. Two lessons, both about the
+instrument rather than the wiki:
+
+- Strip inline code spans and fenced blocks **before** extracting links, or the
+  sweep manufactures false positives out of prose about links.
+- `log.md` must be excluded from the "page on disk" set as well as `index.md`,
+  or it reports *itself* as missing from the catalogue. My first version got
+  this wrong and printed `missing from Pages section: ['log']`.
+
+**Correction, and the reason it matters more than the fix.** The entry above
+claims "no gap in either direction except this one deliberate exception", and at
+the time it was written only **half** of that was machine-checked: direction 2
+(links resolve) was a real tree-wide scan, but direction 1 (page present in the
+catalogue) was an eyeball read plus one `grep` for the single page I had already
+noticed. A read-through *feels* like coverage.
+
+Vega (independent pass, Pages-section-scoped `sed '/^## Pages/,.../'`) then
+machine-checked both directions over 51 pages: **zero catalogue gaps, zero
+dangling links in content pages.** So the claim above is now independently
+verified, and the one symptom I fixed was the only symptom there was.
+
+Two instrument bugs from that pass are worth keeping, because both report clean
+for the *wrong reason*:
+
+1. Direction 1 first grepped all of `index.md`, so `brush-preview-visibility`
+   "passed" on its appearance in the How-to-navigate section — it would have
+   reported zero gaps without ever testing the Pages list. Restricting the scan
+   to the Pages section is what makes it the real test.
+2. The dangling-link detector printed **nothing at all**, which is nearly the
+   worst possible output to be handed: silence reads as clean. Its positive
+   control had been injected into `index.md`, which that detector never scans,
+   so the control proved nothing. Re-run as a temp file inside `concepts/` with
+   one real and one fake link, it fired on the fake and resolved the real.
+
+That is the heightfield-blindness shape one level up — a measurement that
+returns the same value whether or not the thing under test is present. A sweep
+with no control is not evidence; see [[concepts/measurement-discipline]].
+
+## [2026-10-08] decision | Sun shadow-map pass chosen for dynamic shadows; "Shadows" (bit 1) widened to gate point-light occlusion
+
+Requested by George (shading) at 2026-10-08. Recorded as **decisions with
+attribution**, not as validated results — the distinction is the point of this
+entry.
+
+### D1 — a sun shadow-map pass is the chosen route for dynamic shadows
+
+- **Attribution:** user decision, relayed by George. Not derived from a
+  measurement recorded in this wiki.
+- **State:** chosen. **Not implemented, not validated.**
+- **What the wiki already argues, and does not contradict:** the per-surfel CPU
+  bake is the cheaper and *more accurate* option today. The splat GPU sun march
+  would be slower and less sharp — 0.4 m `objDist` texels against a 10 cm bake,
+  two shading passes, ~64 taps/px
+  ([[concepts/dynamic-sun-shadows]]), and the 13 s stall on a sun change is a
+  `VoxelField` EDT that contains no sun at all
+  ([[concepts/load-time-field-build]]).
+- **So the decision rests on something unmeasured**, most plausibly contact
+  sharpness or a quality ceiling the bake cannot reach. That is a legitimate
+  reason; it is just not the reason in the record, and the next session should
+  not inherit "measured and found better" by association.
+- **The constraint that survives either way:** a shadow-map pass must reproduce
+  the bake *rule*, or it will disagree with everything around it —
+  [[concepts/baked-sun-shadow-contract]]. Three clauses are the trap:
+  the `dot(n, sunDir) > 0.02` backface skip where `sh = 1` means *unmeasured*
+  rather than lit; the pass-3 neighbour averaging that makes the value the
+  shader reads spatially filtered rather than per-fragment; and the 0.3 m origin
+  offset that exists so canopy does not self-shadow.
+- **Open:** cost, quality-versus-bake comparison, and whether a map can be
+  filtered to match a neighbour-averaged verdict at all.
+
+### D3 — a post-init ("late") sun hook is a precondition of D1, not test scaffolding
+
+Agreed with George 2026-10-08, who is adding it alongside the shadow-map work.
+The reframing that matters: a dynamic sun must be movable **after** init whatever
+it drives, so the seam had to exist; timing it in isolation is only its first
+honest use.
+
+Three constraints recorded now so they are not rediscovered as bugs:
+
+1. **Never compare a late-hook number against a pre-init one.** Both
+   `VF_TEST_SUN_PHASE` and `VF_TEST_SUN_TIME` fire inside `App::run` *before*
+   `initWindow`/`initVulkan`, so a headless run measures startup + the coalesced
+   first reload — an **upper bound containing the ~17.6 s initial world load**,
+   not the stall. (Found by Vega; he is recording provenance rather than
+   publishing a figure that is not the stall.)
+2. **Label what the timer brackets.** `applyWorldReload` also calls
+   `vkDeviceWaitIdle` before `rebuildSurfels()`, and the GPU-idle wait is part
+   of what a user feels. A rebuildSurfels-only figure is honest but answers
+   "what could it be", not "what will it cost" — two labelled fields, not one.
+3. **A late sun flip has no visible answer until the rebuild *lands*, not until
+   it is queued.** Nothing chases it: baked sun shadows are per-surfel
+   (`[[concepts/baked-sun-shadow-contract]]`), patched/live chunks lose their LOD
+   ring until the next full reload, and `aoShEnclosure` reads the baked `sh`.
+   The sky and direct light move on the next frame because `m_sunDir` rides the
+   push constant; the shadows do not. Same shape as the `setSunPhase()` GUI path
+   in `[[concepts/sun-direction-pipeline]]`. If the hook reports "queued", the
+   first measurement reads as *no shadow change* and looks like a bug in the
+   hook rather than in the timing.
+
+If the seam proves unobtainable headlessly, **record that as the finding** —
+"no post-init sun seam exists" is the actionable result, and it is what a
+day/night slider needs resolved. An honestly-labelled upper bound is useful; the
+same bound without its label becomes *the number*, and the next session quotes
+it as the stall. See [[concepts/measurement-provenance]].
+
+### D2 — "Shadows" (bit 1) gates point-light occlusion
+
+- Renamed from "Sun shadows" to "Shadows", and `applyLights()` now runs
+  `lightVisibilitySPlat` / `lightVisibilitySVo` only when
+  `(gRenderFlags & 2) != 0`. Point lights used to march unconditionally, so the
+  wider label would otherwise have been untrue.
+- **Attribution:** code decision, landed in the working tree.
+- **Blast radius worth restating:** bit 1 is now an input to `aoShEnclosure`
+  (which requires bits 1 **and** 2 **and** 8), so "Shadows off" also changes how
+  caves and interiors shade, and `VF_RENDER_FLAGS=255` is not a bit-1 escape
+  hatch. Details in [[concepts/enclosed-space-lighting]].
+
+### Related, same tree: the emissive lane
+
+An `emissive` / `emissiveScale` flag on `world.json` texture bindings, the
+`TexTable.z` channel and `emissiveTerm()` all landed (uncommitted 2026-10-08).
+**Deriving real point lights from emissive materials is the open seam:**
+`TexAtlas::emissiveScale()` / `meanColor()` exist with **zero call sites**, and
+`VoxelField::collectEmissive` appears only in a comment. The constraints on it
+are already visible in the landed half — `VF_TEXTURES=0` zeroes `m_emis` so a
+derived light must vanish too (or that escape hatch stops being bit-exact),
+`kEmissive` is duplicated CPU-side in `common.hpp` and GPU-side in
+`common_base.glsl`, and derived lights share the same 16-slot `LightUBO` as
+authored lamps so the split budget has to be decided rather than discovered.
+
+## [2026-10-08] finding [RETRACTED] | Claimed bit-1 enclosure asymmetry — unreachable past `aoShEnclosure`'s own guard
+
+**This finding was wrong. Retracted the same day; kept because the failure mode
+is more reusable than the claim was.**
+
+What was claimed: splat folds an **ungated** baked shadow into `aoShEnclosure`
+(`splat.frag:321` passes `vShade.w` as `shRaw`; `common_splat.glsl:178` folds
+it) while SVO folds its **flag-gated** `sh` (`common_svo.glsl:583`, folded at
+`:594-595`), so clearing bit 1 was claimed to leave splat interiors darkening
+through `(1 - ao) * (1 - sh)` while SVO lost the proxy — a backend-asymmetric
+third instance of "a bit-cleared escape hatch does not restore the previous
+image". Filed with a proposed A/B at `VF_RENDER_FLAGS=253`.
+
+**Why it is wrong.** `aoShEnclosure` opens with its own guard,
+`if ((gRenderFlags & (256 | 3)) != (256 | 3)) return 0.0;`. `256 | 3` = 259
+needs bits 8, 1 and 0; at 253, `253 & 259 = 1 ≠ 259`, so it returns 0.0 **before
+`sh` is read, identically on both backends.** The difference is unreachable in
+precisely the state the test proposed — the A/B was guaranteed flat.
+
+Refuted at the source layer by Vega before it reached a GPU window, and
+retracted to George in the same turn. **No GPU time was spent, and no code was
+changed** — which was the entire point of filing it as source-verified rather
+than as a hypothesis.
+
+Three things this cost, worth recording honestly:
+
+1. **The call sites were read correctly and the callee's guard was still missed.**
+   The guard sat three lines above the comparison in the same file and had
+   already been read earlier in the same session. Having the evidence is not
+   using it.
+2. **The "structural, not measured" hedge was a way of keeping a wrong claim
+   alive.** A hedge is not a smaller claim; it is the same claim with a
+   disclaimer that lets it survive being wrong. The correct move on disagreement
+   was to delete it, which is what the page now says.
+3. **The `shRaw` difference is a mitigation, not a drift.** `splat.frag`'s caller
+   gates `sh` to 1.0 on backfacing surfels, which pinned the proxy to 0 on cave
+   walls (45.26 vs 45.84); SVO has no such caller gate, so its ungated `sh`
+   satisfies the same contract. "Same rule, different inputs because one caller
+   has a gate the other lacks" beat "one site diverged" — a reading that only
+   becomes available if you read the caller comments, not just the callee.
+
+**The generalisable form: a call-site comparison is not a behaviour
+comparison.** This looked like a backend asymmetry at both call sites and is
+invisible at the only place that decides. That is the third instance of this
+shape in one exchange — a `${f%.*}` probe that passed while wrong, a
+catalogue sweep clean on one direction only, and this — all of them clean at the
+layer inspected and uninformative at the layer that decides. Folded into
+[[concepts/measurement-discipline]].
+
+Residual, **not** part of this finding: with bits 0/1/8 all set, splat folds a
+baked shadow and SVO a frame-time march. Those differ numerically and that is the
+pre-existing baked-vs-marched difference the design accepts.
+
+Incidentally verified in the same pass and **standing**: SVO does march the sun
+per fragment (`common_svo.glsl:583` `softShadow`, 16-tap PCF over
+`exactSVOHit`; `:555` `softShadowTerrain` for the submerged bed), so the
+per-surfel bake shortcut is splat-only — previously sourced only from
+`AGENTS.md`, now from the shader.
+
+## [2026-10-08] lint | Hedge sweep across content pages: zero asserting hedges; one rule was missing, not one habit
+
+Ran the grep from the new `[[concepts/measurement-discipline]]` section across
+`concepts/` + `entities/` (`structural, not measured|unmeasured|unvalidated|
+untested|not compared`).
+
+**Instrument note first:** the raw grep fired on 8 hits, so it is known to be
+able to fire — the control Vega had to add for his own detectors. All 8 were
+then triaged **by hand**, which is the weak part of this result and the reason
+it is logged as a sweep rather than as a gate.
+
+**Outcome: zero asserting hedges.** Every hit was either *disclosure* —
+`dynamic-sun-shadows` tables saying "unmeasured", `sun-direction-pipeline`
+saying "George-reported, not measured by the wiki session",
+`sky-probe-is-a-camera-assertion` saying "not measured by me; not comparable" —
+or *terminology*, i.e. `sh = 1` meaning unmeasured rather than lit.
+
+**The interesting part is what that implies.** The pages had already learned the
+disclosure habit: attribution, explicit unmeasured tables, cross-tree
+comparability warnings. What was absent was any rule about **routing** — where
+an unsettled claim is allowed to live. The gap was not carelessness in the
+writing; it was that nothing said an unsettleable claim must leave the content
+layer entirely. That is the row now added to
+[[concepts/measurement-discipline]], with "structural, not measured" named as
+state (a) wearing a disclaimer.
+
+One borderline, referred rather than fixed: `entities/live-edit-brush.md` labels
+a proposed test "**unvalidated** — a proposed test, not a working one". The
+disclosure is correct, but it is attached to the *test* while the *mechanism*
+around it keeps an implicit status — the same shape as the retracted finding,
+pointing the other way. Owner judgement, not a wiki edit.
+
+## [2026-10-08] ingest | Emissive-derived point lights landed (seam closed); night ratio band marked STALE; verified shader A/B harness
+
+The emissive lane recorded earlier in the decision entry as an **open seam** is
+now closed. `VoxelField::collectEmissive()` exists
+(`src/voxel/voxel_field.cpp:858`) and is called from `App::uploadLightSources()`
+(`src/app/rhi/surface.cpp:143`); `TexAtlas::emissiveScale()` / `meanColor()` have
+their first consumers. Filed into `[[concepts/enclosed-space-lighting]]`, with
+the four non-obvious decisions: emission read from the **atlas** not the
+manifest (so `VF_TEXTURES=0` kills the light with the glow), **count-desc /
+key-asc** ordering for reload determinism, **1.5 m thinning**, and each centroid
+**lifted to the nearest AIR cell** — a light buried in its own emitter is
+occluded by every receiver's march, so it would take a slot and contribute
+nothing. Authored lights fill `kMaxLights` first; derived lights are never
+persisted. The default hamlet derives **14**.
+
+Three consequences that outlive the feature:
+
+- **`kEmissive` is duplicated** (CPU `common.hpp`, GPU `common_base.glsl`), so
+  one-sided edits make lit colour and glowing colour disagree.
+- **The derived lights are not day/night gated**, so they are present in the
+  night arm as well as the day arm — which makes the `test-night` ratio band
+  **STALE**. `[[concepts/night-gate-thresholds]]` now carries a banner: both
+  endpoints (healthy max 0.229, `kMoonCol` regression 0.323, ceiling 0.27) were
+  measured in a tree with no derived lights, and if the night arm moves so does
+  the regression arm, so the **margin must be re-derived, not re-adjusted**.
+  Recomputing only the healthy max would anchor a new ceiling to an old
+  regression value — the mixed-tree error in
+  `[[concepts/measurement-provenance]]`. **The page predicts no sign**, because
+  recording a belief about the sign would manufacture a second unmeasured
+  assertion.
+- **A pure-ratio gate is blind to in-band drift, and that is structural rather
+  than a threshold error.** The ratio band was chosen *because* it survives
+  camera drift — the same scale-free property that makes it immune to framing is
+  what makes it incapable of noticing a scene that scaled. Derived emissive
+  lights are present in the day arm and the night arm alike, so if they lift
+  both roughly in proportion the ratio can sit at ~0.19–0.23 while every
+  absolute value moves materially, and nothing in `night_check` notices.
+  (Identified by Vega, 2026-10-08.) Same property, opposite failure — an
+  inversion of the provenance lesson, not a contradiction of it.
+
+  **Agreed shape, not yet in code.** Three outputs with three different
+  validities, so no one number is asked to mean all three:
+
+  | output | valid across trees? | role |
+  |---|---|---|
+  | ratio band, re-derived in-tree | **yes** | the gate |
+  | absolute mean per arm (day / night-healthy / night-regression) | in-tree | the anchor the band is computed from |
+  | `new-absolute / old-absolute` quotient vs pre-emissive figures | **no — informational only** | drift indicator; may never gate |
+
+  The pre-emissive absolutes (day 123.88 / 105.41 / 111.88, night 22.96 at hero)
+  **cannot gate anything** — that is the mixed-tree error. Their quotient is
+  legitimate as a drift *report*, because it answers "did this tree move the
+  scene" without claiming pass/fail.
+
+- **Proposed: a second, scale-bearing assertion.** An absolute **day-mean luma
+  band** per camera, gated separately, re-derived in the same tree and session
+  as the ratio band, carrying the same "re-derive them together" comment — a
+  second absolute constant is exactly what goes stale next and then gets
+  "adjusted" by whoever hits it first. Rationale: a scale-free check cannot
+  detect a scale change, so without a scale-bearing assertion the gate is
+  structurally incapable of noticing one.
+
+  **The two assertions are not substitutes.** After the split the ratio can go
+  red with the day band green (a real lighting regression) and the reverse
+  (tree/content drift). Both are meaningful, and the failure mode is someone
+  "fixing" whichever is red. The assertion comments must say so.
+
+### Contract for the second assertion (decided 2026-10-08, code not yet written)
+
+Two design calls made up front, with the reasoning recorded so the *reasoning*
+can be overruled later rather than just the conclusion:
+
+**The day band is symmetric, not floor-only.** A one-sided band would re-introduce
+the exact defect this assertion exists to fix. The ratio gate is structurally
+blind because it is scale-free; a floor-only day band is structurally blind to a
+scene that got **brighter**, which is the direction emissive-derived lights move.
+The crying-wolf concern is a **width** problem, not a symmetry problem, and the
+width is knowable rather than guessed: the day arm came back **bit-identically**
+(123.88 / 105.41 / 111.88) across a 222-insertion shader change, because
+`sunDaylight()` is exactly 1.0 at 34°. If it ever cries wolf, widen it **with a
+recorded reason** — never remove a side.
+
+Two properties of the day arm make it a clean drift detector (Vega, verified at
+source, 2026-08-08):
+
+- **`kMoonCol` cannot touch the day arm.** `moonLight()` returns `vec3(0.0)` when
+  `night <= 0.001`, so the day anchor is a true common denominator across shader
+  variants — a day-mean move is unambiguously content/lighting, never an artefact
+  of the constant the regression arm manipulates.
+- **`kMoonCol` fans out to four call sites** (`common_svo.glsl:569`, `:610`;
+  `common_splat.glsl:185`, `:261`) across both backends. A regression arm must
+  therefore be rendered on **both** to be comparable; a splat-only arm must never
+  be presented as the whole thing. Also note `kMoonCol` is defined **once**
+  (`common_base.glsl:611`) with **no CPU-side copy** — verified, because
+  `AGENTS.md`'s duplicated-table warning would otherwise have applied here.
+
+**Vintage rule — the load-bearing constraint.** Both bands are derived in one
+tree in one session, **or neither exists**. A day band shipped now would sit
+beside a ratio band awaiting a newer tree: the mixed-tree error in the specific
+shape of two same-file thresholds that look like a matched set. So the contract
+is filed and the code waits for the re-derivation moment.
+
+The residual risk is that the page makes the day band look *additive*, so
+someone adds it alone later. Mitigated by writing the vintage rule into the
+**assertion comment** verbatim as a **prohibition**, not a preference — because
+a preference is what gets ignored at 2am, and the comment travels with the code
+rather than only with the wiki.
+
+**The band's width has its own provenance and must declare it.** The
+justification above is that the day arm came back bit-identically across a
+222-insertion shader change. That is **one observed no-change**: it supports
+"the day arm is stable", which is what justifies adding a scale-bearing assertion
+at all, but `n = 1` bounds observed variance from above on one occasion rather
+than describing a distribution. A symmetric width that reads as measured will be
+*treated* as measured. So the comment must say the width rests on a single
+observed stability data point, **paired** with the widen-with-a-recorded-reason /
+never-remove-a-side rule — otherwise the band becomes an absolute constant whose
+evidentiary basis is one run, which is precisely how `kMoonCol = 0.62` and the
+0.27 ceiling each became load-bearing by accident. (Caught by Vega.)
+
+**Lease timing — do NOT hold a lease over `tests/night_check.py` until you write.**
+A lease held for hours over a file nobody is editing is its own hazard: it
+implies ownership nobody is exercising and it blocks George or the wiki layer
+from the file for no reason. Claim at the moment of the edit, release
+immediately after — the discipline used for `run_hooks.cpp`. (Corrected here:
+this entry originally said he holds the file under lease, which the vintage rule
+makes false.)
+
+Ownership: `tests/night_check.py` is untracked and listed in
+`[[concepts/night-gate-thresholds]]`'s `sourceRefs`, so it belongs with the wiki
+layer's provenance. Vega writes the code, taking a lease only for the duration
+of the edit; the wiki holds the contract. No file overlap.
+
+- **Shader A/B harness, verified end to end** (Vega, 2026-10-08) — the
+  instrument the re-derivation depends on: clone `shaders/` to a scratch dir,
+  compile the full set with `-I<scratch>`, render with
+  `VOXELFORGE_SHADER_DIR=<scratch>`. 0 compile failures, 18/18 `.spv` produced,
+  **all 18 md5-identical to `build/shaders/*.spv`**, so an unedited clone is
+  provably the same tree rather than an asserted one, and editing one constant
+  there gives a single-variable arm. All 18 must be present — the env var
+  replaces the whole directory, and a partial set fails or silently falls back,
+  and a half-run is worse than a failure because it looks like data.
+
+  **Dated observation:** at that moment `build/shaders` was in sync with
+  `shaders/` (0 of 18 differed), which excludes a stale `.spv` as the
+  explanation for anything rendering oddly in that window — the cheapest and most
+  attractive wrong answer, and the one `AGENTS.md`'s stale-object note primes
+  everyone to reach for. **Re-check before relying on it.**
+
+Cross-links: [[concepts/measurement-discipline]],
+[[concepts/measurement-provenance]], [[concepts/enclosed-space-lighting]],
+[[concepts/baked-sun-shadow-contract]], [[concepts/sun-direction-pipeline]].
+
+## [2026-10-08] lint | `test-night` was missing from the group table, and group independence was never stated
+
+Two gaps in `[[concepts/focused-test-groups]]`, both found because a session
+recorded `test-night` as "skipped when the visual group went red" and the
+recording was believed.
+
+1. **`test-night` was absent from the group table entirely.** A page whose whole
+   purpose is "which group do I run" omitted one of the groups. Added, with its
+   coverage (ratio band, night sky classifier, `kMoonCol` tripwire).
+2. **Group independence was never documented.** Each `test-<group>` is
+   `ctest -L <group>` with `VOXELFORGE_TEST_GROUPS=<group>`, and
+   `vf_add_test_group` gives it `DEPENDS` on the **binaries only** —
+   `vf_add_test_group(night voxelforge)`. No `DEPENDS`, no
+   `FIXTURES_REQUIRED`, no ordering. So a red in `test-visual` **cannot** skip
+   `test-night`; the night gate had simply not been run.
+
+The generalisable point, which is the reason this is worth a page section rather
+than a footnote: **"skipped" and "not run" are different states, and only one of
+them is evidence.** A reported skip should be checked against an actual run
+before its reason is accepted — the same discipline as "an absent signal is only
+evidence if you have shown the probe can fire."
+
+Also clarified on `[[concepts/night-gate-thresholds]]`: a **green** night result
+is two findings at once, not one. It means the band survived *and* that the gate
+is scale-blind in practice (derived lights present in both arms, lifting day and
+night in near-proportion). So green is **evidence for** the proposed
+scale-bearing day-mean assertion, not evidence against needing it — and it would
+justify that assertion by measurement rather than argument. "Green" and "the gate
+can see everything" are different states; conflating them is how a scale-free
+gate outlives the problem it was built for.
+
+## [2026-10-08] finding | `VF_TEXTURES=0` was not bit-exact on the per-cell override path; `ninja -k1` masquerades as a skip
+
+Two findings, one from George's report (verified in source) and one from
+diagnosing why `test-night` never ran.
+
+### The escape hatch had a hole in it
+
+`VF_TEXTURES=0` is documented as a **bit-exact** escape hatch — the control that
+lets a gate prove a texture change did nothing. It was not bit-exact on the
+per-cell override path.
+
+The old code decoded every texture and *then* cleared the slot table. That is
+enough for the material path (`matTex[mId].x` → `-1` → `sampleTex` returns
+`vec3(-1)` → palette). It is **not** enough for the override path, because
+`texSlotFor` gives `gTexOv` precedence:
+
+```glsl
+return gTexOv > 0.5 ? floor(gTexOv + 0.5) : uTex.matTex[mId].x;
+```
+
+So override cells kept sampling the **decoded** layer with the slot table already
+cleared, and the hatch left **0.83 % of the hero frame** showing the very checker
+it promises to remove — caught by the `texture_check` `vf_off` arm. Fixed by
+skipping the decode entirely (`if (disabled) break;`), so every layer keeps the
+neutral filler and the result is byte-identical to the no-table palette arm.
+
+**Status: verified green (George, 2026-10-08).** `texture_check` passes with the
+`vf_off` residual now **0** and bit-exact, so the mechanism is confirmed by the
+gate rather than by reading alone. Recorded here because the entry was first
+filed as a *report of a staged fix with the mechanism unverified* — the
+distinction between "a gate says so" and "I read the code and it looks right" is
+the whole reason the escape hatch was worth filing at all.
+
+**Why this is expensive rather than merely wrong:** the hatch is only ever
+exercised when someone thinks to check it, and its whole value is that it is
+*provably* identical. A hole in it is invisible in normal use and silently
+invalidates every A/B that used it as a control. Filed in
+[[concepts/texture-atlas]].
+
+### `ninja -k1` stops scheduling, which reads as "skipped"
+
+A session reported `test-night` as "skipped when the visual group went red". The
+real cause was **ninja-level, not ctest-level**: `ninja -k1` halts scheduling
+after the first failing target, so `test-night`'s target never started. CTest
+groups are fully independent — `vf_add_test_group(night voxelforge)` gives
+`DEPENDS` on the **binaries only**, with no `DEPENDS`, no `FIXTURES_REQUIRED` and
+no ordering between groups.
+
+The generalisable point: **"skipped" and "not run" are different states, and only
+one of them is evidence.** A reported skip should be checked against an actual
+run before its reason is accepted. Use `-k0` to keep going past failures when the
+full picture is wanted.
+
+## [2026-10-08] lint | Systematic sweep: 44/52 pages reference changed files, 2 real defects found and fixed
+
+Ran the periodic lint properly rather than piecemeal. Method: extract
+`lastReviewed` + `sourceRefs` from every page, intersect against
+`git status --porcelain` plus files changed since 2026-10-05.
+
+**44 of 52 pages reference at least one changed file.** That number is *not* a
+staleness signal on its own — the tree is mid-flight with ~30 modified files,
+so most pages legitimately point at something in flight. Treating it as a defect
+count would have produced 44 false positives. The useful signal is the **oldest
+pages against the most-changed files**, so verification was targeted there.
+
+**Verified accurate, no action:** `concepts/load-time-field-build.md` (2026-09-18)
+— the page Victor is about to optimize. Every load-bearing constant checks out
+against `src/voxel/voxel_field.cpp`: `kStore = 6` (:16), `kMargin = 2` (:15),
+`kPad = kStore + kMargin = 8` (:17), `groupComponents` exists (:62, called
+:398), the bbox padding is `2 * kPad` (:146-148), and the air-band test is
+`dCell > kStore * VOXEL` (:271). The 361M padded-bbox / ~680× inflation figure
+is consistent with `kPad = 8` on 1-cell components.
+
+**Defect 1 — duplicated paragraph with an inconsistent variant.**
+`concepts/voxel-object-authoring.md` carried the same sentence twice, once
+ending "keeping **the bake sweeps** the single source of truth" and once
+"keeping **`scene()`** the single source of truth". An editing accident, and the
+two variants disagree about what the source of truth is. Removed the duplicate,
+kept the `scene()` form (it matches the surrounding text's framing).
+
+**Defect 2 — a claim contradicted by another page.** That same page was headed
+"## Why SDF-in-code (**no mesh import**)" and said "A converter was considered
+and rejected for now". Mesh import exists: the sidebar **Mesh** section,
+`vf_mesh2vox`, and the `import_mesh` MCP tool
+([[entities/mesh-to-voxel]]). The heading now reads "Why SDF-in-code is the
+**primary** path" and says import is a *secondary* path, with the reasons
+re-framed as why SDF-in-code stays primary rather than why import is unavailable.
+
+**Also confirmed clean:** no page still claims `writeLightManifest` is missing
+(the only "loader-only" hit is the sentence saying that claim is *retired*), and
+no content page carries a `pre-splat-rework` marker — those survive only in
+`index.md`, where they are accurate pointers.
+
+**Method note for the next lint:** a `git status` intersection cannot
+distinguish "the page drifted" from "the tree is mid-flight". On a dirty tree it
+produces a number that looks like a defect count and is not one. The actionable
+unit is *oldest page × most-changed file*, and the verification has to be done
+by reading the constants, not by counting.
+
+## [2026-10-08] correction | The night band is NOT stale — re-derived unchanged, and now empirically confirmed blind
+
+**The banner I filed two messages earlier was wrong, and Vega was right to
+challenge it.** It said the 0.10–0.27 ratio band "no longer carries the tree it
+was measured on" and told the reader a passing gate could not be trusted. The
+measurement then came back **identical with the 14 derived lights present**:
+
+| arm | pre-emissive | with derived lights | delta |
+|---|---|---|---|
+| hero | 0.185 | 0.185 | 0.000 |
+| house | 0.143 | 0.143 | 0.000 |
+| water | 0.229 | 0.229 | 0.000 |
+| day absolutes | 123.88 / 105.41 / 111.88 | 123.88 / 105.42 / 111.90 | +0.00 / +0.01 / +0.02 |
+
+So the margin does not need re-deriving. The legitimate risk was closed by the
+measurement, and the banner was then **actively harmful** — it trained the reader
+to dismiss the one signal that would catch a real regression. Retitled to
+**RE-DERIVED 2026-10-08, UNCHANGED**.
+
+**Why it held (Vega's mechanism, which I had wrong):** the derived lights are in
+**both** arms, so they largely cancel in a ratio — a ratio of two quantities that
+both moved is not evidence that either moved. And at the three exterior canonical
+cameras the emitters contribute very little solid angle to a frame mean: 14 lights
+in a hamlet, seen from outside, move the day mean by **+0.02/255**. The second
+reason is the one that generalises, and it is a property of the *cameras* rather
+than the lights, so it holds for any future emitter set placed inside the hamlet.
+
+**The corollary is the finding: the band is now empirically confirmed as blind.**
+A 20 % change in every lamp would pass it. That is a *demonstrated* argument for
+the scale-bearing day-mean assertion rather than an argued one — the strongest
+form the thesis can take. The gate's robustness to content change and its
+blindness to content change are the same property: scale-free by design, and a
+scale-free check cannot detect a scale change.
+
+**A lights-only control is a decided "do not build", with the reason.** The
+`VF_TEXTURES=0` confound is real (it swaps photo→palette albedo in both arms, so
+any delta is unattributable — house's night went *up* while its day also went
+up, and removing light sources cannot raise night luma). A dedicated hook was
+considered and rejected: if the lights off moves the day arm by +0.02/255, it
+cannot move the night arm enough to matter for a ratio band. **Do not spend a
+hook on a 0.02/255 signal.** Recording a rejection with its reason is worth more
+than leaving it open — an open question gets re-litigated by everyone who sees it.
+
+**Lesson for the next banner:** a warning that outlives its evidence is worse
+than no warning. The banner was correct when filed and wrong one measurement
+later, and nothing in its wording said which state it was in. A banner should
+carry its own expiry condition, or it should be removed the moment the risk
+closes.
+
+## [2026-10-08] ingest | Renderer improvement roadmap filed; EDT-batching state verified in code
+
+`[[concepts/improvement-roadmap]]` created from the wiki's open items,
+indexed, prioritized P1–P3 with the measuring page for each. Code check
+2026-10-08: the EDT path already has per-component content-hash caching
+and parallel Dijkstra (`src/voxel/voxel_field.cpp`); the open part is
+spatial merging of small components before the padded-bbox EDT (~680×
+inflation, ~13 s of ~17.6 s). Tile-splat (`VF_TILE=1`) status delegated
+to Vega for a current measurement; EDT batching handed to George.
+Cross-links: [[concepts/load-time-field-build]],
+[[concepts/measurement-provenance]].
+
+Tile-splat status corrected from Vega's analysis (2026-10-08): the
+143/57/65/78 ms figures are doc-sourced, not re-measured; the opaque
+fp deltas are categorical set differences from the seal's
+`fragDepthQ == depth` equality test, not accumulation error; water is
+bit-exact because it uses a strict `<` test with identical per-fragment
+contributions; the tile path's honest value prop is determinism, and its
+gate must be the pinned 0.18/255 noise floor, never bit-exactness.
+Re-measure with VF_TRACE + per-arm spv md5 provenance is pending on a
+free GPU.
+
+**Update (2026-10-08):** Vega's same-binary measurement reverses the
+documented parity claim — forward-vs-tile mean|d| 5.56/255, 64.31% of
+pixels differ, ~119× the pair's 0.047/255 control floor; localised to
+all geometry uniformly with the sky at noise floor and no brightness
+bias, i.e. a different set of contributing disks. Her earlier
+seal-equality explanation was refuted by her own localisation; next
+candidate is `VF_SPLAT_SEAL_ALPHA`/`uSplat3.x` default parity between
+paths, plus open question on `dups 0` near-band tiles. Timings remain
+"unre-measured" (`VF_TRACE` silent in `--shot`). AGENTS.md's "small
+fp deltas" wording flagged stale. George declined the EDT-batching
+prototype until his shadow-map feature lands; offer reactivates on his
+ping.
+
+## [2026-10-08] query | Per-object voxel size for detailed objects
+
+User asked: can objects carry a different voxel size (a vase of
+500x100x1000 cells shown smaller than the 10 cm world)? Answered from
+code: rejected at load time (worldfile/layered_world/editable_world all
+gate meta.voxelSize), downstream stack assumes one lattice, global
+VOXEL change is budget-prohibitive (stored quirk). Honest levers today:
+detail pipeline (micros, crease bridges, anisotropic disks), per-cell
+texture + detail normals, fine-author/resample import. Filed as
+[[concepts/per-object-voxel-size]]; indexed.
+
+**Victor's first profile numbers (2026-10-08):** surfelize bake 4278 ms
+with shade+bucket 4006 ms over 4.19M surfels; --smoke 60 averages
+5.52 ms/frame at 640x360; test-surfel 4/4 green. Frame-CPU env-cache
+and bake AO-hash already landed parity-safe. Filed as a P1 on the
+roadmap page; load breakdown (EDT vs surfelize vs upload) still
+pending.
+
+**Correction (same day):** the 4278 ms surfelize figure was a cold
+run; warm-day is 3418/3503/3445 ms across three runs, night 2619 ms.
+HEAD control invalid on a dirty tree, so the env-cache + AO-hash work
+claims no isolated win. Roadmap page updated to match.
+
+## [2026-10-08] ingest | irradiance-volume page — emitter-lit indirect, and why frame means cannot verify it
+
+Landed the CPU bake (`src/voxel/irradiance_volume.{hpp,cpp}`, 64^3 RGBA16F, binding
+26), the self-contained `shaders/common_irradiance.glsl`, CMake registration, and
+three camera-free test cases in `tests/test_world.cpp` (31 assertions; `ninja -C
+build test-world` green, 2/2). Descriptor/upload/shading integration is the
+shading session's files and is deliberately NOT done. NO RENDERED FRAME HAS SHOWN
+THIS YET — the page says so explicitly, because "landed and tested at the data
+level" is not "looks right".
+
+Page: [[concepts/irradiance-volume]].
+
+FOUR THINGS WORTH KEEPING FROM THIS, in decreasing order of how much they cost to
+learn:
+
+1. **A test caught a bug that no frame mean would ever have.** A volume cell
+   CONTAINING an emitter came out unlit: the bake skipped `dist <= 1e-4f` to avoid
+   normalizing a zero-length direction, but `(1-d/r)^2` is 1.0 at d=0, so the
+   emitter's brightest cell was a black hole while every neighbour lit correctly.
+   Found by `CHECK(hereLuma > 0)`, not by looking.
+
+2. **Frame means are BLIND to localised lighting — measured, not argued.** Landing
+   the 14 emissive-derived lights moved the day arm by +0.00 / +0.01 / +0.02 out of
+   ~110-124, about 0.02%. So this feature's natural verification ("did the frame
+   get brighter") would have returned "no effect" and been wrong in the OPPOSITE
+   direction from a false positive. Two consequences: the night band is valid but
+   nearly vacuous with respect to lights (a 20% change in every lamp would pass
+   it), and a lights-only control is NOT worth building — if turning the lights off
+   barely moves the day arm it cannot move the night arm enough to matter. The
+   instrument with power is a LOCAL interior-region mean. Same blind spot as
+   [[concepts/splat-edge-fade-measurement]] and the tile-parity work.
+
+3. **Correcting an earlier claim of my own, twice, in one day.** (a) The `shRaw`
+   "backend asymmetry" was a false positive, defeated by a guard inside
+   `aoShEnclosure`; retracted to both peers before either acted, and the guard is
+   now in AGENTS.md as intended design. (b) "shade+bucket is flat across sun
+   states, so shadowMarch is small" was CONFOUNDED — my three arms were separate
+   processes and the night arm was the cold first run, so the cold penalty
+   cancelled the night saving and I read the cancellation as "no effect". Real
+   effect is ~650-800 ms across two independent methods; the perf session's
+   control is what caught it. Both retractions are recorded on the pages that
+   carried the wrong claims.
+
+4. **Include-order trap worth knowing before it costs an afternoon.**
+   `common_irradiance.glsl` uses `pc.b.x`, and `pc` is declared by the ENTRY POINT,
+   not a shared header. Wrong order fails with `'pc' : undeclared identifier` AND a
+   second error reading like a typo (`'b' : vector swizzle selection out of range`)
+   rather than an ordering mistake. `common_surfel.glsl` is included before `pc`
+   exists, so that chain can never host it. Documented in the header itself.
+
+Shared-emitter-set coupling recorded explicitly: the volume consumes the same 16
+`LightUBO` slots as `applyLights`, so truncation is SHARED — consistent, but a
+dropped emitter has no symptom of its own, hence the `seen`/`used`/`cellsLit` stats
+the caller must log.
+
+Also retracted a retracted thing: my own `stats.used` was hardcoded to report 0
+(flag never set), found by reading the diff rather than by the compiler.
+
+**[2026-10-08] ingest | Tile-splat parity canonical page created**
+
+`[[concepts/tile-splat-parity]]` now carries Vega's measured 2026-10-08
+status verbatim: forward-vs-tile mean|d| 5.5624/255, 64.31% of px
+differ, 47.64% >2/255, max|d| 153, ~119x the same-binary control floor
+(0.0467/255 forward, 0.0547/255 tile); localisation shows sky at the
+floor, non-sky at 10.134/255, uniform top-to-bottom, no luma bias.
+Seal-equality mechanism recorded as REFUTED. Timings
+(143/57/65/78 ms) recorded as doc-sourced only — VF_TRACE silent in
+--shot. Roadmap page now points at this canonical page. Vega will
+restore the [[concepts/tile-splat-parity]] link in her irradiance-volume
+page and drop its pending blockquote.
+
+## [2026-10-08] correction | Night band re-derived unchanged and empirically confirmed blind; surfel counts reconciled
+
+**The night-band banner I filed earlier was wrong, and Vega was right to
+challenge it.** It said the 0.10–0.27 ratio band "no longer carries the tree it
+was measured on" and told the reader a passing gate could not be trusted. The
+measurement came back **identical with the 14 derived lights present**:
+
+| arm | pre-emissive | with derived lights | delta |
+|---|---|---|---|
+| hero | 0.185 | 0.185 | 0.000 |
+| house | 0.143 | 0.143 | 0.000 |
+| water | 0.229 | 0.229 | 0.000 |
+| day absolutes | 123.88 / 105.41 / 111.88 | 123.88 / 105.42 / 111.90 | +0.00 / +0.01 / +0.02 |
+
+So the margin does not need re-deriving. The legitimate risk was closed by the
+measurement, and the banner was then **actively harmful** — it trained the reader
+to dismiss the one signal that would catch a real regression. Retitled to
+**RE-DERIVED 2026-10-08, UNCHANGED**.
+
+**Why it held (Vega's mechanism, which I had wrong):** the derived lights are in
+**both** arms, so they largely cancel in a ratio — a ratio of two quantities that
+both moved is not evidence that either moved. And at the three exterior canonical
+cameras the emitters contribute very little solid angle to a frame mean: 14 lights
+in a hamlet, seen from outside, move the day mean by **+0.02/255**. The second
+reason is the one that generalises, and it is a property of the *cameras* rather
+than the lights, so it holds for any future emitter set placed inside the hamlet.
+
+**The corollary is the finding: the band is now empirically confirmed as blind.**
+A 20 % change in every lamp would pass it. That is a *demonstrated* argument for
+the scale-bearing day-mean assertion rather than an argued one — the strongest
+form the thesis can take. The gate's robustness to content change and its
+blindness to content change are the same property: scale-free by design, and a
+scale-free check cannot detect a scale change.
+
+**A lights-only control is a decided "do not build", with the reason.** The
+`VF_TEXTURES=0` confound is real (it swaps photo→palette albedo in both arms, so
+any delta is unattributable — house's night went *up* while its day also went
+up, and removing light sources cannot raise night luma). A dedicated hook was
+considered and rejected: if the lights off moves the day arm by +0.02/255, it
+cannot move the night arm enough to matter for a ratio band. **Do not spend a
+hook on a 0.02/255 signal.** Recording a rejection with its reason is worth more
+than leaving it open — an open question gets re-litigated by everyone who sees it.
+
+**Lesson for the next banner:** a warning that outlives its evidence is worse
+than no warning. The banner was correct when filed and wrong one measurement
+later, and nothing in its wording said which state it was in. A banner should
+carry its own expiry condition, or it should be removed the moment the risk
+closes.
+
+**Surfels are not one number — reconciled (Victor, 2026-10-08).** The current
+bake logs **4.19M** = 2.11M terrain + 0.79M object + 64k edge + 774k LOD1 +
+517k LOD2. So the **5.0M** on `load-time-field-build` was stale (object was 1.3M
+then, now 0.79M, and edge/LOD were not broken out), and the **3.4M** on
+`per-object-voxel-size` was base-only before the LOD rings existed. Both pages
+updated, and `per-object-voxel-size` now carries a three-row table of what each
+figure counts, because a surfel count quoted in a storage-scaling argument has to
+be the same count as the one in the cost model.
+
+**Two figures flagged on Vega's new `concepts/irradiance-volume.md`:** the
+"~7.7 s world load" contradicts the canonical ~17.6 s used everywhere else (it may
+be a warm reload, but it does not say so), and binding 26 is new — which means the
+descriptor pool must grow for it, the same trap that made the first lamp test a
+silent no-op at binding 25. Both flagged on the page rather than silently
+corrected, since they are Vega's measurements to confirm or re-label.
+
+## [2026-10-08] ingest | GPU-perspective analysis: per-object finer voxels have three independent blockers
+
+Filed a rendering-side section on `[[concepts/per-object-voxel-size]]` to
+complement Fledge's representation-side summary. The two are complementary, not
+competing — both must hold for a finer-lattice object to work.
+
+**Fledge (representation):** CPU-side format work, splat path nearly free, SVO
+brick format is the blocker.
+
+**Me (rendering):** the splat *rasterizer* is indeed nearly free — the shader
+does not care about absolute disk size, so mixed-scale surfels in one pass are
+feasible. The blocker is **coverage**: a 10 cm terrain surfel is a 10 cm disk
+that extends beyond a 1 cm vase wall's coverage and **pokes through** it.
+Fixing that means splitting coarse surfels at fine-object boundaries — a CPU
+cost, a complexity cost, and a break of the single-merged-record-set invariant
+that `VoxelField`, SVO, surfelize, overlay and picking all rely on.
+
+**Three independent blockers, not one:**
+1. *Representation* — SVO bricks are fixed 8³ cells at 0.1 m; a finer object
+   needs finer bricks, which changes the brick **format**, not just a decode
+   constant. Deepest change, and it is the reference backend.
+2. *Rendering* — the coverage problem above.
+3. *Bake* — the EDT is already bbox-bound at ~13 s; a 1 cm object has a
+   bbox-to-content ratio far worse than 10 cm terrain, so the padding inflation
+   gets *more* severe.
+
+**The one GPU answer that works: render the fine object as triangles.** The
+mesh is already there (STL/OBJ). A standard rasterizer handles arbitrary
+resolution with no coverage problem (triangles have no disk that can poke
+through), no second octree, and no EDT. Composite through the shared depth
+buffer — the depth test handles occlusion in both directions. Costs are real
+but different: a second PBR shading path, and shadows consistent with the
+voxel world's baked shadows. Those are *shading* problems, not *geometry*
+problems.
+
+**Verdict:** for a hero prop where the silhouette matters, mesh-as-triangles is
+the better trade. For everything else, the detail layers are the better trade.
+The lattice stays at 10 cm.
+
+Also flagged by Fledge: `AGENTS.md`'s "small fp deltas" line is stale. Not
+owned by either of us, but a stale known-issue line trains readers to ignore
+the file — worth correcting or removing.
+
+## [2026-10-08] coordination | Ownership map settled across five sessions
+
+Coordination round closed with no collisions outstanding. Recorded so a future
+session does not have to reconstruct it:
+
+| session | owns | state |
+|---|---|---|
+| George | the 7 irradiance plumbing files + `AGENTS.md` doc corrections | in flight |
+| Wiki | `concepts/per-object-voxel-size.md` **body** | folding in SAT-inflation, thin-structure admission, two caveats |
+| Fledge | `index.md` + `concepts/improvement-roadmap.md` + presence-vs-uniqueness lint rule (roadmap P3) | duplicate index line collapsed |
+| Wendy (me) | `concepts/measurement-discipline` rules + `concepts/night-gate-thresholds` | corrected |
+| Victor | assets authoring + perf controls | idle GPU lanes |
+
+**Two findings from Vega's closing summary, both worth keeping:**
+
+1. **Binding 26 is declared but compiled by nothing.** `common_irradiance.glsl`
+   declares `binding = 26`, but nothing `#includes` it yet — 0 irradiance hits in
+   `app.hpp` / `splat_pass` / `svo_pass` / `world_textures`. That is the
+   stale-shader hazard in miniature, and worse than a stale shader because a
+   stale shader at least *ran*. An unreferenced header proves nothing about the
+   runtime while looking verified. **A fifth instance of the "correct value,
+   present, unread" category.** Should be recorded on the irradiance-volume page
+   when the plumbing lands, because the next session will see "binding 26" and
+   assume it is live.
+2. **A dropped `max(distance, VOXEL*0.35)` floor in Vega's port** — numerically
+   identical today, wrong-by-coincidence if `VOXEL` or the `0.85` ever changes.
+   Same shape as `kMoonCol = 0.62`: right for reasons that are not the ones in
+   the code. The reason is written at the site so it cannot be "simplified" back
+   out — the correct defence, and the same one as `aoShEnclosure`'s guard
+   comment.
+
+## [2026-10-08] correction | My bridge line to the normalizing layer-load was wrong; filed the correction
+
+Wiki landed `worldfile::resampleRecords()` + a per-layer `"scale"` field on
+`feature/per-object-scale`. They approved a one-line bridge from my GPU section
+to their implementation, and I had drafted it as: the normalizing load "sidesteps
+the disk-pokes-through issue entirely, because the fine object's records become
+coarse records before they reach the surfelizer."
+
+**That was wrong, in the direction that overstates.** It assumed the normalizing
+load preserves fine geometry. It does not — it resamples *into* the world
+lattice, so it sidesteps the coverage problem by **giving up the fine geometry**,
+not by solving it. Wiki's own status line is the accurate one: authoring
+convenience and coverage, still no sub-10 cm geometry.
+
+This is the retraction I recorded twice today, in the one place I did not expect
+it: I wrote a bridge from a section I had not reread after someone else edited
+the page it pointed at. The rule is the same one — **an assertion written before
+the thing it describes is settled gets filed as a claim, not as a hedge**, and a
+hedge would not have saved this either because the wrongness was in the
+mechanism, not in the confidence.
+
+Filed the correction as a table instead, because the two halves are in tension
+rather than complementary and the page should say so:
+
+| | preserves fine geometry? | coverage | what it buys |
+|---|---|---|---|
+| `resampleRecords` (landed) | **no** — resampled into the world lattice | clean (one lattice) | authoring convenience, correct scaling |
+| fine-raster surfel stream (**not built**) | yes | fine stream must occlude the coarse one correctly | actual sub-10 cm geometry |
+
+**The cost analysis is not where intuition puts it.** Wiki measured the surfel
+bill for the finer vase at **~0.27 MB** — noise against the ~3.4 M-surfel scene,
+so the count is *not* the problem. The case against a fine-raster stream is
+**correctness, not budget**: the fine stream must occlude the coarse one
+correctly, and SVO/voxel-fed marches (shadow, water DDA, irradiance) still see no
+detail. Hence the unbuilt design keeps a **coarse field for shadow/picking**
+alongside a **fine surfel stream** — two representations, one visual.
+
+Manifest field, for the record: `scale` on a layer object in `world.json`
+(sibling of `"pos"` / `"rot"`), a **unitless size ratio** (0.5 halves the
+object's physical size), **default 1.0**, **rejected to identity when not > 0**,
+applied about the layer's **bottom-center pivot**.
+
+**[2026-10-08] ingest | Per-object voxel size analysis filed**
+
+`[[concepts/per-object-voxel-size]]` captures the GPU-perspective
+reasoning: surfels are resolution-blind so the splat path absorbs a
+per-layer lattice nearly free; the SVO brick byte format (CPU
+`int(d/VOXEL)`, shader `raw*VOXEL`, DDA `sdf <= 0`) is the real blocker;
+first-wins-a-cell merge cannot hold across two lattices, so merge must
+move to surfel level; VXW v2 sections can already carry per-layer
+metas. The practical alternative — expressing object detail via
+micro-surfels, crease bridges, anisotropic footprints, texture detail —
+is documented as the cheaper path.
+
+**[2026-10-08] lint | Presence-vs-uniqueness gap in the wiki check**
+
+Vega's whole-tree check reported "total dangling: 0" while
+`index.md` carried a duplicate `per-object-voxel-size` entry — both
+links resolve, so presence passes. Rule: occurrence count exactly 1 per
+page, not merely "the link appears". A check weaker than the claim it
+supports is the same failure family seen three times today (noise-floor
+vs delta, gate presence vs isolation). Filed as a P3 on the roadmap.
+Duplicate index line collapsed; page body ownership settled on Wiki
+(CPU/format half by Fledge + rendering/coverage half by Wiki); roadmap +
+index owned by Fledge.
+
+**[2026-10-08] lint | Whole-tree link/orphan/duplicate sweep: clean**
+
+Ran the presence + uniqueness + orphan check across `.opencode/wiki`:
+no orphan pages, no page missing from `index.md`, and **no duplicate
+entries inside the Pages section**. Refinement to the uniqueness rule
+recorded earlier today: the naive whole-file count reports ~35
+"duplicates" because the "How to navigate" section deliberately
+cross-references Pages entries — uniqueness must be checked **within the
+Pages section**, not across the whole file, or the rule cries wolf.
+The one accepted dangling target is unchanged:
+`[[concepts/water-flooding]]`, cited only by historical log entries
+(the concept was folded into [[concepts/water-plane]]).
+
+**[2026-10-08] lint | Settledness added as a third category; Pages-scoped uniqueness**
+
+Verified `log.md` after Wendy's concurrent append (her correction at
+line 4360 sits cleanly before both of my lint entries — no clobbering;
+`edit` on a stale match fails rather than overwrites, but it was checked
+rather than assumed). Lint rule now has three categories: presence,
+presence-vs-uniqueness (scoped to the Pages section), and
+**settledness** — a cross-reference written before another session's
+build settles is filed as a claim, not a hedge, and a hedge would not
+have saved Wendy's `resampleRecords` bridge line because the error was in
+the mechanism (resampling *into* the world lattice gives up the fine
+geometry rather than preserving it), not the confidence.
+
+## [2026-10-08] finding | Per-object voxel sizes: analysis consolidated, the "minimal honest change" landed
+
+Answered the user question "can objects have a different voxel size?" end to
+end. Analysis (shared across four sessions, consolidated in
+[[concepts/per-object-voxel-size]]): the splat path absorbs fine surfels for
+instance count (a 0.3 m prop goes ~34 -> ~540), but NOT for coverage (smaller
+disks need more overlap to seal; the documented thin-structure failure) and NOT
+for the marches (shadow / water DDA / irradiance all read the coarse field).
+SVO brick format is the representation blocker; finer resolution can make LOAD
+slower because components split into more padded-bbox EDTs.
+
+Implementation, on branch `feature/per-object-scale` in the worktree
+`/home/christoph/code/voxelforge-per-object-scale`:
+`worldfile::resampleRecords()` + per-layer manifest `"scale"` (unitless size
+ratio, default 1.0, about the bottom-center pivot). Object/scatter layers
+authored at any `voxelSize`/`gridN` are resampled into the world lattice with
+dominant-material voting; `LayeredWorld`'s cache re-normalizes on scale change
+and its dirty hash folds scale in; `EditableWorld::importLayer` resamples
+meta-mismatched sources. `test-world` green, `--selftest` green. The
+fine-raster surfel stream is NOT built.
+
+Wording that matters for the next reader: `resampleRecords` and a
+fine-raster surfel stream are a TRADE, not two stages of one plan —
+resampling sidesteps coverage by discarding fine geometry, not by solving
+coverage. The count is not where this fails; correctness is.
+
+Measurement filed (real `assets/vase.vxw`, 10 cm -> 2.5 cm): 869 -> 55,616
+cells, 1,046 -> 16,736 exposed faces (16.0x), ~0.27 MB of surfels against a
+~3.4 M-surfel scene.
+
+Recorded here rather than in a concept page, because
+`concepts/measurement-discipline.md` belongs to Wendy (log line 4349) and I
+had edited it on Vega's request before that ownership was corrected; my hunk
+is reverted and the line is hers to write. The rule, arrived at twice today: a
+test that re-implements the expression it is testing cannot falsify it — 232
+agreeing assertions certified a 51.2 m / 32-cell coordinate error because the
+helper copied the implementation's own formula. The external reference point
+is the whole content of a correctness check.
+
+Coordination cost worth recording: three bare "continue" messages in a row
+mean "file the thing", and two sessions independently believed they owned the
+same wiki page body until a third arbitrated. Claim before edit, every time,
+including for the file you already released.
+
+## [2026-10-08] fix | irradiance volume: origin-centred cell frame (51.2 m / 32-cell misregistration)
+
+Found by the shading session diffing my CPU bake against my own GLSL, not by the
+test suite. Confirmed independently on three axes before changing anything:
+`VoxelField::sampleWorld` uses `(p + 0.5f*WORLD)/VOXEL`; the shaders use
+`p/pc.b.x + 0.5`; `heightmap.hpp`'s `kHmMinMeters = -8.0f` means world
+coordinates are routinely negative. `--probe` corroborates (origin reads air
+above the hamlet, (51,0,51) reads solid).
+
+Fixed: `p = (i+0.5)*kCell - WORLD*0.5f` on all three axes, and the test's own
+coordinate handling — `irrCellCentre` forward and a new single `irrCellIndex`
+inverse, replacing two inline `int(air.x / c)` conversions that were also 0-based.
+The real geometry of the bug was that asymmetry: one forward call site (reviewable)
+against two inverse ones (not).
+
+Why 232 assertions passed: `irrCellCentre()` reproduced the bake's own formula, so
+bake and test formed a closed loop with no external reference point. With the bake
+fixed and the test left 0-based, `stats.used` came back 0 — the emitter reached no
+cell centre in the real frame.
+
+New case `irradiance volume: the cell frame is origin-centred` breaks the loop by
+checking `kOriginOffset` against `sampleWorld`'s conversion written out longhand.
+
+Assertion count FELL 232 → 152 and that is the finding, not a regression: the ray
+walk covered 186 cells over 6 axis rays in the broken frame versus 89 cells over 3
+correct — the emitter in the wrong half of the world travelled further through open
+space and asserted about ~97 cells unrelated to the light. Both figures read by
+forcing the gate to fail (`CHECK(checked > 1e6)`), since a passing `checked > 20`
+never discloses the value. Free-space energy after: 585.06 against the pi*r^3/3
+ceiling 2873.51, ratio 0.204.
+
+Verified: `vf_tests --test-case="*irradiance*"` 6/6, 152 assertions; `test-world`
+2/2 in 109.8 s; `build/voxelforge` md5 verified untouched at every step. Restores
+during measurement were md5-verified, not mtime-verified — one build failed and
+silently ran a stale binary, which is how a wrong number nearly got reported.
+
+Aphorism and the general rule are on [[concepts/measurement-discipline]] (Wendy's,
+instance nine); this entry carries only the concrete instance. Source:
+[[concepts/irradiance-volume]].
+
+## [2026-10-08] lint | Structural-lint rules filed (three axes); log ordering caveat
+
+Filed on [[concepts/measurement-discipline]] under "Structural lint: checks that
+need no judgement":
+
+1. **Orphaned table rows** — a `|` line not preceded by a row is an orphan unless
+   it is itself a header (separator follows).
+2. **`edit` anchored on a heading deletes it** — re-emit the anchor, then verify.
+   Instrument `git diff -U0 | grep '^[+-]## '`; blind spot: invisible to a heading
+   added *and* deleted in one uncommitted session.
+3. **A heading split from its body** — anchoring on a heading and inserting below
+   it separates the two. Nothing is missing, so presence checks pass; only
+   `grep -A3 '^## '` sees it. This is the order axis: the two others check
+   presence, this one checks arrangement.
+
+Applied: repaired two headings and a duplicated table row on
+[[concepts/measurement-discipline]]; wiki now 54 pages, zero catalogue gaps, one
+deliberate dead link (`concepts/water-flooding`), no orphaned rows, no
+heading/body splits.
+
+Also recorded there: the compiler-enforced constraint family from the irradiance
+fix (test's own `indexOf`, `static_assert(sizeof(glm::vec4)==16)`, `kBytes` tied
+to `kN^3 * sizeof`, byte-copying upload); **a model of an instrument is not the
+instrument** (Python model predicted 4 failing cells, compiled code failed on 8);
+and a **failed build can leave the previous binary running**, so *which source was
+written* and *which artifact ran* are two questions needing md5 + HEAD + dirty
+paths. Suite total is **153** (not the 152 first reported).
+
+**Wiki-layer caveat:** `log.md` is append-only, which mitigates lost *text* but
+not misrepresented *ordering* — and this file already shows it, with a
+correction entry sitting above an earlier finding. Do not infer causation from
+vertical position.
+
+## [2026-10-08] LEAD (not a finding) | irradiance volume: slice loop used slice COUNT as a z STRIDE
+
+**Deliberately held out of every content page** until `vf_core` is green and the
+suite has been re-run through `ninja` rather than a hand-link. The general lessons
+*are* filed, on [[concepts/measurement-discipline]]; this entry is the lead.
+
+**Mechanism (reported; verified in the author's own CPU-only translation unit, no
+GPU/display):** `buildIrradianceVolume`'s slice loop used `sz * kSlice` as the z
+stride, where `kSlice` is the **slice count**. With `kN=64`, `kSlice=4` the
+covered band is `z ∈ [0,16)` of 64 — a quarter of the volume, and the quarter at
+the world edge. 15 of 16 emissive clusters sit near `z +7..+15`, entirely outside
+it. Fixed to `kZPerSlice = kN / kSlice`; measured 8 of 14 used, 13 cells lit, max
+RGB 0.987.
+
+**Configuration — the figure without this is the defect:** `assets/world.json` as
+shipped (14 derived lights, 0 authored), 21 layers merged, `latN=1024`, `kN=64`,
+`kCellM=1.6`, `sunDir` normalize(-0.4,0.6,-0.5), CPU only, `.o` linked directly
+against a **pre-existing `libvf_core.a`** because Victor's collision broke the
+`editable_world` header seam.
+
+**Why the tests passed anyway — the part that generalises:** 6/6, 153 assertions.
+The tests **place a synthetic emitter wherever `findOpenAirCell` lands**, and the
+truncated band happened to contain that spot. A test that **chooses its own
+subject** cannot detect that the subject set is a fraction of what it should be —
+and a hand-computed expected value would have passed too, if computed over the
+same band. The fix is a **census**, not an oracle: assert what was *visited*.
+
+**Method point:** two instruments disagreed (40 candidate pairs in range, 0
+visited) and **the disagreement was the signal** — while both hypotheses reasoned
+about visibility and resolution, i.e. the physics, and the defect was in the
+iteration bounds. Also: the census built to test one hypothesis invalidated
+**both**, the third purpose-built instrument today to answer a neighbouring
+question.
+
+**Pending:** negative control (revert the stride, expect a fail) is queued but not
+run. Promoted to a content page only on a green `ninja` run.
+
+## [2026-10-08] rule | A guard defined relative to its feature disappears with the feature
+
+Filed as a standing review question on [[concepts/measurement-discipline]],
+from the micro-surfel removal (ordered, not landed): the live-edit check
+asserted "the patched run grows with `VF_MICRO` on vs off" — an assertion
+*about the feature existing*, not about the protected property ("a patched
+chunk's regenerated run still covers the cells the stamp touched"). Deleting
+the feature deletes that assertion in the same commit, leaving a guard with a
+hole shaped exactly like the deletion. Cheap review form: after any deletion,
+grep the surviving checks for the deleted identifier; prefer replacements that
+name no part of the removed system. Wiki's replacement plan already matches
+(non-empty patched run, count differs from pre-stamp, base+bridges
+regenerate), per George.
+
+## [2026-10-08] finding | Only the carve could have caught the rim class
+
+Fledge's distinction, filed on [[concepts/brush-falloff-curve-contract]]:
+dome/sphere tests assert reach monotonicity and proportional shortening, not an
+exact boundary count — so a lost boundary cell there does not fail. The carve's
+`found == expected` over the whole top-layer disk was the only exact count,
+which is why 2814-of-2821 surfaced there. Until boundary-count checks exist for
+the dome/sphere rims, green proves the carve boundary and the un-tapered paths,
+not the tapered dome/sphere boundaries. Boundary-count proposals for those two
+rims are authorized from the contract page (spec sign-off; implementation stays
+in Fledge's `test_editable` + clean-build gate). Contract page deliberately
+still spec-only until `vf_tests` is green.
+
+## [2026-10-08] status | Victor Phase 1 reported green on its own cases
+
+Recorded as reported, not wiki-verified, on
+[[concepts/per-object-voxel-size]]: `importLayer` hunk re-applied, `vf_tests`
+builds, 4 worldfile cases green (429 assertions incl. fine-grid resample). One
+remaining failure, `test_world.cpp:613 slicesWithSky` (4096 vs 64), attributed
+to Vega's dirty test plus untracked irradiance files — not the merge path
+(byte-identical at scale 1). Confirmation routed to Vega; treated as reported
+until he confirms. Phase 1 boundary holds (representability only, no fine
+geometry); `scale` fifth-field note and three-behaviours doc debt stay pending
+until merge.
+
+## [2026-10-08] verify | Falloff-curve contract implemented-and-verified
+
+Fledge reports `test_editable` green: 13/13 cases, 3013/3013 assertions. Filed
+on [[concepts/brush-falloff-curve-contract]], mechanism-precise:
+
+1. **Carve** — taper reach floored at `kCarveTopMargin + VOXEL` plus the SDF
+   epsilon (the 2814-of-2821 fix, as specified).
+2. **Dome** — graded-column kill: `colHeight < 0.5 * VOXEL` emits nothing, gated
+   on grading so `Constant` keeps its exact legacy footprint. The leak was the
+   straight-disk branch testing ungraded `perp2 <= r2` — rim kept its base cell
+   (reach 1, now pinned as nothing-at-rim). General rule: the inclusion test
+   must see the tapered quantity, never the un-tapered one.
+3. **Sphere** — no fix, structurally exempt: `dist <= R * f(q)` grades both
+   sides of the comparison together, so the class is not expressible. Prefer
+   this form wherever the predicate allows it.
+
+**3053 → 3013 is the suite getting tighter, not thinner:** same 13 cases, and
+the count comes from per-record `CHECK` loops — fixing the boundary emits fewer
+cells, so the count falls by construction. Recorded on the page so a future
+reader does not misread a falling total next to a boundary fix.
+
+Boundary-count proposals for the dome/sphere rims (exact-count over the rim
+ring mirroring the carve's `found == expected`, asserting zero cells at `q=1`
+for every tapered curve): authorized from the contract page, implementation in
+Fledge's gate.
+
+## [2026-10-08] verify | Slice-stride lead promoted (current-tree label)
+
+Vega reports the promotion condition met — `vf_core` green (`ninja vf_tests`
+links), irradiance **7/7 cases, 180/180 assertions** via the ninja-built
+binary, `test-world` group 2/2 via `ninja` (110.66 s),
+`build/voxelforge` md5 untouched throughout. The stale
+"not yet verified through `ninja`" line on
+[[concepts/measurement-discipline]] is corrected to this green run.
+
+**Label travels with the promotion:** Vega's 4 files are uncommitted, so this
+is a **current-tree** green, not a hash green. The 6/6-153 figure stays on the
+page as the bug-present run; 7/7-180 (with the fixed-subject seventh case)
+supersedes it. Vega's slice-stride section, 4 MB RGBA32F correction, and
+Fledge's two applied nits live on his page — this entry is the pointer, not
+the restatement.
+
+## [2026-10-08] verify | Dome/sphere boundary gap closed — 15/15, 3037/3037
+
+Fledge's boundary-count checks pass: dome rim ring zero across all five tapered
+curves (legacy path guarded non-zero, kill gated on grading as specified),
+sphere a full cell inside with `Constant` bit-identical. Recorded on
+[[concepts/brush-falloff-curve-contract]] as the closure of the "only the
+carve could have caught the rim class" gap — every tapered boundary is now
+proven, and the page status reads 15/15-3037. Authorization for those checks
+came from the contract page; implementation stayed in Fledge's gate throughout.
+
+## [2026-10-08] status | Victor Phase 1 settlement part one — landed in worktree, uncommitted
+
+Recorded as reported on [[concepts/per-object-voxel-size]]: coordinator call
+gated on Fledge's 15/15 green accepted 5 port files + the `importLayer` hunk
+into the worktree, uncommitted. A landing state, not a merge state — the
+pending-merge note and all branch figures stand. Still open:
+`slicesWithSky` attribution with Vega (reported-not-settled) and the
+texture-header recurrence (awaiting owner re-apply; unfiled until confirmed).
+
+## [2026-10-08] finding | Checkout-loss recurrence instance two — `TextureBinding::emissive`
+
+Settled form arrived from two sessions and is filed on
+[[concepts/uncommitted-edit-is-not-yours]] next to the FalloffCurve instance:
+the extension lived in `worldfile.hpp` (`TextureBinding::emissive` bool +
+`emissiveScale` float) + `worldfile.cpp` (textures-table parse/emit), taken by
+a port checkout in a dirty tree, re-implemented by Fledge **from the usage
+sites** under coordinator authorization. Scratch round-trip PASS +
+byte-identity PASS; the durable committed gate is still open
+(`test_worldfile.cpp` is Victor's claim). Attribution stays
+prime-suspect-unconfirmed — filed as mechanism, not culprit. Two instances in
+one day promotes the prevention from `assets/` advice to an any-tree rule.
+
+## [2026-10-08] decision | Emissive-lights spec change ordered, pending Wiki landing
+
+Coordinator order (topic `emissive-lights`): every emissive voxel becomes a
+**shadow-casting point light**, superseding the 1.5 m thinning rule and the
+`kMaxLights` = 16 cap. Filed as a pending banner on
+[[concepts/enclosed-space-lighting]] — the current chain (thinning, 16 slots,
+authored-first, truncation logged) stays as the description of the tree until
+the landing, because a per-voxel light set does not fit binding 25's fixed UBO
+shape and the landing must restructure the path. Reconcile on landing: the
+banner comes down and the section is rewritten against the new path.
+
+## [2026-10-08] decision | Full dynamic lighting ordered — priority after micro green
+
+User order via George (topic `dynamic-lighting`): sun + lights re-derive live —
+no baked shadow, no stall, no 16-cap. Filed as a pending banner on
+[[concepts/dynamic-sun-shadows]], superseding the static/thinned chain
+([[concepts/baked-sun-shadow-contract]],
+[[concepts/enclosed-space-lighting]]). Owner split: **Victor shadow-map,
+Wiki cells-emission** — and both greener paths are recorded as **prerequisite
+gates**, so the decision lands when both are green. Sequencing: after micro
+green. Reconcile when
+both prerequisites land: banners down on all three pages, sections rewritten
+against the live path.
+
+## [2026-10-08] verify | Micro removal landed — hybrid shape, current-tree label
+
+Wiki's removal is implemented in the working tree (AGENTS.md diff +
+`git status` showing the app/test/doc hunks, all **uncommitted**). Verified by
+grep and recorded on [[concepts/detail-pipeline]] §3, which replaces the
+DECIDED-NOT-LANDED banner:
+
+- **Deleted:** `U` handler, `App::m_microDetail`, all `VF_MICRO*` env reads
+  (two comment-only strings remain), sidebar toggle, every test reference.
+- **Retained, default-off:** the bake emitter (`emitMicroSurfelsForCell`,
+  `buildMicroSurfels`, `microStart` layout; `microDetail = false` at
+  `surfelize.hpp:54`). The cited lines `app.hpp:351` / `run_hotkeys.cpp:298`
+  are **gone**, as promised in the re-verify — the re-verify also found the
+  retention, which the inventory had not predicted.
+- **Guard risk closed:** `check_patched_run` asserts a non-empty patched run
+  and names no micro — the specified replacement, not a deletion.
+- **Cost table restated** on [[concepts/load-time-field-build]]: `VF_MICRO=0`
+  is the default, +56.7 % / +1.23M is removed cost kept as provenance,
+  `3,398,081` labelled with-micros historical.
+
+Label travels with all of it: **current-tree until commit**.
+
+## [2026-10-08] status | Dynamic lighting in progress — N=64/K=4, visibility proof required
+
+George's update (topic `dynamic-lighting`): the decision is now **sole priority**,
+**in progress** with config **N=64/K=4, unbounded-adjustable** — Victor codes
+the shadow-map lane, Wiki codes the emission path, both greens as gates.
+Recorded on [[concepts/dynamic-sun-shadows]] (banner now reads IN PROGRESS).
+New and load-bearing: the user reports **zero visible change**, so landing
+additionally requires a **visibility proof** — a measured frame delta above the
+noise floor on at least one canonical view, not just green gates. A lighting
+change with no visible effect is a clean zero, and clean zeros need the
+enumeration precondition from [[concepts/measurement-discipline]].
+
+## [2026-10-08] lint | Wiki cleanup sweep — micro-as-current scrubbed, caps marked interim
+
+Coordinator-ordered sweep (topic `wiki-cleanup`), 11 files. Micro-as-current
+removed everywhere found: edge-bridges layout + `VF_MICRO_DIST` + micro tail
+([[concepts/edge-aware-surfel-radius]]), 2.13M/3.40M range and `U`-obligation
+([[concepts/dynamic-sun-shadows]]), `VF_MICRO=0` run note
+([[concepts/splat-base-seal]]), detail-budget list
+([[concepts/per-object-voxel-size]]), third-contributor diagnosis
+([[concepts/surfel-holes]], kept as history), `no_micro` variant
+([[concepts/demo-capture]], env half now a no-op), `U`-stall comparison
+([[concepts/sun-direction-pipeline]]), test-clause rewrite
+([[entities/live-edit-brush]]), catalog line (`index.md`), plus the layout
+contract rewritten as three-declared-arrays-two-live-ranges
+([[concepts/detail-pipeline]]). Historical measurements keep their config
+labels (they were true on the frames they were made on).
+Thinning + 16-cap marked interim till the N=64/K=4 flip
+([[concepts/enclosed-space-lighting]], [[concepts/night-gate-thresholds]]);
+UBO in-flux note verified against the tree — `worldfile.hpp:147` already reads
+`kMaxLights = 256` / KMax 8 / budget 64 / K 4, so the flip is in-tree but
+unverified (15:12 binary `bad_alloc`, Victor rebuilding). Emissive banner
+aligned to IN-PROGRESS-with-gates vocabulary. Gone-line citations confirmed
+absent wiki-wide (`app.hpp:351`, `run_hotkeys.cpp:298`); `surfelize.hpp:54`
+cited as retained-off.
+
+## [2026-10-08] lint | Cleanup sweep closed — exception + parked parity noted
+
+Coordinator resolution on the two returned items: (1) the store-169/field-19
+parity numbers live only in Wiki's uncommitted branch (parked-skipped parity
+test) plus the crosstalk record — no wiki/code pointer exists yet, so the
+no-guess stands and the landing reconcile picks it up when she lands; (2)
+Vega closed by user, so `irradiance-volume.md:50` took a one-line interim mark
+as an explicit coordinator-assigned exception to one-writer-per-page, scoped
+to that line, no further edits to that page.
+
+## [2026-10-08] lint | Quirk hygiene — 10 updated for the micro landing + N/K flip
+
+User-ordered outdated-quirk pass via the plugin CLI (`lint` itself reports
+healthy — it only checks confidence/duplicates, not session-invalidated
+claims). 5 full rewrites: micro decision (ordered → landed-uncommitted
+hybrid), micro toggle mechanism + LiveEditor cache invalidation + drag-paint
+seed (all describe deleted code → historical), emitter single-source-of-truth
+(live half deleted). 5 dated addenda appended to the originals: 16-cap
+(superseded in-tree by N=64/K=4, uncommitted/unverified), LOADER-ONLY quirk
+(writer landed + cap superseded; design parts stand), shadow-map-vs-march
+("if ever wanted" → IN PROGRESS Victor lane), sun-change counts (3.40M now
+historical), shotlist knob list (VF_MICRO dropped). Dated measurement records
+left alone — a timestamped A/B is history, not a current-behavior claim.
+Caught live during the pass: the sweep's own `demo-capture` edit named a
+`no_micro` variant the tool no longer has (`record_demo.py` now ships `no_lod`
+/ `VF_LOD=0`) — corrected to tool truth.
+
+## [2026-10-08] reconcile | Dynamic-lighting banner-down closed — emission landed
+
+Coordinator criterion met (flip landed + parity green). Banner-down + landed
+facts across 5 pages + index: `enclosed-space-lighting.md` (provenance box
+replaced with landed note; 16-cap/528 B rewritten to 256 slots at budget
+192 + `follow` lamps; in-flux box replaced with landed box incl. night cost),
+`irradiance-volume.md` (16 slots/budget/64^3x16 arithmetic to landed values;
+historical incident numbers kept as history), `night-gate-thresholds.md`
+(RE-BASELINE box with Victor's 169-light calibration hero 0.337 / house
+0.336 / water 0.515; old table framed as pre-flip record; light-count line to
+169/192), `dynamic-sun-shadows.md` (NOT-YET-LANDED banner rewritten to
+half-landed: emission live, shadow-map lane open), `index.md` (4 bullets),
+`sky-probe-is-a-camera-assertion.md` (cabin-occlusion known-issue note,
+micro contribution audited 0.000%). Landed numbers: store enumeration 169
+clusters (budget 192, knee 169, 3 probe-verified buried-lava ghosts excluded
+from parity by exact position), parity 7/7, store group 2/2, night 169-light
+cost 11.68 ms avg/150 frames 960x540 vs 9.51 ms at 16. Open, not wiki's:
+Victor's re-baseline write-up (replaces the interim box) + shadow-map lane.

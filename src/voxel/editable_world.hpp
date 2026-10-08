@@ -2,6 +2,8 @@
 #include "voxel/worldfile.hpp"
 #include "voxel/common.hpp"
 #include <glm/glm.hpp>
+#include <algorithm>
+#include <cmath>
 #include <string>
 #include <vector>
 
@@ -50,14 +52,89 @@ struct EditableWorld {
     // extent (App::applyEditLive's brush volume).
     static constexpr float kCarveTopMargin = 2.0f * VOXEL;
 
+    // Radial influence profile shared by Add, Carve, Delete and Paint.
+    // q = perpendicular distance / radius, so the CENTRE of the brush is at
+    // full influence and the rim at zero. Every curve satisfies f(0) = 1,
+    // f(1) = 0 and is non-increasing.
+    //
+    // These are NAMED curves rather than one hidden exponent, because the old
+    // scalar had a cliff and no usable middle: `falloff <= 0` returned exactly
+    // 1.0, while `falloff = 0.001` was already ((1+cos)/2)^1.001 = 0.5 at half
+    // radius - a 0.001 nudge jumped from "no taper at all" to "halved", and the
+    // rest of the travel only steepened towards a spike (k = 3 -> 0.125 at half
+    // radius). That is what made the control read as inert then confusing.
+    // The half-radius column below is the practical way to choose one.
+    //
+    //  Constant  1              1.00  flat - the legacy footprint, flat-bottomed digs
+    //  Sphere    sqrt(1-q^2)    0.87  round dome (hemisphere silhouette)
+    //  Root      sqrt(1-q)      0.71  broad shoulder
+    //  Smooth    1-3q^2+2q^3    0.50  default; the sculpt-standard S curve
+    //  Linear    1-q            0.50  straight cone
+    //  Sharp     (1-q)^2        0.25  crease / tight falloff
+    enum class FalloffCurve : uint8_t {
+        Constant = 0, Sphere, Root, Smooth, Linear, Sharp, Count
+    };
+
+    static const char* falloffCurveName(FalloffCurve c)
+    {
+        switch (c) {
+        case FalloffCurve::Constant: return "Constant";
+        case FalloffCurve::Sphere: return "Sphere";
+        case FalloffCurve::Root: return "Root";
+        case FalloffCurve::Smooth: return "Smooth";
+        case FalloffCurve::Linear: return "Linear";
+        case FalloffCurve::Sharp: return "Sharp";
+        default: return "Smooth";
+        }
+    }
+
+    // f(q) for one curve. Continuous everywhere including q -> 1, so the
+    // "does this column emit a cell" decision is never on a floating-point
+    // knife edge at the footprint boundary.
+    static float falloffCurveAt(FalloffCurve c, float q)
+    {
+        q = std::clamp(q, 0.0f, 1.0f);
+        switch (c) {
+        case FalloffCurve::Constant: return 1.0f;
+        case FalloffCurve::Sphere: return std::sqrt(std::max(0.0f, 1.0f - q * q));
+        case FalloffCurve::Root: return std::sqrt(std::max(0.0f, 1.0f - q));
+        case FalloffCurve::Smooth: return 1.0f - q * q * (3.0f - 2.0f * q);
+        case FalloffCurve::Linear: return 1.0f - q;
+        case FalloffCurve::Sharp: return (1.0f - q) * (1.0f - q);
+        default: return 1.0f - q * q * (3.0f - 2.0f * q);
+        }
+    }
+
+    // Kept for the existing call sites that only know a 0..1 slider: the old
+    // scalar now selects the curve nearest to its intent, so a stored value of
+    // 0 still means "flat" and mid values land on the dome-like curves instead
+    // of a spike. New code should pass a FalloffCurve directly.
+    static float radialFalloff(float q, float falloff)
+    {
+        if (falloff <= 0.0f)
+            return 1.0f;
+        const FalloffCurve c = falloff < 0.2f   ? FalloffCurve::Root
+                               : falloff < 0.45f ? FalloffCurve::Sphere
+                               : falloff < 0.8f  ? FalloffCurve::Smooth
+                                                 : FalloffCurve::Sharp;
+        return falloffCurveAt(c, q);
+    }
+
     // Oriented cylinder stamped along `axisDir` (unit world vector) for `lengthM`,
     // starting at the anchor (base centre). When `carve` is true the FULL solid
     // volume is emitted (the removed material), reaching kCarveTopMargin above
     // the base; otherwise a thin shell band is emitted (flood-filled to solid
     // by VoxelField::build, like other objects) with the exact [0, length] extent.
+    // `curve` tapers the FAR end of the volume towards the rim, so the scoop is
+    // deepest under the cursor and feathers out at its edge instead of leaving a
+    // vertical crater wall. Default Constant = the original hard-edged shape.
+    // The near end is NOT tapered: kCarveTopMargin is what opens the ground the
+    // scoop starts at, and fading it would put the one-cell roof back. A rim
+    // column still cuts one cell, so the footprint boundary stays crisp.
     std::vector<VoxelRecord> makeOrientedCylinder(glm::ivec3 anchor, glm::vec3 axisDir,
                                                   float radiusM, float lengthM,
-                                                  uint8_t mat, bool carve) const;
+                                                  uint8_t mat, bool carve,
+                                                  FalloffCurve curve = FalloffCurve::Constant) const;
 
     // "Add" brush volume: the surface GROWS OUT along `axisDir` (the picked
     // surface normal) from the anchor. The footprint is a disk of radius
@@ -69,10 +146,18 @@ struct EditableWorld {
     // emitted behind the surface (one voxel of base layer excepted, which
     // seals the growth against the surface), so clicking a wall never erodes
     // the far side.
-    // The hover preview tints exactly this set (BrushUBO with w < 0 on the
-    // axis; the shader repeats the extruded-disk + fillet test).
+    // `curve` scales that height PER COLUMN by falloffCurveAt(curve, q), and the
+    // fillet shrinks with it, so the growth becomes a mound: full heightM under
+    // the cursor, nothing at the rim. This REVERSES the flat-top decision above
+    // on purpose - a full-height rim is right for "thicken this wall" and wrong
+    // for "raise this spot" - so `FalloffCurve::Constant` keeps the old shape
+    // reachable. Do not "restore the flat top": the shape was re-chosen so the
+    // brush has proportional influence, per the falloff control.
+    // The hover preview tints this set (BrushUBO with w < 0 on the axis; the
+    // shader repeats the extruded-disk + fillet test, and the curve).
     std::vector<VoxelRecord> makeDome(glm::ivec3 anchor, glm::vec3 axisDir,
-                                      float radiusM, float heightM, uint8_t mat) const;
+                                      float radiusM, float heightM, uint8_t mat,
+                                      FalloffCurve curve = FalloffCurve::Constant) const;
 
     // Exactly ONE cell - the per-voxel Add/Carve target, used when the brush
     // width is 1 voxel (the pick is the cell under the cursor, which the hover
@@ -87,7 +172,12 @@ struct EditableWorld {
     // Full solid ball centred on `anchor` (radiusM in meters): every cell whose
     // centre lies inside. The brush volume of the Delete (clear) and Paint
     // (recolour) edit modes, and what the hover preview tints.
-    std::vector<VoxelRecord> makeSphere(glm::ivec3 anchor, float radiusM, uint8_t mat) const;
+    // `curve` scales the RADIUS per cell by falloffCurveAt(curve, q): a cell is
+    // included when its distance is within radiusM * f(q), which turns a Delete
+    // from a hard-edged ball into a graded crater and makes the Falloff control
+    // mean the same thing in every brush. Default Constant = the original ball.
+    std::vector<VoxelRecord> makeSphere(glm::ivec3 anchor, float radiusM, uint8_t mat,
+                                        FalloffCurve curve = FalloffCurve::Constant) const;
     // Import a foreign .vxw layer file: translates its records so the object's
     // bottom-center lands on `anchor` and appends the copy to ai_edits.vxw.
     // This is the only runtime placement path — layer files store absolute

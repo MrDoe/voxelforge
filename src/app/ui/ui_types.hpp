@@ -65,7 +65,7 @@ constexpr PanelInfo kPanels[kPanelCount] = {
 // Sidebar metrics. The sidebar is an overlay: the render is still full-window
 
 // sidebar only costs screen area, never geometry. It is horizontally
-// user-resizable, clamps on small windows, and can collapse to the rail (Tab).
+// user-resizable, clamps on small windows, and can collapse to the rail (Ctrl+B).
 constexpr float kRailW   = 46.0f;
 constexpr float kPaneW   = 300.0f;
 // kFooterH covers the separator plus the two status rows and the window

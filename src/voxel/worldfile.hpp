@@ -102,6 +102,10 @@ struct WorldLayer {
     float rotZ = 0.f;    // roll about +Z (after pitch)
     bool enabled = true;              // false = kept on disk, excluded from merges
     bool listed = true;               // runtime-only: false = discovered folder entry
+    // Runtime placement scale for object/scatter layers: applied about the
+    // layer's bottom-center pivot together with the resample into the world
+    // lattice. 1.0 = authored size.
+    float scale = 1.0f;
 };
 
 bool loadManifest(const std::string& path, std::vector<WorldLayer>& out);
@@ -121,6 +125,8 @@ struct TextureBinding {
     std::string file;                 // PNG, relative to the manifest directory
     int mat = -1;                     // material id to override (0..16)
     float scale = 0.5f;               // metres per tile
+    bool emissive = false;            // derived-light emitter (atlas emissiveScale/meanColor)
+    float emissiveScale = 1.0f;       // emission gain; <= 0 reads as 1.0 downstream
 };
 bool loadTextureManifest(const std::string& path, std::vector<TextureBinding>& out);
 
@@ -131,18 +137,32 @@ bool loadTextureManifest(const std::string& path, std::vector<TextureBinding>& o
 //     { "pos": [12.0, 3.0, 8.0], "color": [1.0, 0.55, 0.18],
 //       "radius": 8.0, "intensity": 1.5 }
 //   ]
+// A light may FOLLOW an object layer: "follow": "hamlet_hall.vxw" makes
+// `pos` a pivot-relative LOCAL offset (metres from the layer's bottom-center
+// pivot, pre-rotation) instead of a world position, resolved as
+// placedPivot + placementR * pos. Move/Rotate of that layer then carries the
+// light (live in the splat preview, exact after the commit reload); without
+// follow the light is fixed world geometry.
 struct LightSource {
     glm::vec3 pos { 0.f };
     glm::vec3 color { 1.f };
     float radius = 1.0f;
     float intensity = 1.0f;
+    std::string follow; // layer file to ride, or empty = fixed world pos
 };
-inline constexpr int kMaxLights = 16;
+inline constexpr int kMaxLights = 256;
+inline constexpr int kLightKMax = 8; // per-pixel nearest-K ceiling
+inline constexpr int kLightBudgetDefault = 192; // global emitter budget default:
+// room for the measured ~170 store clusters (lava lakes outrank hearths in
+// count-desc order, so the knee sits at the tail) + authored headroom; the
+// UBO holds 256 and per-frame cost follows the live count, not the cap.
+inline constexpr int kLightKDefault = 4; // per-pixel nearest-K default
 struct alignas(16) LightUBO {
     glm::vec4 posRadius[kMaxLights];    // pos.xyz, radius
     glm::vec4 colorIntensity[kMaxLights]; // color.rgb, intensity
     int32_t count = 0;
-    int32_t _pad0 = 0, _pad1 = 0, _pad2 = 0;
+    int32_t perPixelK = kLightKDefault; // nearest-K selector, 1..kLightKMax
+    int32_t _pad1 = 0, _pad2 = 0;
 };
 bool loadLightManifest(const std::string& path, std::vector<LightSource>& out);
 
@@ -210,6 +230,21 @@ void transformRecords(const std::vector<VoxelRecord>& src,
                       const glm::vec3& offset,
                       float rotDeg, float rotX, float rotZ,
                       std::vector<VoxelRecord>& out);
+
+// Convert a layer authored on a DIFFERENT lattice (e.g. a fine 1 cm grid)
+// onto the world's lattice, optionally scaling its physical size by `scale`
+// about the source records' bottom-center pivot. Each source cell is mapped
+// to world space, scaled, and splatted onto the destination cells it
+// overlaps; every destination cell keeps the source cell with the largest
+// overlap volume (dominant-material voting). This gives better silhouettes
+// and material coverage than authoring coarse directly - but still no
+// sub-world-voxel geometry. scale=1 with matching meta is an exact
+// supersampled resample; out is deterministic (key-sorted).
+void resampleRecords(const std::vector<VoxelRecord>& src,
+                     const WorldFileMeta& srcMeta,
+                     const WorldFileMeta& dstMeta,
+                     float scale,
+                     std::vector<VoxelRecord>& out);
 } // namespace worldfile
 
 using worldfile::LightSource;
