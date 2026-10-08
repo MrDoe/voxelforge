@@ -76,6 +76,8 @@ void App::listFloatingSurfels()
     vf::voxel::SurfelParams sp;
     sp.edgeShrink = m_edgeShrink;
     sp.edgeFill = m_edgeFill;
+    sp.edgeBridgeSize = m_edgeBridgeSize;
+    sp.cornerFill = m_cornerFill;
     sp.sunDir = glm::vec3(m_sunDir);
     sp.anisotropy = true;
     for (int c : want) {
@@ -176,6 +178,8 @@ void App::describeSurfelsAt(const glm::ivec3& cell)
     vf::voxel::SurfelParams sp;
     sp.edgeShrink = m_edgeShrink;
     sp.edgeFill = m_edgeFill;
+    sp.edgeBridgeSize = m_edgeBridgeSize;
+    sp.cornerFill = m_cornerFill;
     sp.sunDir = glm::vec3(m_sunDir);
     sp.anisotropy = true;
 
@@ -292,6 +296,8 @@ void App::rebuildSurfels()
     vf::voxel::SurfelParams sp;
     sp.edgeShrink = m_edgeShrink;
     sp.edgeFill = m_edgeFill;
+    sp.edgeBridgeSize = m_edgeBridgeSize;
+    sp.cornerFill = m_cornerFill;
     sp.sunDir = glm::vec3(m_sunDir);
     // LOD rings: baked 2x2x2 / 4x4x4 merged-terrain surfel runs per chunk;
     // the renderer picks a ring per chunk by distance (VF_LOD1/VF_LOD2).

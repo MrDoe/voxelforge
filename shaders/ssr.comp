@@ -127,9 +127,21 @@ void main()
             break;
     }
 
-    // fresnel-weighted blend; water reflects more at all angles
+    // Fresnel-weighted blend; water reflects more at all angles.
+    //
+    // A silhouette IS a grazing angle: dot(V, n) -> 0 there, so
+    // pow(1 - ndv, 3) -> 1. The old constants (0.8 solids / 0.30 water floor)
+    // therefore put the blend at its MAXIMUM exactly on the outline, blending
+    // 80% toward the near-white sky fallback - every edge read as a white
+    // "wet" rim. Subtle means the reflection is a tint, not a second surface:
+    // the peak is capped well below 1, and the face-on case is still ~0 so a
+    // flat wall keeps its own colour. Keep the water above the solid curve at
+    // every angle (that is what makes water read as water).
+    const float kReflStrength = 0.22; // peak blend on solids (was 0.8)
+    const float kReflWaterFloor = 0.10; // minimum blend on water (was 0.30)
     float fresnel = pow(1.0 - max(dot(viewDir, n), 0.0), 3.0);
-    float amt = (hitType > 1.5) ? max(fresnel * 0.8, 0.30) : fresnel * 0.8;
+    float amt = (hitType > 1.5) ? max(fresnel * kReflStrength, kReflWaterFloor)
+                                : fresnel * kReflStrength;
     vec3 result = mix(baseCol, col, clamp(amt, 0.0, 1.0));
     imageStore(uOut, pix, vec4(result, 1.0));
 }

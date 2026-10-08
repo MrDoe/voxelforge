@@ -1,5 +1,5 @@
 # log
-Append-only timeline — 164 entries, 4577 lines. Entries are appended
+Append-only timeline — 166 entries, 5117 lines. Entries are appended
 in **session order, not date order**, so this index is the only chronological view.
 Do not infer causation from vertical position in the file itself.
 
@@ -5076,3 +5076,42 @@ clusters (budget 192, knee 169, 3 probe-verified buried-lava ghosts excluded
 from parity by exact position), parity 7/7, store group 2/2, night 169-light
 cost 11.68 ms avg/150 frames 960x540 vs 9.51 ms at 16. Open, not wiki's:
 Victor's re-baseline write-up (replaces the interim box) + shadow-map lane.
+
+## [2026-10-08] ingest | Edge/corner fill size control + opt-in corner caps
+
+Extended [[concepts/edge-aware-surfel-radius]] with the new silhouette-fill
+controls. `SurfelParams::edgeBridgeSize` (GUI "Crease splat size", env
+`VF_EDGE_SIZE`, default 1.0) scales both bridge and corner radii — measured
+house-view A/B 1.0 vs 2.0 = 14.9% bytes changed, mean 1.32/255.
+`SurfelParams::cornerFill` (GUI "Fill corner splats", env `VF_CORNER_FILL`,
+default OFF) adds small isotropic caps on tri-face corners; convex box corners
+are already sealed by the parent disk (acc=0.994), so caps target only
+concave/thin-shell holes. Hamlet bake: 63,537 bridges -> 81,002 derived splats
+with caps on. Detection lives in `edgeInfoFromMask` (all 8 sign combinations);
+emission in `appendCornerCaps`, wired into both the full bake and the live
+`appendCandidateEdgeBridges` path. Default path is a no-op (size 1.0, caps
+off). Pre-existing `live_edit_check` failures (object_smooth path selection,
+undo margin) are unrelated — they reproduce without these changes.
+
+## [2026-10-08] update | Corner caps: coverage guard replaces angle proxy
+
+Reworked [[concepts/edge-aware-surfel-radius]] corner fill. The first guard
+(`dot(parentNormal, cornerDir) > 0.99`) was a proxy that leaked: it kept
+17,705 caps on covered multi-exposed hamlet cells, whose diagonal normal has
+worse ndl than the wall — 401 px darkened >20 at 960x540 (dark specks). The
+real guard is COVERAGE: fire a cap only when the corner vertex projects
+outside the parent disk footprint (flat Gaussian at centre + n*0.5*VOXEL,
+in-plane radius = max parent radius). A normal 0.14 m parent covers the
+0.037-0.13 m corner offset in every direction, so convex/multi-exposed cells
+emit nothing; only thin-shell/narrow-disk parents and concave corners get caps.
+Result (independent 960x540 verify by George): caps 17,705 -> 557,
+darkened>20 401 -> 17, changed>1 10,807 -> 173, frame mean luma flat;
+`cornerFill` now defaults ON. Also widened cornerDirs[3] -> [8] (a lone voxel
+has 8 vertices) and re-floor rV/rU AFTER the bridgeSize scale.
+
+Tests: the 5% edge-geometry gate is scoped to bridges (cornerFill=false) and a
+lone-voxel + edgeShrink=0.8 fixture proves caps fire (1 bridge -> 9 splats)
+while a convex cubeField stays at 0. test-surfel 14/14, test-store green.
+test-visual's house sky-probe failure and test-live-edit's 5 object_smooth/
+object_undo failures are PRE-EXISTING: the sky probe fails with cornerFill=0,
+with SSR off, and with HEAD shaders; the live-edit pair is unchanged in kind.

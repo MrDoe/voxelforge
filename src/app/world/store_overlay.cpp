@@ -44,6 +44,8 @@ void App::loadStoreOverlay()
     vf::voxel::SurfelParams sp;
     sp.edgeShrink = m_edgeShrink;
     sp.edgeFill = m_edgeFill;
+    sp.edgeBridgeSize = m_edgeBridgeSize;
+    sp.cornerFill = m_cornerFill;
     sp.sunDir = glm::vec3(m_sunDir);
     sp.lodRings = false;
     sp.anisotropy = true;

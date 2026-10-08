@@ -2,7 +2,7 @@
 title: Hard-edge surfel fit and crease bridges
 tags: [rendering, surfels, hard-edges, curvature, live-editing, performance]
 sourceRefs: [src/voxel/surfelize.hpp, src/voxel/surfelize.cpp, src/voxel/live_editor.hpp, src/voxel/live_editor.cpp, src/render/splat_pass.hpp, src/render/splat_pass.cpp, src/app/main.cpp, tests/test_surfelize.cpp, tests/test_store.cpp, docs/rendering.md, AGENTS.md]
-lastReviewed: 2026-09-25
+lastReviewed: 2026-10-08
 ---
 
 # Hard-edge surfel fit and crease bridges
@@ -56,20 +56,61 @@ and `LiveEditor::edgeCountOf()` preserve the CPU split for GPU-seeded live
 patches. `ChunkStore` recomputes parents and bridges in a region refresh. Object bridges also ride
 along unmerged in LOD1/LOD2.
 
+## Corner fill (coverage-gated)
+
+`SurfelParams::cornerFill` (default **ON**) adds small isotropic caps at
+tri-face corner vertices (three mutually orthogonal exposed faces;
+`edgeInfoFromMask` detects up to 8 corners per cell).
+
+Caps are **coverage-gated, not angle-gated**: a cap fires only when the corner
+vertex projects **outside** the parent disk footprint — the parent is a flat
+Gaussian at `centre + n*0.5*VOXEL` with in-plane radius `max(rU, rV)`, and the
+corner sits 0.037–0.13 m out along the diagonal. A normal 0.14 m parent covers
+that in every direction, so **convex and multi-exposed cells emit nothing**;
+only thin-shell / narrow-disk parents (which genuinely miss the corner) and
+concave corners get caps.
+
+Why not an angle guard (`dot(parentNormal, cornerDir) > 0.99`): it is a proxy
+that leaks. On the hamlet it kept 17,705 caps on covered multi-exposed cells
+whose diagonal normal has worse ndl than the wall they land on — 401 px
+darkened >20 luma (dark specks on bright walls). The coverage guard dropped
+caps to **557** and darkened>20 to **17** (measured 960×540, hero view; frame
+mean luma unchanged), with the ~37 brightened px being the intended fill.
+
+Caps inherit parent shading/owner and ride in the `[base | edge]` region
+alongside bridges (no extra draw call). On healthy content the count is ~0.
+
+## Size control
+
+`SurfelParams::edgeBridgeSize` scales both bridge and corner radii
+(`rV`, `rU` multiplied then **re-floored** so a size < 1 cannot breach the
+pinhole threshold). `1.0` preserves the historical footprint. Measured
+house-view A/B `1.0` vs `2.0`: 14.9% of bytes changed, mean 1.32/255 — a real
+but modest silhouette effect.
+
 ## Controls
 
 - **Rendering → Sharp-edge fit**: baked strength, `0.00–0.80`, default `0.35`.
 - **Rendering → Interpolate crease splats**: bridge emission, default on.
+- **Rendering → Crease splat size**: `edgeBridgeSize`, `0.00–2.00`, default `1.00`.
+- **Rendering → Fill corner splats**: `cornerFill`, default on.
 - `VF_EDGE_SHRINK=0..1`: launch strength override.
 - `VF_EDGE_FILL=0`: disable bridges while retaining hard-edge fit.
+- `VF_EDGE_SIZE=<float>`: bridge/corner size override.
+- `VF_CORNER_FILL=0`: disable corner caps.
 - Either GUI change requests a world/surfel reload.
 
 ## Verification and cost
 
 `tests/test_surfelize.cpp` proves that flat interiors and terrain keep their
 radius, hard edges tighten, bridge geometry is smaller/tangent-aligned, and
-the full stream remains deterministic. `tests/test_store.cpp` pins live segment
-refresh and placement outside the bridge range.
+the full stream remains deterministic. The 5% always-on edge-geometry gate is
+scoped to **bridges** (`cornerFill=false`) so it stays exact; a separate
+`cornerFill=true` bound keeps the combined edge geometry under 10%. A
+lone-voxel + `edgeShrink=0.8` fixture proves caps fire (shrunk face disks miss
+their own corners: 1 bridge → 9 splats) while a convex `cubeField` stays at 0
+caps. `tests/test_store.cpp` pins live segment refresh and placement outside
+the bridge range.
 
 On the current hamlet (`VF_EDGE_SHRINK=0.35`, fill on), the bake emitted
 20,252 bridges for 20,252 edge parents. The opaque/LOD stream rose from

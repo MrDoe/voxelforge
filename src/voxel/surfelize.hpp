@@ -38,6 +38,20 @@ struct SurfelParams {
     // tightened parent cannot open a hole farther away. edgeShrink == 0 keeps
     // the exact historical footprint and emits no bridges.
     bool edgeFill = true;
+    // Size multiplier for edge bridges and corner caps (1.0 = default).
+    // Scales the small derived surfels that fill creases and corners.
+    float edgeBridgeSize = 1.0f;
+    // Fill corners the parent disk does not reach with small caps. Default ON.
+    // A COVERAGE guard skips any corner vertex that projects inside the
+    // parent's in-plane footprint (flat Gaussian at centre + n*0.5*VOXEL,
+    // radius = max parent radius). A normal 0.14 m parent covers the
+    // 0.037-0.13 m corner offset in every direction, so convex and
+    // multi-exposed cells emit nothing; only thin-shell / narrow-disk parents
+    // (whose disks genuinely miss the corner) and concave corners get caps.
+    // Measured on the hamlet: 557 caps, vs 17,705 with an angle-based proxy
+    // that leaked dark specks onto covered corners. Disable for the exact
+    // pre-caps footprint.
+    bool cornerFill = true;
     float heightfieldBlend = 0.55f;   // blend terrain-top cells toward the analytic
                                        // two-scale heightfield normal (parity with the
                                        // current shader look)

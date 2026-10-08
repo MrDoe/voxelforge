@@ -397,6 +397,8 @@ private:
     // either setting requests a world reload.
     float m_edgeShrink = 0.25f;
     bool m_edgeFill = true;
+    float m_edgeBridgeSize = 1.0f;
+    bool m_cornerFill = true;
     // Point-light budget: global emitter cap N (VF_LIGHT_BUDGET, 1..256,
     // default kLightBudgetDefault) + per-pixel nearest-K (VF_LIGHT_K, 1..8,
     // default 4).

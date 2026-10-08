@@ -228,6 +228,8 @@ void App::commitStoreEdits(std::vector<vf::voxel::StoreEdit>& edits, int riseCel
     vf::voxel::SurfelParams sp;
     sp.edgeShrink = m_edgeShrink;
     sp.edgeFill = m_edgeFill;
+    sp.edgeBridgeSize = m_edgeBridgeSize;
+    sp.cornerFill = m_cornerFill;
     sp.sunDir = glm::vec3(m_sunDir);
     sp.lodRings = false;
     sp.anisotropy = true;
@@ -508,6 +510,8 @@ void App::clearLiveEdits()
     vf::voxel::SurfelParams sp;
     sp.edgeShrink = m_edgeShrink;
     sp.edgeFill = m_edgeFill;
+    sp.edgeBridgeSize = m_edgeBridgeSize;
+    sp.cornerFill = m_cornerFill;
     sp.sunDir = glm::vec3(m_sunDir);
     sp.lodRings = false;
     sp.anisotropy = true;

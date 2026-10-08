@@ -35,6 +35,8 @@ struct EdgeInfo {
     int pairCount = 0;
     glm::vec3 faces[3] {};
     glm::vec3 axes[3] {};
+    int cornerCount = 0;
+    glm::vec3 cornerDirs[8] {}; // f0+f1+f2 per corner (unnormalized)
 };
 
 EdgeInfo edgeInfoFromMask(unsigned exposedFaces)
@@ -74,6 +76,27 @@ EdgeInfo edgeInfoFromMask(unsigned exposedFaces)
             out.axes[out.pairCount++] = axis;
         }
     }
+    // Detect corners: 3 mutually orthogonal exposed faces meeting at a vertex.
+    // A corner at sign (sx, sy, sz) is exposed when the 3 faces meeting
+    // there are all air. The corner direction is the diagonal (sx, sy, sz).
+    // Up to 8 corners (a lone voxel exposes all 8 vertices).
+    for (int cx = 0; cx < 2; ++cx) {
+        for (int cy = 0; cy < 2; ++cy) {
+            for (int cz = 0; cz < 2; ++cz) {
+                const int fx = cx ? 0 : 1;
+                const int fy = cy ? 2 : 3;
+                const int fz = cz ? 4 : 5;
+                if ((exposedFaces & (1u << fx)) &&
+                    (exposedFaces & (1u << fy)) &&
+                    (exposedFaces & (1u << fz))) {
+                    out.cornerDirs[out.cornerCount++] = glm::vec3(
+                        cx ? 1.0f : -1.0f,
+                        cy ? 1.0f : -1.0f,
+                        cz ? 1.0f : -1.0f);
+                }
+            }
+        }
+    }
     return out;
 }
 
@@ -82,6 +105,7 @@ EdgeInfo edgeInfoFromMask(unsigned exposedFaces)
 // parent, so edge quality costs geometry only: no extra shadow or AO march.
 void appendEdgeBridges(glm::vec3 cellCentre, const Surfel& parent,
                         const EdgeInfo& edge, float baseRadius,
+                        float bridgeSize,
                         std::vector<Surfel>& out)
 {
     if (edge.pairCount <= 0)
@@ -91,10 +115,15 @@ void appendEdgeBridges(glm::vec3 cellCentre, const Surfel& parent,
         const glm::vec3 f1 = edge.faces[p * 2 + 1];
         const glm::vec3 creaseN = safeNormalize(f0 + f1);
         const glm::vec3 pos = cellCentre + 0.5f * VOXEL * (f0 + f1);
-        const float rV = std::min(0.40f * baseRadius,
-                                   std::max(0.25f * VOXEL,
-                                            0.65f * parent.normal_rV.w));
-        const float rU = std::max(0.60f * VOXEL, rV);
+        float rV = std::min(0.40f * baseRadius,
+                            std::max(0.25f * VOXEL,
+                                     0.65f * parent.normal_rV.w));
+        float rU = std::max(0.60f * VOXEL, rV);
+        rV *= bridgeSize;
+        rU *= bridgeSize;
+        // Re-floor after scaling (size < 1 must not breach the pinhole floor).
+        rV = std::max(0.25f * VOXEL, rV);
+        rU = std::max(0.60f * VOXEL, rU);
         Surfel bridge = parent;
         bridge.pos_rU = glm::vec4(pos, rU);
         bridge.normal_rV = glm::vec4(creaseN, rV);
@@ -102,6 +131,56 @@ void appendEdgeBridges(glm::vec3 cellCentre, const Surfel& parent,
             safeNormalize(glm::vec3(parent.bent_sh) + creaseN), parent.bent_sh.w);
         bridge.tan_aspect = glm::vec4(edge.axes[p], parent.tan_aspect.w);
         out.push_back(bridge);
+    }
+}
+
+// Emit a small isotropic cap directly on a tri-face corner vertex. Like the
+// edge bridges, it inherits all shading/ownership from the parent so corner
+// coverage costs geometry only.
+void appendCornerCaps(glm::vec3 cellCentre, const Surfel& parent,
+                       const EdgeInfo& edge, float baseRadius,
+                       float bridgeSize,
+                       std::vector<Surfel>& out)
+{
+    if (edge.cornerCount <= 0)
+        return;
+    // Coverage guard. The parent is a flat Gaussian disk centred at
+    // pc = centre + n*0.5*VOXEL with in-plane radius parentR. If a corner
+    // vertex projects inside that footprint, the parent already covers it and
+    // a cap would only add a spurious (often darker) speck — its diagonal
+    // normal has worse ndl than the wall it lands on. Fire a cap only where
+    // the parent genuinely does not reach: thin-shell / narrow disks and
+    // concave corners. A normal 0.14 m parent covers the 0.037–0.13 m corner
+    // offset in every direction, so convex/multi-exposed cells emit nothing.
+    const glm::vec3 pn = safeNormalize(glm::vec3(parent.normal_rV));
+    const glm::vec3 pc = cellCentre + pn * (0.5f * VOXEL);
+    const float parentR = std::max(parent.pos_rU.w, parent.normal_rV.w);
+    for (int c = 0; c < edge.cornerCount; ++c) {
+        const glm::vec3 dir = edge.cornerDirs[c];
+        const glm::vec3 n = safeNormalize(dir);
+        const glm::vec3 cv = cellCentre + 0.5f * VOXEL * dir;
+        const glm::vec3 delta = cv - pc;
+        const glm::vec3 inPlane = delta - pn * glm::dot(delta, pn);
+        if (glm::dot(inPlane, inPlane) < parentR * parentR)
+            continue; // parent disk already reaches this vertex
+        const glm::vec3 pos = cv;
+        float rV = std::min(0.30f * baseRadius,
+                            std::max(0.20f * VOXEL,
+                                     0.50f * parent.normal_rV.w));
+        float rU = std::max(0.50f * VOXEL, rV);
+        rV *= bridgeSize;
+        rU *= bridgeSize;
+        // Re-floor after scaling so a size < 1 cannot push under the pinhole
+        // threshold (grid corner is at 0.707*VOXEL from the centres).
+        rV = std::max(0.20f * VOXEL, rV);
+        rU = std::max(0.50f * VOXEL, rU);
+        Surfel cap = parent;
+        cap.pos_rU = glm::vec4(pos, rU);
+        cap.normal_rV = glm::vec4(n, rV);
+        cap.bent_sh = glm::vec4(
+            safeNormalize(glm::vec3(parent.bent_sh) + n), parent.bent_sh.w);
+        cap.tan_aspect = glm::vec4(0.0f, 0.0f, 0.0f, parent.tan_aspect.w);
+        out.push_back(cap);
     }
 }
 
@@ -1219,7 +1298,10 @@ SurfelSet buildSurfels(const VoxelField& field, const SurfelParams& params) {
             std::vector<Surfel>& out = edgeByChunk[chunkOf[i]];
             const size_t before = out.size();
             appendEdgeBridges(cellCentre, surfels[i], edgeInfos[source],
-                              baseR, out);
+                              baseR, params.edgeBridgeSize, out);
+            if (params.cornerFill)
+                appendCornerCaps(cellCentre, surfels[i], edgeInfos[source],
+                                 baseR, params.edgeBridgeSize, out);
             if (out.size() != before) {
                 ++set.edgeParentCount;
                 const size_t added = out.size() - before;
@@ -2112,13 +2194,17 @@ void appendCandidateEdgeBridges(const std::vector<SurfelCand>& cands,
         return;
     for (size_t i = 0; i < cands.size(); ++i) {
         const SurfelCand& cd = cands[i];
-        if (!cd.cell.obj || cd.edge.pairCount <= 0)
+        if (!cd.cell.obj || (cd.edge.pairCount <= 0 && cd.edge.cornerCount <= 0))
             continue;
         const int mat = int(base[i].mat_ao.x + 0.5f);
         if (mat == 8 || (mat >= 9 && mat <= 15))
             continue;
         const size_t before = edges.size();
-        appendEdgeBridges(cd.pos, base[i], cd.edge, params.baseRadius, edges);
+        appendEdgeBridges(cd.pos, base[i], cd.edge, params.baseRadius,
+                          params.edgeBridgeSize, edges);
+        if (params.cornerFill)
+            appendCornerCaps(cd.pos, base[i], cd.edge, params.baseRadius,
+                             params.edgeBridgeSize, edges);
         for (size_t j = before; j < edges.size(); ++j)
             edgeKeys.push_back(cd.key);
     }

@@ -318,6 +318,10 @@ bool App::initVulkan()
         m_edgeShrink = std::clamp(float(atof(e)), 0.0f, 1.0f);
     if (const char* e = getenv("VF_EDGE_FILL"))
         m_edgeFill = atoi(e) != 0;
+    if (const char* e = getenv("VF_EDGE_SIZE"))
+        m_edgeBridgeSize = std::max(0.0f, float(atof(e)));
+    if (const char* e = getenv("VF_CORNER_FILL"))
+        m_cornerFill = atoi(e) != 0;
 
     // splat backend owns the primary view: build surfels from the live field
     m_renderMode = (m_args.mode == "svo") ? RenderMode::Svo : RenderMode::Splats;

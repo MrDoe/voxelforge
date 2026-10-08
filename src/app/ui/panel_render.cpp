@@ -231,6 +231,19 @@ void App::drawPanelRender()
                               "smooth curvature keeps full coverage. Rebuilds.");
         if (ImGui::Checkbox("Interpolate crease splats", &m_edgeFill))
             requestWorldReload();
+        ImGui::SetNextItemWidth(-1.0f);
+        ImGui::SliderFloat("Crease splat size##edgeSize", &m_edgeBridgeSize,
+                           0.0f, 2.0f, "%.2f");
+        if (ImGui::IsItemDeactivatedAfterEdit())
+            requestWorldReload();
+        if (ImGui::IsItemHovered())
+            ImGui::SetTooltip("Size of edge/corner fill splats. Rebuilds.");
+        if (ImGui::Checkbox("Fill corner splats", &m_cornerFill))
+            requestWorldReload();
+        if (ImGui::IsItemHovered())
+            ImGui::SetTooltip("Cap corner vertices the parent disk does not "
+                              "reach (thin shells, concave corners); covered "
+                              "convex corners are skipped. Rebuilds.");
     }
     ImGui::SetNextItemWidth(-1.0f);
     ImGui::SliderFloat("Exposure", &m_exposure, 0.1f, 4.0f, "%.2f");

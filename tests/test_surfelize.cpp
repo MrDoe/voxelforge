@@ -182,6 +182,9 @@ TEST_CASE("surfelize real world: sane count and chunk ranges")
     p.terrainHeightfieldNormals = true;
     p.edgeShrink = 0.35f;
     p.edgeFill = true;
+    p.cornerFill = false; // bridge-only gate: corner caps are coverage-gated
+                          // and fire ~0 on healthy content (see the lone-voxel
+                          // cap test below)
     const SurfelSet set = buildSurfels(field, p);
 
     CAPTURE(set.surfels.size());
@@ -201,6 +204,16 @@ TEST_CASE("surfelize real world: sane count and chunk ranges")
     // geometry. A classification regression that floods curved surfaces fails
     // here before the GPU stream grows without bound.
     CHECK(set.edgeBridgeCount * 20u < set.surfels.size());
+
+    // Corner caps are a separate, coverage-gated mechanism (see the lone-voxel
+    // cap test). On healthy content every corner is already inside its parent
+    // disk, so the production default (cornerFill=true) must not add a
+    // meaningful amount of always-on geometry.
+    p.cornerFill = true;
+    const SurfelSet setCaps = buildSurfels(field, p);
+    CAPTURE(setCaps.edgeBridgeCount);
+    CHECK(setCaps.edgeBridgeCount * 10u < setCaps.surfels.size());
+    CHECK(setCaps.edgeBridgeCount >= set.edgeBridgeCount); // caps are additive
     CHECK(set.edgeStart.size() == size_t(GRID_N * GRID_N * GRID_N) + 1u);
     CHECK(set.chunkRange.size() == size_t(GRID_N * GRID_N * GRID_N) + 1u);
     CHECK(set.chunkRange.front() == 0u);
@@ -499,4 +512,49 @@ TEST_CASE("surfelize: hard-edge parents tighten and small crease bridges fill th
     for (size_t i = 0; i < terrainBase.surfels.size(); ++i)
         CHECK(std::fabs(terrainTight.surfels[i].pos_rU.w -
                         terrainBase.surfels[i].pos_rU.w) < 1e-6f);
+}
+
+TEST_CASE("surfelize: corner caps fill only where the parent disk misses")
+{
+    // A lone voxel exposes all 6 faces; the surfelizer expands it into one
+    // axis-aligned face entry per face. With a hard shrink each face disk is
+    // narrower than its own corners, so caps fire to fill the gap. A convex
+    // 2x2x2 block's corners ARE covered (parent normal == the corner diagonal
+    // -> in-plane offset 0), so its caps stay at zero.
+    std::vector<uint32_t> loneCells { (512u << 20) | (512u << 10) | 512u };
+    std::vector<uint8_t> loneMats { 6 };
+    std::vector<uint8_t> loneLayers { 9 };
+    VoxelField lone;
+    {
+        std::vector<VoxelRecord> recs;
+        std::vector<int16_t> colTop(kLatN * kLatN, -1);
+        std::vector<uint8_t> colMat(kLatN * kLatN, 0);
+        lone.build(recs, colTop, colMat, loneCells, loneMats,
+                   {}, {}, {}, {}, {}, loneLayers);
+    }
+    REQUIRE(lone.valid());
+
+    SurfelParams p;
+    p.smoothNormals = false;
+    p.terrainHeightfieldNormals = false;
+    p.anisotropy = false;
+    p.lodRings = false;
+    p.edgeShrink = 0.8f;
+    p.edgeFill = true;
+
+    p.cornerFill = false;
+    const SurfelSet loneNo = buildSurfels(lone, p);
+    p.cornerFill = true;
+    const SurfelSet loneCaps = buildSurfels(lone, p);
+    CAPTURE(loneNo.edgeBridgeCount);
+    CAPTURE(loneCaps.edgeBridgeCount);
+    CHECK(loneCaps.edgeBridgeCount > loneNo.edgeBridgeCount); // caps fired
+
+    // Convex block: every corner is parent-covered, so cornerFill is a no-op.
+    const VoxelField cube = cubeField(9);
+    p.cornerFill = false;
+    const SurfelSet cubeNo = buildSurfels(cube, p);
+    p.cornerFill = true;
+    const SurfelSet cubeCaps = buildSurfels(cube, p);
+    CHECK(cubeCaps.edgeBridgeCount == cubeNo.edgeBridgeCount);
 }

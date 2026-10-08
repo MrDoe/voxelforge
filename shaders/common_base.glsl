@@ -1025,6 +1025,18 @@ layout(set = 0, binding = 11) uniform samplerCube uEnvCubemap;
 layout(set = 0, binding = 12) uniform sampler2D uBRDFLUT;
 const float kIBLIntensity = 1.0;
 
+// Grazing-reflectance ceiling (the Schlick "F90" endpoint).
+//
+// The textbook value is 1.0, which makes every surface a near-perfect mirror
+// of the environment as it turns away from the camera. A silhouette IS that
+// case: ndv -> 0 on the outline, so pow(1 - ndv, 5) -> 1 exactly where the
+// object meets the background, and kS -> 1.0 hands the pixel fully to the sky
+// cubemap. That is the white "wet" rim. Clamping F90 turns the environment
+// into a TINT at the outline instead of a replacement, while leaving the
+// face-on response alone (there pow -> 0 and kS stays at f0, so a flat wall
+// keeps its own colour). Raise it to make reflections read stronger again.
+const float kIblF90 = 0.32;
+
 // Pre-filtered mip levels for IBL (0 = rough, 5 = smooth)
 const float kEnvMipLevels = 5.0;
 
@@ -1046,7 +1058,7 @@ vec3 iblContribution(vec3 n, vec3 V, vec3 f0, float rough)
     float envRough = max(rough, 0.05);
     vec3 prefiltered = sampleEnv(R);
     vec2 brdf = texture(uBRDFLUT, vec2(vdh, envRough)).rg;
-    vec3 kS = f0 + (1.0 - f0) * pow(1.0 - vdh, 5.0);
+    vec3 kS = f0 + (vec3(kIblF90) - f0) * pow(1.0 - vdh, 5.0);
     vec3 kD = (1.0 - kS) * (1.0 - f0);
     vec3 diffuse = iblIrradiance(n) * kD;
     vec3 specular = prefiltered * (kS * envRough + (1.0 - envRough) * vec3(brdf, 0.0));
