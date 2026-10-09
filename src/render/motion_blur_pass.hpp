@@ -3,7 +3,7 @@
 #include "rhi/resources.hpp"
 #include <cstdint>
 #include "render/svo_pass.hpp"
-#include "render/taa_pass.hpp" // TaaPrevCam for camera-velocity reconstruction
+#include "render/taa_pass.hpp" // PrevCam/TaaPrevCam: the camera-velocity source
 
 
 namespace vf {

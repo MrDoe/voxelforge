@@ -1,0 +1,557 @@
+#version 460
+#extension GL_GOOGLE_include_directive : require
+// Micro-voxel SVO overlay (micro_overlay.comp).
+//
+// Renders HIGH-DETAIL objects that live on their OWN fine lattice (a 30 cm vase
+// at 5 mm voxels) alongside the main 0.1 m world - without ever mixing the two.
+//
+// Design: the world and the micro objects are kept SEPARATE end to end. This
+// shader owns its own six SSBOs (grid/childBase/payload/handles/bricks/
+// chunkInfo) that hold one or more INDEPENDENT SVO worlds, each with its own
+// voxel size, chunk grid and bases. Not one byte of the main world's SVO is
+// read here, and not one byte of the micro worlds' data is read by the main
+// world's shaders. The only shared thing is a per-world table of scales.
+//
+// Consequences of that separation, stated plainly rather than hidden:
+//   * Micro objects self-shadow and shadow each other exactly (the marches below
+//     resolve the micro worlds). They do NOT receive the main world's shadows
+//     and the main world does NOT receive theirs - those marches live in the
+//     world shaders and by design know nothing about this pass. See
+//     docs/rendering.md.
+//   * Live edits cannot touch micro geometry: the micro worlds are outside the
+//     16^3 chunk stream entirely.
+//
+// The shared lighting model (sky/PBR/fog/IBL/lights/emissive/atlas) is the SAME
+// common_base.glsl the other backends include, so a micro object is lit exactly
+// like everything else. common_base.glsl references uHeight/uObjVol, which are
+// declared PER SHADER, so this file declares its own - that is what makes the
+// include safe here without editing any shared header.
+
+layout(local_size_x = 8, local_size_y = 8, local_size_z = 1) in;
+
+// Where the main backend already resolved this pixel. The overlay composites
+// into these rather than owning new targets, so micro geometry lands in the
+// same HDR/G-buffer the post chain, SSAO, SSR, fog and bloom all read.
+layout(set = 0, binding = 12, rgba16f) uniform highp image2D uOutHdr;
+layout(set = 0, binding = 13, rgba16f) uniform highp image2D uOutGPos;
+layout(set = 0, binding = 14, rgba16f) uniform highp image2D uOutGNorm;
+
+// ---- the micro worlds (separate from the world's own SVO buffers) ----------
+layout(std430, set = 0, binding = 1) readonly buffer MGrid { int uMGrid[]; };
+layout(std430, set = 0, binding = 2) readonly buffer MChildBase { uint uMChildBase[]; };
+layout(std430, set = 0, binding = 3) readonly buffer MPayload { uint uMPayload[]; };
+layout(std430, set = 0, binding = 4) readonly buffer MHandles { uint uMHandles[]; };
+layout(std430, set = 0, binding = 5) readonly buffer MBricks { uint uMBricks[]; };
+layout(std430, set = 0, binding = 6) readonly buffer MChunkInfo { uvec4 uMChunkInfo[]; };
+
+// Per-world SCALES. Everything world-specific the main shader hardcodes from
+// the push constant (worldSize / voxelSize / gridN) lives here instead, which is
+// what lets one dispatch serve N objects at N different voxel sizes.
+//   geo  = (voxelSize m, gridN, chunkM m, _)
+//   base = (gridBase into uMGrid, chunkInfoBase into uMChunkInfo, _, _)
+//   lo/hi= world-space AABB of the object (early-out + march bounds)
+// The node/child/brick bases are NOT here: they are folded into each world's
+// chunkInfo entries at upload time, so one flat index serves every world.
+struct MicroWorld {
+    vec4 geo;
+    uvec4 base;
+    vec4 lo;
+    vec4 hi;
+};
+layout(std140, set = 0, binding = 7) readonly uniform WorldTable {
+    MicroWorld uWorlds[16];
+    ivec4 uWorldInfo; // x = world count, yzw = pad
+} wt;
+
+// ---- shared-model resources (same texture views the other passes use) ------
+layout(set = 0, binding = 8, rg32f) uniform readonly highp image2D uHeight;
+layout(set = 0, binding = 9, r8_snorm) uniform readonly highp image3D uObjVol;
+
+layout(push_constant) uniform PC {
+    vec4 camPos;
+    vec4 camRight;
+    vec4 camUp;
+    vec4 camFwd;
+    vec4 a; // tanHalfFov, aspect, extentX, extentY
+    vec4 b; // unused in micro worlds (their scales come from uWorlds); w = frameIdx
+    vec4 sunDir;
+    vec4 misc; // x = renderFlags, y = animTime, z = tonemapLook, w = exposure
+} pc;
+
+const uint kEmpty = 0xFFFFFFFFu;
+const uint kSolid = 0xFFFFFFFEu;
+const int BRICK_N = 8;
+const int BRICK_WORDS = BRICK_N * BRICK_N * BRICK_N * 2;
+const float kWaterLevel = -0.9;
+const int MAX_MICRO_WORLDS = 16;
+
+#define VOXELFORGE_MICRO_BACKEND 1
+#include "common_base.glsl"
+#include "common_irradiance.glsl"
+
+// ---------------------------------------------------------------------------
+// Octree traversal over the MICRO worlds.
+//
+// This is deliberately a SEPARATE copy of the traversal from common_svo.glsl
+// rather than a shared one parameterised by a world index. The main shader's
+// six world-resolution sites are the world's hit path; parameterising them would
+// put the 0.1 m render at risk for a feature that is off by default, and this
+// codebase deliberately keeps bit-exact escape hatches (VF_TEXTURES=0,
+// VF_RENDER_FLAGS=255) for exactly that reason. Duplicating ~150 lines keeps
+// the world path untouched, and with no micro worlds uploaded this shader is
+// never dispatched at all.
+// ---------------------------------------------------------------------------
+
+struct MBases {
+    uint node;
+    uint child;
+    uint brick;
+};
+
+// Local copy of the main shader's box SDF (the one line that needs it).
+// common_svo.glsl is deliberately NOT included: including it would pull in the
+// MAIN world's world-resolution code, which is the whole thing this pass keeps
+// out of its own resolution path.
+float sdBox(vec3 p, vec3 bmin, vec3 bmax)
+{
+    vec3 q = max(bmin - p, p - bmax);
+    return length(max(q, vec3(0.0))) + min(max(q.x, max(q.y, q.z)), 0.0);
+}
+
+MBases mChunkBases(int ci)
+{
+    uvec4 v = uMChunkInfo[ci];
+    return MBases(v.x, v.y, v.z);
+}
+
+// The sdf byte is a signed VOXEL count, so the decode scale is THIS world's
+// voxel size - the one thing that must never be read from the push constant.
+float mBrickVoxelSdf(uint bi, uint brickBase, ivec3 c, float voxel)
+{
+    c = clamp(c, ivec3(0), ivec3(BRICK_N - 1));
+    uint v = uMBricks[(brickBase + bi) * BRICK_WORDS +
+                      (uint(c.z) * BRICK_N * BRICK_N + uint(c.y) * BRICK_N +
+                       uint(c.x)) * 2];
+    int raw = int((v >> 24) & 255u);
+    if (raw >= 128)
+        raw -= 256;
+    return float(raw) * voxel;
+}
+
+float mBrickSample(uint bi, uint brickBase, vec3 p, vec3 mn, vec3 sz, float voxel)
+{
+    float cellSz = sz.x / float(BRICK_N);
+    vec3 g = clamp((p - mn) / cellSz - 0.5, vec3(0.0), vec3(float(BRICK_N) - 1.001));
+    ivec3 i0 = ivec3(g);
+    vec3 f = g - vec3(i0);
+    float s000 = mBrickVoxelSdf(bi, brickBase, i0 + ivec3(0, 0, 0), voxel);
+    float s100 = mBrickVoxelSdf(bi, brickBase, i0 + ivec3(1, 0, 0), voxel);
+    float s010 = mBrickVoxelSdf(bi, brickBase, i0 + ivec3(0, 1, 0), voxel);
+    float s110 = mBrickVoxelSdf(bi, brickBase, i0 + ivec3(1, 1, 0), voxel);
+    float s001 = mBrickVoxelSdf(bi, brickBase, i0 + ivec3(0, 0, 1), voxel);
+    float s101 = mBrickVoxelSdf(bi, brickBase, i0 + ivec3(1, 0, 1), voxel);
+    float s011 = mBrickVoxelSdf(bi, brickBase, i0 + ivec3(0, 1, 1), voxel);
+    float s111 = mBrickVoxelSdf(bi, brickBase, i0 + ivec3(1, 1, 1), voxel);
+    float c00 = mix(s000, s100, f.x), c10 = mix(s010, s110, f.x);
+    float c01 = mix(s001, s101, f.x), c11 = mix(s011, s111, f.x);
+    float c0 = mix(c00, c10, f.y), c1 = mix(c01, c11, f.y);
+    // The main bake's brickSample subtracts a fixed 0.025 m fudge. That is a
+    // QUARTER OF A WORLD VOXEL at 0.1 m - at a 5 mm micro voxel it would be
+    // five voxels, inflating the object by 2.5 cm. Scaling it by the world's own
+    // voxel preserves the constant's INTENT (a fraction of a cell, to keep the
+    // sphere tracer from stalling just short of a surface) without importing a
+    // world-scale constant into a world-scale-less field.
+    return mix(c0, c1, f.z) - 0.25 * voxel;
+}
+
+// Signed distance to ONE micro world at p. Outside the world's AABB it returns
+// the TRUE distance to that box, never a flat constant.
+//
+// This matters more than it looks. The main shader's map() also returns a
+// constant (6.0) outside its world, and is safe doing so only because the world
+// is 102 m across and the SVO marches with a DDA, not by stepping. A micro
+// object is centimetres across and IS sphere-traced, so a 6 m step from the
+// camera sails straight past a vase half a metre away and the trace reports a
+// miss. Returning the exact box distance makes the outside case a valid
+// conservative step instead.
+float microMapWorld(int w, vec3 p, float voxel, int gridN, uint gridBase)
+{
+    vec3 wmin = wt.uWorlds[w].lo.xyz;
+    vec3 wsize = wt.uWorlds[w].hi.xyz - wmin;
+    vec3 rp = p - wmin;
+    if (any(lessThan(rp, vec3(0.0))) || any(greaterThanEqual(rp, wsize))) {
+        vec3 q = max(wmin - p, p - (wmin + wsize));
+        float d = length(max(q, vec3(0.0))) + min(max(q.x, max(q.y, q.z)), 0.0);
+        return max(d, 1e-4);
+    }
+    float chunkM = wt.uWorlds[w].geo.z;
+    ivec3 cc = ivec3(floor(rp / chunkM));
+    cc = clamp(cc, ivec3(0), ivec3(gridN - 1));
+    int ci = int(gridBase) + (cc.z * gridN + cc.y) * gridN + cc.x;
+    int root = uMGrid[ci];
+    if (root == -1) {
+        vec3 cmin = wmin + vec3(cc) * chunkM;
+        return max(-sdBox(p, cmin, cmin + vec3(chunkM)), voxel * 0.5);
+    }
+    MBases bs = mChunkBases(ci);
+    vec3 mn = wmin + vec3(cc) * chunkM;
+    vec3 sz = vec3(chunkM);
+    uint h = uint(root);
+    for (int guard = 0; guard < 16; ++guard) {
+        uint ty = h & 3u;
+        if (ty == 1u)
+            return mBrickSample(h >> 2u, bs.brick, p, mn, sz, voxel);
+        if (ty == 2u)
+            return -voxel;
+        if (ty == 3u)
+            return max(-sdBox(p, mn, mn + sz), voxel * 0.5);
+        uint ni = h >> 2u;
+        uint pl = uMPayload[bs.node + ni];
+        vec3 halfS = sz * 0.5;
+        vec3 r2 = p - mn;
+        int oct = (r2.x >= halfS.x ? 1 : 0) | (r2.y >= halfS.y ? 2 : 0) |
+                  (r2.z >= halfS.z ? 4 : 0);
+        if (((pl >> (8u + uint(oct))) & 1u) != 0u)
+            return -voxel;
+        uint ch = uMHandles[bs.child + uMChildBase[bs.node + ni] + uint(oct)];
+        if (ch == kEmpty) {
+            vec3 cmin = mn + vec3(oct & 1, (oct >> 1) & 1, (oct >> 2) & 1) * halfS;
+            return max(-sdBox(p, cmin, cmin + halfS), voxel * 0.5);
+        }
+        if (ch == kSolid)
+            return -voxel;
+        h = ch;
+        mn += vec3(oct & 1, (oct >> 1) & 1, (oct >> 2) & 1) * halfS;
+        sz = halfS;
+    }
+    return 6.0;
+}
+
+// Union of every micro world. Because each world contributes a DISTANCE, the
+// union is simply the minimum - no nearest-world ordering or bookkeeping is
+// needed, and a point in the world's air but inside the vase picks the vase up
+// for free. The floor keeps a far-away world's contribution from producing a
+// zero step that would livelock the trace.
+float microMap(vec3 p)
+{
+    float d = 1e30;
+    for (int w = 0; w < wt.uWorldInfo.x && w < MAX_MICRO_WORLDS; ++w) {
+        float voxel = wt.uWorlds[w].geo.x;
+        d = min(d, microMapWorld(w, p, voxel, int(wt.uWorlds[w].geo.y),
+                                 wt.uWorlds[w].base.x));
+    }
+    return max(d, 1e-4);
+}
+
+// Material + surface response of the micro cell containing p. Micro cells all
+// carry the object flag (bit 7 of the material byte, set by fillMicroBrick), so
+// this never has to consult the terrain heightfield the way the main shader's
+// isObjectSurface does - which also sidesteps that test's world-scale +0.02
+// epsilon, four whole cells wide at a 5 mm voxel.
+bool microSurface(vec3 p, out vec3 albedo, out vec2 rr, out uint matId)
+{
+    albedo = vec3(0.5);
+    rr = vec2(0.15, 0.9);
+    matId = 0u;
+    for (int w = 0; w < wt.uWorldInfo.x && w < MAX_MICRO_WORLDS; ++w) {
+        vec3 wmin = wt.uWorlds[w].lo.xyz;
+        vec3 wsize = wt.uWorlds[w].hi.xyz - wmin;
+        // Clamp the query INTO the box rather than rejecting points outside it.
+        // The traced hit lies exactly ON the object's boundary by construction
+        // (the trace stops where the field crosses zero, and the field is zero
+        // at the AABB face), so a strict inside test rejects the surface it just
+        // found and the object renders as the material-lookup-failed colour.
+        // Clamping is also what the chunk lookup does one line below, so the two
+        // agree at the seam.
+        vec3 rp = clamp(p - wmin, vec3(0.0), wsize);
+        float voxel = wt.uWorlds[w].geo.x;
+        float chunkM = wt.uWorlds[w].geo.z;
+        int gridN = int(wt.uWorlds[w].geo.y);
+        ivec3 cc = clamp(ivec3(floor(rp / chunkM)), ivec3(0), ivec3(gridN - 1));
+        int ci = int(wt.uWorlds[w].base.y) +
+                 (cc.z * gridN + cc.y) * gridN + cc.x;
+        int root = uMGrid[int(wt.uWorlds[w].base.x) + (cc.z * gridN + cc.y) * gridN +
+                            cc.x];
+        if (root == -1)
+            continue;
+        MBases bs = mChunkBases(ci);
+        uint h = uint(root);
+        vec3 mn = wmin + vec3(cc) * chunkM;
+        vec3 sz = vec3(chunkM);
+        for (int guard = 0; guard < 12; ++guard) {
+            if ((h & 3u) == 1u) {
+                uint bi = h >> 2;
+                float cellSz = sz.x / float(BRICK_N);
+                vec3 g = clamp((p - mn) / cellSz - 0.5, vec3(0.0),
+                               vec3(float(BRICK_N) - 1.001));
+                ivec3 i0 = ivec3(g);
+                // Clamp the cell to the AUTHORED grid. A micro chunk spans 16
+                // cells, so a small object's outermost chunks run past the grid
+                // and their bricks hold filler cells with no record behind them.
+                // Sampling one reads material 0 - grass - which paints a pale
+                // ceramic vase bright green.
+                ivec3 dim = ivec3(int(wt.uWorlds[w].base.z),
+                                  int(wt.uWorlds[w].geo.w),
+                                  int(wt.uWorlds[w].base.w));
+                i0 = clamp(i0, ivec3(0), max(dim - ivec3(1), ivec3(0)));
+                uint vi = (bs.brick + bi) * BRICK_WORDS +
+                          (uint(i0.z) * BRICK_N * BRICK_N + uint(i0.y) * BRICK_N +
+                           uint(i0.x)) * 2;
+                uint w0 = uMBricks[vi];
+                uint w1 = uMBricks[vi + 1];
+                albedo = vec3(float(w0 & 255u), float((w0 >> 8) & 255u),
+                              float((w0 >> 16) & 255u)) / 255.0;
+                rr = vec2(float((w1 >> 8) & 255u), float((w1 >> 16) & 255u)) / 255.0;
+                matId = (w1 >> 24) & 127u;
+                return true;
+            }
+            if ((h & 3u) != 0u)
+                break;
+            uint ni = h >> 2;
+            vec3 halfS = sz * 0.5;
+            vec3 r2 = p - mn;
+            int oct = (r2.x >= halfS.x ? 1 : 0) | (r2.y >= halfS.y ? 2 : 0) |
+                      (r2.z >= halfS.z ? 4 : 0);
+            h = uMHandles[bs.child + uMChildBase[bs.node + ni] + uint(oct)];
+            mn += vec3(oct & 1, (oct >> 1) & 1, (oct >> 2) & 1) * halfS;
+            sz = halfS;
+        }
+    }
+    return false;
+}
+
+// Nearest micro hit along a ray, or false. Sphere-traces the union field then
+// bisects the final interval, which is robust against the brick field's
+// quantised (and therefore not perfectly smooth) distance.
+//
+// Step sizing is bounded on BOTH sides. The 0.85 factor keeps a quantised field
+// from overshooting, and the clamp stops one huge distance (a ray starting far
+// from a small object) from consuming the whole trace in a single stride.
+bool microTrace(vec3 ro, vec3 rd, float tMax, out float tHit)
+{
+    tHit = 0.0;
+    if (microMap(ro) < 0.0)
+        return false; // camera already inside a micro solid
+    const float eps = 1.5e-4;
+    const float kMaxStep = 0.25;
+    float t = eps;
+    float prevT = t;
+    for (int i = 0; i < 512; ++i) {
+        if (t > tMax)
+            return false;
+        vec3 p = ro + rd * t;
+        float d = microMap(p);
+        if (d < eps) {
+            // bisect between the last outside sample and this inside one
+            float lo = prevT, hi = t;
+            for (int b = 0; b < 16; ++b) {
+                float mid = 0.5 * (lo + hi);
+                if (microMap(ro + rd * mid) > 0.0)
+                    lo = mid;
+                else
+                    hi = mid;
+            }
+            tHit = hi;
+            return true;
+        }
+        prevT = t;
+        t += clamp(d * 0.85, eps, kMaxStep);
+    }
+    return false;
+}
+
+// Shadow/light visibility across the micro worlds. NOTE the scope limit: these
+// marches resolve the MICRO worlds only, so a micro object is shadowed by its
+// own geometry and by other micro objects, but neither by nor onto the main
+// world. Making shadows cross between the two would mean giving one side access
+// to the other's buffers, which is exactly the separation this pass keeps.
+float microVisibility(vec3 ro, vec3 rd, float maxDist)
+{
+    // ESCAPE THE SURFACE FIRST. The traced hit point sits fractionally INSIDE
+    // the solid (the bisection keeps the inside sample), so a visibility ray
+    // started there reads d < 0 on its very first step and returns "fully
+    // occluded" for every fragment - the object then renders uniformly black,
+    // because direct sun is multiplied by this term. March forward until the
+    // field is positive before testing anything, and give up as unshadowed if
+    // the ray cannot get out (deep inside the object there is nothing to cast).
+    float t = 0.0;
+    for (int i = 0; i < 12; ++i) {
+        if (microMap(ro + rd * t) > 0.0)
+            break;
+        t += 0.0006;
+        if (t > 0.02)
+            return 1.0;
+    }
+    for (int i = 0; i < 96; ++i) {
+        float d = microMap(ro + rd * t);
+        if (d < 0.0)
+            return 0.0;
+        t += max(d * 0.85, 0.002);
+        if (t > maxDist)
+            return 1.0;
+    }
+    return 1.0;
+}
+
+// common_base.glsl forward-declares these; the micro backend supplies its own.
+float softShadow(vec3 ro, vec3 rd)
+{
+    return microVisibility(ro, rd, 24.0);
+}
+float lightVisibilitySvo(vec3 ro, vec3 rd, float maxDist)
+{
+    return microVisibility(ro, normalize(rd), maxDist);
+}
+float skyVisibilitySvo(vec3 p, vec3 bent)
+{
+    vec3 dir = normalize(mix(bent, vec3(0.0, 1.0, 0.0), 0.65));
+    return microVisibility(p + dir * 0.25, dir, 24.0) > 0.5 ? 1.0 : 0.05;
+}
+// applyFlora is already defined by common_base.glsl (it only dispatches to the
+// per-backend shadow march), so the micro backend inherits the flora overlay for
+// free - a green micro object still gets its grass-blade treatment. Only the
+// marches are backend-specific, and those are defined above.
+
+vec3 microNormal(vec3 p, float e)
+{
+    vec3 g = vec3(microMap(p + vec3(e, 0, 0)) - microMap(p - vec3(e, 0, 0)),
+                  microMap(p + vec3(0, e, 0)) - microMap(p - vec3(0, e, 0)),
+                  microMap(p + vec3(0, 0, e)) - microMap(p - vec3(0, 0, e)));
+    float gl = length(g);
+    if (gl < 1e-6)
+        return vec3(0.0, 1.0, 0.0);
+    return normalize(g);
+}
+
+// Multi-scale AO over the micro union, mirroring the SVO backend's sdfAO rings.
+// Radii stay in METRES, so they are absolute rather than per-voxel: at a 5 mm
+// voxel a voxel-relative first ring would sample inside a single cell and read
+// as flat.
+void microAO(vec3 p, vec3 n, out float ao, out vec3 bent)
+{
+    const float rad[3] = float[3](0.006, 0.018, 0.05);
+    vec3 tv = cross(n, vec3(0.0001, 1.0, 0.0001));
+    vec3 tang = normalize(tv);
+    vec3 bitan = normalize(cross(n, tang));
+    float occ = 0.0, wsum = 0.0;
+    vec3 bd = n * 0.5;
+    for (int ring = 0; ring < 3; ++ring) {
+        float r = rad[ring];
+        for (int a = 0; a < 4; ++a) {
+            float ang = float(a) * 1.5708 + float(ring) * 0.785;
+            vec3 dir = normalize(n * 0.85 + (cos(ang) * tang + sin(ang) * bitan) * 0.7);
+            float s = microMap(p + dir * r);
+            float fall = clamp(1.0 - s / r, 0.0, 1.0);
+            fall = fall * fall * (3.0 - 2.0 * fall);
+            float w = 1.0 / (1.0 + fall * fall * 4.0);
+            occ += w * fall;
+            wsum += w;
+            bd += dir * w * (1.0 - fall);
+        }
+    }
+    ao = clamp(1.0 - 0.85 * occ / max(wsum, 1e-4), 0.0, 1.0);
+    bent = normalize(bd);
+}
+
+// Lit colour for a micro surface, using the SAME shared lighting terms the other
+// backends use (so a vase is not secretly lit by a private model).
+vec3 shadeMicro(vec3 p, vec3 rd)
+{
+    vec3 alb;
+    vec2 rr;
+    uint mId;
+    if (!microSurface(p, alb, rr, mId))
+        return vec3(0.0);
+    vec3 n = microNormal(p, 0.0015);
+    alb = detailAlbedo(alb, p, n, mId);
+    n = detailNormal(n, p, mId);
+    float sh = ((gRenderFlags & 2) != 0) ? softShadow(p + n * 0.004, kSunDir) : 1.0;
+
+    float ao = 1.0;
+    vec3 bent = n;
+    if ((gRenderFlags & 1) != 0)
+        microAO(p, n, ao, bent);
+
+    float enclosed = 1.0 - ((gRenderFlags & 256) != 0 ? skyVisibilitySvo(p, bent) : 1.0);
+    enclosed = max(enclosed, aoShEnclosure(ao, sh));
+    float skyAmb = mix(1.0, 0.16, enclosed);
+    float skyIbl = mix(1.0, 0.04, enclosed);
+
+    float ndl = max(dot(n, kSunDir), 0.0);
+    vec3 amb = skyIrradiance(bent) * (0.28 + 0.30 * ao) * skyAmb;
+    amb += moonLight(n, ao) * skyAmb;
+    vec3 irr = irradianceVolume(p);
+    float fold = clamp(-n.y, 0.0, 1.0);
+    vec3 bounce = any(greaterThan(irr, vec3(0.0)))
+                      ? alb * irr * (0.3 + 0.7 * ao) * skyAmb
+                      : (alb * 0.65 + vec3(0.10, 0.09, 0.07)) * fold *
+                            (0.3 + 0.7 * ao) * skyAmb;
+    vec3 V = -rd;
+    vec3 hv = normalize(kSunDir + V);
+    float vdh = max(dot(V, hv), 0.0);
+    float rough = clamp(rr.y, 0.05, 1.0);
+    float f0b = 0.04 + rr.x * 0.70;
+    vec3 F = fresnelSchlick(vec3(f0b), vdh);
+    float fAvg = clamp((F.r + F.g + F.b) / 3.0, 0.0, 1.0);
+    vec3 spec = pbrSpec(n, V, kSunDir, vec3(f0b), rough);
+    vec3 ibl = iblContribution(n, V, vec3(f0b), rough) * (0.28 + 0.30 * ao) * skyIbl;
+    vec3 col = alb * (1.0 - fAvg) * (sunCol() * ndl * sh + amb + bounce + ibl) +
+               spec * sunCol() * ndl * sh +
+               spec * alb * 0.30 * sunCol() * sh;
+    col += alb * vec3(0.075, 0.080, 0.090) * enclosed * (0.35 + 0.65 * ao);
+    if (p.y < kWaterLevel && underWater(p.xz) && !gUnderwater) {
+        float depth = kWaterLevel - p.y;
+        col *= exp(-depth * vec3(0.35, 0.18, 0.12) * 3.0);
+        col = mix(col, vec3(0.05, 0.14, 0.13), clamp(depth * 0.8, 0.0, 0.85));
+        col += sunCol() * causticAt(p.xz, pc.misc.y) * ndl * sh * 0.25 *
+               exp(-depth * 0.55);
+    }
+    col += applyLights(p, n, V, rr, alb);
+    col += emissiveTerm(p, n, mId, alb);
+    return col;
+}
+
+void main()
+{
+    ivec2 pix = ivec2(gl_GlobalInvocationID.xy);
+    if (pix.x >= int(pc.a.z) || pix.y >= int(pc.a.w))
+        return;
+    if (wt.uWorldInfo.x <= 0)
+        return;
+
+    kSunDir = normalize(pc.sunDir.xyz);
+    gRenderFlags = int(pc.misc.x + 0.5);
+    gTexOv = 0.0;
+
+    vec2 ndc = (vec2(pix) + 0.5) / vec2(pc.a.z, pc.a.w) * 2.0 - 1.0;
+    vec3 rd = normalize(pc.camFwd.xyz + ndc.x * pc.a.x * pc.a.y * pc.camRight.xyz -
+                        ndc.y * pc.a.x * pc.camUp.xyz);
+    vec3 ro = pc.camPos.xyz;
+    gUnderwater = ((gRenderFlags & 8) != 0) && ro.y < kWaterLevel && underWater(ro.xz);
+
+    // The main backend's own resolution of this pixel, used as the depth test.
+    // gpos is (world position, hitType); the sky pass writes zero, and the water
+    // pass writes the plane, so BOTH cases compare correctly for free - a micro
+    // object standing in the shallows beats the lake plane in front of it, and
+    // one sunk on the bed loses to it. No depth attachment and no edit to the
+    // water pass are needed.
+    vec4 gp = imageLoad(uOutGPos, pix);
+    float sceneT = dot(gp.xyz - ro, rd);
+    bool sceneHasGeometry = !(gp.xyz == vec3(0.0)) && sceneT > 0.0;
+
+    float t;
+    if (!microTrace(ro, rd, sceneHasGeometry ? sceneT : 400.0, t))
+        return;
+    if (sceneHasGeometry && t >= sceneT)
+        return; // the main backend already resolved this pixel nearer
+
+    vec3 p = ro + rd * t;
+    vec3 col = shadeMicro(p, rd);
+    if (any(isnan(col)) || any(isinf(col)))
+        return;
+
+    imageStore(uOutHdr, pix, vec4(col, 1.0));
+    vec3 n = microNormal(p, 0.0015);
+    imageStore(uOutGPos, pix, vec4(p, 2.0));
+    imageStore(uOutGNorm, pix, vec4(n, 0.0));
+}

@@ -107,6 +107,10 @@ void App::applyWorldReload()
     // with the manifest rather than waiting for a restart.
     uploadLightSources();
     rebuildSurfels();       // splat backend follows the same live field
+    // micro objects are SEPARATE SVO worlds, so a manifest edit that adds,
+    // removes or repositions one only re-uploads its own buffers - it never
+    // invalidates the world bake above.
+    loadMicroObjects();
     // the reload re-adopted the store: re-apply the persisted live overlay
     m_liveEditor.clear();
     m_overlayLoaded = false;

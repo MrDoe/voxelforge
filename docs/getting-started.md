@@ -64,7 +64,7 @@ It also refuses to run without baked assets.
 | `C` → Move | grab the exact object under the cursor |
 | drag in Move | translate along the selected world X/Y/Z handle; release stages, then press Apply |
 | `F` | toggle the renderer: Gaussian surfels (default) ↔ SVO reference |
-| `N` | toggle TAA |
+| `N` | toggle TAA (off by default) |
 | `[` / `]` | shrink / grow splat disks |
 | `B` | toggle texture detail normals (render-flag bit 7, default on) |
 | `G` / `H` | toggle SSR / SSAO |

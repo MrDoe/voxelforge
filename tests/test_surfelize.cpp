@@ -207,8 +207,8 @@ TEST_CASE("surfelize real world: sane count and chunk ranges")
 
     // Corner caps are a separate, coverage-gated mechanism (see the lone-voxel
     // cap test). On healthy content every corner is already inside its parent
-    // disk, so the production default (cornerFill=true) must not add a
-    // meaningful amount of always-on geometry.
+    // disk, so a bridge-count bound with caps ON must stay within the same
+    // budget - caps are additive but fire on almost nothing here.
     p.cornerFill = true;
     const SurfelSet setCaps = buildSurfels(field, p);
     CAPTURE(setCaps.edgeBridgeCount);
@@ -557,4 +557,63 @@ TEST_CASE("surfelize: corner caps fill only where the parent disk misses")
     p.cornerFill = true;
     const SurfelSet cubeCaps = buildSurfels(cube, p);
     CHECK(cubeCaps.edgeBridgeCount == cubeNo.edgeBridgeCount);
+}
+
+TEST_CASE("surfelize: crease bridges only fire where the parent was shrunk")
+{
+    // A bridge exists to fill the hole the hard-edge shrink opened. A thin
+    // footprint keeps its EXPLICIT radii and is not shrunk, so its parents
+    // already cover the crease - bridging those too produced the "diamond
+    // chain" of dark 45-degree disks on thin beams. A thick block IS shrunk,
+    // so it still bridges. Regression guard for the 2026-10-09 gate.
+    auto build = [](std::vector<uint32_t>& cells, const SurfelParams& p) {
+        const std::vector<uint8_t> mats(cells.size(), 6);
+        const std::vector<uint8_t> layers(cells.size(), 9);
+        VoxelField f;
+        const std::vector<VoxelRecord> recs;
+        const std::vector<int16_t> colTop(kLatN * kLatN, -1);
+        const std::vector<uint8_t> colMat(kLatN * kLatN, 0);
+        f.build(recs, colTop, colMat, cells, mats, {}, {}, {}, {}, {}, layers);
+        return buildSurfels(f, p);
+    };
+
+    SurfelParams p;
+    p.smoothNormals = false;
+    p.terrainHeightfieldNormals = false;
+    p.anisotropy = true; // thin classification active
+    p.lodRings = false;
+    p.edgeFill = true;
+    p.edgeShrink = 0.35f;
+    p.cornerFill = true; // must not change the bridge count either way
+
+    // Thick 2x2x2 block: no axis reaches the thin run threshold, so parents
+    // are shrunk and the crease needs its bridge.
+    std::vector<uint32_t> cube;
+    for (int dz = 0; dz < 2; ++dz)
+        for (int dy = 0; dy < 2; ++dy)
+            for (int dx = 0; dx < 2; ++dx)
+                cube.push_back(((512u + dx) << 20) | ((512u + dy) << 10) | (512u + dz));
+    const SurfelSet thick = build(cube, p);
+    CAPTURE(thick.edgeBridgeCount);
+    CHECK(thick.edgeBridgeCount > 0);
+
+    // Thin 2x2 x 8 post: long vertical run, 2 cells across -> thin footprint.
+    // Parents keep their explicit radii and cover the crease, so no bridges.
+    std::vector<uint32_t> post;
+    for (int i = 0; i < 8; ++i)
+        for (int dz = 0; dz < 2; ++dz)
+            for (int dx = 0; dx < 2; ++dx)
+                post.push_back(((512u + dx) << 20) | ((512u + i) << 10) | (512u + dz));
+    const SurfelSet thin = build(post, p);
+    CAPTURE(thin.edgeBridgeCount);
+    CHECK(thin.edgeBridgeCount == 0);      // redundant bridges suppressed
+    CHECK(thin.edgeParentCount == 0);      // and no parent was tightened
+    CHECK(thin.surfels.size() > 0);        // the post still renders
+
+    // The suppressed set is the thin rule, not an object gate: with thin
+    // classification off the same post bridges again (historical behaviour).
+    SurfelParams q = p;
+    q.anisotropy = false;
+    const SurfelSet notThin = build(post, q);
+    CHECK(notThin.edgeBridgeCount > 0);
 }

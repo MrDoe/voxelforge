@@ -776,6 +776,9 @@ SurfelSet buildSurfels(const VoxelField& field, const SurfelParams& params) {
     std::vector<Surfel> surfels(n);
     std::vector<uint8_t> isObj(n);    // pass-2 snapshot: object-field winners
     std::vector<uint8_t> layerId(n);  // owning .vxw layer, 0 = terrain/unowned
+    std::vector<uint8_t> tightened(n); // 1 = this parent's radius was reduced by
+                                      // edgeShrink (the only case a crease
+                                      // bridge is needed to fill)
 
     // Pass 1: raw mean normals (sharded). Smoothing lookups below use
     // binary search over the sorted keys (lock-free, no hash build).
@@ -918,6 +921,7 @@ SurfelSet buildSurfels(const VoxelField& field, const SurfelParams& params) {
     surfels.resize(size_t(n));
     isObj.resize(size_t(n));
     layerId.resize(size_t(n));
+    tightened.resize(size_t(n));
 
     // Pass 2: blend, smooth, bake shadow+AO, and emit (also sharded; every
     // index is independent and keys/rawNormals are read-only here).
@@ -1086,6 +1090,7 @@ SurfelSet buildSurfels(const VoxelField& field, const SurfelParams& params) {
                     sl.tan_aspect = glm::vec4(tanOut, float(s.tex));
                     surfels[i] = sl;
                     isObj[i] = s.obj ? 1 : 0;
+                    tightened[i] = hardEdge ? 1 : 0;
                     layerId[i] = s.obj ? s.layer : uint8_t(0);
                     if (s.obj)
                         ++locObject;
@@ -1286,6 +1291,14 @@ SurfelSet buildSurfels(const VoxelField& field, const SurfelParams& params) {
             if (i > 0 && keys[source] == keys[order[i - 1]])
                 continue;
             if (!isObj[source] || edgeInfos[source].pairCount <= 0)
+                continue;
+            // A bridge exists to fill the hole the hard-edge SHRINK opened.
+            // A parent that was never tightened - a thin footprint keeps its
+            // explicit radii, smooth curvature and foliage keep the full disk
+            // - already covers its crease, so bridging it too only adds a
+            // redundant 45-degree-normal disk. That was the "diamond chain"
+            // on thin beams. Corner caps keep their own coverage gate below.
+            if (!tightened[source])
                 continue;
             const int mat = int(surfels[i].mat_ao.x + 0.5f);
             if (mat == 8 || (mat >= 9 && mat <= 15))
@@ -2194,14 +2207,19 @@ void appendCandidateEdgeBridges(const std::vector<SurfelCand>& cands,
         return;
     for (size_t i = 0; i < cands.size(); ++i) {
         const SurfelCand& cd = cands[i];
-        if (!cd.cell.obj || (cd.edge.pairCount <= 0 && cd.edge.cornerCount <= 0))
+        if (!cd.cell.obj)
             continue;
         const int mat = int(base[i].mat_ao.x + 0.5f);
         if (mat == 8 || (mat >= 9 && mat <= 15))
             continue;
         const size_t before = edges.size();
-        appendEdgeBridges(cd.pos, base[i], cd.edge, params.baseRadius,
-                          params.edgeBridgeSize, edges);
+        // Bridges only where the hard-edge shrink actually opened a crease.
+        // A thin footprint (thinTall > 0) keeps its explicit radii and covers
+        // its own crease, so bridging it too is the "diamond chain" on thin
+        // beams. Corner caps keep their own coverage gate.
+        if (cd.edge.pairCount > 0 && cd.thinTall <= 0.0f)
+            appendEdgeBridges(cd.pos, base[i], cd.edge, params.baseRadius,
+                              params.edgeBridgeSize, edges);
         if (params.cornerFill)
             appendCornerCaps(cd.pos, base[i], cd.edge, params.baseRadius,
                              params.edgeBridgeSize, edges);

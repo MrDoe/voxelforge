@@ -1,5 +1,5 @@
 # log
-Append-only timeline — 166 entries, 5117 lines. Entries are appended
+Append-only timeline — 167 entries, 5163 lines. Entries are appended
 in **session order, not date order**, so this index is the only chronological view.
 Do not infer causation from vertical position in the file itself.
 
@@ -5115,3 +5115,98 @@ while a convex cubeField stays at 0. test-surfel 14/14, test-store green.
 test-visual's house sky-probe failure and test-live-edit's 5 object_smooth/
 object_undo failures are PRE-EXISTING: the sky probe fails with cornerFill=0,
 with SSR off, and with HEAD shaders; the live-edit pair is unchanged in kind.
+
+## [2026-10-09] ingest | render-defaults-off
+
+New page [[concepts/render-defaults-off]] plus the flip it documents.
+
+`App::m_edgeFill`, `App::m_cornerFill` and `App::m_taaEnabled` now default
+false, and `SurfelParams::edgeFill` / `cornerFill` were flipped with them so
+the library default and the app default cannot drift apart. `VF_EDGE_FILL` /
+`VF_CORNER_FILL` still override at launch, so the A/B below needed no rebuild.
+
+Measured 960x540 A/B (2x2, fresh render per cell, same-binary rerun as floor):
+
+  cornerFill off only   hero 0.0076  house 0.0076  water 0.024
+  edgeFill off only     hero 0.128   house 0.575   water 0.059
+  thin-beam close-up    edgeFill off 0.5406, cornerFill off 0.0089
+  noise floor           hero 0.0074  house 0.0088/0.0091
+
+mean L2 per pixel vs the full-ON frame. Corner caps are a no-op on the hamlet
+(px >12 = 0.00%, max 4-6 codes) but the guard is live — a thin rod emits 8
+caps, unit-test pinned. Edge bridges are NOT free: 1.14-1.24% of pixels move
+by >12, and the same magnitude at the cabin corner posts, which are 2-3 cells
+across so the hard-edge shrink opens a hole the bridge seals. Interior
+one-cell posts read 0 px because they are never shrunk.
+
+TAA: the interactive view now equals what `--shot` always produced (the resolve
+is interactive-only), which is what makes the pixel-mean/claim comparison
+meaningless — TAA's output was literally unreachable from the reference path.
+
+Fix that came with the flip: `m_prevCam` was advanced only inside the TAA
+branch of `recordInteractiveFrame`, while the opt-in motion blur reprojects
+against the same member. With TAA off the first motion-blur frame used a zero
+camera. Moved the update out of the branch to run on both paths.
+
+Docs updated: AGENTS.md Run + kernel-knobs, docs/rendering.md, docs/tooling.md,
+docs/getting-started.md. Gates: ninja build, test-surfel (4/4), test-store,
+test-preview all green.
+
+## [2026-10-09] update | Bridges only where the parent was shrunk
+
+Documented the diamond-chain fix in [[concepts/edge-aware-surfel-radius]] §
+"Bridges only where the parent was actually shrunk". Root cause: bridge
+emission gated on `pairCount > 0` alone, so thin shells whose parent was never
+reduced still got a redundant 45-degree-normal disk. Both paths now gate on the
+shrink predicate (`tightened[]` in the bake, `cd.thinTall <= 0` live).
+Fixtures: thick 2x2x2 block -> 8 bridges; thin 2x2x8 post -> 0; same post with
+anisotropy off -> 32 (proves it is the thin rule, not an object-class gate).
+
+## [2026-10-09] ingest | textbox-input-gate
+
+Filed by CursorGuard (ses_ede451262ffeKkDFaja0sPFJc5) - the page
+`.opencode/wiki/concepts/textbox-input-gate.md` already existed as a request to
+me; this entry records it in the log so it is discoverable from the timeline.
+
+What it pins: the input gate is `ImGui::GetIO().WantTextInput` read once per
+frame into `fx.textCaptures`, gating the camera, `processInput` (picks/stamps)
+and `handleHotkeys`, while the brush preview deliberately survives. The two
+traps worth remembering are the one-frame WantTextInput lag on the way OUT
+(the Tab that leaves the field clears it while `glfwGetKey` still reports the
+key held), which forces gated hotkeys to poll and discard every latch - hence
+the single shared `g_keyLatch` table bounded to real GLFW key codes - and the
+four XTEST-probe traps (wrong window, post-move reference frame, stalled frame
+loop after the load log, WM owning focus) that each produced a 0.000 false
+pass before a real control existed.
+
+Linked from [[concepts/interactive-ui-coverage-gap]]; verified with
+`tools/test_inject.py` (10.5 s of typing into the layer filter, zero hotkey
+log lines, scene diff 0.0006, camera moves again on W afterwards).
+
+## [2026-10-09] ingest | motion-blur-prevcam
+
+New page [[concepts/motion-blur-prevcam]].
+
+`VF_MOTIONBLUR=1` smeared the whole frame on a STATIC headless camera. Root cause
+was not the shader: `App::m_prevCam` (the previous-frame camera basis that both
+TAA and motion blur reproject against) was written ONLY inside the TAA branch of
+`recordInteractiveFrame`, so it was dead both headlessly and interactively with
+TAA off. Its untouched default is a camera at the world origin looking down +Z,
+which against the real camera gives cz of metres and a velocity of hundreds of
+pixels everywhere.
+
+Fix: `vf::PrevCam` moved to `render/taa_pass.hpp` (the app's frame.hpp cannot be
+included from src/render - imgui + the vf namespace trap), one
+`App::advancePrevCam()` seeded in `run()` after `setupCameraAndShots()` and
+called at the end of every frame on BOTH recorders. `motion_blur.comp` untouched.
+
+Measured, on-vs-off, mean L2/code at 960x540 (hero/house/water):
+  before  6.76 / 16.54 / 15.92
+  after   0.045 / 0.029 / 3.50
+Noise floor 0.0088. The water residual is the float16 G-buffer quantisation
+ceiling (a water point ~1.5 m below the camera quantises ~0.004 m -> ~0.3 px of
+apparent velocity), and the SVO backend reads 2.99 for the same reason; the
+analytically-proven exactness of the shader for a static camera (10 m centre
+point -> (480.0, 270.0)) is in the page.
+
+Gates: ninja, test-surfel 4/4, test-store, test-live-edit 3/2.

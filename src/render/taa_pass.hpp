@@ -5,8 +5,18 @@
 
 namespace vf {
 
-// Previous-frame camera, used to reproject the TAA history via the world-pos G-buffer.
-struct TaaPrevCam {
+// Previous-frame camera basis, shared by every pass that reprojects history
+// against it: TAA's resolve and the motion-blur velocity field.
+//
+// It MUST be the basis of the camera that rendered the PREVIOUS frame, so the
+// app writes it at the END of a recorded frame (on both the headless and
+// interactive paths) and seeds it once at startup. The default-constructed
+// value is NOT a valid camera - it is pos = origin with right = +X, up = +Y,
+// fwd = +Z and tanHalfFov = 1.0 - i.e. a camera sitting at the world origin
+// looking down +Z. Reprojecting against it makes every pixel read as having
+// travelled a long way, which is exactly the "motion blur smears the whole
+// frame while nothing moves" symptom.
+struct PrevCam {
     glm::vec3 pos = {0.0f, 0.0f, 0.0f};
     glm::vec3 right = {1.0f, 0.0f, 0.0f};
     glm::vec3 up = {0.0f, 1.0f, 0.0f};
@@ -14,6 +24,7 @@ struct TaaPrevCam {
     float tanHalfFov = 1.0f;
     float aspect = 1.0f;
 };
+using TaaPrevCam = PrevCam; // historical name; both passes read the same state
 
 class TaaPass {
 public:

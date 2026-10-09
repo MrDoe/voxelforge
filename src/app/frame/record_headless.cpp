@@ -145,6 +145,22 @@ int App::recordHeadlessFrame(FrameSync& fr)
             di.pMemoryBarriers = &mb;
             vkCmdPipelineBarrier2(fr.cmd, &di);
             }
+            // Micro-voxel overlay (SEPARATE SVO worlds): same compositing as the
+            // interactive path - reads gpos as its depth reference and overwrites
+            // a pixel only where a micro surface is nearer than what the main
+            // backend already resolved there. A no-op when none are loaded.
+            if (!m_microSvoPass.empty()) {
+                m_microSvoPass.record(fr.cmd, push);
+                VkMemoryBarrier2 mb2 { VK_STRUCTURE_TYPE_MEMORY_BARRIER_2 };
+                mb2.srcStageMask = VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT;
+                mb2.srcAccessMask = VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT;
+                mb2.dstStageMask = VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT;
+                mb2.dstAccessMask = VK_ACCESS_2_SHADER_STORAGE_READ_BIT;
+                VkDependencyInfo di2 { VK_STRUCTURE_TYPE_DEPENDENCY_INFO };
+                di2.memoryBarrierCount = 1;
+                di2.pMemoryBarriers = &mb2;
+                vkCmdPipelineBarrier2(fr.cmd, &di2);
+            }
             profMark(1);
             // post pass reads HDR/G-buffer, writes LDR offscreen
             vf::transitionImage(fr.cmd, m_offscreen.img, VK_IMAGE_ASPECT_COLOR_BIT,
@@ -170,6 +186,12 @@ int App::recordHeadlessFrame(FrameSync& fr)
         if (getenv("VF_TRACE"))
             fprintf(stderr, "[f%llu] headless submitted\n", (unsigned long long)m_frameIdx);
         forceFrameResults(m_frameIdx);
+        // Advance the previous-frame camera here as well as interactively.
+        // The headless camera never moves on its own (no input), but the shot
+        // LIST does move it, and a reprojection pass that replays the first
+        // shot's camera across every later shot produces a full-frame smear
+        // that looks exactly like motion blur firing on a still scene.
+        advancePrevCam();
         if ((args.selftest) && m_frameIdx == 30)
             return runSelftest() ? 0 : 1;
         if (shotMode && m_frameIdx == 3) {

@@ -38,6 +38,7 @@
 #include "render/ssr_pass.hpp"
 #include "render/ssao_pass.hpp"
 #include "render/svo_pass.hpp"
+#include "render/micro_svo_pass.hpp"
 #include "render/taa_pass.hpp"
 #include "render/texture_atlas.hpp"
 #include "render/volumetric_fog_pass.hpp"
@@ -173,6 +174,10 @@ private:
     void pollTextureFiles();
     void applyWorldReload();
     void rebuildSurfels(); // (re)build the surfel set from the live field
+    // Load "role":"micro" manifest layers into SEPARATE micro SVO worlds and
+    // hand them to the GPU overlay pass. They never enter the world record set,
+    // the VoxelField, the ChunkStore or the live-edit overlay.
+    void loadMicroObjects();
     // Sun: m_sunDir is the single source of truth for where the sun is (it
     // rides the per-frame push constant), so every control that moves the sun
     // funnels through setSunAngles and nothing keeps parallel angle floats.
@@ -266,6 +271,17 @@ private:
     // Shared by the headless and interactive frame paths so they can't drift.
     void recordPhotorealism(VkCommandBuffer cmd, const vf::RaymarchPush& push);
 
+    // Write the live camera basis into m_prevCam so the NEXT frame's reprojection
+    // (TAA history + motion-blur velocity) sees this frame's camera. Called at
+    // the END of a recorded frame on BOTH paths, and once from App::run() just
+    // after setupCameraAndShots() so the first frame is already seeded.
+    //
+    // The aspect ratio comes from the SWAPCHAIN, matching what both frame
+    // recorders put in push.a, because that is the projection the G-buffer
+    // world positions were rendered with - a mismatched aspect silently halves
+    // or doubles the horizontal velocity.
+    void advancePrevCam();
+
     Args m_args;
     vf::Window m_window;
     vf::Context m_ctx;
@@ -282,6 +298,12 @@ private:
                           // never recreated - replacing it would free the view
                           // the descriptor set already references
     vf::SvoPass m_svoPass;
+    // GPU overlay for SEPARATE high-detail micro SVO worlds (own fine lattice).
+    // Reads the main backend's G-buffer and overwrites a pixel only where a
+    // micro surface is nearer - so it needs no depth attachment and no change
+    // to the splat or water pass. Empty = the feature is off and record() is a
+    // single branch.
+    vf::MicroSvoPass m_microSvoPass;
     vf::SplatPass m_splatPass;
     vf::TaaPass m_taaPass;
     vf::PostPass m_postPass;
@@ -299,11 +321,25 @@ private:
     RenderMode m_renderMode = RenderMode::Splats;
     vf::Image3D m_taaHistory[2];
     vf::Image3D m_taaResolved;
-    bool m_taaEnabled = true;
+    // TAA is OFF by default (N re-enables it and forces a clean first frame).
+    // The viewer now shows the raw post-pass image, which is what
+    // `--shot`/headless has always produced - so an interactive frame and a
+    // headless frame of the same camera agree pixel-for-pixel. TAA does have a
+    // real effect (reprojected reprojection + variance clamp), it just is no
+    // longer what you see unless you ask for it.
+    //
+    // m_prevCam is advanced every interactive frame in BOTH branches of the
+    // TAA gate (see record_interactive), because the opt-in motion blur (K)
+    // reprojects against the same m_prevCam and would otherwise smear on a
+    // stale camera while TAA is off.
+    bool m_taaEnabled = false;
     float m_taaBlend = 0.92f; // base history blend (VF_TAA_BLEND overrides)
     bool m_taaFirstFrame = true;
     int m_taaHistoryIdx = 0;
-    vf::TaaPrevCam m_prevCam{};
+    // Previous-frame camera basis (vf::PrevCam, render/taa_pass.hpp). Advanced
+    // at the END of every recorded frame on both paths, and SEEDED at startup
+    // so the first frame's reprojection is already valid. See advancePrevCam().
+    vf::PrevCam m_prevCam;
     glm::vec4 m_pushB { 1.0f };
     // layered world state (GUI)
     std::vector<vf::voxel::worldfile::WorldLayer> m_worldLayers;
@@ -402,10 +438,23 @@ private:
     // Tighten only genuine hard-edge object parents; small tangent-aligned
     // bridge splats preserve crease coverage. Both are baked, so changing
     // either setting requests a world reload.
+    //
+    // Both fills default OFF. Corner caps are a measured no-op on the shipped
+    // hamlet - the parent's own disk already covers every corner vertex, so
+    // the coverage guard removes ~everything (ON vs OFF: house mean 0.0076
+    // L2/code, max 6, against a same-binary rerun noise floor of 0.0088 / 5;
+    // a thin-beam close-up reads 0.0089 against 0.0091). The mechanism is
+    // still LIVE, not dead code: a genuine thin rod emits 8 caps (unit-test
+    // pinned), so the clean hamlet reading is a property of its content.
+    // Edge bridges are NOT a free no-op: they re-cover what the 0.25
+    // edgeShrink stops short of, and turning them off costs ~0.6 L2/code at
+    // the house view (1.24% of pixels move by >12) even though mean luma and
+    // world coverage stay flat. They are off because the coverage they add is
+    // redundant on this scene, not because they cost nothing.
     float m_edgeShrink = 0.25f;
-    bool m_edgeFill = true;
+    bool m_edgeFill = false;
     float m_edgeBridgeSize = 1.0f;
-    bool m_cornerFill = true;
+    bool m_cornerFill = false;
     // Point-light budget: global emitter cap N (VF_LIGHT_BUDGET, 1..256,
     // default kLightBudgetDefault) + per-pixel nearest-K (VF_LIGHT_K, 1..8,
     // default 4).

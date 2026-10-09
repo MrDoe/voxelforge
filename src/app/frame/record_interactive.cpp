@@ -157,6 +157,26 @@ int App::recordInteractiveFrame(FrameSync& fr, const FrameInputs& fx)
     di.memoryBarrierCount = 1;
     di.pMemoryBarriers = &mb;
     vkCmdPipelineBarrier2(fr.cmd, &di);
+    // ---- micro-voxel overlay (SEPARATE SVO worlds) --------------------
+    // Composites high-detail objects that live on their own fine lattice (a 30
+    // cm vase at 5 mm) into the G-buffer the main backend just resolved. It
+    // reads gpos as its depth reference - sky writes zero and the water pass
+    // writes the plane - so a micro object standing in the shallows wins
+    // against the lake plane in front of it and one sunk on the bed loses to
+    // it, with no depth attachment and no change to either pass. Runs for both
+    // render modes, after the barrier above has made the images readable.
+    if (!m_microSvoPass.empty()) {
+        m_microSvoPass.record(fr.cmd, push);
+        VkMemoryBarrier2 mb2 { VK_STRUCTURE_TYPE_MEMORY_BARRIER_2 };
+        mb2.srcStageMask = VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT;
+        mb2.srcAccessMask = VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT;
+        mb2.dstStageMask = VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT;
+        mb2.dstAccessMask = VK_ACCESS_2_SHADER_STORAGE_READ_BIT;
+        VkDependencyInfo di2 { VK_STRUCTURE_TYPE_DEPENDENCY_INFO };
+        di2.memoryBarrierCount = 1;
+        di2.pMemoryBarriers = &mb2;
+        vkCmdPipelineBarrier2(fr.cmd, &di2);
+    }
     // post pass reads HDR/G-buffer, writes LDR offscreen ---------------
     vf::transitionImage(fr.cmd, m_offscreen.img, VK_IMAGE_ASPECT_COLOR_BIT,
                         VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_GENERAL,
@@ -229,13 +249,6 @@ int App::recordInteractiveFrame(FrameSync& fr, const FrameInputs& fx)
         taaSrcAccess = VK_ACCESS_2_TRANSFER_READ_BIT;
         m_taaHistoryIdx = int(widx);
         m_taaFirstFrame = false;
-        // remember this frame's camera so next frame can reproject history
-        m_prevCam.pos = m_camera.pos;
-        m_prevCam.right = m_camera.right();
-        m_prevCam.up = m_camera.up();
-        m_prevCam.fwd = m_camera.forward();
-        m_prevCam.tanHalfFov = tanHalfFov;
-        m_prevCam.aspect = float(m_swapchain.extent().width) / float(m_swapchain.extent().height);
     } else {
         // no TAA: offscreen -> TRANSFER_SRC directly
         vf::transitionImage(fr.cmd, m_offscreen.img, VK_IMAGE_ASPECT_COLOR_BIT,
@@ -246,6 +259,11 @@ int App::recordInteractiveFrame(FrameSync& fr, const FrameInputs& fx)
         taaSrcStage = VK_PIPELINE_STAGE_2_TRANSFER_BIT;
         taaSrcAccess = VK_ACCESS_2_TRANSFER_READ_BIT;
     }
+    // Remember this frame's camera for NEXT frame's reprojection, in BOTH
+    // branches. TAA needs it to blend history; the opt-in motion blur (K)
+    // reprojects against the same m_prevCam, so it must advance every
+    // interactive frame regardless of m_taaEnabled.
+    advancePrevCam();
     profMark(4);
     // swapchain -> transfer-dst, blit ----------
     vf::transitionImage(fr.cmd, m_swapchain.image(imgIdx), VK_IMAGE_ASPECT_COLOR_BIT,

@@ -37,11 +37,18 @@ struct SurfelParams {
     // the always-on base+edge range, not the distance-culled micro tail, so a
     // tightened parent cannot open a hole farther away. edgeShrink == 0 keeps
     // the exact historical footprint and emits no bridges.
-    bool edgeFill = true;
+    //
+    // DEFAULT OFF (matches App::m_edgeFill). With edgeShrink > 0 a bridge
+    // genuinely re-covers the crease the shrink opened (turning them off
+    // moves ~0.6 L2/code at the house view, 1.24% of pixels by >12, mean
+    // luma flat), so this is a deliberate coverage-complexity trade, not a
+    // free off switch. The app overrides it from its GUI member.
+    bool edgeFill = false;
     // Size multiplier for edge bridges and corner caps (1.0 = default).
     // Scales the small derived surfels that fill creases and corners.
     float edgeBridgeSize = 1.0f;
-    // Fill corners the parent disk does not reach with small caps. Default ON.
+    // Fill corners the parent disk does not reach with small caps. DEFAULT OFF
+    // (matches App::m_cornerFill).
     // A COVERAGE guard skips any corner vertex that projects inside the
     // parent's in-plane footprint (flat Gaussian at centre + n*0.5*VOXEL,
     // radius = max parent radius). A normal 0.14 m parent covers the
@@ -51,7 +58,16 @@ struct SurfelParams {
     // Measured on the hamlet: 557 caps, vs 17,705 with an angle-based proxy
     // that leaked dark specks onto covered corners. Disable for the exact
     // pre-caps footprint.
-    bool cornerFill = true;
+    //
+    // Turning this flag ON changes nothing measurable on the shipped hamlet:
+    // the coverage guard leaves ~557 caps out of ~3.4M surfels (0.016%), and
+    // ON-vs-OFF at 960x540 stays inside the same-binary rerun noise floor
+    // (house mean 0.0076 L2/code, max 6, vs 0.0088 / 5 for two identical runs;
+    // a thin-beam close-up reads 0.0089 against 0.0091 noise). The mechanism
+    // is still LIVE, not dead code: a genuine thin rod emits 8 caps
+    // (unit-test pinned), so the hamlet's clean bill is a property of its
+    // content, not of the guard.
+    bool cornerFill = false;
     float heightfieldBlend = 0.55f;   // blend terrain-top cells toward the analytic
                                        // two-scale heightfield normal (parity with the
                                        // current shader look)

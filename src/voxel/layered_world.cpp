@@ -378,7 +378,10 @@ bool LayeredWorld::parseAndComputeDirty(bool& outFull, std::vector<int>& outDirt
     for (const worldfile::WorldLayer& l : manifest) {
         // remember every non-packed layer (enabled or not) so GUI persistence
         // can never silently delete a temporarily disabled layer; dedupe by
-        // file (first entry wins) so corrupt manifests cannot multiply rows
+        // file (first entry wins) so corrupt manifests cannot multiply rows.
+        // "micro" layers are REMEMBERED (so persistWorldLayers keeps them) but
+        // never merged here: they live on their own fine lattice and are loaded
+        // into separate SVO worlds by App::loadMicroObjects.
         if (l.role == "packed")
             continue;
         bool known = false;
@@ -388,6 +391,8 @@ bool LayeredWorld::parseAndComputeDirty(bool& outFull, std::vector<int>& outDirt
             m_layersMeta.push_back(l);
         if (!l.enabled)
             continue;
+        if (l.role == "micro")
+            continue; // never enters the world record set
         // parse-cache: only re-read layers whose mtime+size changed
         const std::string path = dir + l.file;
         std::error_code ec;
@@ -412,6 +417,21 @@ bool LayeredWorld::parseAndComputeDirty(bool& outFull, std::vector<int>& outDirt
                 data.meta.gridN == expected.gridN;
             if (!metaMatch && !isPlaceable) {
                 spdlog::error("layered_world: layer '{}' meta mismatch", l.file);
+                ce.valid = false;
+                continue;
+            }
+            // A layer FINER than the world lattice is a high-detail micro
+            // object, not world geometry. Silently resampling it onto the 0.1 m
+            // lattice would throw away every feature it exists to carry and
+            // look like it worked, so refuse instead. Listing such a file as
+            // role "micro" is the supported path (it is loaded into its own
+            // SVO world); role "object" here is a manifest mistake.
+            if (isPlaceable && data.meta.voxelSize < expected.voxelSize) {
+                spdlog::error("layered_world: layer '{}' has voxelSize {} < world "
+                              "voxel {} - refusing to resample it onto the world "
+                              "lattice (list it as role \"micro\" to render it at "
+                              "its own resolution)",
+                              l.file, data.meta.voxelSize, expected.voxelSize);
                 ce.valid = false;
                 continue;
             }

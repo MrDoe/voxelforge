@@ -212,7 +212,8 @@ one costs a whole turn, because the bad call is rejected before any work runs.
 ## Run
 - `./build/voxelforge` — reference cam `1.0,2.0,1.5 → 5.3,1.0,11.3` (house.jpeg view), sun `34°/238°`.
 - Keys: `WASD/QE` move, `RMB+mouse` look, wheel speed, `Ctrl+LMB` pick anchor,
-  `F` toggles splats/SVO renderer, `N` toggles TAA, `[`/`]` shrink/grow splat disks. The window close button quits; `Esc` is reserved and does not exit.
+  `F` toggles splats/SVO renderer, `N` toggles TAA (off by default; headless
+  never ran it), `[`/`]` shrink/grow splat disks. The window close button quits; `Esc` is reserved and does not exit.
   `B` toggles texture detail normals (render-flag bit 7, default on), `G`/`H` toggle SSR/SSAO,
   `J` volumetric fog (opt-in, see below). Enclosed-space sky occlusion
   (render-flag bit 8) has no key — it is on by default and `VF_RENDER_FLAGS=255`
@@ -237,6 +238,12 @@ one costs a whole turn, because the bad call is rejected before any work runs.
   `+`. Do NOT use `io.InputQueueCharacters` for this: ImGui fills it from its
   event queue during `NewFrame()`, which runs in the *render* step — after
   `handleHotkeys` — so it is always empty there.
+- **A focused text field owns the keyboard**: while any ImGui text box has the
+  cursor (chat composer, World layer filter, Mesh path/anchor/fit, Render sun
+  time), `WASD/QE`, the RMB look, `Ctrl+LMB`, every render-flag/tool/sidebar
+  hotkey and the brush stamp are inert; the click that dismisses the field does
+  not carve with it. Sliders (`DragFloat`/`DragInt`) are exempt. See
+  `.opencode/wiki/concepts/textbox-input-gate.md`.
   **`W/A/S/D/Q/E` always move the camera, in every edit-tool state.** While
   armed, A/D/S are therefore dual-purpose: the mode is picked on the *edge*
   (one action per press) while flying is level-triggered (continuous while
@@ -315,7 +322,8 @@ one costs a whole turn, because the bad call is rejected before any work runs.
   window, position, or visibility state of its own. `m_editActive` is
   tool-armed state, *not* a window flag: it gates LMB stamping in the frame
   loop, `Tab` also switches the rail to Edit, and an accent bar marks the armed
-  rail button. A staged rotation/move is announced in the footer from every
+  rail button (the same gate: while a text field owns the keyboard
+  `m_editActive` never changes). A staged rotation/move is announced in the footer from every
   section (it is a pending `world.json` write). Keep widget widths relative
   (`-1.0f`) or ≤ pane width; the default pane is ≈300 px wide (the full
   sidebar is 334 px at 960×540) and the user can drag it wider or narrower.
@@ -340,7 +348,20 @@ one costs a whole turn, because the bad call is rejected before any work runs.
   `VF_EDGE_SHRINK=0..1` tightens only opaque object parents with two
   non-opposite exposed lattice faces; normal disagreement never shrinks object
   coverage. `VF_EDGE_FILL=0` disables the derived small tangent-aligned crease
-  bridges (GUI: **Rendering → Interpolate crease splats**, default on). The
+  bridges (GUI: **Rendering → Interpolate crease splats**, default **off** —
+  turning them off is a coverage/complexity trade, not a free one: ~0.6
+  L2/code at the house view, ~1.2 % of pixels move by >12 while mean luma and
+  coverage stay flat, and 0.54 L2 / 1.14 % at a cabin-corner-post close-up —
+  those posts are 2–3 cells across, so the shrink opens a real hole and the
+  bridge is load-bearing). `VF_CORNER_FILL=0` disables the corner caps
+  (**Rendering → Fill corner splats**, default **off** — a genuine no-op on
+  the hamlet: ~557 caps among ~3.4 M surfels, ON-vs-OFF inside the rerun noise
+  floor, though the guard itself is live: a thin rod emits 8 caps). **Gate
+  caveat**: turning bridges off silently blinded
+  `check_object_undo_surgical`'s `after[1] > 200` bound (the app now emits 0
+  bridges, so the run split reads 11002+0 vs 11008+0 and that message can no
+  longer appear) — the undo-margin defect is untouched, only the failure *count*
+  fell from 5 to 4. Never read a shrink in failure count as a fix. The
   chunk layout is `[base | edge bridges]`: bridges stay in
   the always-on opaque range, add no draw call, and carry no extra shadow/AO
   march (GUI: **Sharp-edge fit**, default 0.35; changes trigger a world/surfel
@@ -579,6 +600,16 @@ one costs a whole turn, because the bad call is rejected before any work runs.
   centre's luma must return to the untouched value) and the cleared overlay
   file must be gone;
   asserts a visible but bounded pixel diff and sane edited-frame probes.
+  **Known red on the shipped hamlet**, unchanged in class since 2026-10-03 and
+  still red on 2026-10-09 after the crease-bridge default flip: 3×
+  `object_smooth` (`edit too small`, `object pick did not run the surface-axis
+  relaxation`, `object pick ran the terrain path`) + 1× `object undo`
+  (`run split 11002+0 does not match the add-only split 11008+0`). Note that the
+  old `object_undo` secondary — "`459` edge bridges for a one-voxel undo" —
+  **stopped firing** when `edgeFill` defaulted OFF: it compares the run's
+  `edges` term against a bound, and the app now emits 0, so the assertion is
+  structurally dead. The undo-margin defect itself is untouched; only the failure
+  *count* fell from 5 to 4. Never read a shrink in failure count as a fix.
 - `python3 tests/fog_check.py build/voxelforge` — the three canonical shots ×
   both backends with `VF_VOLFOG` off/on, asserting the mean shift stays within
   −1..+12 %, **no new pixels below luma 20** (the old fixed-16 m march darkened

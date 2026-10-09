@@ -177,6 +177,11 @@ int App::run(const Args& args)
     // VF_HUD_SHOT fills a field of it.
     FrameInputs fx;
     setupCameraAndShots();
+    // Seed the previous-frame camera before the first frame renders: the
+    // unseeded value is a camera at the world origin, which makes the first
+    // frame's reprojection (and, with TAA off, every motion-blur frame) read
+    // as full-frame motion on a still scene.
+    advancePrevCam();
     applyStartupEnvOverrides(fx);
 
     auto last = std::chrono::steady_clock::now();

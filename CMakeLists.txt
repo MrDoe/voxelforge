@@ -93,6 +93,7 @@ add_library(vf_core STATIC src/core/camera.cpp
                           src/voxel/irradiance_volume.cpp
                           src/voxel/live_editor.cpp
                           src/voxel/surfelize.cpp
+                          src/voxel/micro_field.cpp src/voxel/micro_svo.cpp
                           src/voxel/heightmap.cpp src/voxel/worldfile.cpp
                           src/voxel/picking.cpp src/voxel/editable_world.cpp
                           src/ai/ollama_client.cpp)
@@ -123,6 +124,12 @@ add_executable(vf_mesh2vox tools/mesh_to_voxel.cpp)
 target_include_directories(vf_mesh2vox PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
 target_link_libraries(vf_mesh2vox PRIVATE vf_core)
 
+# High-detail micro-voxel object -> a SEPARATE SVO world (own fine lattice).
+# Explicit tool: never wired into the default build or the world bake target.
+add_executable(vf_microvox tools/micro_voxel.cpp)
+target_include_directories(vf_microvox PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
+target_link_libraries(vf_microvox PRIVATE vf_core)
+
 # ---- MCP server -----------------------------------------------------------------
 add_executable(vf_mcp src/ai/mcp_server.cpp)
 target_include_directories(vf_mcp PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
@@ -151,6 +158,7 @@ add_library(vf_rhi STATIC src/rhi/context.cpp src/rhi/resources.cpp src/rhi/swap
 target_link_libraries(vf_rhi PUBLIC vf_platform vf_vma spdlog::spdlog)
 
 add_library(vf_render STATIC src/render/svo_pass.cpp src/render/taa_pass.cpp src/render/post_pass.cpp src/render/splat_pass.cpp
+    src/render/micro_svo_pass.cpp
     src/render/ssr_pass.cpp src/render/ssao_pass.cpp src/render/volumetric_fog_pass.cpp
     src/render/motion_blur_pass.cpp src/render/dof_pass.cpp src/render/environment_pass.cpp
     src/render/texture_atlas.cpp)
@@ -170,6 +178,7 @@ set(VF_SHADER_SRCS ${CMAKE_CURRENT_SOURCE_DIR}/shaders/svo_raymarch.comp
     ${CMAKE_CURRENT_SOURCE_DIR}/shaders/taa_resolve.comp
     ${CMAKE_CURRENT_SOURCE_DIR}/shaders/splat.vert
     ${CMAKE_CURRENT_SOURCE_DIR}/shaders/splat.frag
+    ${CMAKE_CURRENT_SOURCE_DIR}/shaders/micro_overlay.comp
     ${CMAKE_CURRENT_SOURCE_DIR}/shaders/splat_cull.comp
     ${CMAKE_CURRENT_SOURCE_DIR}/shaders/splat_hiz.comp
     ${CMAKE_CURRENT_SOURCE_DIR}/shaders/splat_tile_bin.comp
@@ -207,6 +216,7 @@ add_executable(voxelforge
     src/app/world/world_textures.cpp
     src/app/world/store_overlay.cpp
     src/app/world/surfel_stream.cpp
+    src/app/world/micro_objects.cpp
     src/app/textures/texture_bindings.cpp
     src/app/edit/live_edit.cpp
     src/app/edit/transform.cpp

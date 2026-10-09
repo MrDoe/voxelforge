@@ -25,6 +25,29 @@ A qualifying hard-edge parent becomes isotropic and its diameter is reduced by
 `edgeShrink`. Hardened parents do not use the normal-field anisotropy stretch;
 the derived bridge carries that elongation.
 
+### Bridges only where the parent was actually shrunk (2026-10-09)
+
+A bridge's only job is to fill the hole that reduction opened, so it must not
+be emitted where no hole exists. The emission gates therefore key off the
+**same predicate as the shrink**, not off exposed faces alone:
+
+- bake (`buildSurfels`): records a per-index `tightened[]` flag from the
+  `hardEdge` decision and skips bridges unless it is set;
+- live/store (`appendCandidateEdgeBridges`): skips unless
+  `cd.thinTall <= 0.0f`, which is that path's form of the same test.
+
+Before this gate, every object cell with two non-opposite exposed faces
+bridged — including cells whose parent was *never* reduced (thin footprints,
+smooth curvature, foliage). Those parents already covered the crease, so the
+bridge was a redundant disk whose 45° crease normal shades darker than the
+face it lands on. On a thin beam the result was a vertical **"diamond chain"**
+of dark disks.
+
+Measured: hamlet bridges 63,537 → 44,610 records; the artifact view's
+fill on-vs-off changed pixels 20,481 → 1; cabin 2–3-cell corner posts (real
+hard edges) still bridge and still carry ~0.54 L² / 1.14 % px >12 — that part
+is load-bearing sealing, not an artifact.
+
 ## Crease interpolation
 
 Each exposed face pair `f0/f1` emits a small bridge:
@@ -91,13 +114,14 @@ but modest silhouette effect.
 ## Controls
 
 - **Rendering → Sharp-edge fit**: baked strength, `0.00–0.80`, default `0.35`.
-- **Rendering → Interpolate crease splats**: bridge emission, default on.
+- **Rendering → Interpolate crease splats**: bridge emission, default **off**.
 - **Rendering → Crease splat size**: `edgeBridgeSize`, `0.00–2.00`, default `1.00`.
-- **Rendering → Fill corner splats**: `cornerFill`, default on.
+- **Rendering → Fill corner splats**: `cornerFill`, default **off**.
 - `VF_EDGE_SHRINK=0..1`: launch strength override.
-- `VF_EDGE_FILL=0`: disable bridges while retaining hard-edge fit.
+- `VF_EDGE_FILL=1`: turn crease bridges **on** (they are off by default);
+  works independently of the GUI checkbox.
 - `VF_EDGE_SIZE=<float>`: bridge/corner size override.
-- `VF_CORNER_FILL=0`: disable corner caps.
+- `VF_CORNER_FILL=1`: turn corner caps **on** (off by default).
 - Either GUI change requests a world/surfel reload.
 
 ## Verification and cost
@@ -112,12 +136,55 @@ their own corners: 1 bridge → 9 splats) while a convex `cubeField` stays at 0
 caps. `tests/test_store.cpp` pins live segment refresh and placement outside
 the bridge range.
 
+Two fixtures pin the tightened-only bridge gate: a thick 2×2×2 block emits
+8 bridges (still a genuine hard edge), while a thin 2×2 × 8 post emits **0**
+with thin classification on — and, run again with `anisotropy=false`, emits 32
+again, which proves the suppression is the thin rule and not an object-class
+gate.
+
 On the current hamlet (`VF_EDGE_SHRINK=0.35`, fill on), the bake emitted
 20,252 bridges for 20,252 edge parents. The opaque/LOD stream rose from
 3,366,598 to 3,427,354 records (+1.8% including both object LOD copies), and
 the house-view pre-cull workload rose from 601,162 to 614,178 quads (+2.2%).
 Bake time was unchanged within run-to-run noise (about 2.34–2.46 s). The full
 screenshot A/B changed 2.0% of pixels by more than 3/255 versus shrink-only.
+
+## Why both fills are off by default (2026-10-09)
+
+A 2×2 A/B at 960×540 on the hero/house/water views (`VF_EDGE_FILL` ×
+`VF_CORNER_FILL`), with a same-settings rerun as the noise floor:
+
+| comparison | hero | house | water | noise floor (house) |
+|---|---|---|---|---|
+| `cornerFill` off only | 0.0076 | 0.0076 | 0.024 | 0.0088 |
+| `edgeFill` off only | 0.128 | 0.575 | 0.059 | 0.0088 |
+
+Mean L2 difference per pixel, in 8-bit codes, against the full-ON frame.
+Corner caps are a **genuine no-op on the shipped hamlet** — the coverage
+guard leaves ~557 caps among ~3.4 M surfels, and ON-vs-OFF stays inside the
+same-binary rerun noise floor (max 6 codes vs 5 for two identical runs). The
+guard is live, not dead code: a genuine thin rod emits 8 caps (unit-test
+pinned, [[concepts/surfel-holes]]), so the hamlet reading is a property of its
+content.
+
+Edge bridges are **not** free, and this is the load-bearing distinction:
+turning them off moves 1.24 % of house pixels by >12 codes (mean 0.575 L2,
+~60× the noise floor), and the same magnitude at a cabin-corner-post
+close-up (0.54 L2 / 1.14 % px >12 / max 132). Those posts are 2–3 cells
+across, so the hard-edge shrink *opens a real hole* and the bridge seals it.
+Interior thin posts (one-cell cross-section) read 0 px instead — their
+parents keep their full footprint and are not shrunk, so bridging them was
+pure double coverage. That split is exactly what the tightened-only bridge
+gate added the same day produces: bridges seal genuine hard edges, and stop
+re-covering thin shells.
+
+All bridge figures above come from measurements taken on the tightened-only
+bridge gate, i.e. the post-fix set, not the pre-fix one. The record-count comparison (44,610 hamlet-derived, down from 63,537 pre-gate) is a peer
+session's number, not part of this A/B: `./build/voxelforge --selftest --width
+320 --height 180` with `VF_NO_OVERLAY=1`, no `--sun`, no `VF_ANISO` override
+(so anisotropy on, lodRings off). It is **not** comparable to a run with
+lodRings on — this page's pixel deltas were all taken under the app's
+default params.
 
 See also [[concepts/detail-pipeline]], [[concepts/surfel-holes]], and
 [[entities/live-edit-brush]].

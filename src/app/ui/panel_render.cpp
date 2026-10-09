@@ -231,6 +231,12 @@ void App::drawPanelRender()
                               "smooth curvature keeps full coverage. Rebuilds.");
         if (ImGui::Checkbox("Interpolate crease splats", &m_edgeFill))
             requestWorldReload();
+        if (ImGui::IsItemHovered())
+            ImGui::SetTooltip("Bridge the crease between a shrunk parent and its "
+                              "neighbour. Off by default: with edgeShrink 0.25 "
+                              "turning this off moves ~1.2% of pixels by >12 at "
+                              "the house view (a coverage/complexity trade, not "
+                              "a free off switch). Rebuilds.");
         ImGui::SetNextItemWidth(-1.0f);
         ImGui::SliderFloat("Crease splat size##edgeSize", &m_edgeBridgeSize,
                            0.0f, 2.0f, "%.2f");
@@ -243,7 +249,9 @@ void App::drawPanelRender()
         if (ImGui::IsItemHovered())
             ImGui::SetTooltip("Cap corner vertices the parent disk does not "
                               "reach (thin shells, concave corners); covered "
-                              "convex corners are skipped. Rebuilds.");
+                              "convex corners are skipped. Off by default - "
+                              "measured no visible change on the hamlet "
+                              "(stays inside the rerun noise floor). Rebuilds.");
     }
     ImGui::SetNextItemWidth(-1.0f);
     ImGui::SliderFloat("Exposure", &m_exposure, 0.1f, 4.0f, "%.2f");

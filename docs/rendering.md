@@ -153,9 +153,24 @@ in `App::rebuildSurfels`, ~0.6 s for ~1.3 M surfels):
   bridges stay in the always-on opaque range and add no draw
   call. The app exposes
   **Rendering → Sharp-edge fit** (`0.00–0.80`, default `0.35`) and **Interpolate
-  crease splats** (default on); either change queues `requestWorldReload()` so
+  crease splats** (default **off**); either change queues `requestWorldReload()` so
   full-bake and live-store paths rebuild together. `VF_EDGE_SHRINK` and
-  `VF_EDGE_FILL=0/1` are launch overrides.
+  `VF_EDGE_FILL=0/1` are launch overrides. Turning bridges off is a
+  coverage-vs-complexity call, not a free one: with the default 0.35 shrink it
+  moves ~0.6 L2/code at the house view (~1.2 % of pixels by >12) while mean
+  luma and silhouette coverage stay flat, and the same magnitude shows up at a
+  thin-beam close-up on the cabin corner posts (0.54 L2, 1.14 % of pixels by
+  >12, max 132) — those posts are 2–3 cells across, so the shrink opens a
+  real hole there and the bridge is load-bearing. That the number does not go
+  to zero is the point: bridges still seal genuine hard edges, they only stop
+  double-covering thin shells. `SurfelParams::cornerFill`
+  (**Rendering → Fill corner splats**, default **off**) is a genuine no-op on
+  healthy content — the coverage guard leaves ~557 caps among ~3.4 M surfels,
+  and ON-vs-OFF stays inside the same-binary rerun noise floor (house mean
+  0.0076 L2/code, max 6, against 0.0088 / 5 for two identical runs; the
+  thin-beam close-up reads 0.0089 against 0.0091). The guard is live, not
+  dead code — a genuine thin rod emits 8 caps, unit-test pinned — so the
+  hamlet's clean bill is a property of its content.
 - **Baked per-surfel**: binary sun shadow (exact cell-DDA near field +
   sphere-trace far field over `VoxelField::sample`, same verdict as SVO
   `softShadow`, then blurred over face neighbours for a 1-cell penumbra
@@ -361,7 +376,16 @@ all of that; keep J off by default until the gate is green on your scene.
 4. Motion blur (`motion_blur.comp`, K): velocity from reprojecting `uGPos`
    with the previous frame's camera (`m_prevCam`, same source TAA uses);
    a still camera is a clean no-op. Extra push constants carry the prev
-   camera (`MotionBlurPass::PC`, 208 B total).
+   camera (`MotionBlurPass::PC`, 208 B total). **`m_prevCam` is CPU state,
+   not a shader input, and it must be seeded and advanced on BOTH frame
+   paths** - it is written by `App::advancePrevCam()` at startup (after
+   `setupCameraAndShots()`) and at the end of every frame, in `record_interactive`
+   and `record_headless` alike. Leaving it at its default (a camera at the
+   world origin looking down +Z) makes every pixel reproject hundreds of
+   pixels away, which reads as a full-frame smear on a completely still scene
+   - that is what "motion blur is broken" was, and it was only ever visible
+   headlessly (or interactively with TAA off, which is now the default). See
+   `.opencode/wiki/concepts/motion-blur-prevcam.md`.
 5. DoF (`depth_of_field.comp`, L): CoC from G-buffer distance around
    `m_dofFocusDist` (10 m) / `m_dofFocalLength` (50); sky stays sharp.
    Focus params ride trailing push constants (`DepthOfFieldPass::PC`).

@@ -84,6 +84,11 @@ bool App::createOffscreen(uint32_t w, uint32_t h)
         !m_ssaoAo.img)
         return false;
     m_svoPass.updateDescriptors(m_hdr, m_gpos, m_gnorm);
+    // The micro overlay composites into the SAME three images, so it must be
+    // re-bound whenever they are recreated - otherwise its descriptor set keeps
+    // views to freed images and every write lands nowhere. This is why the
+    // magenta-diagnostic dispatch produced no pixels at all.
+    m_microSvoPass.updateDescriptors(m_hdr, m_gpos, m_gnorm);
     m_splatPass.updateDescriptors(m_hdr.view, m_gpos.view, m_gnorm.view,
                                   m_heightImg.view, m_objVolImg.view);
     m_postPass.updateDescriptors(m_hdr.view, m_gpos.view, m_offscreen.view);
@@ -176,6 +181,7 @@ void App::uploadLightSources()
         std::clamp(m_lightK, 1, vf::voxel::worldfile::kLightKMax);
     m_svoPass.setLights(ubo);
     m_splatPass.setLights(ubo);
+    m_microSvoPass.setLights(ubo);
     if (n > 0)
         spdlog::info("lighting: {} authored (world.json), {} derived from emissive "
                      "materials, {}/{} budget used, K={}",
@@ -261,6 +267,19 @@ bool App::initVulkan()
         return false;
     if (!m_splatPass.init(m_ctx))
         return false;
+    // Micro-voxel overlay: its OWN pass + buffers, holding separate fine-lattice
+    // SVO worlds. Initialised here so its descriptor set exists before any
+    // setter writes to it (the same ordering trap that makes a silently unbound
+    // lamp read as "the manifest entry does nothing").
+    if (!m_microSvoPass.init(m_ctx))
+        return false;
+    m_microSvoPass.updateDescriptors(m_hdr, m_gpos, m_gnorm);
+    m_microSvoPass.setHeightmapView(m_heightImg.view);
+    m_microSvoPass.setObjVolumeView(m_objVolImg.view);
+    // Load the separate micro SVO worlds now that the pass and its shared
+    // resources exist. Independent of the world bake above: these objects are
+    // never part of the world record set.
+    loadMicroObjects();
 
     // photorealism passes
     if (!m_ssrPass.init(m_ctx)) return false;
@@ -279,6 +298,8 @@ bool App::initVulkan()
                             m_texAtlas.tableUbo());
     m_svoPass.setTexAtlas(m_texAtlas.view(), m_texAtlas.sampler(),
                           m_texAtlas.tableUbo());
+    m_microSvoPass.setTexAtlas(m_texAtlas.view(), m_texAtlas.sampler(),
+                               m_texAtlas.tableUbo());
     // seed the GUI picker from the manifest + whatever is on disk
     vf::voxel::worldfile::loadTextureManifest(m_manifestPath, m_texBindings);
     rescanTextureFiles();

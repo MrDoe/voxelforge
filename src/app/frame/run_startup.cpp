@@ -307,6 +307,29 @@ void App::setupCameraAndShots()
     }
 }
 
+// Previous-frame camera basis, published at the END of each recorded frame
+// (both paths) and seeded here so the FIRST frame already has a valid value.
+//
+// The unseeded default is pos = origin, right = +X, up = +Y, fwd = +Z,
+// tanHalfFov = 1.0: a camera sitting at the world origin looking down +Z.
+// Any reprojection against it (TAA history, motion-blur velocity) sees every
+// pixel as having moved a long way, which is precisely the "motion blur smears
+// a completely still frame" symptom.
+void App::advancePrevCam()
+{
+    m_prevCam.pos = m_camera.pos;
+    m_prevCam.right = m_camera.right();
+    m_prevCam.up = m_camera.up();
+    m_prevCam.fwd = m_camera.forward();
+    m_prevCam.tanHalfFov = tanHalfFov60();
+    // The swapchain aspect is the projection the G-buffer was rendered with
+    // (both recorders build push.a from it), so a reprojection must use the
+    // same one - a stale or offscreen-derived aspect mis-scales horizontal
+    // velocity by the aspect ratio.
+    m_prevCam.aspect =
+        float(m_swapchain.extent().width) / float(m_swapchain.extent().height);
+}
+
 // The render-flag / photorealism / SSAO / TAA environment overrides, read once
 // at startup rather than per frame: these are CI knobs, and the sidebar owns
 // the interactive equivalents.

@@ -37,6 +37,10 @@ bool App::uploadTerrainTexture()
                             VK_ACCESS_2_SHADER_STORAGE_READ_BIT);
     });
     m_svoPass.setHeightmapView(m_heightImg.view);
+    // The micro overlay includes the same shared_model and needs the same
+    // terrain texture. It only STORES the view here; the descriptor is written
+    // by updateDescriptors once its own set exists.
+    m_microSvoPass.setHeightmapView(m_heightImg.view);
     return true;
 }
 
@@ -67,6 +71,7 @@ bool App::uploadObjVolTexture()
                             VK_ACCESS_2_SHADER_STORAGE_READ_BIT);
     });
     m_svoPass.setObjVolumeView(m_objVolImg.view);
+    m_microSvoPass.setObjVolumeView(m_objVolImg.view);
     return true;
 }
 
@@ -121,6 +126,7 @@ void App::uploadIrradianceVolume(const vf::voxel::worldfile::LightUBO& lights)
         // guaranteed populated. Reloads re-upload through the same view.
         m_splatPass.setIrrVolView(m_irrImg.view);
         m_svoPass.setIrrVolView(m_irrImg.view);
+        m_microSvoPass.setIrrVolView(m_irrImg.view);
     }
 
     vf::voxel::IrradianceBakeStats st;
