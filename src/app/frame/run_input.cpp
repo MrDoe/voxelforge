@@ -24,32 +24,85 @@ namespace vf {
 namespace app {
 
 // Camera first: picking, gizmo hit-testing and rendering must all use the same
-// pose, otherwise the visible ring trails a moving camera by one frame. The
-// chat pane blocks the camera and swallows the mouse delta to avoid a jump.
+// pose, otherwise the visible ring trails a moving camera by one frame.
+//
+// The text-field gate is a MUST-NOT-MOVE, not a "don't touch the keyboard":
+// WASD/QE strafe, the RMB look drag and the whole flight path live inside
+// Camera::update, so skipping the call freezes the view while the user types a
+// layer name or a mesh path. The mouse delta is drained so the first RMB-drag
+// after leaving the field does not yank the view by however far the cursor
+// travelled while the camera was frozen. This replaces the chat-only gate,
+// which left every other InputText (mesh path, layer filter, sun time) flying
+// the camera while the user typed into them.
 bool App::updateCamera(float dt)
 {
-    bool chatCaptures = m_chatInitialized && m_chatUi.wantsCaptureKeyboard();
+    // One flag, one reading. textFieldOwnsKeyboard() covers the chat box as
+    // well as every other field, so there is no second condition to keep in
+    // sync (the chat's own m_inputFocused flag also stays stale true if the AI
+    // section is left, which would freeze the camera for the rest of the run).
+    const bool textCaptures = textFieldOwnsKeyboard();
+    // One-shot per transition. "A text field owns the keyboard" is otherwise an
+    // invisible state, and a gate that silently stops firing - or never
+    // releases - is precisely the failure this line exists to expose. It is a
+    // member of the frame, not of the flag, so it prints twice at most per
+    // focus/unfocus cycle however long the user types.
+    {
+        static bool wasFocused = false;
+        if (textCaptures != wasFocused) {
+            wasFocused = textCaptures;
+            spdlog::info("keyboard -> {}",
+                         textCaptures ? "text field (input frozen)" : "app");
+        }
+    }
     // A/D/S are also brush-mode shortcuts while the brush is armed, but they
     // remain camera keys: movement is never taken away. The two uses do not
     // conflict because the mode keys are edge-triggered (one action per press)
     // while flying is level-triggered (continuous while held), so holding A to
     // strafe selects Add once and then just strafes.
-    if (chatCaptures) {
+    if (textCaptures) {
         // block camera move while typing; consume mouse delta to avoid jump
         double _dx, _dy;
         m_window.getMouseDelta(_dx, _dy);
     } else {
         m_camera.update(m_window, dt);
     }
-    return chatCaptures;
+    return textCaptures;
+}
+
+// While a text field owns the keyboard, everything below must be inert:
+// picking would spend a ray/trace on a frame the user is typing through, the
+// click that leaves the field must NOT also carve a voxel, rotate an object or
+// drag a trackball ring, and a camera that keeps turning would fight the text
+// caret the user is trying to place. Only the button latches are kept current,
+// so the frame the user leaves the field gets a clean edge rather than a
+// phantom one. The brush preview deliberately survives: it follows
+// m_latchedHover, which this path leaves alone, so the tint stays on screen
+// while a field is typed into (the same reason resizing the brush from the
+// sidebar does not blink it out).
+void App::drainInputWhileTextFocused()
+{
+    GLFWwindow* hw = m_window.handle();
+    const bool lmb =
+        glfwGetMouseButton(hw, GLFW_MOUSE_BUTTON_LEFT) == GLFW_PRESS;
+    m_lmbWasDown = lmb;
+    m_ctrlWasDown = glfwGetKey(hw, GLFW_KEY_LEFT_CONTROL) == GLFW_PRESS ||
+                    glfwGetKey(hw, GLFW_KEY_RIGHT_CONTROL) == GLFW_PRESS;
+    m_hoverHit.hit = false;
 }
 
 // Picking, the brush stamp, and the two gizmo drags. The whole block is one
 // scope in the original frame body and the inner scopes interlock (a ring hit
 // is tested before ImGui capture, and the sidebar grip yields to both), so it
 // is moved as a unit rather than split further.
-void App::processInput(bool chatCaptures, bool rotateLiveTest)
+void App::processInput(bool textCaptures, bool rotateLiveTest)
 {
+    // A text field owns the keyboard. Drain the buttons, touch nothing else:
+    // the latched preview keeps the tint alive, and the click that is about to
+    // leave the field is spent on the field, not on the world behind it.
+    if (textCaptures) {
+        drainInputWhileTextFocused();
+        return;
+    }
     const float tanHalfFov = tanHalfFov60();
     // Voxel picking: Ctrl+LMB
     {

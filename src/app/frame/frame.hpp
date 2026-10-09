@@ -1,5 +1,33 @@
 #pragma once
 
+// One thing the frame loop must never forget: while a text field owns the
+// keyboard, NOTHING elsewhere in the loop may act on the keyboard or move the
+// view. That gate lives here so the input slices share one reading of one flag.
+//
+// A text field "owns the keyboard" when an ImGui InputText or
+// InputTextMultiline is active: the chat composer, the World section's layer
+// filter, the Mesh section's path / layer name / anchor / fit / scale / yaw
+// fields, the Render section's sun time field. io.WantTextInput covers all of
+// them at once.
+//
+// GLFW is polled before the input slices and the UI is built (NewFrame) later
+// in the same frame, so this reads the PREVIOUS frame's verdict. The lag is one
+// frame and is bounded by design: on the frame the click focuses a field the
+// user is still holding a mouse button over the sidebar, not WASD, and the
+// latches catch up on the next frame. This is the same one-frame relationship
+// the chat input's own m_inputFocused flag always had - reading
+// WantTextInput is strictly better, because it clears the frame the widget
+// stops being submitted, so leaving the AI panel can never leave a remembered
+// "focused" flag true for good.
+//
+// This deliberately does NOT block anything while the pointer is over a plain
+// slider (DragFloat/DragInt): those are not text fields, they absorb the mouse,
+// and typed characters route to the active widget and stop there.
+inline bool textFieldOwnsKeyboard()
+{
+    return ImGui::GetIO().WantTextInput;
+}
+
 // The frame loop is cut into slices (run_input.cpp, run_brush_preview.cpp,
 // run_hotkeys.cpp, run_capture.cpp, ...), so a few values can no longer be
 // locals of one giant while body. They are gathered here rather than threaded
@@ -12,6 +40,7 @@
 #include <string>
 
 #include <glm/glm.hpp>
+#include <imgui.h>
 
 namespace vf {
 namespace app {
@@ -58,8 +87,12 @@ struct FrameInputs {
     // The animation clock does not advance and no key state is read, so a
     // hidden window can never phantom-trigger a toggle.
     bool headlessRun = false;
-    // The chat pane owns the keyboard, so the camera must not move.
-    bool chatCaptures = false;
+    // Any ImGui text field owns the keyboard (chat box, layer filter, mesh
+    // path, numeric Input*), so the camera must not move, no global hotkey may
+    // fire, and the click that only means "leave the field" must not stamp or
+    // pick. Set by updateCamera, the single place that reads
+    // textFieldOwnsKeyboard().
+    bool textCaptures = false;
     // "frames:path" - dump the swapchain (HUD included) after N presented
     // frames. A headless run never reaches it (it renders offscreen).
     uint64_t hudShotFrame = 0;

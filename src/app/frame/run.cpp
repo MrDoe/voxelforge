@@ -210,11 +210,16 @@ int App::run(const Args& args)
         // that seeds it.
         const char* testRotateLive = getenv("VF_TEST_ROTATE_LIVE");
         const bool rotateLiveTest = testRotateLive && *testRotateLive;
-        fx.chatCaptures = updateCamera(dt);
-        processInput(fx.chatCaptures, rotateLiveTest);
+        // One flag, three consumers: updateCamera READS it (and freezes the
+        // view), processInput and handleHotkeys are gated by it. All three must
+        // see the same value for the same frame, so it travels in fx instead
+        // of each slice re-reading io.WantTextInput while the UI is rebuilt
+        // in between.
+        fx.textCaptures = updateCamera(dt);
+        processInput(fx.textCaptures, rotateLiveTest);
         runPostInputTestHooks(testRotateLive);
         updateBrushPreview();
-        handleHotkeys(fx.chatCaptures, fx.headlessRun);
+        handleHotkeys(fx.textCaptures, fx.headlessRun);
 
         FrameSync& fr = waitFrameSlot();
         const int rc = fx.headlessRun ? recordHeadlessFrame(fr)

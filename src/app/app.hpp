@@ -225,19 +225,26 @@ private:
     void pollWorldAndTextures(float dt);
     // Claim this frame's slot: fence wait + GPU timestamp harvest.
     FrameSync& waitFrameSlot();
-    // Camera update. Returns true when the chat pane owns the keyboard.
+    // Camera update. Returns true when a text field owns the keyboard
+    // (textFieldOwnsKeyboard), which freezes the whole view - see the rule in
+    // frame/frame.hpp.
     bool updateCamera(float dt);
+    // Drain the button latches while a text field owns the keyboard, so no
+    // picking/stamp/drag runs and the click that leaves the field is not
+    // spent on the world behind it.
+    void drainInputWhileTextFocused();
     // Picking, the brush stamp, and the rotate/move gizmo drags.
     // `rotateLiveTest` suppresses the release/ring paths for the synthetic
     // VF_TEST_ROTATE_LIVE preview, which must not accumulate cursor deltas.
-    void processInput(bool chatCaptures, bool rotateLiveTest);
+    void processInput(bool textCaptures, bool rotateLiveTest);
     // The in-loop VF_TEST_* hooks, before and after input.
     void runPreInputTestHooks();
     void runPostInputTestHooks(const char* testRotateLive);
     // Tint the splats the next stamp would affect, then feed the highlight.
     void updateBrushPreview();
-    // The keyboard: render flags, tool shortcuts, sidebar chrome.
-    void handleHotkeys(bool chatCaptures, bool headlessRun);
+    // The keyboard: render flags, tool shortcuts, sidebar chrome. Suppressed
+    // entirely while a text field owns the keyboard.
+    void handleHotkeys(bool textCaptures, bool headlessRun);
     // The two recording paths. Both return kFrameDone to end the frame, or a
     // value >= 0 to end the run with that status (see frame/frame.hpp).
     int recordHeadlessFrame(FrameSync& fr);

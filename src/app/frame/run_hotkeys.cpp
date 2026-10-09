@@ -1,5 +1,25 @@
 // The keyboard: render-flag bits, the browser-style tool shortcuts, the edit
 // hotkeys, and the sidebar chrome (Tab collapse, Ctrl+1..6 section jumps).
+//
+// THE RULE: a text field owns the keyboard, so nothing here fires. That is
+// broader than "don't echo a character". While the user types a layer filter,
+// a mesh path or a sun time, every key below is a character or a chord the
+// field wants: WASD/QE, the bare 1..5/0/G/H/B/J/K/L render-flag toggles, T/F/N,
+// P, Exposure `+`/`-`, the brush size keys, Ctrl+1..6 section jumps, Ctrl+B
+// collapse, Ctrl+Z undo, and Tab - which is a REAL CHARACTER in an InputText.
+//
+// The gate is textFieldOwnsKeyboard() (see frame.hpp), read once per frame
+// through run.cpp rather than here: the same value must also freeze the camera
+// and the picking/stamp path in the same frame, and three separate readings of
+// io.WantTextInput could disagree. Note the flag lags the focus event by one
+// frame (the UI is built after this runs), which is exactly why the key
+// latches below are polled unconditionally: skipping a key leaves its latch
+// stale and it phantom-fires the frame focus leaves.
+//
+// Chat used to be the only gate here, and it did not even cover its own menu:
+// clicking Chat with the composer focused left the camera frozen but every
+// render-flag key live, so typing "hat" in the composer toggled SSR and set
+// exposure to 1.10.
 #include "app/app.hpp"
 
 #include "app/frame/frame.hpp"
@@ -46,21 +66,58 @@ bool keyShowsChar(int key, char want)
     return nm != nullptr && nm[0] == want && nm[1] == '\0';
 }
 
+// The per-key edge latch table, shared by BOTH gates: the warm-up while a text
+// field owns the keyboard must write the SAME table the action loop reads, or
+// the first ungated frame re-fires whatever key was held. A lambda-local static
+// in each branch would be two separate tables, which is exactly the bug.
+constexpr int kKeyLatchCount = 1024;
+std::vector<uint8_t> g_keyLatch(kKeyLatchCount, 0);
+
+// Edge-triggered poll of a physical GLFW key code. The latch ALWAYS advances,
+// so this is safe to call while the caller is going to ignore the result.
+bool keyEdge(int k, GLFWwindow* w)
+{
+    const bool now = glfwGetKey(w, k) == GLFW_PRESS;
+    const bool e = now && !g_keyLatch[k];
+    g_keyLatch[k] = now ? 1 : 0;
+    return e;
+}
+
 } // namespace
 
-void App::handleHotkeys(bool chatCaptures, bool headlessRun)
+void App::handleHotkeys(bool textCaptures, bool headlessRun)
 {
+    // ---- latch discipline -------------------------------------------------
+    // While a text field owns the keyboard, NOTHING below runs - but the
+    // per-key latches must still be polled, every key, every frame.
+    //
+    // Why: the frame the gate drops is not the frame the user stopped typing.
+    // ImGui consumes the keypress that MOVES focus off the field (Tab is the
+    // common one) inside its own NewFrame, which runs after this function; that
+    // clears io.WantTextInput for the NEXT frame while glfwGetKey still reports
+    // the key held. A frame that skipped the latch would then see `now ==
+    // true` against a stale `prev == false` and fire that key once - measured
+    // live: typing in the layer filter and pressing Tab armed the edit tool in
+    // the same millisecond the field lost focus.
+    //
+    // Scanning every key (rather than a hand-written list) means a new hotkey
+    // cannot reintroduce the bug by being forgotten here. The range is the real
+    // GLFW key range: glfwGetKey on an out-of-range code invokes the GLFW error
+    // callback, and the first version scanned 0..1023 and logged 1020 "Invalid
+    // key" errors per typed frame.
+    if (textCaptures) {
+        GLFWwindow* w0 = m_window.handle();
+        for (int k = GLFW_KEY_SPACE; k <= GLFW_KEY_LAST; ++k)
+            (void)keyEdge(k, w0);
+        return;
+    }
     // ---- render-option hotkeys (edge-triggered, interactive only:
     // headless runs must stay deterministic - key state on a hidden
     // window can phantom-trigger toggles) ----
-    if (!chatCaptures && !headlessRun) {
-        auto edge = [](int k, GLFWwindow* w) {
-            static std::vector<uint8_t> prev(1024, 0);
-            bool now = glfwGetKey(w, k) == GLFW_PRESS;
-            bool e = now && !prev[k];
-            prev[k] = now ? 1 : 0;
-            return e;
-        };
+    if (!headlessRun) {
+        // Every edge below shares g_keyLatch via keyEdge, so the warm-up above
+        // (and the headless skip) keep the table honest.
+        auto edge = [](int k, GLFWwindow* w) { return keyEdge(k, w); };
         GLFWwindow* hw = m_window.handle();
         bool shift = glfwGetKey(hw, GLFW_KEY_LEFT_SHIFT) == GLFW_PRESS ||
                      glfwGetKey(hw, GLFW_KEY_RIGHT_SHIFT) == GLFW_PRESS;
@@ -141,10 +198,12 @@ void App::handleHotkeys(bool chatCaptures, bool headlessRun)
                 if (mk.pressed)
                     chooseEditMode(mk.mode);
         }
-        // Sidebar chrome. Both are suppressed while a text field owns the
-        // keyboard (the chat input is a multiline InputText, and Tab is a
-        // normal character there).
-        if (!ImGui::GetIO().WantTextInput) {
+        // Sidebar chrome. No extra text-field guard is needed here any more:
+        // the function returns before this point while one is focused, so these
+        // chords are already suppressed - and Tab in particular is a real
+        // character in the chat's multiline InputText, which is why the
+        // suppression has to be whole-function rather than per-chord.
+        {
             // Tab is the ONLY View/Edit switch, both directions. The mode
             // keys do not arm the brush and C does not disarm (see above):
             // one key owns the mode, so a press can never switch it by
