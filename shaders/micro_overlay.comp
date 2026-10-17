@@ -227,6 +227,14 @@ float microMapWorld(int w, vec3 p, float voxel, int gridN, uint gridBase)
     return 6.0;
 }
 
+float microVoxelSize()
+{
+    float v = 1e30;
+    for (int w = 0; w < wt.uWorldInfo.x && w < MAX_MICRO_WORLDS; ++w)
+        v = min(v, wt.uWorlds[w].geo.x);
+    return v > 1e29 ? 0.005 : v;
+}
+
 // Union of every micro world. Because each world contributes a DISTANCE, the
 // union is simply the minimum - no nearest-world ordering or bookkeeping is
 // needed, and a point in the world's air but inside the vase picks the vase up
@@ -240,7 +248,7 @@ float microMap(vec3 p)
         d = min(d, microMapWorld(w, p, voxel, int(wt.uWorlds[w].geo.y),
                                  wt.uWorlds[w].base.x));
     }
-    return max(d, 1e-4);
+    return d;
 }
 
 // Material + surface response of the micro cell containing p. Micro cells all
@@ -285,18 +293,31 @@ bool microSurface(vec3 p, out vec3 albedo, out vec2 rr, out uint matId)
                 vec3 g = clamp((p - mn) / cellSz - 0.5, vec3(0.0),
                                vec3(float(BRICK_N) - 1.001));
                 ivec3 i0 = ivec3(g);
-                // Clamp the cell to the AUTHORED grid. A micro chunk spans 16
-                // cells, so a small object's outermost chunks run past the grid
-                // and their bricks hold filler cells with no record behind them.
-                // Sampling one reads material 0 - grass - which paints a pale
-                // ceramic vase bright green.
-                ivec3 dim = ivec3(int(wt.uWorlds[w].base.z),
-                                  int(wt.uWorlds[w].geo.w),
-                                  int(wt.uWorlds[w].base.w));
-                i0 = clamp(i0, ivec3(0), max(dim - ivec3(1), ivec3(0)));
+                // The hit cell may be AIR (w0 == 0): the SDF's zero band is two
+                // voxels wide, so the trace stops one voxel OUTSIDE the surface,
+                // and fillMicroBrick packs air as w0 = 0 (black albedo, material
+                // 0 = grass). Reading it gives a black albedo + grass tint.
+                //
+                // Search the 3x3x3 box around the hit and take the first cell
+                // whose albedo is non-zero -- i.e. a real solid cell. The
+                // albedo is unambiguous where the SDF byte is not.
+                ivec3 best = ivec3(-1);
+                for (int dz = -1; dz <= 1 && best.x < 0; ++dz)
+                    for (int dy = -1; dy <= 1 && best.x < 0; ++dy)
+                        for (int dx = -1; dx <= 1 && best.x < 0; ++dx) {
+                            ivec3 c = clamp(i0 + ivec3(dx, dy, dz), ivec3(0),
+                                            ivec3(int(BRICK_N) - 1));
+                            uint v = (bs.brick + bi) * BRICK_WORDS +
+                                     (uint(c.z) * BRICK_N * BRICK_N +
+                                      uint(c.y) * BRICK_N + uint(c.x)) * 2;
+                            if ((uMBricks[v] & 0x00FFFFFFu) != 0u)
+                                best = c;
+                        }
+                if (best.x < 0)
+                    break; // nothing nearby is solid: not a micro hit
                 uint vi = (bs.brick + bi) * BRICK_WORDS +
-                          (uint(i0.z) * BRICK_N * BRICK_N + uint(i0.y) * BRICK_N +
-                           uint(i0.x)) * 2;
+                          (uint(best.z) * BRICK_N * BRICK_N + uint(best.y) * BRICK_N +
+                           uint(best.x)) * 2;
                 uint w0 = uMBricks[vi];
                 uint w1 = uMBricks[vi + 1];
                 albedo = vec3(float(w0 & 255u), float((w0 >> 8) & 255u),
@@ -374,19 +395,20 @@ float microVisibility(vec3 ro, vec3 rd, float maxDist)
     // because direct sun is multiplied by this term. March forward until the
     // field is positive before testing anything, and give up as unshadowed if
     // the ray cannot get out (deep inside the object there is nothing to cast).
+    const float vs = microVoxelSize();
     float t = 0.0;
-    for (int i = 0; i < 12; ++i) {
-        if (microMap(ro + rd * t) > 0.0)
-            break;
-        t += 0.0006;
-        if (t > 0.02)
-            return 1.0;
+    bool escaped = false;
+    for (int i = 0; i < 32; ++i) {
+        if (microMap(ro + rd * t) > 0.0) { escaped = true; break; }
+        t += 0.25 * vs;
     }
+    if (!escaped)
+        return 1.0;
     for (int i = 0; i < 96; ++i) {
         float d = microMap(ro + rd * t);
-        if (d < 0.0)
+        if (d < -0.5 * vs)
             return 0.0;
-        t += max(d * 0.85, 0.002);
+        t += max(d * 0.85, 0.25 * vs);
         if (t > maxDist)
             return 1.0;
     }
@@ -405,7 +427,8 @@ float lightVisibilitySvo(vec3 ro, vec3 rd, float maxDist)
 float skyVisibilitySvo(vec3 p, vec3 bent)
 {
     vec3 dir = normalize(mix(bent, vec3(0.0, 1.0, 0.0), 0.65));
-    return microVisibility(p + dir * 0.25, dir, 24.0) > 0.5 ? 1.0 : 0.05;
+    return microVisibility(p + dir * (3.0 * microVoxelSize()), dir,
+                           64.0 * microVoxelSize()) > 0.5 ? 1.0 : 0.05;
 }
 // applyFlora is already defined by common_base.glsl (it only dispatches to the
 // per-backend shadow march), so the micro backend inherits the flora overlay for
@@ -418,7 +441,7 @@ vec3 microNormal(vec3 p, float e)
                   microMap(p + vec3(0, e, 0)) - microMap(p - vec3(0, e, 0)),
                   microMap(p + vec3(0, 0, e)) - microMap(p - vec3(0, 0, e)));
     float gl = length(g);
-    if (gl < 1e-6)
+    if (gl < 1e-9)
         return vec3(0.0, 1.0, 0.0);
     return normalize(g);
 }
@@ -462,10 +485,12 @@ vec3 shadeMicro(vec3 p, vec3 rd)
     uint mId;
     if (!microSurface(p, alb, rr, mId))
         return vec3(0.0);
-    vec3 n = microNormal(p, 0.0015);
+    vec3 n = microNormal(p, 6.0 * microVoxelSize());
     alb = detailAlbedo(alb, p, n, mId);
     n = detailNormal(n, p, mId);
-    float sh = ((gRenderFlags & 2) != 0) ? softShadow(p + n * 0.004, kSunDir) : 1.0;
+    float sh = ((gRenderFlags & 2) != 0)
+                     ? softShadow(p + n * (2.0 * microVoxelSize()), kSunDir)
+                     : 1.0;
 
     float ao = 1.0;
     vec3 bent = n;
@@ -551,7 +576,7 @@ void main()
         return;
 
     imageStore(uOutHdr, pix, vec4(col, 1.0));
-    vec3 n = microNormal(p, 0.0015);
+    vec3 n = microNormal(p, 6.0 * microVoxelSize());
     imageStore(uOutGPos, pix, vec4(p, 2.0));
     imageStore(uOutGNorm, pix, vec4(n, 0.0));
 }
