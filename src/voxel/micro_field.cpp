@@ -74,9 +74,6 @@ struct BfsDist {
         dist.assign(n, INF);
         std::vector<uint32_t> queue;
         queue.reserve(n);
-        const int dx[6] = { 1, -1, 0, 0, 0, 0 };
-        const int dy[6] = { 0, 0, 1, -1, 0, 0 };
-        const int dz[6] = { 0, 0, 0, 0, 1, -1 };
         for (int z = 0; z < dim.z; ++z)
             for (int y = 0; y < dim.y; ++y)
                 for (int x = 0; x < dim.x; ++x) {
@@ -93,23 +90,36 @@ struct BfsDist {
         // only the seeds are ever expanded, every deeper cell stays INF. That
         // reads as "deep inside the object the distance clamps to the ceiling",
         // which is exactly how it showed up here.
+        //
+        // 26 NEIGHBOURS, not 6. A 6-neighbour walk measures the L1 (Manhattan)
+        // distance, which is LARGER than the Euclidean one - up to sqrt(3) in a
+        // diagonal direction. A sphere tracer steps by 0.85 * d, so an
+        // over-estimating field lets the ray jump clean through a thin
+        // diagonal wall. The 26-neighbour walk measures the Chebyshev
+        // distance, which is never larger than the Euclidean one, so the
+        // tracer's step is always conservative.
         for (size_t head = 0; head < queue.size(); ++head) {
             const uint32_t cur = queue[head];
             const int cx = int(cur % uint32_t(dim.x));
             const int cy = int((cur / uint32_t(dim.x)) % uint32_t(dim.y));
             const int cz = int(cur / (uint32_t(dim.x) * uint32_t(dim.y)));
-            for (int d = 0; d < 6; ++d) {
-                const int nx = cx + dx[d], ny = cy + dy[d], nz = cz + dz[d];
-                if (nx < 0 || ny < 0 || nz < 0 || nx >= dim.x || ny >= dim.y ||
-                    nz >= dim.z)
-                    continue;
-                const size_t ni = (size_t(nz) * size_t(dim.y) + size_t(ny)) *
-                                      size_t(dim.x) + size_t(nx);
-                if (dist[ni] == INF) {
-                    dist[ni] = dist[cur] + 1.0f;
-                    queue.push_back(uint32_t(ni));
-                }
-            }
+            for (int dz = -1; dz <= 1; ++dz)
+                for (int dy = -1; dy <= 1; ++dy)
+                    for (int dx = -1; dx <= 1; ++dx) {
+                        if (!dx && !dy && !dz)
+                            continue;
+                        const int nx = cx + dx, ny = cy + dy, nz = cz + dz;
+                        if (nx < 0 || ny < 0 || nz < 0 || nx >= dim.x ||
+                            ny >= dim.y || nz >= dim.z)
+                            continue;
+                        const size_t ni = (size_t(nz) * size_t(dim.y) +
+                                           size_t(ny)) *
+                                              size_t(dim.x) + size_t(nx);
+                        if (dist[ni] == INF) {
+                            dist[ni] = dist[cur] + 1.0f;
+                            queue.push_back(uint32_t(ni));
+                        }
+                    }
         }
     }
 };
@@ -144,17 +154,34 @@ bool buildMicroField(const std::vector<VoxelRecord>& records,
         hi.z = std::max(hi.z, int(r.z));
     }
     out.voxel = meta.voxelSize;
-    out.dim = hi - lo + 1;
-    if (out.dim.x <= 0 || out.dim.y <= 0 || out.dim.z <= 0)
+    const glm::ivec3 objDim = hi - lo + 1;
+    if (objDim.x <= 0 || objDim.y <= 0 || objDim.z <= 0)
         return fail("micro layer has an empty grid extent");
-    if (out.size3() > kMicroMaxCells)
+    if (size_t(objDim.x + 2 * kMicroMarginCells) *
+            size_t(objDim.y + 2 * kMicroMarginCells) *
+            size_t(objDim.z + 2 * kMicroMarginCells) > kMicroMaxCells)
         return fail("micro layer grid exceeds the cell budget");
 
-    // The origin is left at 0 here: the layer's local frame is what the field
-    // stores, and placement into the world is applied by the caller when it
-    // sets `origin` (transformRecords-equivalent for the fine lattice). Records
-    // are rebased so index 0 is the grid min corner.
-    out.origin = glm::vec3(0.0f);
+    // The grid is the object's cells plus an AIR MARGIN of kMicroMarginCells
+    // on every side. The margin is not cosmetic:
+    //
+    //  - The world AABB IS this grid, and outside it the shader has no field
+    //    to sample - it falls back to the distance to the box, which is 0 on
+    //    the box face. Without a margin the object's own surface sits ON the
+    //    box face, so a ray approaching the object converges onto the box and
+    //    the trace reports a hit on the box, not on the object (the object
+    //    renders as its own bounding box).
+    //  - The shader's field stencil reaches one cell past the sample point.
+    //    At the grid's edge that is a FILLER cell, and a filler carrying the
+    //    maximum distance would make the interpolated field explode there -
+    //    a huge step, straight through the object.
+    //
+    // So the margin gives the field real air to interpolate in, and the
+    // object's world position is preserved by moving the grid's origin back
+    // by the margin (the object's cells move FORWARD inside the grid).
+    const int M = kMicroMarginCells;
+    out.dim = objDim + glm::ivec3(2 * M);
+    out.origin = glm::vec3(-float(M) * out.voxel);
     const size_t n = out.size3();
     out.solid.assign(n, 0);
     out.mat.assign(n, 0);
@@ -165,8 +192,8 @@ bool buildMicroField(const std::vector<VoxelRecord>& records,
     out.rough.assign(n, 0);
     out.tex.assign(n, 0);
     for (const VoxelRecord& rec : records) {
-        const int x = int(rec.x) - lo.x, y = int(rec.y) - lo.y,
-                  z = int(rec.z) - lo.z;
+        const int x = int(rec.x) - lo.x + M, y = int(rec.y) - lo.y + M,
+                  z = int(rec.z) - lo.z + M;
         const size_t i = out.idx(x, y, z);
         out.solid[i] = 1;
         out.mat[i] = std::min(rec.materialId, uint8_t(kPaletteN - 1));
@@ -211,13 +238,16 @@ bool buildMicroField(const std::vector<VoxelRecord>& records,
                 // surface. Getting the sign wrong here is invisible in a
                 // screenshot but makes every tracer step straight through the
                 // object, so it is asserted in tests/test_micro_surfel.cpp.
+                //
+                // The depth is capped at kMicroSdfMaxSteps BFS STEPS (not
+                // metres): (steps - 0.5) * quantum has to fit the int8 byte.
                 if (out.solid[i])
                     out.sdf[i] = -(std::min(fromAir.dist[pidx(x + 1, y + 1, z + 1)],
-                                            float(kMicroSdfMaxVoxels)) - 0.5f) *
+                                            float(kMicroSdfMaxSteps)) - 0.5f) *
                                  out.voxel;
                 else
                     out.sdf[i] = (std::min(fromSolid.dist[pidx(x + 1, y + 1, z + 1)],
-                                           float(kMicroSdfMaxVoxels)) - 0.5f) *
+                                           float(kMicroSdfMaxSteps)) - 0.5f) *
                                  out.voxel;
                 }
     }
@@ -247,14 +277,16 @@ void fillMicroBrick(const MicroField& f, uint32_t* data, int bx0, int by0, int b
                     const size_t i = f.idx(cx, cy, cz);
                     const uint8_t mat = f.mat[i];
                     const float d = f.sdf[i];
-                    // Same quantisation contract as the world bake: the sdf byte
-                    // is a signed VOXEL count, decoded by multiplying by this
-                    // world's voxel size in the shader. Sign convention matches
-                    // too: negative inside, and the hard clamps keep a cell more
-                    // than 127 voxels away from any surface at the int8
-                    // ceiling rather than wrapping.
-                    int sraw = int(d / f.voxel);
-                    sraw = std::clamp(sraw, -kMicroSdfMaxVoxels, kMicroSdfMaxVoxels);
+                    // The sdf byte is a signed count of EIGHTHS of a voxel
+                    // (kMicroSdfQuantum), not whole voxels - see the header for
+                    // why the world's whole-voxel convention cannot be reused
+                    // here. The BFS distances are whole steps, so
+                    // (steps - 0.5) * 8 is an exact integer and the round
+                    // never loses anything.
+                    int sraw = int(std::lround(d * float(kMicroSdfQuantum) /
+                                                f.voxel));
+                    sraw = std::clamp(sraw, -kMicroSdfMaxEighths,
+                                      kMicroSdfMaxEighths);
                     // bit 7 of the material byte = object surface (drives the
                     // SVO gradient normal and brick material).
                     w[0] = uint32_t(f.r[i]) | (uint32_t(f.g[i]) << 8) |
@@ -264,10 +296,19 @@ void fillMicroBrick(const MicroField& f, uint32_t* data, int bx0, int by0, int b
                            (uint32_t(f.rough[i]) << 16) |
                            (uint32_t(mat | 0x80u) << 24);
                 } else {
-                    // Outside the authored grid: air at the max distance, so a
-                    // chunk that overhangs the object still marches cleanly.
-                    w[0] = 0u | (uint32_t(uint8_t(kMicroSdfMaxVoxels)) << 24);
-                    w[1] = 255u | (uint32_t(kMicroSdfMaxVoxels) << 16);
+                    // Outside the authored grid: air, at a distance that is a
+                    // CONSERVATIVE lower bound on the true distance to the
+                    // object. The grid's edge cells are (margin - 0.5) voxels
+                    // from the surface, so anything beyond the grid is at
+                    // least that far away. The maximum distance would be an
+                    // OVER-estimate, and the shader's field stencil would
+                    // interpolate it next to a real edge cell, exploding the
+                    // field there into a huge (and tunnelling) step.
+                    const int fillerEighths =
+                        int(std::lround((float(kMicroMarginCells) - 0.5f) *
+                                        float(kMicroSdfQuantum)));
+                    w[0] = 0u | (uint32_t(uint8_t(fillerEighths)) << 24);
+                    w[1] = 255u;
                 }
                 const size_t bi = (size_t(bz) * BRICK_N + size_t(by)) * BRICK_N +
                                    size_t(bx);

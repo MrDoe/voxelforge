@@ -34,7 +34,8 @@ constexpr int kMicroMaxWorlds = 16;
 struct alignas(16) MicroWorldRow {
     // geo  = voxel, gridN, chunkM, dimY
     // base = gridBase, chunkInfoBase, dimX, dimZ   <- authored cell dims
-    // lo/hi = world AABB min/max.
+    // lo/hi = world AABB min/max. lo.w carries the world's OFFSET into the
+    // dense field buffer (in cells); hi.w is unused.
     // The cell dims matter: a chunk spans 16 cells, so the outermost chunks of
     // a small object reach past the authored grid. Those cells exist in the
     // brick but have no record behind them, and the shader must clamp its cell
@@ -87,17 +88,18 @@ void MicroSvoPass::destroySsbo(Ssbo& s)
 
 void MicroSvoPass::bindMicroBuffers()
 {
-    VkDescriptorBufferInfo infos[6] = {
+    VkDescriptorBufferInfo infos[7] = {
         { m_grid.buf, 0, VK_WHOLE_SIZE },    { m_childBase.buf, 0, VK_WHOLE_SIZE },
         { m_payload.buf, 0, VK_WHOLE_SIZE }, { m_handles.buf, 0, VK_WHOLE_SIZE },
         { m_bricks.buf, 0, VK_WHOLE_SIZE },  { m_chunkInfo.buf, 0, VK_WHOLE_SIZE },
+        { m_field.buf, 0, VK_WHOLE_SIZE },
     };
-    const uint32_t bindings[6] = { 1, 2, 3, 4, 5, 6 };
-    VkWriteDescriptorSet w[6] = {};
-    for (int i = 0; i < 6; ++i)
+    const uint32_t bindings[7] = { 1, 2, 3, 4, 5, 6, 10 };
+    VkWriteDescriptorSet w[7] = {};
+    for (int i = 0; i < 7; ++i)
         w[i] = { VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, nullptr, m_set, bindings[i], 0, 1,
                  VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, nullptr, &infos[i], nullptr };
-    vkUpdateDescriptorSets(m_ctx->device(), 6, w, 0, nullptr);
+    vkUpdateDescriptorSets(m_ctx->device(), 7, w, 0, nullptr);
 }
 
 bool MicroSvoPass::setMicroWorlds(const std::vector<voxel::MicroWorld>& worlds)
@@ -110,6 +112,7 @@ bool MicroSvoPass::setMicroWorlds(const std::vector<voxel::MicroWorld>& worlds)
         destroySsbo(m_handles);
         destroySsbo(m_bricks);
         destroySsbo(m_chunkInfo);
+        destroySsbo(m_field);
         if (m_worldTable.mapped)
             memset(m_worldTable.mapped, 0, sizeof(int32_t) * 4);
         return true;
@@ -127,6 +130,7 @@ bool MicroSvoPass::setMicroWorlds(const std::vector<voxel::MicroWorld>& worlds)
     std::vector<int32_t> grid;
     std::vector<voxel::GpuChunkInfo> info;
     std::vector<uint32_t> childBase, payload, handles, bricks;
+    std::vector<uint8_t> field;
     std::vector<MicroWorldRow> rows;
     rows.reserve(n);
     for (size_t w = 0; w < n; ++w) {
@@ -142,6 +146,14 @@ bool MicroSvoPass::setMicroWorlds(const std::vector<voxel::MicroWorld>& worlds)
         row.base[3] = uint32_t(s.fieldDim.z);
         row.base[0] = uint32_t(grid.size());
         row.base[1] = uint32_t(info.size());
+        // The dense field is one contiguous array; each world's slice starts
+        // where the previous one ended. The offset is padded to a multiple of
+        // four because the shader reads the field as bytes out of a uint
+        // array (std430 packs uints four to a block).
+        while (field.size() % 4)
+            field.push_back(0);
+        row.lo[3] = float(field.size());
+        field.insert(field.end(), s.field.begin(), s.field.end());
         for (int i = 0; i < 3; ++i) {
             row.lo[i] = s.worldMin[i];
             row.hi[i] = s.worldMax[i];
@@ -170,7 +182,8 @@ bool MicroSvoPass::setMicroWorlds(const std::vector<voxel::MicroWorld>& worlds)
         !uploadSsbo(m_payload, payload.data(), payload.size() * 4) ||
         !uploadSsbo(m_handles, handles.data(), handles.size() * 4) ||
         !uploadSsbo(m_bricks, bricks.data(), bricks.size() * 4) ||
-        !uploadSsbo(m_chunkInfo, info.data(), info.size() * 16)) {
+        !uploadSsbo(m_chunkInfo, info.data(), info.size() * 16) ||
+        !uploadSsbo(m_field, field.data(), field.size())) {
         spdlog::error("micro: failed to upload one of the world buffers");
         m_worldCount = 0;
         return false;
@@ -199,7 +212,7 @@ bool MicroSvoPass::setMicroWorlds(const std::vector<voxel::MicroWorld>& worlds)
 size_t MicroSvoPass::gpuBytes() const
 {
     return m_grid.bytes + m_childBase.bytes + m_payload.bytes + m_handles.bytes +
-           m_bricks.bytes + m_chunkInfo.bytes;
+           m_bricks.bytes + m_chunkInfo.bytes + m_field.bytes;
 }
 
 bool MicroSvoPass::init(const Context& ctx)
@@ -218,6 +231,11 @@ bool MicroSvoPass::init(const Context& ctx)
                    VK_SHADER_STAGE_COMPUTE_BIT, nullptr };
     // 7: per-world scale table.
     b[n++] = { 7, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, 1, VK_SHADER_STAGE_COMPUTE_BIT,
+               nullptr };
+    // 10: the dense signed-distance fields (one byte per cell, all worlds
+    // concatenated). Separate from the bricks so the field is continuous
+    // across brick boundaries - see MicroWorld::field.
+    b[n++] = { 10, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, VK_SHADER_STAGE_COMPUTE_BIT,
                nullptr };
     // 8/9: terrain height texture + coarse object volume (declared by the micro
     // shader itself; shared_model includes reference them by name).
@@ -284,10 +302,10 @@ bool MicroSvoPass::init(const Context& ctx)
     }
 
     // Pool sizes cover every binding above: STORAGE_IMAGE 8/9/12/13/14 (5),
-    // STORAGE_BUFFER 1-6 (6), UNIFORM_BUFFER 7/23/25 (3),
+    // STORAGE_BUFFER 1-6 + 10 (7), UNIFORM_BUFFER 7/23/25 (3),
     // COMBINED_IMAGE_SAMPLER 22/26 (2).
     VkDescriptorPoolSize sizes[4] = { { VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 5 },
-                                       { VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 6 },
+                                       { VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 7 },
                                        { VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, 3 },
                                        { VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 2 } };
     VkDescriptorPoolCreateInfo pi { VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO };
@@ -440,6 +458,7 @@ void MicroSvoPass::destroy()
     destroySsbo(m_handles);
     destroySsbo(m_bricks);
     destroySsbo(m_chunkInfo);
+    destroySsbo(m_field);
     if (m_irrSampler)
         vkDestroySampler(dev, m_irrSampler, nullptr);
     if (m_pipeline)

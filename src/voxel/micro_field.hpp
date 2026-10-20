@@ -30,11 +30,34 @@ namespace vf::voxel {
 // an OOM: a mis-sized export must fail loudly rather than wedge the app.
 inline constexpr size_t kMicroMaxCells = size_t(4) * 1024 * 1024;
 
-// Distance quantisation matches the world bake: an int8 count of voxels, so a
-// brick stores |sdf| <= 127 voxels of range. Air beyond kMicroSdfMaxVoxels is
-// clamped to the same ceiling (the world clamps at 32) - far enough that the
-// sphere tracer never sees it, and it keeps the stored range inside int8.
-inline constexpr int kMicroSdfMaxVoxels = 32;
+// Distance quantisation. The world bake stores the SDF as an int8 count of
+// WHOLE voxels, because the world raymarcher is a DDA: it steps cell to cell
+// and tests the byte's SIGN, so the hit IS a cell and the cell index is
+// always right. The micro overlay instead SPHERE-TRACES a continuous field,
+// and whole-voxel truncation destroys exactly what a sphere tracer needs: the
+// BFS places the surface at +-0.5 voxel from a cell centre, so truncating
+// sends BOTH the outermost solid cell (-0.5 -> 0) and the adjacent air cell
+// (+0.5 -> 0) to byte 0. The byte field is then flat zero across a two-cell
+// band straddling the surface, the zero crossing lands at the band's edge
+// instead of at the surface, and the material lookup reads an AIR cell.
+//
+// So the micro field counts EIGHTHS of a voxel: the same int8 byte, but
+// 8x the resolution, which makes the stored field a faithful signed distance
+// with a real zero crossing exactly at the surface. The range is +-127
+// eighths = +-15.875 voxels, far beyond anything the tracer needs (and the
+// clamp UNDER-estimates, which is the safe direction for a sphere tracer).
+inline constexpr int kMicroSdfQuantum = 8;
+inline constexpr int kMicroSdfMaxEighths = 127;
+// BFS depth ceiling, in steps. (steps - 0.5) * quantum must fit the byte:
+// 16 steps -> 15.5 voxels -> 124 eighths.
+inline constexpr int kMicroSdfMaxSteps = 16;
+inline constexpr float kMicroSdfMaxVoxels = float(kMicroSdfMaxSteps) - 0.5f;
+
+// Air margin, in CELLS, kept around the object inside the micro grid. The
+// world AABB is the grid, so the margin is what keeps the object's real
+// surface away from the box face the tracer converges onto; see
+// buildMicroField for the full reasoning.
+inline constexpr int kMicroMarginCells = 4;
 
 struct MicroField {
     // Cell size in METRES. This is the object's own voxel size (0.005 for the

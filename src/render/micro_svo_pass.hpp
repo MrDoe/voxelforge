@@ -75,6 +75,10 @@ private:
 
     // The micro worlds' own pools. These are NOT the world's SVO buffers.
     Ssbo m_grid, m_childBase, m_payload, m_handles, m_bricks, m_chunkInfo;
+    // The DENSE signed-distance fields, one byte per cell, all worlds
+    // concatenated. Separate from the bricks because the field has to be
+    // CONTINUOUS across brick boundaries (see MicroWorld::field).
+    Ssbo m_field;
     // Per-world scale table (std140): 4 vec4 per world, world count in the
     // first ivec4. Host-visible so setMicroWorlds can write it directly.
     Buffer m_worldTable {};

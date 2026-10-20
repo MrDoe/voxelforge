@@ -43,13 +43,20 @@ layout(std430, set = 0, binding = 3) readonly buffer MPayload { uint uMPayload[]
 layout(std430, set = 0, binding = 4) readonly buffer MHandles { uint uMHandles[]; };
 layout(std430, set = 0, binding = 5) readonly buffer MBricks { uint uMBricks[]; };
 layout(std430, set = 0, binding = 6) readonly buffer MChunkInfo { uvec4 uMChunkInfo[]; };
+// The DENSE signed-distance fields: one signed byte per cell, in eighth-voxel
+// units, all worlds concatenated. Separate from the bricks because the field
+// has to be CONTINUOUS: the bricks' trilinear stencil can only reach inside
+// its own brick, so a brick-stored field JUMPS at every brick boundary and
+// the sphere tracer has no zero crossing to bisect to. See MicroWorld::field.
+layout(std430, set = 0, binding = 10) readonly buffer MField { uint uMField[]; };
 
 // Per-world SCALES. Everything world-specific the main shader hardcodes from
 // the push constant (worldSize / voxelSize / gridN) lives here instead, which is
 // what lets one dispatch serve N objects at N different voxel sizes.
 //   geo  = (voxelSize m, gridN, chunkM m, _)
-//   base = (gridBase into uMGrid, chunkInfoBase into uMChunkInfo, _, _)
-//   lo/hi= world-space AABB of the object (early-out + march bounds)
+//   base = (gridBase into uMGrid, chunkInfoBase into uMChunkInfo, dimX, dimZ)
+//   lo/hi= world-space AABB of the object (early-out + march bounds);
+//          lo.w = this world's offset into uMField, in cells
 // The node/child/brick bases are NOT here: they are folded into each world's
 // chunkInfo entries at upload time, so one flat index serves every world.
 struct MicroWorld {
@@ -124,8 +131,19 @@ MBases mChunkBases(int ci)
     return MBases(v.x, v.y, v.z);
 }
 
-// The sdf byte is a signed VOXEL count, so the decode scale is THIS world's
-// voxel size - the one thing that must never be read from the push constant.
+// The micro field's sdf byte counts EIGHTHS of a voxel, not whole voxels. The
+// world's int8-voxel convention cannot be reused here: the world raymarcher is
+// a DDA that tests the byte's SIGN, so its hit is always a cell, but this pass
+// SPHERE-TRACES a continuous field, and truncating the BFS distance to whole
+// voxels sends both the outermost solid cell (-0.5 voxel) and the adjacent air
+// cell (+0.5 voxel) to byte 0 - a flat-zero band across the surface, with the
+// zero crossing at the band's edge instead of at the surface. See
+// src/voxel/micro_field.hpp for the full reasoning.
+const float kMicroSdfQuantum = 8.0;
+
+// The sdf byte is a signed count of kMicroSdfQuantumths of a voxel, so the
+// decode scale is THIS world's voxel size - the one thing that must never be
+// read from the push constant.
 float mBrickVoxelSdf(uint bi, uint brickBase, ivec3 c, float voxel)
 {
     c = clamp(c, ivec3(0), ivec3(BRICK_N - 1));
@@ -135,7 +153,7 @@ float mBrickVoxelSdf(uint bi, uint brickBase, ivec3 c, float voxel)
     int raw = int((v >> 24) & 255u);
     if (raw >= 128)
         raw -= 256;
-    return float(raw) * voxel;
+    return float(raw) * voxel / kMicroSdfQuantum;
 }
 
 float mBrickSample(uint bi, uint brickBase, vec3 p, vec3 mn, vec3 sz, float voxel)
@@ -155,17 +173,57 @@ float mBrickSample(uint bi, uint brickBase, vec3 p, vec3 mn, vec3 sz, float voxe
     float c00 = mix(s000, s100, f.x), c10 = mix(s010, s110, f.x);
     float c01 = mix(s001, s101, f.x), c11 = mix(s011, s111, f.x);
     float c0 = mix(c00, c10, f.y), c1 = mix(c01, c11, f.y);
-    // The main bake's brickSample subtracts a fixed 0.025 m fudge. That is a
-    // QUARTER OF A WORLD VOXEL at 0.1 m - at a 5 mm micro voxel it would be
-    // five voxels, inflating the object by 2.5 cm. Scaling it by the world's own
-    // voxel preserves the constant's INTENT (a fraction of a cell, to keep the
-    // sphere tracer from stalling just short of a surface) without importing a
-    // world-scale constant into a world-scale-less field.
-    return mix(c0, c1, f.z) - 0.25 * voxel;
+    // NO fudge term. The field is now a faithful signed distance (the byte
+    // counts eighth-voxels), so the zero crossing lands exactly on the
+    // object's surface and the tracer needs no bias to reach it. The old
+    // -0.25*voxel shift was inherited from the world bake, where the byte was
+    // a whole-voxel count and the tracer had to be pushed a quarter cell past
+    // the truncated zero band to reach the surface at all. At a 5 mm voxel that
+    // shift moved the surface by 1.25 mm - a quarter of a cell - and pushed
+    // the crossing well outside the solid, which is what made the material
+    // lookup read an air cell.
+    return mix(c0, c1, f.z);
 }
 
 // Signed distance to ONE micro world at p. Outside the world's AABB it returns
 // the TRUE distance to that box, never a flat constant.
+//
+// This matters more than it looks. The main shader's map() also returns a
+// constant (6.0) outside its world, and is safe doing so only because the world
+// is 102 m across and the SVO marches with a DDA, not by stepping. A micro
+// object is centimetres across and IS sphere-traced, so a 6 m step from the
+// camera sails straight past a vase half a metre away and the trace reports a
+// miss. Returning the exact box distance makes the outside case a valid
+// conservative step instead.
+// The field value at one cell of the dense field, in metres. The byte counts
+// eighth-voxels (kMicroSdfQuantum), negative inside the object.
+float mFieldCell(uint off, ivec3 dim, ivec3 c, float voxel)
+{
+    c = clamp(c, ivec3(0), dim - ivec3(1));
+    // The field is a BYTE array, but std430 packs uints four to a 16-byte
+    // block, so a byte index is (word, shift). The world's byte offset is
+    // padded to a multiple of four so the two never straddle a word.
+    uint i = off + uint((c.z * dim.y + c.y) * dim.x + c.x);
+    int raw = int((uMField[i >> 2u] >> ((i & 3u) * 8u)) & 0xFFu);
+    if (raw >= 128)
+        raw -= 256;
+    return float(raw) * voxel / kMicroSdfQuantum;
+}
+
+// Signed distance to ONE micro world at p, sampled from the DENSE field.
+//
+// The dense field is what makes the sphere tracer work. The bricks also carry
+// a per-cell distance, but the trilinear stencil reaches one cell past the
+// sample point and a brick can only be indexed inside itself, so the stencil
+// has to be clamped to the brick - and a clamped stencil makes the field JUMP
+// at every brick boundary (measured: +0.5 voxel to -1.0 voxel in one step, with
+// no zero crossing between), so the tracer's bisection converges to a
+// discontinuity instead of to the surface. The dense array has no such
+// boundary: the stencil reads the neighbouring cells of the same array, so the
+// field is continuous everywhere the object lives.
+//
+// Outside the world's AABB it returns the TRUE distance to that box, never a
+// flat constant.
 //
 // This matters more than it looks. The main shader's map() also returns a
 // constant (6.0) outside its world, and is safe doing so only because the world
@@ -184,47 +242,26 @@ float microMapWorld(int w, vec3 p, float voxel, int gridN, uint gridBase)
         float d = length(max(q, vec3(0.0))) + min(max(q.x, max(q.y, q.z)), 0.0);
         return max(d, 1e-4);
     }
-    float chunkM = wt.uWorlds[w].geo.z;
-    ivec3 cc = ivec3(floor(rp / chunkM));
-    cc = clamp(cc, ivec3(0), ivec3(gridN - 1));
-    int ci = int(gridBase) + (cc.z * gridN + cc.y) * gridN + cc.x;
-    int root = uMGrid[ci];
-    if (root == -1) {
-        vec3 cmin = wmin + vec3(cc) * chunkM;
-        return max(-sdBox(p, cmin, cmin + vec3(chunkM)), voxel * 0.5);
-    }
-    MBases bs = mChunkBases(ci);
-    vec3 mn = wmin + vec3(cc) * chunkM;
-    vec3 sz = vec3(chunkM);
-    uint h = uint(root);
-    for (int guard = 0; guard < 16; ++guard) {
-        uint ty = h & 3u;
-        if (ty == 1u)
-            return mBrickSample(h >> 2u, bs.brick, p, mn, sz, voxel);
-        if (ty == 2u)
-            return -voxel;
-        if (ty == 3u)
-            return max(-sdBox(p, mn, mn + sz), voxel * 0.5);
-        uint ni = h >> 2u;
-        uint pl = uMPayload[bs.node + ni];
-        vec3 halfS = sz * 0.5;
-        vec3 r2 = p - mn;
-        int oct = (r2.x >= halfS.x ? 1 : 0) | (r2.y >= halfS.y ? 2 : 0) |
-                  (r2.z >= halfS.z ? 4 : 0);
-        if (((pl >> (8u + uint(oct))) & 1u) != 0u)
-            return -voxel;
-        uint ch = uMHandles[bs.child + uMChildBase[bs.node + ni] + uint(oct)];
-        if (ch == kEmpty) {
-            vec3 cmin = mn + vec3(oct & 1, (oct >> 1) & 1, (oct >> 2) & 1) * halfS;
-            return max(-sdBox(p, cmin, cmin + halfS), voxel * 0.5);
-        }
-        if (ch == kSolid)
-            return -voxel;
-        h = ch;
-        mn += vec3(oct & 1, (oct >> 1) & 1, (oct >> 2) & 1) * halfS;
-        sz = halfS;
-    }
-    return 6.0;
+    const ivec3 dim = ivec3(int(wt.uWorlds[w].base.z), int(wt.uWorlds[w].geo.w),
+                            int(wt.uWorlds[w].base.w));
+    const uint off = uint(wt.uWorlds[w].lo.w);
+    // Cell-CENTRE convention: g = c + 0.5 at a cell's centre, so g = c there
+    // and the interpolation returns that cell's own value.
+    vec3 g = rp / voxel - 0.5;
+    ivec3 i0 = ivec3(floor(g));
+    vec3 f = g - vec3(i0);
+    float s000 = mFieldCell(off, dim, i0 + ivec3(0, 0, 0), voxel);
+    float s100 = mFieldCell(off, dim, i0 + ivec3(1, 0, 0), voxel);
+    float s010 = mFieldCell(off, dim, i0 + ivec3(0, 1, 0), voxel);
+    float s110 = mFieldCell(off, dim, i0 + ivec3(1, 1, 0), voxel);
+    float s001 = mFieldCell(off, dim, i0 + ivec3(0, 0, 1), voxel);
+    float s101 = mFieldCell(off, dim, i0 + ivec3(1, 0, 1), voxel);
+    float s011 = mFieldCell(off, dim, i0 + ivec3(0, 1, 1), voxel);
+    float s111 = mFieldCell(off, dim, i0 + ivec3(1, 1, 1), voxel);
+    float c00 = mix(s000, s100, f.x), c10 = mix(s010, s110, f.x);
+    float c01 = mix(s001, s101, f.x), c11 = mix(s011, s111, f.x);
+    float c0 = mix(c00, c10, f.y), c1 = mix(c01, c11, f.y);
+    return mix(c0, c1, f.z);
 }
 
 float microVoxelSize()
@@ -251,12 +288,38 @@ float microMap(vec3 p)
     return d;
 }
 
-// Material + surface response of the micro cell containing p. Micro cells all
-// carry the object flag (bit 7 of the material byte, set by fillMicroBrick), so
-// this never has to consult the terrain heightfield the way the main shader's
-// isObjectSurface does - which also sidesteps that test's world-scale +0.02
-// epsilon, four whole cells wide at a 5 mm voxel.
-bool microSurface(vec3 p, out vec3 albedo, out vec2 rr, out uint matId)
+// Material + surface response of the micro cell that owns the surface hit.
+//
+// WHICH CELL owns the hit is the whole difficulty, and it is decided by the
+// field, not by arithmetic:
+//
+//  - The trace stops where the signed-distance field crosses zero, which (now
+//    that the byte counts eighth-voxels) is exactly ON the object's surface -
+//    the face between the outermost SOLID cell and the adjacent AIR cell.
+//  - The cell CONTAINING that face is the solid one. The formula here is
+//    floor((p - mn) / cellSz) - the cell p is in. It is NOT the
+//    trunc((p - mn) / cellSz - 0.5) used by the field stencil, which is the
+//    "p sits at a cell CENTRE" convention: at a face that lands on the AIR
+//    side, which is what used to paint the vase with the air filler's black
+//    albedo and grass material.
+//  - The face can coincide with a BRICK boundary, and the octree descent
+//    resolves a boundary with ">=", which picks the higher-coordinate side -
+//    the wrong side half the time. So the lookup is done a hair INSIDE the
+//    solid, along the ray: rd points into the object (the trace hit the front
+//    surface), so p + rd * 0.15 voxel is unambiguously on the solid side, in
+//    the solid brick, in the solid cell.
+//
+// If the containing cell still is not solid (a diagonal surface, where the
+// zero crossing falls on a cell CORNER rather than a face), the 3x3x3
+// neighbourhood is searched and the cell whose centre is nearest the surface
+// - the smallest |field| among the negative ones - wins. That is unambiguous
+// now that the field is a faithful distance instead of a flat zero band.
+//
+// Micro cells all carry the object flag (bit 7 of the material byte, set by
+// fillMicroBrick), so this never has to consult the terrain heightfield the
+// way the main shader's isObjectSurface does - which also sidesteps that
+// test's world-scale +0.02 epsilon, four whole cells wide at a 5 mm voxel.
+bool microSurface(vec3 p, vec3 rd, out vec3 albedo, out vec2 rr, out uint matId)
 {
     albedo = vec3(0.5);
     rr = vec2(0.15, 0.9);
@@ -264,6 +327,9 @@ bool microSurface(vec3 p, out vec3 albedo, out vec2 rr, out uint matId)
     for (int w = 0; w < wt.uWorldInfo.x && w < MAX_MICRO_WORLDS; ++w) {
         vec3 wmin = wt.uWorlds[w].lo.xyz;
         vec3 wsize = wt.uWorlds[w].hi.xyz - wmin;
+        float voxel = wt.uWorlds[w].geo.x;
+        // A hair inside the solid, along the ray.
+        vec3 q = p + rd * (0.15 * voxel);
         // Clamp the query INTO the box rather than rejecting points outside it.
         // The traced hit lies exactly ON the object's boundary by construction
         // (the trace stops where the field crosses zero, and the field is zero
@@ -271,8 +337,7 @@ bool microSurface(vec3 p, out vec3 albedo, out vec2 rr, out uint matId)
         // found and the object renders as the material-lookup-failed colour.
         // Clamping is also what the chunk lookup does one line below, so the two
         // agree at the seam.
-        vec3 rp = clamp(p - wmin, vec3(0.0), wsize);
-        float voxel = wt.uWorlds[w].geo.x;
+        vec3 rp = clamp(q - wmin, vec3(0.0), wsize);
         float chunkM = wt.uWorlds[w].geo.z;
         int gridN = int(wt.uWorlds[w].geo.y);
         ivec3 cc = clamp(ivec3(floor(rp / chunkM)), ivec3(0), ivec3(gridN - 1));
@@ -290,31 +355,29 @@ bool microSurface(vec3 p, out vec3 albedo, out vec2 rr, out uint matId)
             if ((h & 3u) == 1u) {
                 uint bi = h >> 2;
                 float cellSz = sz.x / float(BRICK_N);
-                vec3 g = clamp((p - mn) / cellSz - 0.5, vec3(0.0),
-                               vec3(float(BRICK_N) - 1.001));
-                ivec3 i0 = ivec3(g);
-                // The hit cell may be AIR (w0 == 0): the SDF's zero band is two
-                // voxels wide, so the trace stops one voxel OUTSIDE the surface,
-                // and fillMicroBrick packs air as w0 = 0 (black albedo, material
-                // 0 = grass). Reading it gives a black albedo + grass tint.
-                //
-                // Search the 3x3x3 box around the hit and take the first cell
-                // whose albedo is non-zero -- i.e. a real solid cell. The
-                // albedo is unambiguous where the SDF byte is not.
+                // The cell CONTAINING the query point.
+                ivec3 c0 = ivec3(clamp(floor((q - mn) / cellSz), vec3(0.0),
+                                       vec3(float(BRICK_N) - 1.0)));
                 ivec3 best = ivec3(-1);
-                for (int dz = -1; dz <= 1 && best.x < 0; ++dz)
-                    for (int dy = -1; dy <= 1 && best.x < 0; ++dy)
-                        for (int dx = -1; dx <= 1 && best.x < 0; ++dx) {
-                            ivec3 c = clamp(i0 + ivec3(dx, dy, dz), ivec3(0),
+                float bestAbs = 1e30;
+                for (int dz = -1; dz <= 1; ++dz)
+                    for (int dy = -1; dy <= 1; ++dy)
+                        for (int dx = -1; dx <= 1; ++dx) {
+                            ivec3 c = clamp(c0 + ivec3(dx, dy, dz), ivec3(0),
                                             ivec3(int(BRICK_N) - 1));
-                            uint v = (bs.brick + bi) * BRICK_WORDS +
-                                     (uint(c.z) * BRICK_N * BRICK_N +
-                                      uint(c.y) * BRICK_N + uint(c.x)) * 2;
-                            if ((uMBricks[v] & 0x00FFFFFFu) != 0u)
+                            // The field AT the cell centre. Negative means the
+                            // cell is on the solid side of the surface.
+                            float fd = mBrickVoxelSdf(bi, bs.brick, c, voxel);
+                            if (fd >= 0.0)
+                                continue; // air side
+                            float a = abs(fd);
+                            if (a < bestAbs) {
+                                bestAbs = a;
                                 best = c;
+                            }
                         }
                 if (best.x < 0)
-                    break; // nothing nearby is solid: not a micro hit
+                    break; // no solid cell nearby: not a micro hit
                 uint vi = (bs.brick + bi) * BRICK_WORDS +
                           (uint(best.z) * BRICK_N * BRICK_N + uint(best.y) * BRICK_N +
                            uint(best.x)) * 2;
@@ -330,7 +393,7 @@ bool microSurface(vec3 p, out vec3 albedo, out vec2 rr, out uint matId)
                 break;
             uint ni = h >> 2;
             vec3 halfS = sz * 0.5;
-            vec3 r2 = p - mn;
+            vec3 r2 = q - mn;
             int oct = (r2.x >= halfS.x ? 1 : 0) | (r2.y >= halfS.y ? 2 : 0) |
                       (r2.z >= halfS.z ? 4 : 0);
             h = uMHandles[bs.child + uMChildBase[bs.node + ni] + uint(oct)];
@@ -353,16 +416,27 @@ bool microTrace(vec3 ro, vec3 rd, float tMax, out float tHit)
     tHit = 0.0;
     if (microMap(ro) < 0.0)
         return false; // camera already inside a micro solid
-    const float eps = 1.5e-4;
     const float kMaxStep = 0.25;
-    float t = eps;
+    // The minimum step is a QUARTER OF A MICRO VOXEL, not a fixed epsilon. It
+    // has to be able to carry the ray ACROSS the surface: a sphere tracer
+    // steps by a fraction of the distance, so it approaches the surface
+    // geometrically and never actually reaches it - without a floor big
+    // enough to overshoot, the sample never lands inside the object and the
+    // hit is never detected.
+    const float minStep = 0.25 * microVoxelSize();
+    float t = 1e-5;
     float prevT = t;
     for (int i = 0; i < 512; ++i) {
         if (t > tMax)
             return false;
         vec3 p = ro + rd * t;
         float d = microMap(p);
-        if (d < eps) {
+        // STRICTLY INSIDE, not "within eps of the surface". Outside the
+        // world's AABB the field falls back to the distance to the box, which
+        // is ZERO on the box face - so a "d < eps" test fires on the BOX, and
+        // the object renders as its own bounding box. The field is negative
+        // only inside the object, so "d < 0" is the hit.
+        if (d < 0.0) {
             // bisect between the last outside sample and this inside one
             float lo = prevT, hi = t;
             for (int b = 0; b < 16; ++b) {
@@ -376,7 +450,7 @@ bool microTrace(vec3 ro, vec3 rd, float tMax, out float tHit)
             return true;
         }
         prevT = t;
-        t += clamp(d * 0.85, eps, kMaxStep);
+        t += clamp(d * 0.85, minStep, kMaxStep);
     }
     return false;
 }
@@ -406,7 +480,7 @@ float microVisibility(vec3 ro, vec3 rd, float maxDist)
         return 1.0;
     for (int i = 0; i < 96; ++i) {
         float d = microMap(ro + rd * t);
-        if (d < -0.5 * vs)
+        if (d < 0.0)
             return 0.0;
         t += max(d * 0.85, 0.25 * vs);
         if (t > maxDist)
@@ -483,13 +557,13 @@ vec3 shadeMicro(vec3 p, vec3 rd)
     vec3 alb;
     vec2 rr;
     uint mId;
-    if (!microSurface(p, alb, rr, mId))
+    if (!microSurface(p, rd, alb, rr, mId))
         return vec3(0.0);
-    vec3 n = microNormal(p, 6.0 * microVoxelSize());
+    vec3 n = microNormal(p, 1.0 * microVoxelSize());
     alb = detailAlbedo(alb, p, n, mId);
     n = detailNormal(n, p, mId);
     float sh = ((gRenderFlags & 2) != 0)
-                     ? softShadow(p + n * (2.0 * microVoxelSize()), kSunDir)
+                     ? softShadow(p + n * (1.0 * microVoxelSize()), kSunDir)
                      : 1.0;
 
     float ao = 1.0;
@@ -576,7 +650,7 @@ void main()
         return;
 
     imageStore(uOutHdr, pix, vec4(col, 1.0));
-    vec3 n = microNormal(p, 6.0 * microVoxelSize());
+    vec3 n = microNormal(p, 1.0 * microVoxelSize());
     imageStore(uOutGPos, pix, vec4(p, 2.0));
     imageStore(uOutGNorm, pix, vec4(n, 0.0));
 }

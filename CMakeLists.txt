@@ -219,6 +219,7 @@ add_executable(voxelforge
     src/app/world/micro_objects.cpp
     src/app/textures/texture_bindings.cpp
     src/app/edit/live_edit.cpp
+    src/app/edit/box_select.cpp
     src/app/edit/transform.cpp
     src/app/mesh/mesh_import.cpp
     src/app/ui/ui_primitives.cpp
@@ -258,6 +259,7 @@ add_executable(vf_tests tests/main.cpp tests/test_camera.cpp
                         tests/test_picking.cpp tests/test_editable.cpp
                         tests/test_surfelize.cpp tests/test_store.cpp
                         tests/test_app_gizmo.cpp tests/test_app_cli_ui.cpp
+                        tests/test_box_select.cpp tests/test_micro.cpp
                         # The app's pure leaf logic, compiled in directly: before
                         # the src/app split these lived in the same translation
                         # unit as main() and could not be reached from a test.
@@ -314,6 +316,14 @@ add_test(NAME preview_check
     COMMAND ${Python3_EXECUTABLE} ${GROUP_GATE} preview
             ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/tests/live_edit_check.py
             $<TARGET_FILE:voxelforge> --only preview)
+# Bounding-box selection: a stamp outside the box must change NOTHING, one
+# inside must change the world, the tint clips with it, and the box contents
+# report (cells + surfats) must exist. Labelled live-edit AND preview so
+# either focused group runs it.
+add_test(NAME box_select_check
+    COMMAND ${Python3_EXECUTABLE} ${GROUP_GATE} live-edit,preview
+            ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/tests/live_edit_check.py
+            $<TARGET_FILE:voxelforge> --only box)
 add_test(NAME ssao_check
     COMMAND ${Python3_EXECUTABLE} ${GROUP_GATE} effects
             ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/tests/ssao_check.py
@@ -384,6 +394,8 @@ set_tests_properties(live_edit_check
     PROPERTIES LABELS "live-edit" SKIP_RETURN_CODE 77)
 set_tests_properties(preview_check
     PROPERTIES LABELS "preview" SKIP_RETURN_CODE 77)
+set_tests_properties(box_select_check
+    PROPERTIES LABELS "live-edit;preview;box-select" SKIP_RETURN_CODE 77)
 set_tests_properties(ssao_check
     PROPERTIES LABELS "effects;ssao" SKIP_RETURN_CODE 77)
 set_tests_properties(texture_check

@@ -50,6 +50,16 @@ void synthesizeMicroSvo(const MicroField& f, glm::vec3 worldOffset,
     out.worldMin = f.origin + worldOffset;
     out.worldMax = out.worldMin + f.extent();
 
+    // The DENSE field, in eighth-voxel units (see MicroWorld::field for why
+    // it cannot live in the bricks). One signed byte per cell, the same
+    // quantisation the bricks use, so the shader decodes both the same way.
+    out.field.assign(f.size3(), 0);
+    for (size_t i = 0; i < f.size3(); ++i) {
+        int sraw = int(std::lround(f.sdf[i] * float(kMicroSdfQuantum) / f.voxel));
+        out.field[i] = uint8_t(std::clamp(sraw, -kMicroSdfMaxEighths,
+                                          kMicroSdfMaxEighths));
+    }
+
     const int gridN = out.gridN;
     const size_t numChunks = size_t(gridN) * size_t(gridN) * size_t(gridN);
     out.chunkGrid.assign(numChunks, -1);

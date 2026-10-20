@@ -24,6 +24,25 @@ struct MicroWorld {
     std::vector<int32_t> chunkGrid;   // gridN^3 root handles (-1 = empty)
     std::vector<GpuChunkInfo> chunkInfo; // gridN^3 bases
 
+    // The DENSE signed-distance field, one signed byte per cell, in the same
+    // order as MicroField (z * dimY + y) * dimX + x, and in EIGHTH-VOXEL
+    // units (kMicroSdfQuantum).
+    //
+    // It is a SEPARATE array from the bricks on purpose. The bricks store the
+    // field per cell too, but the shader's trilinear stencil reaches one cell
+    // PAST the sample point, and a brick can only be indexed inside itself -
+    // so the stencil has to be clamped to the brick, and a clamped stencil
+    // makes the field JUMP at every brick boundary (a +0.5 voxel step to a
+    // -1.0 voxel one, with no zero crossing in between). The sphere tracer
+    // then has nothing to bisect and the object's surface is found at a
+    // discontinuity instead of at the surface.
+    //
+    // A dense field has no such boundary: the stencil simply reads the
+    // neighbouring cells of the same array, so the field is continuous
+    // everywhere the object lives. It is affordable precisely because a micro
+    // object is small - a 30 cm vase at 5 mm is 25x68x25 = 42 k cells = 42 KB.
+    std::vector<uint8_t> field;
+
     float voxel = 0.005f;   // this world's cell size (m)
     int gridN = 1;          // chunks per axis
     // The AUTHORED grid's cell count per axis. Chunks span 16 cells, so a small
@@ -38,7 +57,8 @@ struct MicroWorld {
     size_t bytes() const
     {
         return (childBase.size() + payload.size() + handles.size() +
-                bricks.size() + chunkGrid.size() + chunkInfo.size() * 4) * 4;
+                bricks.size() + chunkGrid.size() + chunkInfo.size() * 4 + field.size()) *
+               4;
     }
 };
 
