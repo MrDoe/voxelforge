@@ -5493,3 +5493,36 @@ unchanged.
 
 New page: [[concepts/terrain-surfel-interpolation]]. New tool:
 `tools/surf_spectrum.py`.
+
+## [2026-10-21] ingest | Live movement for micro objects
+
+A micro layer's manifest `pos` was honoured but its `rot`/`rotX`/`rotZ` were
+**silently ignored**, so the World panel's Rotation fields did nothing for a
+micro object (and its Apply triggered the full ~20 s world re-bake for one
+small object). Now:
+
+- `rotateMicroRecords` spins a micro layer's RECORDS on its own fine lattice
+  about the object's **bottom-centre pivot** (the same pivot the world uses).
+  Destination-driven, so the rotated shape keeps its solidity; not bounded by
+  the layer's grid, so a 45 degree turn is not clipped; emitted REBASED,
+  because a 90 degree yaw sweeps the footprint to x = -35 and a record's
+  uint16 coordinates would wrap to 65535.
+- The pivot stays fixed in world space while the shape spins: the world offset
+  is corrected by the min corner's shift, so the shipped placements are
+  untouched.
+- Applying a micro transform re-bakes **only that object** (milliseconds).
+
+Gated by a new unit case (the pivot's world position is unchanged within 1 mm)
+and by two new gate checks (the footprint's aspect flips 1.18 -> 0.66 under a
+90 degree yaw; the silhouette's base row does not move, 559 -> 559).
+
+**Two of my gate measures were wrong instruments, not wrong code**: the
+silhouette's *width* (the camera is diagonal, so a yaw can widen it) and the
+*base row* from a top-down view (the screen's y is a world x/z there). It
+takes two views to measure the two halves of the contract.
+
+**Also fixed**: the micro gate did not restore the manifest exactly - it
+patched saved layer DICTS while the manifest is re-read on every write (stale
+references), and it never restored a rotation it had set (a full gate run left
+the shipped alpaca turned 90 degrees). It now snapshots values keyed by file
+and restores them; a full run leaves `git diff assets/world.json` empty.

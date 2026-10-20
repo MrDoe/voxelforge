@@ -237,6 +237,50 @@ A drop-in fur is gated by `tools/check_texture.py --material fleece` (the
 are indistinguishable to every other check, so the gate measures the luma
 spread of the alpaca's own pixels.
 
+## Live movement: a micro layer can be moved and turned
+
+A micro layer's `pos` is the world position of the object's **min corner** (a
+world layer's `pos` is a lattice offset instead), and `rot`/`rotX`/`rotZ` spin
+the object about its **bottom-centre pivot** — the same pivot the world uses,
+so "yaw about the base" means the same thing in both.
+
+`rotateMicroRecords` (micro_field.cpp) applies the rotation to the layer's
+**records on its own fine lattice**, and three details decide whether it
+works or produces a 65 k cell mess:
+
+- **Destination-driven**, like the world's `transformRecords`: every cell of
+  the rotated footprint queries its pre-image, so the rotated shape keeps the
+  source's solidity. A forward map drops cells wherever two source cells
+  round to the same destination — holes in the surface.
+- **Not bounded by the layer's own grid**: a 45° turn needs a wider footprint
+  than the grid the object was authored in, and clipping it would cut the
+  animal in half. (The alpaca's 90° yaw sweeps its footprint to x = −35.)
+  The records are therefore emitted **rebased** — a record's coordinates are
+  `uint16`, so writing a negative cell wraps it to 65535.
+- **The pivot stays fixed in world space** while the shape spins about it. The
+  rotation moves the shape's min corner, so the world offset is corrected by
+  exactly that shift (`minShift` cells). With no rotation the shift is zero
+  and the offset is `pos` — unchanged, so the shipped placements are not
+  disturbed.
+
+Applying a micro layer's transform re-bakes **only that object**
+(milliseconds). The world's Apply still triggers the full world reload — the
+separation pays off here.
+
+**Gated**: `tests/test_micro.cpp` pins the contract (no coordinate wraps, the
+volume survives, the pivot's world position is unchanged within 1 mm), and
+`tests/micro_check.py` pins the end-to-end effect (the footprint's aspect
+flips under a 90° yaw: 1.18 → 0.66, while the silhouette's base row does not
+move: 559 → 559).
+
+**A lesson about instruments**: both of the gate's first two "did it turn"
+measures were wrong, and the code was right. The silhouette's *width* is not a
+measure (the camera is diagonal, so a yaw can widen or narrow it: measured
+344 → 425 px, the wrong way round), and from directly above the *base row* is
+a world x/z, so it measures nothing at all. It takes two views — from above
+for the footprint's aspect, from the side for the base row — to measure both
+halves of the contract.
+
 ## Verification
 
 | check | result |

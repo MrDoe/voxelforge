@@ -860,6 +860,31 @@ one costs a whole turn, because the bad call is rejected before any work runs.
 - Live edits cannot touch micro geometry: the micro worlds are outside the 16³
   chunk stream (an edit to the WORLD ground beside a micro object re-bakes that
   ground and re-applies the cast shadow).
+- **A micro layer can be MOVED and TURNED live** from the World panel's
+  Position/Rotation inspector. A micro layer's `pos` is the world position of
+  the object's **min corner** (not a world layer's lattice offset), and
+  `rot`/`rotX`/`rotZ` spin the object about its **bottom-centre pivot** — the
+  same pivot the world uses, so "yaw about the base" means the same thing in
+  both. The rotation is applied to the layer's RECORDS on its own fine
+  lattice by `rotateMicroRecords` (micro_field.cpp), **destination-driven** so
+  the rotated shape keeps its solidity (a forward map drops cells wherever two
+  source cells round to the same destination and punches holes in the surface),
+  and **not bounded by the layer's grid** (a 45° turn needs a wider footprint
+  than the grid the object was authored in; clipping would cut it in half). Two
+  details that are easy to get wrong:
+  - the destination cells can go **negative** (a 90° yaw of an object longer
+    in z than in x reaches x = −35) and a record's coordinates are `uint16`, so
+    the records are emitted **rebased** — writing a negative cell wraps it to
+    65535 and turns the object into a 65 k cell mess;
+  - the pivot must stay fixed in world space while the shape spins, and the
+    rotation moves the shape's min corner, so the world offset is corrected by
+    exactly that shift (`minShift` cells). With no rotation the shift is zero
+    and the offset is `pos` — unchanged.
+  Applying a micro layer's transform re-bakes **only that object**
+  (milliseconds); the world's Apply still triggers the full world reload.
+  Gated by `tests/test_micro.cpp` (the pivot's world position is unchanged
+  within 1 mm) and by `tests/micro_check.py` (the footprint's aspect flips and
+  the base row does not move).
 - Coverage: `tests/test_micro.cpp` (9 cases) pins the SDF's sign convention and
   half-cell offset, the eighth-voxel quantisation, the margin, the dense field
   against the CPU field, the brick packing, a CPU replica of the shader's
