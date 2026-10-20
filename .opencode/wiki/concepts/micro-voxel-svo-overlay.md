@@ -1,7 +1,7 @@
 ---
 title: Micro-voxel objects as separate SVO worlds (2026-10-20)
 tags: [micro-voxel, svo, sdf, encoding, shader, separate-lattice, overlay]
-sourceRefs: [src/voxel/micro_field.hpp, src/voxel/micro_field.cpp, src/voxel/micro_svo.hpp, src/voxel/micro_svo.cpp, src/render/micro_svo_pass.hpp, src/render/micro_svo_pass.cpp, src/app/world/micro_objects.cpp, shaders/micro_overlay.comp, tools/micro_voxel.cpp, tests/test_micro.cpp]
+sourceRefs: [src/voxel/micro_field.hpp, src/voxel/micro_field.cpp, src/voxel/micro_svo.hpp, src/voxel/micro_svo.cpp, src/render/micro_svo_pass.hpp, src/render/micro_svo_pass.cpp, src/app/world/micro_objects.cpp, src/voxel/surfelize.cpp, src/voxel/surfelize.hpp, shaders/micro_overlay.comp, tools/micro_voxel.cpp, tests/test_micro.cpp, tests/micro_check.py]
 lastReviewed: 2026-10-20
 ---
 
@@ -155,6 +155,18 @@ only honest way to bridge two lattices that must stay separate.
 The cost stays bounded: the object's AABB is centimetres, so only the surfels
 beside it ever run the micro march, and with no micro layer loaded the bake is
 bit-identical to before (`microOccluders` empty).
+
+**Backend caveat**: the CAST half lives in the SURFEL bake, so it is the splat
+backend's. The SVO reference backend computes its shadow per fragment from the
+world's own octree, which by design holds no micro cells, so it shows no micro
+cast shadow. That is a real (documented) divergence; the reference views
+(`hero`/`house`/`water`) contain no micro object, so no gate sees it.
+
+**A pre-existing quirk noticed on the way**: `softShadowSplat` adds `0.5` for
+every tap that does NOT hit anything and divides by the tap count, so a fully
+LIT water fragment returns 0.5 rather than 1.0 — the sun on water is always
+halved. It is calibrated into the water's appearance, so it is documented here
+rather than changed.
 
 - Live edits cannot touch micro geometry: the micro worlds are outside the
   16³ chunk stream entirely. (An edit to the WORLD ground beside a micro
