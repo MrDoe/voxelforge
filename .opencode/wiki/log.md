@@ -5484,7 +5484,12 @@ when the scene is flattened is a broken instrument.
 
 Gates: `test-surfel` green (15/15), `test-store` green, `test-visual` at its
 documented pre-existing baseline (the house sky-probe failure only), and
-`test-live-edit` - see the log.
+`test-live-edit` at its documented pre-existing baseline as well - the same
+four failures with the same numbers (`3x object_smooth`: "edit too small",
+"object pick did not run the surface-axis relaxation", "object pick ran the
+terrain path"; `1x object undo`: "run split 11002+0 does not match the
+add-only split 11008+0"), i.e. no new failure and the object surfel counts
+unchanged.
 
 New page: [[concepts/terrain-surfel-interpolation]]. New tool:
 `tools/surf_spectrum.py`.
