@@ -324,6 +324,17 @@ add_test(NAME box_select_check
     COMMAND ${Python3_EXECUTABLE} ${GROUP_GATE} live-edit,preview
             ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/tests/live_edit_check.py
             $<TARGET_FILE:voxelforge> --only box)
+# The micro-voxel overlay (separate SVO worlds on their own fine lattice).
+# Measures what the feature PROMISES: the objects are visible, their material
+# is bright and neutral (the bug's signature was a near-black green-ish
+# object - the air filler's albedo), the silhouette is not a rectangle (the
+# "hits the bounding box" failure produced a filled square, which a mean
+# colour cannot see), one micro object shadows another, the world view is
+# untouched, and the SVO reference backend draws them too.
+add_test(NAME micro_check
+    COMMAND ${Python3_EXECUTABLE} ${GROUP_GATE} visual,micro
+            ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/tests/micro_check.py
+            $<TARGET_FILE:voxelforge>)
 add_test(NAME ssao_check
     COMMAND ${Python3_EXECUTABLE} ${GROUP_GATE} effects
             ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/tests/ssao_check.py
@@ -396,6 +407,8 @@ set_tests_properties(preview_check
     PROPERTIES LABELS "preview" SKIP_RETURN_CODE 77)
 set_tests_properties(box_select_check
     PROPERTIES LABELS "live-edit;preview;box-select" SKIP_RETURN_CODE 77)
+set_tests_properties(micro_check
+    PROPERTIES LABELS "visual;micro" SKIP_RETURN_CODE 77)
 set_tests_properties(ssao_check
     PROPERTIES LABELS "effects;ssao" SKIP_RETURN_CODE 77)
 set_tests_properties(texture_check

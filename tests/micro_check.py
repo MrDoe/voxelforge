@@ -1,0 +1,249 @@
+#!/usr/bin/env python3
+"""Gate for the MICRO-VOXEL overlay (separate SVO worlds, own fine lattice).
+
+The micro subsystem had NO automated coverage at all, and that is how a whole
+class of bugs shipped: the vase rendered as a dark, almost black object
+because the SDF's byte encoding was a whole-voxel truncation (fine for the
+world's DDA, fatal for a sphere tracer), and the trace converged onto the
+world's bounding box instead of the object.
+
+This gate is the measurement that caught it, kept as a script so the claims
+are reproducible rather than remembered:
+
+  1. MATERIAL - the micro objects must be visible AND bright and neutral.
+     The bug's signature was a near-black, slightly green object: the air
+     filler's black albedo with the grass material. A mean luma well below the
+     plaster's, or a channel spread, fails.
+  2. SHAPE - the silhouette must not be a rectangle. The "hits the bounding
+     box" failure mode produced a 67x67 px SQUARE, and a mean colour cannot
+     see that; a fill-ratio test can.
+  3. MICRO-TO-MICRO SHADOW - with the vase present the urn must be DARKER on
+     the pixels it occupies. One object cannot show this, which is why two are
+     shipped.
+  4. NO WORLD REGRESSION - the house view must be pixel-identical with the
+     micro layers on and off. The overlay must not be able to touch the 0.1 m
+     path.
+
+SCOPE: this gate covers the VISIBLE outcome. It does NOT cover the SDF's
+quantisation - measured: with the whole-voxel encoding restored, this gate
+still passes (the dense field's search falls back to a deeper solid cell, and
+the vase is uniformly coloured so the material still reads as plaster). The
+quantisation is pinned by tests/test_micro.cpp instead ("the byte quantisation
+keeps the half-voxel offsets"), which fails loudly on it. The two layers are
+complementary: the unit test pins the encoding, this gate pins what the
+encoding is FOR.
+
+Usage:  python3 tests/micro_check.py [path/to/voxelforge]
+"""
+from __future__ import annotations
+
+import json
+import os
+import statistics
+import subprocess
+import sys
+import tempfile
+
+# The repo root, so the script works from the build directory too (ctest runs
+# there) and not only from the source root.
+ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+APP = sys.argv[1] if len(sys.argv) > 1 else os.path.join(ROOT, "build", "voxelforge")
+
+# The micro objects' spot on the shore: the vase at (12, -0.25, 12) and the urn
+# at (12.3, -0.25, 12.2), the latter in the vase's shadow (the sun is at
+# 34 deg / 238 deg, so shadows are thrown toward (0.85, 0.53) in xz).
+MICRO_CAM = "11.45,0.30,11.45,12.22,-0.20,12.14"
+# A view with no micro object in it: the house.
+HOUSE_CAM = "2.5,1.3,6.0,6.8,1.0,12.2"
+W, H = 900, 600
+
+failures: list[str] = []
+
+
+def note(ok: bool, msg: str) -> None:
+    print(("  ok   " if ok else "  FAIL ") + msg)
+    if not ok:
+        failures.append(msg)
+
+
+def render(out: str, cam: str, w: int = W, h: int = H, mode: str = "") -> None:
+    cmd = [APP, "--shot", out, "--cam", cam, "--width", str(w), "--height", str(h)]
+    if mode:
+        cmd += ["--mode", mode]
+    subprocess.run(
+        cmd,
+        check=True,
+        cwd=ROOT,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+
+
+def read_ppm(path: str) -> tuple[int, int, bytes]:
+    with open(path, "rb") as f:
+        f.readline()  # P6
+        w, h = map(int, f.readline().split())
+        f.readline()  # maxval
+        return w, h, f.read()
+
+
+def set_micro(enabled: dict[str, bool]) -> None:
+    """Toggle the micro layers in the manifest.
+
+    The manifest is a TRACKED file, so it is rewritten through a temp file and
+    renamed: a bare write truncates it, and a concurrent reader (another
+    session's render, a running app's poll) would see a half-written manifest.
+    """
+    path = os.path.join(ROOT, "assets", "world.json")
+    with open(path) as f:
+        doc = json.load(f)
+    for layer in doc["layers"]:
+        if layer.get("role") == "micro":
+            name = layer.get("file", "")
+            layer["enabled"] = bool(enabled.get(name, True))
+    tmp = path + ".microcheck.tmp"
+    with open(tmp, "w") as f:
+        json.dump(doc, f, indent=2)
+        f.flush()
+        os.fsync(f.fileno())
+    os.replace(tmp, path)
+
+
+def restore_micro() -> None:
+    set_micro({"micro/vase.vxw": True, "micro/urn.vxw": True})
+
+
+def differing(a: bytes, b: bytes, thr: int = 16) -> list[int]:
+    return [
+        i
+        for i in range(0, len(a), 3)
+        if max(abs(a[i] - b[i]), abs(a[i + 1] - b[i + 1]), abs(a[i + 2] - b[i + 2])) > thr
+    ]
+
+
+def luma(buf: bytes, i: int) -> int:
+    return (buf[i] * 299 + buf[i + 1] * 587 + buf[i + 2] * 114) // 1000
+
+
+def main() -> int:
+    tmpdir = tempfile.mkdtemp(prefix="vf-micro-check-")
+    env = os.environ.copy()
+    # Never touch the live-edit overlay file: this is a read-only measurement.
+    env["VF_OVERLAY_PATH"] = os.path.join(tmpdir, "overlay.vxw")
+    os.environ.update(env)
+
+    try:
+        restore_micro()
+        on = os.path.join(tmpdir, "on.ppm")
+        off = os.path.join(tmpdir, "off.ppm")
+        urn_only = os.path.join(tmpdir, "urn.ppm")
+
+        print("[micro] rendering the micro objects ...")
+        set_micro({"micro/vase.vxw": True, "micro/urn.vxw": True})
+        render(on, MICRO_CAM)
+        set_micro({"micro/vase.vxw": False, "micro/urn.vxw": False})
+        render(off, MICRO_CAM)
+        set_micro({"micro/vase.vxw": False, "micro/urn.vxw": True})
+        render(urn_only, MICRO_CAM)
+
+        _, _, a = read_ppm(on)
+        _, _, b = read_ppm(off)
+        _, _, c = read_ppm(urn_only)
+
+        px = differing(a, b)
+        note(len(px) > 500, "micro objects are visible (%d differing pixels)" % len(px))
+        if not px:
+            print("FAIL: no micro pixels - nothing to measure")
+            return 1
+
+        # 1. MATERIAL: bright and neutral (the bug's signature was a near-black,
+        #    slightly green object).
+        mean = [statistics.mean(a[i + k] for i in px) for k in range(3)]
+        note(
+            min(mean) > 70.0,
+            "material is bright (mean RGB %.0f/%.0f/%.0f, want > 70)"
+            % (mean[0], mean[1], mean[2]),
+        )
+        note(
+            max(mean) - min(mean) < 25.0,
+            "material is neutral (channel spread %.1f, want < 25)"
+            % (max(mean) - min(mean)),
+        )
+
+        # 2. SHAPE: not a rectangle. A rectangle's bounding box is filled; a
+        #    vase's is not. The "hits the bounding box" failure produced a
+        #    67x67 px square, which a mean colour cannot see.
+        xs = [(i // 3) % W for i in px]
+        ys = [(i // 3) // W for i in px]
+        bw = max(xs) - min(xs) + 1
+        bh = max(ys) - min(ys) + 1
+        fill = len(px) / float(bw * bh)
+        note(
+            fill < 0.85,
+            "silhouette is not a filled rectangle (bbox %dx%d, fill %.2f, want < 0.85)"
+            % (bw, bh, fill),
+        )
+
+        # 3. MICRO-TO-MICRO SHADOW: the urn's own pixels must be darker with
+        #    the vase present.
+        urn_px = differing(c, b)
+        if not urn_px:
+            note(False, "the urn alone is not visible")
+        else:
+            darker = [i for i in urn_px if luma(a, i) < luma(c, i) - 3]
+            mean_drop = (
+                statistics.mean(luma(c, i) for i in darker)
+                - statistics.mean(luma(a, i) for i in darker)
+                if darker
+                else 0.0
+            )
+            note(
+                len(darker) > 30 and mean_drop > 8.0,
+                "the vase shadows the urn (%d px darkened, mean drop %.1f luma)"
+                % (len(darker), mean_drop),
+            )
+
+        # 4. NO WORLD REGRESSION: the house view is untouched.
+        print("[micro] rendering the house view (no micro object in it) ...")
+        house_on = os.path.join(tmpdir, "house_on.ppm")
+        house_off = os.path.join(tmpdir, "house_off.ppm")
+        set_micro({"micro/vase.vxw": True, "micro/urn.vxw": True})
+        render(house_on, HOUSE_CAM, 960, 540)
+        set_micro({"micro/vase.vxw": False, "micro/urn.vxw": False})
+        render(house_off, HOUSE_CAM, 960, 540)
+        _, _, ha = read_ppm(house_on)
+        _, _, hb = read_ppm(house_off)
+        hpx = differing(ha, hb)
+        note(
+            len(hpx) == 0,
+            "the world view is untouched by the overlay (%d differing pixels)" % len(hpx),
+        )
+
+        # 5. BOTH BACKENDS: the micro objects must draw in the SVO reference
+        #    backend too.
+        print("[micro] rendering the SVO backend ...")
+        svo_on = os.path.join(tmpdir, "svo_on.ppm")
+        svo_off = os.path.join(tmpdir, "svo_off.ppm")
+        set_micro({"micro/vase.vxw": True, "micro/urn.vxw": True})
+        render(svo_on, MICRO_CAM, mode="svo")
+        set_micro({"micro/vase.vxw": False, "micro/urn.vxw": False})
+        render(svo_off, MICRO_CAM, mode="svo")
+        _, _, sa = read_ppm(svo_on)
+        _, _, sb = read_ppm(svo_off)
+        spx = differing(sa, sb)
+        note(len(spx) > 200, "the SVO backend draws the micro objects (%d px)" % len(spx))
+    finally:
+        restore_micro()
+
+    print()
+    if failures:
+        print("FAIL: %d micro check(s) failed" % len(failures))
+        for f in failures:
+            print("  - " + f)
+        return 1
+    print("PASS: micro-voxel overlay")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
