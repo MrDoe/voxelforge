@@ -129,13 +129,44 @@ def set_micro(enabled: dict[str, bool], rot: dict[str, float] | None = None) -> 
     _write_manifest(doc)
 
 
-def restore_micro() -> None:
-    """Put the manifest back exactly as it was found."""
+# The manifest's micro entries as they were found, so the gate can put them
+# back EXACTLY. A restore that only re-enables the layers leaves a rotation
+# behind (measured: the gate turned the shipped alpaca 90 degrees and left it
+# that way).
+_MICRO_SAVED: list[tuple[str, bool, float]] = []
+
+
+def save_micro() -> None:
+    """Snapshot the micro entries' VALUES (not their dicts: the manifest is
+    re-read on every write, so a saved dict reference would be stale)."""
     with open(MANIFEST) as f:
         doc = json.load(f)
+    _MICRO_SAVED.clear()
     for layer in doc["layers"]:
         if layer.get("role") == "micro":
-            layer["enabled"] = True
+            _MICRO_SAVED.append(
+                (layer.get("file", ""), layer.get("enabled", True),
+                 float(layer.get("rot", 0.0)))
+            )
+
+
+def restore_micro() -> None:
+    """Put the manifest back exactly as it was found."""
+    if not _MICRO_SAVED:
+        return
+    with open(MANIFEST) as f:
+        doc = json.load(f)
+    saved = {name: (enabled, rot) for name, enabled, rot in _MICRO_SAVED}
+    for layer in doc["layers"]:
+        if layer.get("role") != "micro":
+            continue
+        entry = saved.get(layer.get("file", ""))
+        if entry:
+            layer["enabled"] = entry[0]
+            layer["rot"] = entry[1]
+        # A key the gate may have introduced (an older run wrote "rotDeg")
+        # would otherwise survive into the shipped manifest.
+        layer.pop("rotDeg", None)
     _write_manifest(doc)
 
 
@@ -159,7 +190,7 @@ def main() -> int:
     os.environ.update(env)
 
     try:
-        restore_micro()
+        save_micro()
         on = os.path.join(tmpdir, "on.ppm")
         off = os.path.join(tmpdir, "off.ppm")
         urn_only = os.path.join(tmpdir, "urn.ppm")
