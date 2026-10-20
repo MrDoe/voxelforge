@@ -242,7 +242,7 @@ spread of the alpaca's own pixels.
 | check | result |
 |---|---|
 | `test_micro.cpp` (10 cases) | pass — incl. a negative control for the continuity check and the cast-shadow verdict |
-| `micro_check.py` (9 checks) | pass — visibility, material, silhouette, micro-to-micro shadow, RECEIVE, CAST, world untouched, SVO backend |
+| `micro_check.py` (11 checks) | pass — visibility, material, silhouette, micro-to-micro shadow, RECEIVE, CAST, alpaca visible, fleece texture, world untouched, SVO backend |
 | `test-unit` group | 8/8 pass |
 | `visual_check.py` | only the pre-existing `house: sky probe not blue-dominant` failure; every other metric is **bit-identical** to before the micro layers existed (coverage 70.8 / 94.6 / 96.2 %), because the objects are not in those views |
 | `live_edit_check.py` | exactly the documented pre-existing baseline: 3× `object_smooth` + 1× `object undo`, same 11002/11008 numbers — no regression |
@@ -252,3 +252,5 @@ spread of the alpaca's own pixels.
 | RECEIVE (world → micro) | 116 luma with the world shadow off, 94 with it on |
 | CAST (micro → world) | the bake reports 7 surfels darkened |
 | micro → micro | 349 urn pixels darkened by a mean of 41 luma |
+| the alpaca | visible (86 k px), fleece luma spread 24.7 (a flat fill would be ~2) |
+| shadow reaches the LEGS | ratio 0.87 → 0.57 after the 0.35 m step cap |
