@@ -56,9 +56,13 @@ struct MicroWorld {
     size_t brickCount() const { return bricks.size() / BRICK_WORDS; }
     size_t bytes() const
     {
+        // The uint32 arrays are 4 bytes each; `field` is already ONE BYTE per
+        // cell, so it must not be multiplied again (the log line overstated
+        // the alpaca's GPU footprint 4x while it was added to the sum).
         return (childBase.size() + payload.size() + handles.size() +
-                bricks.size() + chunkGrid.size() + chunkInfo.size() * 4 + field.size()) *
-               4;
+                bricks.size() + chunkGrid.size() + chunkInfo.size() * 4) *
+                   4 +
+               field.size();
     }
 };
 
