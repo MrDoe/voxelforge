@@ -308,6 +308,20 @@
       "rotX": 0.0,
       "rotZ": 0.0,
       "enabled": true
+    },
+    {
+      "file": "micro/alpaca.vxw",
+      "role": "micro",
+      "name": "alpaca",
+      "pos": [
+        11.55,
+        -0.25,
+        12.0
+      ],
+      "rot": 0.0,
+      "rotX": 0.0,
+      "rotZ": 0.0,
+      "enabled": true
     }
   ],
   "lights": [
@@ -432,6 +446,11 @@
       "file": "textures/stone_plaster.png",
       "mat": 20,
       "scale": 1.0
+    },
+    {
+      "file": "textures/fur.jpeg",
+      "mat": 21,
+      "scale": 0.2
     }
   ]
 }

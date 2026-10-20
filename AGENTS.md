@@ -153,7 +153,10 @@ one costs a whole turn, because the bad call is rejected before any work runs.
   sweeps (cabin/forest/orchard/dock/scatter) and their analytic `common.hpp`
   shapes are gone from the baker (the analytics remain only as test fixtures).
 - **Material textures live in `assets/textures/`** as PNG/JPG and are bound
-  per material by the `world.json` "textures" table. The shipped set is
+  per material by the `world.json` "textures" table. **A material is the unit
+  of texture binding**, and a TEXTURED material ignores a record's colour — so
+  a new surface look needs a new material, not a new record colour (see the
+  `fleece` note below). The shipped set is
   downloaded from ambientCG (CC0) by `tools/fetch_textures.py`, which
   **mean-matches every photo to the material's palette colour** so the scene
   keeps its identity; `tools/gen_textures.py` (`ninja -C build vf_textures`)
@@ -167,6 +170,16 @@ one costs a whole turn, because the bad call is rejected before any work runs.
   or AI generation almost always fails at least one (measured: 1 of 13 AI
   candidates passed raw, 10 after repair). See
   `.opencode/wiki/concepts/texture-conformance.md`.
+- **Material 21 is `fleece`** (a warm cream, matte), added for the micro-voxel
+  alpaca so a fur texture could be bound WITHOUT changing the plaster vase
+  (they used to share mat 20). Appending it is safe: `kPaletteN` 21 → 22, the
+  GLSL `kPalette`/`kMatRefl`/`matTex` sizes and the atlas `kLayers` all move
+  together, and every existing material keeps its index. The alpaca's
+  eyes/muzzle/hooves deliberately ride existing materials (4 rock, 19 thatch)
+  so they do not turn furry. The fur's `scale` is **0.2 m/tile** — fleece
+  clumps are centimetres, not metres — and `tools/gen_textures.py`'s TARGETS
+  gained `fleece: (237, 227, 207)` so `check_texture.py --material fleece`
+  can validate a drop-in.
 - **Runtime truth = records.** `LayeredWorld` merges enabled layers
   (first-wins-a-cell), builds `VoxelField`, and synthesizes the SVO.
   `reloadIfChanged()` polls mtimes every ~0.5 s; GUI toggles reload instantly.

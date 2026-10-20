@@ -37,6 +37,11 @@ TARGETS = {
     "foliage": (13, 76, 12),        # mat 8
     "snow": (223, 230, 240),        # mat 16
     "bark": (92, 56, 26),           # mat 17 (palette 0.36,0.22,0.10)
+    # mat 21 - the micro-voxel alpaca's fleece. A warm cream, so a fur photo
+    # stays on-palette: mean-matching preserves the material's identity (see
+    # tools/check_texture.py). Bound in world.json "textures" with a SMALL
+    # scale (~0.2 m/tile) - the fleece's clumps are centimetres, not metres.
+    "fleece": (237, 227, 207),
     "moss": (51, 97, 31),           # mat 18 (palette 0.20,0.38,0.12)
     "thatch": (158, 128, 51),       # mat 19 (palette 0.62,0.50,0.20)
     "plaster": (204, 194, 179),     # mat 20 (palette 0.80,0.76,0.70)

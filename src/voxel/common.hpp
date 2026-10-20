@@ -21,7 +21,7 @@ constexpr int GRID_N = int(WORLD / CHUNK_M);
 
 // The palette size is load-bearing: the shader tables (kPalette/kMatRefl/
 // matTex) and the atlas layer count must all match it exactly.
-inline constexpr int kPaletteN = 21;
+inline constexpr int kPaletteN = 22;
 
 inline const std::array<glm::vec3, kPaletteN> kPalette {
     glm::vec3 { 0.07f, 0.52f, 0.06f }, // 0 grass dark - vivid
@@ -45,6 +45,12 @@ inline const std::array<glm::vec3, kPaletteN> kPalette {
     glm::vec3 { 0.20f, 0.38f, 0.12f }, // 18 moss - damp stone/wood
     glm::vec3 { 0.62f, 0.50f, 0.20f }, // 19 thatch - dry reed roofs
     glm::vec3 { 0.80f, 0.76f, 0.70f }, // 20 plaster - white-washed walls
+    // 21 fleece - a warm cream for the micro-voxel alpaca. Its own material so
+    // a fur texture can be bound to it WITHOUT changing the plaster vase, and
+    // so the animal's eyes/muzzle/hooves can use other materials (a material
+    // is the unit of texture binding, and a textured material ignores the
+    // record's colour).
+    glm::vec3 { 0.93f, 0.89f, 0.81f }, // 21 fleece
 };
 
 // Self-emission colour per material, MIRROR of kEmissive[] in
@@ -76,6 +82,7 @@ inline const std::array<glm::vec3, kPaletteN> kEmissive {
     glm::vec3 { 0.0f },                   // 18 moss
     glm::vec3 { 0.0f },                   // 19 thatch
     glm::vec3 { 0.0f },                   // 20 plaster
+    glm::vec3 { 0.0f },                   // 21 fleece
 };
 // Emission magnitude -> point-light intensity, shared by the bake upload
 // and the live trigger so both sides agree on brightness.
@@ -104,6 +111,7 @@ inline const std::array<glm::vec2, kPaletteN> kMaterialReflection {
     glm::vec2 { 35.f, 235.f },  // 18 moss
     glm::vec2 { 60.f, 170.f },  // 19 thatch
     glm::vec2 { 115.f, 135.f }, // 20 plaster
+    glm::vec2 { 20.f, 245.f },  // 21 fleece - matte, almost no specular
 };
 
 inline constexpr float WATER_LEVEL = -0.9f;

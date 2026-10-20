@@ -7,7 +7,7 @@
 // GPU overlay - the two are never merged.
 //
 //   micro_voxel --vase [--voxel 0.005] [--ground X,Z | --at X,Y,Z]
-//                [--out NAME] [--mat N] [--profile vase|urn] [--append]
+//                [--out NAME] [--mat N] [--profile vase|urn|alpaca] [--append]
 //   micro_voxel <file.stl|file.obj> --out NAME [--voxel 0.005] ...
 //
 // It writes assets/micro/<out>.vxw with a meta whose voxelSize is the fine one,
@@ -124,6 +124,198 @@ const int rVox = int(std::ceil(R / vox)) + 1;
     return out;
 }
 
+// ---------------------------------------------------------------------------
+// An ALPACA. Not a lathe: an animal is a union of primitives with a FUR
+// displacement, so this evaluates an SDF over the grid instead. Only the SIGN
+// matters (the app derives its own distance field), so the primitives may be
+// approximate without any visual cost.
+// ---------------------------------------------------------------------------
+
+// Deterministic 3D value noise: the fleece needs clumps, not a smooth blob.
+float hash3(glm::ivec3 p)
+{
+    uint32_t h = uint32_t(p.x) * 374761393u + uint32_t(p.y) * 668265263u +
+                 uint32_t(p.z) * 1274126177u;
+    h = (h ^ (h >> 13)) * 1274126177u;
+    h ^= h >> 16;
+    return float(h & 0x00FFFFFFu) / float(0x00FFFFFFu);
+}
+
+float vnoise3(glm::vec3 p)
+{
+    const glm::ivec3 i = glm::ivec3(glm::floor(p));
+    const glm::vec3 f = p - glm::vec3(i);
+    const glm::vec3 w = f * f * (3.0f - 2.0f * f);
+    float acc = 0.0f;
+    for (int dz = 0; dz < 2; ++dz)
+        for (int dy = 0; dy < 2; ++dy)
+            for (int dx = 0; dx < 2; ++dx)
+                acc += hash3(i + glm::ivec3(dx, dy, dz)) *
+                       (dx ? w.x : 1.0f - w.x) * (dy ? w.y : 1.0f - w.y) *
+                       (dz ? w.z : 1.0f - w.z);
+    return acc;
+}
+
+// Three octaves at 5 cm / 2 cm / 1 cm periods. At an 8 mm voxel the finest is
+// just over a cell, so the fleece reads as clumps rather than as noise.
+float furNoise(glm::vec3 p)
+{
+    return 0.60f * vnoise3(p * 20.0f) + 0.28f * vnoise3(p * 48.0f) +
+           0.12f * vnoise3(p * 96.0f);
+}
+
+float sdEllipsoid(glm::vec3 p, glm::vec3 r)
+{
+    const float k0 = glm::length(p / r);
+    const float k1 = glm::length(p / (r * r));
+    return k1 > 1e-9f ? k0 * (k0 - 1.0f) / k1 : -std::min(r.x, std::min(r.y, r.z));
+}
+
+// A capsule whose radius varies along its axis. Not an exact SDF, which is
+// fine: only the sign is used.
+float sdTaperedCapsule(glm::vec3 p, glm::vec3 a, glm::vec3 b, float ra, float rb)
+{
+    const glm::vec3 pa = p - a, ba = b - a;
+    const float h = glm::clamp(glm::dot(pa, ba) / glm::dot(ba, ba), 0.0f, 1.0f);
+    return glm::length(pa - ba * h) - mixf(ra, rb, h);
+}
+
+// A short vertical cylinder: the hooves. Only the sign matters.
+float sdCylinderY(glm::vec3 p, glm::vec3 c, float r, float halfH)
+{
+    const glm::vec2 d = glm::vec2(glm::length(glm::vec2(p.x - c.x, p.z - c.z)) - r,
+                                  std::abs(p.y - c.y) - halfH);
+    return std::min(std::max(d.x, d.y), 0.0f) + glm::length(glm::max(d, 0.0f));
+}
+
+// The fleece palette: a Suri alpaca is a warm cream, with a tan muzzle, dark
+// eyes and near-black hooves. Per-record colours, so the silhouette AND the
+// face read at close range.
+struct AlpacaLook {
+    // Colours AND materials. A material is the unit of texture binding, and a
+    // TEXTURED material ignores a record's colour - so the fleece needs its own
+    // material (21, which a fur texture can be bound to without touching the
+    // plaster vase), while the muzzle/eyes/hooves ride existing materials so
+    // they do not turn furry. With no texture bound, the colours below show.
+    glm::vec3 fleece { 0.94f, 0.90f, 0.82f };
+    glm::vec3 muzzle { 0.80f, 0.70f, 0.58f };
+    glm::vec3 eye { 0.10f, 0.09f, 0.08f };
+    glm::vec3 hoof { 0.24f, 0.22f, 0.20f };
+    uint8_t fleeceMat = 21; // fleece
+    uint8_t muzzleMat = 19; // thatch - a dry tan nose
+    uint8_t eyeMat = 4;     // rock - reads dark at 2 cells
+    uint8_t hoofMat = 4;
+};
+
+std::vector<VoxelRecord> makeAlpaca(const Options& o, int& nx, int& ny, int& nz)
+{
+    const float vox = o.voxel;
+    const float s = o.scale; // the whole animal scales about its feet
+    // Bounds in metres, y up from the hooves. The grid is the AABB of the
+    // primitives below plus a cell of slack, so no primitive can write a
+    // negative index (which wraps in the uint16 record - see makeLathe).
+    const glm::vec3 lo(-0.22f * s, 0.0f, -0.50f * s);
+    const glm::vec3 hi(0.22f * s, 1.34f * s, 0.62f * s);
+    nx = int(std::ceil((hi.x - lo.x) / vox)) + 2;
+    ny = int(std::ceil((hi.y - lo.y) / vox)) + 2;
+    nz = int(std::ceil((hi.z - lo.z) / vox)) + 2;
+
+    const AlpacaLook look;
+    const glm::vec3 furAmp(0.0f); // (unused: the amplitude is per-region below)
+    (void)furAmp;
+    std::vector<VoxelRecord> out;
+
+    // Unit-scale geometry: metres with the animal ~1.3 m tall.
+    for (int iz = 0; iz < nz; ++iz)
+        for (int iy = 0; iy < ny; ++iy)
+            for (int ix = 0; ix < nx; ++ix) {
+                const glm::vec3 p = lo + glm::vec3(float(ix) + 0.5f, float(iy) + 0.5f,
+                                                   float(iz) + 0.5f) * vox;
+                const glm::vec3 q = p / s;
+
+                // --- the primitives, nearest-region wins -------------------
+                // The body is a fat ellipsoid; the neck lifts the head clear of
+                // it; four tapered legs stand the animal on the ground.
+                float d = sdEllipsoid(q - glm::vec3(0.0f, 0.62f, 0.02f),
+                                      glm::vec3(0.175f, 0.195f, 0.33f));
+                glm::vec3 col = look.fleece;
+                uint8_t mat = look.fleeceMat;
+                bool fleece = true;
+
+                auto take = [&](float dd, glm::vec3 c, bool fur, uint8_t m) {
+                    if (dd < d) {
+                        d = dd;
+                        col = c;
+                        mat = m;
+                        fleece = fur;
+                    }
+                };
+
+                take(sdTaperedCapsule(q, glm::vec3(0.0f, 0.70f, 0.26f),
+                                      glm::vec3(0.0f, 1.02f, 0.34f), 0.105f, 0.075f),
+                     look.fleece, true, look.fleeceMat);
+                take(sdEllipsoid(q - glm::vec3(0.0f, 1.09f, 0.38f),
+                                 glm::vec3(0.078f, 0.090f, 0.125f)),
+                     look.fleece, true, look.fleeceMat);
+                take(sdEllipsoid(q - glm::vec3(0.0f, 1.045f, 0.50f),
+                                 glm::vec3(0.052f, 0.055f, 0.072f)),
+                     look.muzzle, false, look.muzzleMat);
+                take(sdTaperedCapsule(q, glm::vec3(0.0f, 0.70f, -0.32f),
+                                      glm::vec3(0.0f, 0.82f, -0.40f), 0.050f, 0.032f),
+                     look.fleece, true, look.fleeceMat);
+                for (int side = -1; side <= 1; side += 2) {
+                    const float sx = float(side);
+                    // Ears: tall and slightly splayed, the alpaca's signature.
+                    take(sdTaperedCapsule(q, glm::vec3(0.045f * sx, 1.15f, 0.35f),
+                                          glm::vec3(0.078f * sx, 1.30f, 0.32f), 0.030f,
+                                          0.013f),
+                         look.fleece, true, look.fleeceMat);
+                    // Eyes.
+                    take(glm::length(q - glm::vec3(0.062f * sx, 1.115f, 0.415f)) - 0.017f,
+                         look.eye, false, look.eyeMat);
+                    // Legs: front pair shorter than the back (they are), each
+                    // with a hoof.
+                    take(sdTaperedCapsule(q, glm::vec3(0.083f * sx, 0.50f, 0.235f),
+                                          glm::vec3(0.092f * sx, 0.06f, 0.245f), 0.055f,
+                                          0.030f),
+                         look.fleece, true, look.fleeceMat);
+                    take(sdTaperedCapsule(q, glm::vec3(0.090f * sx, 0.52f, -0.235f),
+                                          glm::vec3(0.100f * sx, 0.06f, -0.250f), 0.065f,
+                                          0.032f),
+                         look.fleece, true, look.fleeceMat);
+                    take(sdCylinderY(q, glm::vec3(0.092f * sx, 0.025f, 0.245f), 0.034f,
+                                     0.028f),
+                         look.hoof, false, look.hoofMat);
+                    take(sdCylinderY(q, glm::vec3(0.100f * sx, 0.025f, -0.250f), 0.036f,
+                                     0.028f),
+                         look.hoof, false, look.hoofMat);
+                }
+
+                // --- the fleece -------------------------------------------
+                // Only near the surface, and only on the fleece regions: the
+                // eyes, muzzle and hooves stay crisp.
+                if (fleece && d < 0.05f)
+                    d -= (furNoise(q) - 0.45f) * 0.030f;
+                if (d > 0.0f)
+                    continue;
+
+                VoxelRecord v;
+                v.x = uint16_t(ix);
+                v.y = uint16_t(iy);
+                v.z = uint16_t(iz);
+                v.a = 255;
+                v.r = uint8_t(glm::clamp(col.r * 255.0f, 0.0f, 255.0f));
+                v.g = uint8_t(glm::clamp(col.g * 255.0f, 0.0f, 255.0f));
+                v.b = uint8_t(glm::clamp(col.b * 255.0f, 0.0f, 255.0f));
+                v.materialId = mat;
+                const glm::vec2 rr = kMaterialReflection[std::min<int>(mat, kPaletteN - 1)];
+                v.reflectivity = uint8_t(rr.x);
+                v.roughness = uint8_t(rr.y);
+                out.push_back(v);
+            }
+    return out;
+}
+
 } // namespace
 
 int main(int argc, char** argv)
@@ -134,7 +326,9 @@ int main(int argc, char** argv)
         std::printf("usage: micro_voxel --vase [--profile vase|urn] [--voxel 0.005] "
                     "[--mat N] [--scale S]\n"
                     "       micro_voxel [--ground X,Z | --at X,Y,Z] [--out NAME] "
-                    "[--append]\n");
+                    "[--append]\n"
+                    "       micro_voxel --alpaca [--voxel 0.008] [--at X,Y,Z] "
+                    "[--out NAME] [--append]\n");
         return 2;
     }
     std::vector<std::string> pos;
@@ -155,6 +349,9 @@ int main(int argc, char** argv)
             o.outName = v;
         } else if (a == "--vase") {
             o.procedural = true;
+        } else if (a == "--alpaca") {
+            o.procedural = true;
+            o.profile = "alpaca";
         } else if (take("--profile", v)) {
             o.profile = v;
         } else if (take("--voxel", v)) {
@@ -217,7 +414,8 @@ int main(int argc, char** argv)
     }
 
     int nx = 0, ny = 0, nz = 0;
-    std::vector<VoxelRecord> recs = makeLathe(o, nx, ny, nz);
+    std::vector<VoxelRecord> recs =
+        o.profile == "alpaca" ? makeAlpaca(o, nx, ny, nz) : makeLathe(o, nx, ny, nz);
     std::printf("micro_voxel: profile '%s' -> %zu voxels, grid %dx%dx%d, "
                 "voxel %.4f m (%.1f cm)\n",
                 o.profile.c_str(), recs.size(), nx, ny, nz, o.voxel, o.voxel * 100.f);

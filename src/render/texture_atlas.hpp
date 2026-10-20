@@ -33,7 +33,7 @@ namespace vf {
 class TexAtlas {
 public:
     static constexpr uint32_t kTexSize = 512;   // texels per atlas layer side
-    static constexpr uint32_t kLayers = 21;     // one per palette material id
+    static constexpr uint32_t kLayers = 22;     // one per palette material id
     static constexpr float kDefaultScale = 0.5f; // metres per tile
 
     TexAtlas()

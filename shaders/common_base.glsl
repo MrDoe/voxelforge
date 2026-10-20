@@ -12,7 +12,7 @@ vec3 kSunDir = normalize(vec3(0.42, 0.78, 0.30)); // set from push in main()
 const vec3 kSunCol = vec3(1.00, 0.95, 0.84) * 1.35;
 const vec3 kZenith = vec3(0.20, 0.36, 0.62);
 const vec3 kHorizon = vec3(0.72, 0.80, 0.90);
-const vec3 kPalette[21] = vec3[21](
+const vec3 kPalette[22] = vec3[22](
     vec3(0.07,0.52,0.06), vec3(0.16,0.68,0.10), vec3(0.62,0.36,0.14),
     vec3(0.84,0.72,0.38), vec3(0.48,0.42,0.38), vec3(0.66,0.64,0.60),
     vec3(0.62,0.33,0.10), vec3(0.42,0.22,0.10), vec3(0.04,0.52,0.03),
@@ -22,9 +22,10 @@ const vec3 kPalette[21] = vec3[21](
     vec3(0.36,0.22,0.10), // 17 bark
     vec3(0.20,0.38,0.12), // 18 moss
     vec3(0.62,0.50,0.20), // 19 thatch
-    vec3(0.80,0.76,0.70)  // 20 plaster
+    vec3(0.80,0.76,0.70), // 20 plaster
+    vec3(0.93,0.89,0.81)  // 21 fleece
 );
-const vec2 kMatRefl[21] = vec2[21](
+const vec2 kMatRefl[22] = vec2[22](
     vec2(35,235)/255.0, vec2(40,230)/255.0, vec2(55,225)/255.0,
     vec2(130,190)/255.0, vec2(95,150)/255.0, vec2(115,135)/255.0,
     vec2(70,160)/255.0, vec2(60,170)/255.0, vec2(30,235)/255.0,
@@ -34,7 +35,8 @@ const vec2 kMatRefl[21] = vec2[21](
     vec2(70,160)/255.0,  // 17 bark
     vec2(35,235)/255.0,  // 18 moss
     vec2(60,170)/255.0,  // 19 thatch
-    vec2(115,135)/255.0  // 20 plaster
+    vec2(115,135)/255.0, // 20 plaster
+    vec2(20,245)/255.0   // 21 fleece - matte, almost no specular
 );
 // emissive (self-illuminating) term per material id; 0-8 are inert, 9-15 glow.
 const vec3 kEmissive[16] = vec3[16](
@@ -141,7 +143,7 @@ float causticAt(vec2 xz, float t)
 // gTexOv (phase 2) overrides the material slot per surfel: > 0 = atlas layer.
 layout(set = 0, binding = 22) uniform sampler2DArray uTexAtlas;
 layout(std140, set = 0, binding = 23) uniform TexTable {
-    vec4 matTex[21]; // x = layer index (-1 = none, palette), y = m/tile,
+    vec4 matTex[22]; // x = layer index (-1 = none, palette), y = m/tile,
                      // z = emissive scale (0 = this texture does not emit)
 } uTex;
 float gTexOv = 0.0;
