@@ -5,6 +5,7 @@
 #include <spdlog/spdlog.h>
 #include <cctype>
 #include <cmath>
+#include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <fstream>
@@ -967,7 +968,15 @@ bool writeManifest(const std::string& path, const std::vector<WorldLayer>& layer
 {
     const std::string prev = readFileText(path);
 
-    std::FILE* f = std::fopen(path.c_str(), "wb");
+    // Write to a sibling temp file and RENAME, not in place. The manifest is
+    // a TRACKED file that a concurrent reader (another session's visual_check,
+    // a running app's poll) can read at any moment, and an in-place
+    // fopen("wb") truncates it first: a reader that arrives between the
+    // truncate and the close sees a half-written manifest, and an interrupted
+    // write leaves it truncated for good. The overlay writer already uses
+    // temp+rename for exactly this reason.
+    const std::string tmp = path + ".tmp";
+    std::FILE* f = std::fopen(tmp.c_str(), "wb");
     if (!f)
         return false;
     std::fprintf(f, "{\n  \"version\": 1,\n  \"layers\": [\n");
@@ -993,7 +1002,17 @@ bool writeManifest(const std::string& path, const std::vector<WorldLayer>& layer
         emitPreserved(f, pairs, "version", "layers", first);
     }
     std::fprintf(f, "\n}\n");
-    return std::fclose(f) == 0;
+    if (std::fclose(f) != 0) {
+        std::remove(tmp.c_str());
+        return false;
+    }
+    // rename(2) is atomic on POSIX: a reader sees the old file or the new
+    // one, never a torn one.
+    if (std::rename(tmp.c_str(), path.c_str()) != 0) {
+        std::remove(tmp.c_str());
+        return false;
+    }
+    return true;
 }
 
 bool writeLightManifest(const std::string& path,
