@@ -257,6 +257,21 @@ one costs a whole turn, because the bad call is rejected before any work runs.
   Rotate has no hotkey: it needs a selected layer first, and a key that
   silently no-ops is worse than no key. `App::drawHotkeyBar` renders the current
   set at the bottom of the screen on a dark plate.
+  **Bounding-box selection** (scopes the brush): with the tool armed,
+  **Shift+LMB drag** defines a world-space lattice box — the pressed cell is
+  the anchor, the cell under the cursor the opposite corner — drawn as a
+  wireframe by the post pass (bit-16 gated, like the other outlines). While a
+  box is active every Carve/Add/Delete/Paint/Smooth stamp only touches cells
+  inside it (`App::applyEditLive` clamps the cell set; the hover tint clips to
+  the same cells through `BrushUBO` `bBoxLo`/`bBoxHi`, so the preview can
+  never promise cells the box would drop), and a stamp entirely outside does
+  nothing at all — no store patch, no stroke, no undo step. Release reports
+  the contents (solid cells, object-owned cells, splats via the shared
+  `buildChunkSurfelsRange`) to the log and the Edit section. **X** clears the
+  box (also the section's **Clear box** button). Rotate/Move ignore the box —
+  they act on a layer owner, not on cells. The math lives in
+  `src/voxel/box_select.hpp` (unit-pinned), the wiring in
+  `src/app/edit/box_select.cpp`.
   **Rotate** is selected from the toolbox or the World Layers **Activate
   trackball** action. A plain LMB click on an object then activates that exact
   owner; ownership comes from the picked `VoxelField` cell and stable 8-bit
@@ -492,7 +507,10 @@ one costs a whole turn, because the bad call is rejected before any work runs.
   reload; `uHeight` is patched for the edited columns and the water plane is
   world-wide, so both follow a live edit. Headless hooks: `VF_TEST_EDIT="x,y,z,carve|add|delete|paint|smooth"` (one
   stamp), `VF_TEST_BRUSH="x,y,z,carve|delete|paint|smooth"` (activates the tool and
-  renders only the hover preview, no edit), `VF_TEST_STROKE="x,y,z,steps[,mode]"`
+  renders only the hover preview, no edit), `VF_TEST_BOX="x0,y0,z0,x1,y1,z1"`
+  (activates the bounding-box selection BEFORE `VF_TEST_EDIT`, so a shot can
+  prove the scoping: an out-of-box stamp must come out pixel-identical to its
+  own `VF_TEST_BRUSH` control), `VF_TEST_STROKE="x,y,z,steps[,mode]"`
   + `VF_TEST_STROKE_SAVE=1` (drag simulation + persistence),
   `VF_EDIT_DIAM`/`VF_EDIT_DEPTH` (brush size),
   `VF_SMOOTH_STRENGTH`/`VF_EDIT_STRENGTH` (Smooth relaxation, 0..1),
@@ -566,6 +584,15 @@ one costs a whole turn, because the bad call is rejected before any work runs.
   vocabulary (`ui/ui_primitives.*`, `ui/ui_types.hpp`). Those were unreachable
   from a test while they shared a translation unit with `main()`; they are also
   inside `test-unit`, so the existing entry point still covers them.
+- The bounding-box selection is verified by `live_edit_check.py --only box`
+  (ctest `box_select_check`, labelled **live-edit AND preview**): a stamp
+  fully outside the box must come out pixel-identical to its own
+  `VF_TEST_BRUSH` control (that comparison pins the CPU clamp and the shader
+  tint clip together), a stamp inside must move pixels, the contents report
+  must count cells + surfels, and the wireframe must be visible. A box check
+  whose baseline is a plain untouched render will fail on the hover
+  outline/tint that `VF_TEST_EDIT` arms — pin the hover with `VF_TEST_BRUSH`
+  in BOTH frames.
 - Use the smallest relevant group: surfel/radius changes use `test-surfel`;
   ChunkStore/brush/live-patch changes use `test-store` or `test-live-edit`;
   camera/shader/scene changes use `test-visual`; SSAO, texture, and fog
@@ -714,6 +741,75 @@ one costs a whole turn, because the bad call is rejected before any work runs.
 - `tools/heightmap_gen.cpp` — offline baker; classifies terrain materials
   against lattice geometry (`latSlope`) so baked materials match what the GPU
   renders. `tools/scene_slice.cpp` — ASCII cross-sections of the field.
+
+## Micro-voxel objects — separate SVO worlds
+- A high-detail object (a 30 cm vase at 5 mm) gets **its own lattice, its own
+  SVO world and its own overlay pass**. The world lattice stays 0.1 m and is
+  never subdivided. Pipeline: `assets/world.json` `role: "micro"` →
+  `App::loadMicroObjects()` (`src/app/world/micro_objects.cpp`) → `MicroField`
+  (dense fine lattice, `src/voxel/micro_field.*`) → `MicroWorld` (its own SVO,
+  `src/voxel/micro_svo.*`) → `MicroSvoPass` (`src/render/micro_svo_pass.*`) →
+  `shaders/micro_overlay.comp`. The world path never sees any of it: no
+  `VoxelField`, no `ChunkStore`, no SVO pool, no live-edit overlay, and
+  `layered_world.cpp` **refuses** to resample a finer-than-world layer onto
+  the world lattice (a silent downsample was the old behaviour). Authoring
+  tool: `tools/micro_voxel.cpp` (`vf_microvox`, lathe profiles) →
+  `assets/micro/<name>.vxw`.
+- The overlay composites into the main backend's **existing** G-buffer
+  (`hdr`/`gpos`/`gnorm`) and overwrites a pixel only where a micro surface is
+  nearer — so the world/micro boundary is a distance comparison, and no depth
+  attachment, water-pass edit or splat change is needed. With no micro layer
+  loaded the pass is never dispatched (`empty()`), so the cost with the
+  feature off is one branch.
+- `shaders/micro_overlay.comp` **duplicates** the octree traversal instead of
+  parameterising `common_svo.glsl`, so the 0.1 m path cannot regress because
+  of an off-by-default feature (the codebase keeps bit-exact escape hatches
+  for the same reason). The shared lighting terms still come from
+  `common_base.glsl`, so a vase is lit like everything else.
+- **The SDF encoding is the load-bearing part, and it is NOT the world's
+  encoding.** The world stores the distance as an int8 count of whole voxels
+  because its raymarcher is a DDA that tests the byte's SIGN (its hit is a
+  cell). A micro field is consumed by a **sphere tracer** and needs a real
+  distance:
+  - the byte counts **eighth-voxels** (`kMicroSdfQuantum = 8`): whole-voxel
+    truncation sends both the outermost solid cell (−0.5 voxel) and the
+    adjacent air cell (+0.5) to 0, i.e. a flat-zero band across the surface;
+  - the field lives in a **dense per-world array** (`MicroWorld::field`, one
+    byte per cell), not in the bricks: a brick's trilinear stencil can only
+    reach inside its own brick, so it must be clamped to the brick and the
+    field then **jumps** at every brick boundary (+0.5 → −1.0 voxel in one
+    step) with no zero crossing to bisect to. Dense is affordable because a
+    micro object is small (the vase: 25×68×25 = 42 k cells = 42 KB);
+  - the grid carries an **air margin** of 4 cells (`kMicroMarginCells`): the
+    world AABB *is* the grid, and outside it the field falls back to the
+    distance to the box, which is **zero on the box face** — so a trace that
+    treats "within eps of the surface" as a hit converges onto the box and the
+    object renders as **its own bounding box**. The hit test is "strictly
+    inside" (`d < 0`);
+  - the BFS walks **26 neighbours**, not 6: a Manhattan distance
+    over-estimates the Euclidean one (up to √3), so a tracer stepping
+    `0.85·d` could jump through a thin diagonal wall; the Chebyshev distance
+    is never larger, so the step is conservative;
+  - the out-of-grid filler carries a **conservative** distance (margin − 0.5
+    voxels), not the maximum: the stencil reaches one cell past the sample
+    point and a maximum-distance filler next to a real edge cell would
+    explode the interpolated field into a tunnelling step.
+  With the field right, the material lookup is a plain cell lookup: the cell
+  **containing** the hit (`floor((p-mn)/cellSz)`), *not* the
+  `trunc((p-mn)/cellSz - 0.5)` cell-**centre** convention the field stencil
+  uses (at a face that lands on the air side — black albedo, grass material).
+- **Consequences of the separation, stated plainly:** micro objects self-shadow
+  and shadow each other exactly, but they do **not** receive the main world's
+  shadows and the main world does **not** receive theirs (those marches live
+  in the world shaders and know nothing about this pass). Live edits cannot
+  touch micro geometry: the micro worlds are outside the 16³ chunk stream.
+- Coverage: `tests/test_micro.cpp` (9 cases) pins the SDF's sign convention and
+  half-cell offset, the eighth-voxel quantisation, the margin, the dense field
+  against the CPU field, the brick packing, a CPU replica of the shader's
+  trace finding the object's **surface** (not the box's), and the field's
+  continuity across a brick boundary — with a negative control proving that
+  check can detect the brick-clamped field. See
+  `.opencode/wiki/concepts/micro-voxel-svo-overlay.md`.
 
 ## Shaders — data-only rule
 - `shaders/svo_raymarch.comp` is the SVO reference shader (+`taa_resolve.comp`,

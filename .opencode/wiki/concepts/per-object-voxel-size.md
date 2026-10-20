@@ -282,6 +282,20 @@ kept for shadow/picking) is the design the analysis above points at; it **has
 not been built**. See [[concepts/improvement-roadmap]] for the phase split now
 under way — **Phase 1 is representability only and claims no fine geometry.**
 
+**Superseded (2026-10-20) for the headline question.** "Can an object have a
+finer lattice than the world?" is now **answered yes**, by a route this page
+did not consider: the object gets its **own** lattice and its **own** SVO
+world, and is drawn by a separate overlay pass — the world lattice, the
+`VoxelField`, the `ChunkStore` and the live-edit overlay are all untouched.
+So the constraints listed above (global `VOXEL`, the single field oracle, the
+SVO brick SDF as a format blocker) still hold **for merging an object into
+the world lattice** — which is still the only way an object can be
+live-edited, picked, or shadowed by the world. What changed is that a
+high-detail object no longer has to be merged. The cost of the separate route,
+and the encoding contract it needed (a micro field is consumed by a sphere
+tracer, not a DDA), are in [[concepts/micro-voxel-svo-overlay]].
+
 Cross-links: [[concepts/improvement-roadmap]],
 [[concepts/live-edit-surfel-parity]],
-[[concepts/detail-pipeline]], [[concepts/edge-aware-surfel-radius]].
+[[concepts/detail-pipeline]], [[concepts/edge-aware-surfel-radius]],
+[[concepts/micro-voxel-svo-overlay]].

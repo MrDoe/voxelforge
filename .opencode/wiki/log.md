@@ -1,5 +1,5 @@
 # log
-Append-only timeline — 167 entries, 5163 lines. Entries are appended
+Append-only timeline — 74 dated session entries, 5267 lines. Entries are appended
 in **session order, not date order**, so this index is the only chronological view.
 Do not infer causation from vertical position in the file itself.
 
@@ -8,6 +8,11 @@ Do not infer causation from vertical position in the file itself.
 > [[concepts/measurement-discipline]].
 
 ## Index
+
+### 2026-10-10
+- **ingest** — Bounding-box selection scopes the brush
+- **finding** — A peer's non-atomic world.json rewrite fakes a visual_check failure
+- **lint** — wiki sweep after the box feature: page indexed + linked, 2 untracked-sourceRef advisories (files not committed yet), 1 pre-existing dangling link in `motion-blur-prevcam.md` (peer page, untouched)
 
 ### 2026-10-08
 - **ingest** — Dynamic sun shadows: the 13 s stall is not the sun's fault
@@ -5210,3 +5215,110 @@ analytically-proven exactness of the shader for a static camera (10 m centre
 point -> (480.0, 270.0)) is in the page.
 
 Gates: ninja, test-surfel 4/4, test-store, test-live-edit 3/2.
+
+## 2026-10-10 ingest | Bounding-box selection scopes the brush
+Implemented the user-requested bounding-box selector as a **scoping tool**
+(after confirming intent through `make_decision` + a preference question:
+"scope brush edits" over "select+inspect" / "extract to layer", targeting
+both voxels and surfels). Shift+LMB drag defines an inclusive lattice AABB
+corner-to-corner off the existing hover pick (no plane maths); X clears.
+One representation (`CellBox`, `src/voxel/box_select.hpp`, unit-pinned by
+`tests/test_box_select.cpp`) feeds three consumers: the stamp clamp in
+`App::applyEditLive` (a fully-outside stamp does nothing — no store patch,
+no stroke, no undo step), the `BrushUBO` `bBoxLo`/`bBoxHi` clip in
+`sharedInBrushVolume` (both backends), and the `post.comp` screen-space
+wireframe. Contents report counts solid/object cells and sums
+`buildChunkSurfelsRange` over the overlapped chunks. New gate:
+`live_edit_check.py --only box` (ctest `box_select_check`, labelled
+live-edit + preview) — the control for a scoped stamp is a `VF_TEST_BRUSH`
+render, so an out-of-box stamp must be **pixel-identical** to it (0.0000 %
+measured), which pins the CPU clamp and the shader clip in one diff.
+Created [[concepts/box-selection-scope]]; documented in AGENTS.md.
+
+## 2026-10-10 finding | A peer's non-atomic world.json rewrite fakes a visual_check failure
+`test-visual` failed twice with "layer ownership: preview hook modified
+world.json" while my renders left the manifest byte-identical (md5
+before == after). The file's mtime moved every ~2 min during the check
+window, `git diff` was empty and `git status` later clean: another session
+was rewriting `assets/world.json` with **identical content** via a
+non-atomic `ofstream`, and the check's before/after read straddled a
+rewrite (torn read). Distinguishing evidence: the failure followed the
+check's wall time (flaky across runs, fixed under `--only preview`),
+`git diff` showed no content change, and a long-lived `./build/vf_mcp`
+from another session was running. The pre-existing house sky-probe failure
+(lint, 2026-10-04: [[concepts/sky-probe-is-a-camera-assertion]]) is a
+separate, documented item; my feature's frames are inert when no box is
+active. Lesson filed under the `overlay-silent-write-trap` /
+`uncommitted-edit-is-not-yours` family: a manifest guard can be defeated by
+a *concurrent writer*, not only by the code under test — check mtime +
+`git diff` before believing a "the code wrote the manifest" failure.
+
+## 2026-10-10 fix | visual_check's manifest guard now tolerates a concurrent A/B writer
+Wesley (ses_ede40313fffeGC57CPRCLVu4qS) confirmed the writer of the finding
+below: his `mprobe2.sh` micro-overlay probe harness toggled
+`micro/vase.vxw`'s `enabled` flag in `assets/world.json` for the duration of
+an A/B render. He landed the atomic-write half (temp+rename + fsync + EXIT
+trap, 1934 concurrent reads / 0 torn). The residual window he named is
+structural: a reader landing between the disable and the restore sees
+`enabled:false` for ~1 s, and the manifest path is a compile-time
+`VOXELFORGE_ASSET_DIR` with no env override. So the guard gained one settled
+re-read (2 s) before failing — a transient toggle now passes, a real commit
+by the code under test still fails. Positive control on the guard's shape in
+isolation: transient-restore → tolerated, persistent write → caught. Verified
+on the quiet tree: "[ownership manifest] unchanged". The full `visual_check`
+run's only failure remains the pre-existing house sky probe
+([[concepts/sky-probe-is-a-camera-assertion]]).
+
+## 2026-10-18 verify | Box selection interactive gesture signed off
+A peer (ses_edd7b4339ffeW6GjHxVlIdjD9f) drove the real app with XTEST at
+1600×900 and reported PASS on all four interactive checks: wireframe draws
+(3650 → 10 387–11 620 cyan pixels while boxed, 3610 after X), the tint
+clips to the box (an entirely-outside hover shows no tint at all and unclips
+after X), an outside stamp is inert (log "fully outside the selection box
+(N cells dropped)", no stroke/undo/overlay write), and X clears (log
+"cleared (the whole world is editable again)"). Release census fired
+correctly. The idle scene animates (clouds/water/grass), so pixel-identity
+claims need a same-state floor — the boxed frames are indistinguishable from
+it. This closes the interactive-coverage gap in
+[[concepts/interactive-ui-coverage-gap]]. Feature fully verified; no
+functional oddities. Updated [[concepts/box-selection-scope]].
+
+## [2026-10-20] ingest | Micro-voxel objects as separate SVO worlds
+
+The vase-rendered-dark bug is fixed, and the fix was in the **SDF encoding**,
+not in the cell lookup — three stacked defects:
+
+1. the sdf byte was a whole-voxel count, so the outermost solid cell (−0.5
+   voxel) and the adjacent air cell (+0.5) both stored 0 and the field was
+   flat zero across the surface. That whole-voxel count is a DDA convention;
+   a sphere tracer needs a real distance. Now eighth-voxel units.
+2. the field was read out of the BRICKS, whose trilinear stencil can only
+   reach inside its own brick, so the field JUMPED at every brick boundary
+   (+0.5 → −1.0 voxel in one step, no zero crossing). Now a dense per-world
+   field array — affordable because a micro object is small (42 KB for the
+   vase) and continuous by construction.
+3. outside the world AABB the field fell back to the distance to the BOX,
+   which is zero on the box face, so the trace converged onto the box and the
+   object rendered as **its own bounding box**. Now an air margin of 4 cells
+   and a "strictly inside" hit test.
+
+Measured: the vase went from (18,18,18) flat dark to (108,107,105) bright
+neutral plaster, with a correct vase silhouette (the old render was a 67×67 px
+square — its bounding box). The vase was also **buried** (the manifest put it
+at y = −0.41, the terrain at (12,12) is at y = −0.25); it now stands on the
+ground.
+
+The diagnosis took a byte-exact **CPU replica of the shader** (now
+`tests/test_micro.cpp`, 9 cases, with a negative control proving the
+continuity check can detect the brick-clamped field). The micro subsystem had
+**no automated coverage at all**, which is how this shipped.
+
+Also: the BFS now walks 26 neighbours (a 6-neighbour Manhattan distance
+over-estimates the Euclidean one, so a tracer could tunnel a thin diagonal
+wall), and the out-of-grid filler carries a conservative distance instead of
+the maximum.
+
+New page: [[concepts/micro-voxel-svo-overlay]]. Updated
+[[concepts/per-object-voxel-size]] (its headline question is now answered —
+by a route it did not consider: a **separate** lattice and SVO world, so the
+constraints it lists still hold only for *merging into* the world lattice).
