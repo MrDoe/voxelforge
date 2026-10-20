@@ -190,10 +190,14 @@ knowing anything about the main world.
 
 | check | result |
 |---|---|
-| `test_micro.cpp` (9 cases) | pass — incl. a negative control for the continuity check |
+| `test_micro.cpp` (10 cases) | pass — incl. a negative control for the continuity check and the cast-shadow verdict |
+| `micro_check.py` (9 checks) | pass — visibility, material, silhouette, micro-to-micro shadow, RECEIVE, CAST, world untouched, SVO backend |
 | `test-unit` group | 8/8 pass |
 | `visual_check.py` | only the pre-existing `house: sky probe not blue-dominant` failure; every other metric is **bit-identical** to before the micro layers existed (coverage 70.8 / 94.6 / 96.2 %), because the objects are not in those views |
 | `live_edit_check.py` | exactly the documented pre-existing baseline: 3× `object_smooth` + 1× `object undo`, same 11002/11008 numbers — no regression |
 | A/B the house view with the micro layers on vs off | **zero** differing pixels — the overlay provably cannot affect the 0.1 m path |
 | the vase's mean colour | (18,18,18) flat dark → **(108,107,105)** bright neutral plaster |
 | both backends | the same vase silhouette in `--mode splat` and `--mode svo` |
+| RECEIVE (world → micro) | 116 luma with the world shadow off, 94 with it on |
+| CAST (micro → world) | the bake reports 7 surfels darkened |
+| micro → micro | 349 urn pixels darkened by a mean of 41 luma |

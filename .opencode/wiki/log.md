@@ -5357,3 +5357,42 @@ Also: `writeManifest` now writes the tracked manifest to a temp file and
 renames it instead of truncating it in place (the hazard AGENTS.md warns
 about), and the dead brick-based field sampler is gone from
 `micro_overlay.comp` with a comment saying why not to put it back.
+
+## [2026-10-20] ingest | Two-way shadows (coarse), and the two traps in each half
+
+The micro objects now exchange shadows with the main world in **both**
+directions, through coarse representations rather than through each other's
+lattices.
+
+**RECEIVE** (`worldShadow` in `micro_overlay.comp`): the micro surface marches
+`uHeight` + `uObjVol` — the two coarse world representations the micro shader
+already binds — and multiplies its sun term. Measured: the objects' own pixels
+read 116 luma with the world shadow term off, 94 with it on.
+
+  Trap: the obvious implementation is to copy `softShadowSplat`, which adds
+  `0.5` for every unoccluded tap. That returns **0.5 for a fully LIT point**.
+  Measured, the vase's mean luma fell 109 → 84 with no occluder anywhere near
+  it. The verdict must be binary, like the SVO backend's exact hits.
+
+**CAST** (`microShadow` in `surfelize.cpp`): the world's shadow is baked per
+surfel from the `VoxelField`, which by design holds no micro cells, so the bake
+consults each micro field directly. Measured: "micro cast shadow darkened 7
+surfel(s)".
+
+  Trap 1: the march must step at a QUARTER of the object's own voxel — the
+  world bake's 0.1 m DDA is wider than a 5 mm object and steps over it.
+  Trap 2: it needs its OWN ray origin. The world march starts 0.3 m above the
+  surface; a 0.3 m-tall object is entirely below that (measured: 1 surfel
+  darkened instead of 7).
+  Trap 3 (a real bug): the occluder list points into `App::m_microFields`, and
+  a `push_back` that reallocated dangled every pointer. A garbage `voxel` of 0
+  made the march's step 0 — a `--shot` spun at 810 % CPU for minutes. The
+  vector is reserved and the occluders are built in a second pass.
+
+`loadMicroObjects()` now runs BEFORE `rebuildSurfels()`, and the live-edit
+re-bake passes the same occluders so an edit beside an object cannot erase its
+shadow.
+
+Gate: `tests/micro_check.py` now checks both directions (9 checks, all pass);
+`tests/test_micro.cpp` gains a cast-shadow case (10/10). Updated
+[[concepts/micro-voxel-svo-overlay]].
