@@ -7,6 +7,7 @@
 #include <algorithm>
 #include <cmath>
 #include <limits>
+#include <unordered_map>
 
 namespace vf::voxel {
 
@@ -251,6 +252,99 @@ bool buildMicroField(const std::vector<VoxelRecord>& records,
                                  out.voxel;
                 }
     }
+    return true;
+}
+
+bool rotateMicroRecords(const std::vector<VoxelRecord>& src,
+                         const WorldFileMeta& meta, float yawDeg, float pitchDeg,
+                         float rollDeg, std::vector<VoxelRecord>& out,
+                         glm::ivec3& outMinShift)
+{
+    out.clear();
+    outMinShift = glm::ivec3(0);
+    if (src.empty() || !(meta.voxelSize > 0.0f))
+        return false;
+    if (yawDeg == 0.0f && pitchDeg == 0.0f && rollDeg == 0.0f)
+        return false;
+
+    const float vox = meta.voxelSize;
+    // The record's own position in the FINE lattice, as a cell coordinate
+    // (not the meta's centred world space: the difference cancels in the
+    // pivot-relative maths, and staying in cell units keeps the quantisation
+    // exact).
+    const auto cellOf = [&](const VoxelRecord& v) {
+        return glm::vec3(float(v.x), float(v.y), float(v.z));
+    };
+    glm::vec3 lo(1e30f), hi(-1e30f);
+    for (const VoxelRecord& v : src) {
+        const glm::vec3 c = cellOf(v);
+        lo = glm::min(lo, c);
+        hi = glm::max(hi, c);
+    }
+    // The BOTTOM-CENTRE pivot, the same convention the world uses: the centre
+    // in x/z, the base in y.
+    const glm::vec3 pivot(0.5f * (lo.x + hi.x), lo.y, 0.5f * (lo.z + hi.z));
+
+    const glm::mat3 R = worldfile::placementRotation(yawDeg, pitchDeg, rollDeg);
+    const glm::mat3 Rinv = glm::transpose(R);
+
+    // The source as a lookup, so a destination cell can find its pre-image.
+    std::unordered_map<uint32_t, const VoxelRecord*> cell;
+    cell.reserve(src.size() * 2);
+    const auto keyOf = [](int x, int y, int z) {
+        return (uint32_t(x) << 20) | (uint32_t(y) << 10) | uint32_t(z);
+    };
+    for (const VoxelRecord& v : src)
+        cell.emplace(keyOf(int(v.x), int(v.y), int(v.z)), &v);
+
+    // The rotated footprint. Every source cell is swept about the pivot, so
+    // the union of the swept corners bounds it exactly.
+    glm::vec3 dmn(1e30f), dmx(-1e30f);
+    for (int i = 0; i < 8; ++i) {
+        const glm::vec3 corner((i & 1) ? hi.x : lo.x, (i & 2) ? hi.y : lo.y,
+                               (i & 4) ? hi.z : lo.z);
+        const glm::vec3 r = pivot + R * (corner - pivot);
+        dmn = glm::min(dmn, r);
+        dmx = glm::max(dmx, r);
+    }
+    const glm::ivec3 c0 = glm::ivec3(glm::floor(dmn)) - glm::ivec3(1);
+    const glm::ivec3 c1 = glm::ivec3(glm::ceil(dmx)) + glm::ivec3(1);
+
+    // The destination cell's CENTRE, in cell units, mapped back through R^-1.
+    const auto preImage = [&](const glm::ivec3& d) {
+        const glm::vec3 p(float(d.x) + 0.5f, float(d.y) + 0.5f, float(d.z) + 0.5f);
+        return pivot + Rinv * (p - pivot);
+    };
+    out.reserve(src.size() * 2);
+    // The destination cells are in the SOURCE's frame, and a rotation can put
+    // them at NEGATIVE indices - a 90 degree yaw of an object that is much
+    // longer in z than in x sweeps the footprint past zero (measured: x down
+    // to -35). A record's coordinates are uint16, so writing a negative cell
+    // wraps it to 65535 and the object turns into a 65 k cell mess. The
+    // records are therefore emitted REBASED by c0 (so they are never
+    // negative), and the shift the caller needs to keep the pivot fixed is
+    // reported separately.
+    glm::ivec3 gotLo(INT32_MAX);
+    for (int y = c0.y; y <= c1.y; ++y)
+        for (int z = c0.z; z <= c1.z; ++z)
+            for (int x = c0.x; x <= c1.x; ++x) {
+                const glm::vec3 pre = preImage(glm::ivec3(x, y, z));
+                const glm::ivec3 sc(glm::floor(pre));
+                const auto it = cell.find(keyOf(sc.x, sc.y, sc.z));
+                if (it == cell.end())
+                    continue;
+                VoxelRecord t = *it->second;
+                t.x = uint16_t(x - c0.x);
+                t.y = uint16_t(y - c0.y);
+                t.z = uint16_t(z - c0.z);
+                gotLo = glm::min(gotLo, glm::ivec3(x, y, z));
+                out.push_back(t);
+            }
+    if (out.empty())
+        return false;
+    // How far the shape's min corner moved, in the SOURCE's frame, so the
+    // caller can keep the pivot fixed in world space.
+    outMinShift = gotLo - glm::ivec3(glm::floor(lo));
     return true;
 }
 

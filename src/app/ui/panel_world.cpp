@@ -170,6 +170,11 @@ void App::drawPanelWorld()
         }
         if (transformChanged)
             ImGui::TextColored(kWarn, "Unsaved transform");
+        // A MICRO layer is its own world: moving one re-bakes only that
+        // object (milliseconds), so it must NOT trigger the world reload
+        // (seconds - the whole world's bake for one small object). The world
+        // path stays as it was.
+        const bool selectedIsMicro = selected->role == "micro";
         if (ImGui::Button("Apply transform##apply", ImVec2(-1.0f, 30.0f))) {
             selected->pos[0] = posDraft.x;
             selected->pos[1] = posDraft.y;
@@ -179,7 +184,10 @@ void App::drawPanelWorld()
             selected->rotZ = angleDraft[2];
             selected->listed = true;
             persistWorldLayers();
-            m_pendingWorldReload = true;
+            if (selectedIsMicro)
+                loadMicroObjects();
+            else
+                m_pendingWorldReload = true;
             m_taaFirstFrame = true;
         }
         ImGui::BeginDisabled(!transformChanged);
@@ -188,7 +196,10 @@ void App::drawPanelWorld()
             selected->rotDeg = selected->rotX = selected->rotZ = 0.0f;
             selected->listed = true;
             persistWorldLayers();
-            m_pendingWorldReload = true;
+            if (selectedIsMicro)
+                loadMicroObjects();
+            else
+                m_pendingWorldReload = true;
             m_taaFirstFrame = true;
         }
         ImGui::EndDisabled();

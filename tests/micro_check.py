@@ -169,12 +169,19 @@ def main() -> int:
             print("FAIL: no micro pixels - nothing to measure")
             return 1
 
-        # 1. MATERIAL: bright and neutral (the bug's signature was a near-black,
-        #    slightly green object).
+        # 1. MATERIAL: not the black air filler, and neutral.
+        #    The bug's signature was a near-black, slightly GREEN object (the
+        #    air filler's black albedo with the grass material) - measured
+        #    (17, 69, 23). Two checks catch it, and they are deliberately
+        #    relative rather than absolute: the objects sit in a real shadow,
+        #    so their absolute luma depends on the scene, not on the material.
+        #    (An absolute "bright" threshold has to be loose enough for a
+        #    shadowed object and tight enough to reject the bug - and the
+        #    NEUTRAL check is the one that really separates them.)
         mean = [statistics.mean(a[i + k] for i in px) for k in range(3)]
         note(
-            min(mean) > 70.0,
-            "material is bright (mean RGB %.0f/%.0f/%.0f, want > 70)"
+            min(mean) > 40.0,
+            "material is not the black air filler (mean RGB %.0f/%.0f/%.0f, want > 40)"
             % (mean[0], mean[1], mean[2]),
         )
         note(

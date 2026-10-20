@@ -130,6 +130,28 @@ bool buildMicroField(const std::vector<VoxelRecord>& records,
 void fillMicroBrick(const MicroField& f, uint32_t* data, int bx0, int by0,
                     int bz0);
 
+// Rotate a micro layer's records about the object's BOTTOM-CENTRE pivot, the
+// same pivot the world uses for its own layers (so the two agree on what
+// "yaw about the base" means).
+//
+// The map is DESTINATION-driven: every cell of the rotated footprint queries
+// its pre-image, so the rotated shape keeps the source's solidity - a forward
+// map would drop cells wherever two source cells round to the same
+// destination, punching holes in the surface.
+//
+// Unlike the world's transformRecords, the destination is NOT bounded by the
+// layer's own grid: a micro object rotated 45 degrees needs a wider footprint
+// than the grid it was authored in, and clipping it would cut the animal in
+// half. `outMinShift` is the difference (in CELLS) between the rotated
+// footprint's min corner and the source's, so the caller can keep the pivot
+// fixed in world space.
+//
+// Returns false if there is nothing to rotate.
+bool rotateMicroRecords(const std::vector<VoxelRecord>& src,
+                         const WorldFileMeta& meta, float yawDeg, float pitchDeg,
+                         float rollDeg, std::vector<VoxelRecord>& out,
+                         glm::ivec3& outMinShift);
+
 // gridN for a micro world holding an object of `extent` metres at `voxel`
 // metres. A brick is BRICK_N^3 voxels, and a chunk holds one level of eight
 // bricks, so one chunk spans 16 cells: gridN = ceil(maxExtent / (16*voxel)).

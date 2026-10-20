@@ -68,9 +68,29 @@ void App::loadMicroObjects()
                           l.file, data.meta.voxelSize, vf::voxel::VOXEL);
             continue;
         }
+        // PLACEMENT. A micro layer's `pos` is the world position of the
+        // object's MIN CORNER (unlike a world layer, where it is an offset of
+        // the layer's centred lattice), and the rotation is about the
+        // object's bottom-centre pivot - the same pivot the world uses, so
+        // "yaw about the base" means the same thing in both.
+        //
+        // The rotation is applied to the RECORDS on the fine lattice, with a
+        // destination-driven map so the rotated shape keeps its solidity.
+        //
+        // The pivot must stay put in world space while the shape spins about
+        // it, and the rotation moves the shape's min corner - so the world
+        // offset is corrected by exactly that shift. With no rotation the
+        // shift is zero and the offset is `pos`, unchanged.
+        std::vector<vf::voxel::VoxelRecord> placed = data.voxels;
+        glm::ivec3 minShift(0);
+        if (l.rotDeg != 0.0f || l.rotX != 0.0f || l.rotZ != 0.0f) {
+            if (!vf::voxel::rotateMicroRecords(data.voxels, data.meta, l.rotDeg,
+                                                l.rotX, l.rotZ, placed, minShift))
+                placed = data.voxels; // nothing to rotate (empty layer)
+        }
         vf::voxel::MicroField field;
         std::string err;
-        if (!vf::voxel::buildMicroField(data.voxels, data.meta, field, &err)) {
+        if (!vf::voxel::buildMicroField(placed, data.meta, field, &err)) {
             spdlog::error("micro: layer '{}': {}", l.file, err);
             continue;
         }
@@ -80,6 +100,9 @@ void App::loadMicroObjects()
         // records). Default placement sits the base on the terrain so a dropped
         // -in vase is not floating.
         glm::vec3 offset { l.pos[0], l.pos[1], l.pos[2] };
+        // Keep the pivot fixed: the rotation moved the shape's min corner by
+        // minShift cells, so the world offset moves with it.
+        offset += glm::vec3(minShift) * data.meta.voxelSize;
         if (l.pos[0] == 0.0f && l.pos[1] == 0.0f && l.pos[2] == 0.0f) {
             const float h =
                 vf::voxel::sharedHeightmap().sample(offset.x + 0.5f * field.extent().x,

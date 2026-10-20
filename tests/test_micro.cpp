@@ -431,6 +431,66 @@ TEST_CASE("micro world: the trace finds the OBJECT's surface, not the box's face
     CHECK(f.solid[f.idx(c.x, c.y, c.z)] == 1);
 }
 
+TEST_CASE("micro world: a micro layer can be ROTATED about its base, in place")
+{
+    // "Live movement" for a micro object: the manifest's rot/rotX/rotZ must
+    // spin the object about its bottom-centre pivot WITHOUT moving it. The
+    // pivot is the same convention the world uses, so "yaw about the base"
+    // means the same thing in both.
+    const float vox = 0.005f;
+    const int half = 3;
+    WorldFileData d = cubeLayer(half, vox);
+    MicroField f;
+    std::string err;
+    REQUIRE(buildMicroField(d.voxels, d.meta, f, &err));
+
+    // The object's bottom-centre pivot, in the field's cells. The field's
+    // cells are the object's cells rebased by the margin, so the pivot is the
+    // object's centre in x/z and its base in y.
+    const glm::ivec3 objMin(kMicroMarginCells, kMicroMarginCells, kMicroMarginCells);
+    const int objCells = 2 * half + 1;
+    const glm::ivec3 pivotCell = objMin + glm::ivec3(objCells / 2, 0, objCells / 2);
+
+    // The unrotated world, placed so the object's min corner is at POS.
+    const glm::vec3 pos(10.0f, 2.0f, 10.0f);
+    MicroWorld plain;
+    synthesizeMicroSvo(f, pos, plain);
+    const glm::vec3 plainPivot = plain.worldMin + (glm::vec3(pivotCell) + 0.5f) * vox;
+
+    // Rotated 90 degrees about Y.
+    std::vector<VoxelRecord> rotated;
+    glm::ivec3 minShift;
+    REQUIRE(rotateMicroRecords(d.voxels, d.meta, 90.0f, 0.0f, 0.0f, rotated, minShift));
+    REQUIRE(!rotated.empty());
+    // The records are uint16: a rotation that sweeps past zero must not wrap
+    // a coordinate to 65535 (measured: a 90 degree yaw of an object longer in
+    // z than in x reaches x = -35).
+    for (const VoxelRecord& r : rotated) {
+        CHECK(r.x < 60000u);
+        CHECK(r.y < 60000u);
+        CHECK(r.z < 60000u);
+    }
+    // The rotated shape keeps the source's solidity: a destination-driven map
+    // cannot punch holes in the surface, so the volume survives.
+    CHECK(rotated.size() > d.voxels.size() * 0.9f);
+
+    MicroField rf;
+    REQUIRE(buildMicroField(rotated, d.meta, rf, &err));
+    MicroWorld turned;
+    // The offset correction keeps the pivot fixed: the rotation moved the
+    // shape's min corner by minShift cells, so the world offset moves with it.
+    synthesizeMicroSvo(rf, pos + glm::vec3(minShift) * d.meta.voxelSize, turned);
+    // The pivot's cell in the ROTATED field: the field rebases the rotated
+    // records to their own min corner, and the pivot's offset from that min
+    // shrank by minShift (the shape's min corner moved toward it).
+    const glm::ivec3 turnedPivotCell = objMin +
+                                       glm::ivec3(objCells / 2, 0, objCells / 2) -
+                                       minShift;
+    const glm::vec3 turnedPivot =
+        turned.worldMin + (glm::vec3(turnedPivotCell) + 0.5f) * vox;
+    CHECK(glm::length(turnedPivot - plainPivot) < 0.001f);
+}
+
 TEST_CASE("micro world: a micro object CASTS a shadow onto the world")
 {
     // The world's sun shadow is BAKED per surfel, so the "cast" half of the
