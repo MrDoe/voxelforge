@@ -565,11 +565,20 @@ one costs a whole turn, because the bad call is rejected before any work runs.
 - Build first with `ninja -C build`, then run only the focused group(s) that
   cover the changed files: `ninja -C build test-unit`, `test-app`, `test-surfel`,
   `test-store`, `test-world`, `test-live-edit`, `test-visual`, `test-effects`,
-  `test-textures`, `test-fog`, `test-preview`, or `test-smoke` (`test-fast` is
-  an alias).
+  `test-textures`, `test-fog`, `test-preview`, `test-micro`, or `test-smoke`
+  (`test-fast` is an alias).
   **Never run bare `ctest --test-dir build` or an all-tests target.** All CTest
   entries are guarded by `tests/group_gate.py`; without an explicitly enabled
   group they return CTest's skip code.
+- **`test-micro` is the micro-voxel overlay's gate** (`tests/micro_check.py`,
+  also labelled `visual`): the objects are visible, their material is BRIGHT
+  and NEUTRAL (the bug's signature was a near-black slightly-green object —
+  the air filler's albedo with the grass material), the silhouette is not a
+  filled rectangle (the "hits the bounding box" failure produced a 67×67 px
+  SQUARE, which a mean colour cannot see), one micro object shadows another,
+  the world view is pixel-identical with the micro layers on and off, and the
+  SVO backend draws them too. It does **not** cover the SDF's quantisation —
+  that is pinned by `tests/test_micro.cpp`; the two are complementary.
 - **`test-preview` is the narrow one.** Any change to the brush hover preview —
   `frame/run_brush_preview.cpp`, the BrushUBO feeds, `inBrushVolume` in
   `shaders/common_surfel.glsl`, the tint in `splat.frag`/`svo_raymarch.comp`, or
