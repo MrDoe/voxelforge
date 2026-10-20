@@ -5322,3 +5322,38 @@ New page: [[concepts/micro-voxel-svo-overlay]]. Updated
 [[concepts/per-object-voxel-size]] (its headline question is now answered —
 by a route it did not consider: a **separate** lattice and SVO world, so the
 constraints it lists still hold only for *merging into* the world lattice).
+
+## [2026-10-20] ingest | A second micro object, and the placement rule
+
+Shipped a second micro object (an urn, `assets/micro/urn.vxw`) because with
+one object **both** of the feature's headline promises are invisible:
+"multiple SVO worlds, one per object" and "self-shadow among micro objects
+only". The urn is placed where the vase's shadow falls (the sun is at 34°/238°
+so shadows are thrown toward (0.85, 0.53) in xz; the urn sits 0.37 m away in
+exactly that direction).
+
+Measured with a three-way A/B (both / urn alone / neither), on the urn's own
+pixels: 246 of them (10.3 % of the urn) darken by a mean of **45.5 luma**
+(114.5 → 69.1) when the vase is present — the vase's shadow falling on the
+urn, with neither object knowing anything about the main world.
+
+**The placement rule this surfaced:** the terrain is a 0.1 m lattice, so its
+surface is quantised and a place the heightmap calls flat can be a 0.1 m
+staircase in the baked world. An object only stands flat if it fits inside
+ONE terrain cell (the vase at x=12.0 spans [12.0,12.1]; the urn at 12.3/12.2
+spans [12.3,12.4] and [12.2,12.3]). Both footprints were probed at four
+corners — the heightmap alone would have said "flat" and been wrong about the
+staircase. Recorded in [[concepts/micro-voxel-svo-overlay]].
+
+Verification for the whole feature: `test_micro.cpp` 9/9; `test-unit` 8/8;
+`visual_check.py` with only the pre-existing house sky-probe failure and every
+other metric bit-identical to before the micro layers existed;
+`live_edit_check.py` at exactly its documented pre-existing baseline (3×
+object_smooth + 1× object undo, same 11002/11008 numbers); and an A/B of the
+house view with the micro layers on vs off shows **zero** differing pixels, so
+the overlay provably cannot affect the 0.1 m path.
+
+Also: `writeManifest` now writes the tracked manifest to a temp file and
+renames it instead of truncating it in place (the hazard AGENTS.md warns
+about), and the dead brick-based field sampler is gone from
+`micro_overlay.comp` with a comment saying why not to put it back.

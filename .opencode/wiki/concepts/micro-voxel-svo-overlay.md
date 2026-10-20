@@ -133,3 +133,39 @@ guards.
   16³ chunk stream entirely.
 - The micro pass is a no-op when no micro layer is loaded (`empty()`), so the
   cost with the feature off is a single branch.
+
+## Placement: the terrain is quantised, so "on the ground" is not automatic
+
+The terrain is a 0.1 m lattice, so its surface is **quantised**: a place the
+heightmap calls flat can be a 0.1 m staircase in the baked world. An object
+therefore only stands flat if it fits inside **one** terrain cell — the vase
+(0.085 m wide) at `x = 12.0` spans `[12.0, 12.1]` and at `z = 12.0` spans
+`[12.0, 12.1]`, one cell each. The urn (0.095 m) at 12.3 / 12.2 spans
+`[12.3, 12.4]` and `[12.2, 12.3]`. Both footprints were **probed at four
+corners** (the ground is −0.25 everywhere under them, so neither floats nor
+sinks) — the heightmap alone would have said "flat" and been wrong about the
+staircase.
+
+The second object exists for the same reason the test does: with one object,
+"multiple SVO worlds" and "self-shadow among micro objects" are both
+**invisible**. The urn is placed where the vase's shadow falls — the sun is at
+34°/238°, so shadows are thrown toward (0.85, 0.53) in xz, and the urn sits
+0.37 m away in exactly that direction.
+
+**Measured** with a three-way A/B (both objects / the urn alone / neither), on
+the urn's own pixels: 246 of them (10.3 % of the urn) darken by a mean of
+**45.5 luma** (114.5 → 69.1) when the vase is present. That is the vase's
+shadow falling on the urn — micro-to-micro shadowing, with neither object
+knowing anything about the main world.
+
+## Verification
+
+| check | result |
+|---|---|
+| `test_micro.cpp` (9 cases) | pass — incl. a negative control for the continuity check |
+| `test-unit` group | 8/8 pass |
+| `visual_check.py` | only the pre-existing `house: sky probe not blue-dominant` failure; every other metric is **bit-identical** to before the micro layers existed (coverage 70.8 / 94.6 / 96.2 %), because the objects are not in those views |
+| `live_edit_check.py` | exactly the documented pre-existing baseline: 3× `object_smooth` + 1× `object undo`, same 11002/11008 numbers — no regression |
+| A/B the house view with the micro layers on vs off | **zero** differing pixels — the overlay provably cannot affect the 0.1 m path |
+| the vase's mean colour | (18,18,18) flat dark → **(108,107,105)** bright neutral plaster |
+| both backends | the same vase silhouette in `--mode splat` and `--mode svo` |
