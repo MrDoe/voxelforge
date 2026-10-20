@@ -994,16 +994,31 @@ SurfelSet buildSurfels(const VoxelField& field, const SurfelParams& params) {
                     const auto s = field.sample(x, y, z);
                     glm::vec3 n = rawNormals[i];
 
+                    // The analytic heightfield normal of a terrain TOP cell.
+                    // It is computed here but APPLIED after the neighbour
+                    // smoothing below (see the "terrain analytic" block): the
+                    // smoothing averages the cell's normal with the RAW
+                    // normals of its face neighbours, so a mix applied before
+                    // it survives with a weight of 1/(1 + neighbours) - the
+                    // analytic field was effectively diluted to ~14 % and the
+                    // noisy per-cell voxel normals dominated the terrain's
+                    // shading, which is what made a stepped heightfield read
+                    // as a field of hard-edged cobblestones.
+                    glm::vec3 hfN(0.0f);
+                    bool terrainTop = false;
                     if (params.terrainHeightfieldNormals) {
                         const int16_t colTop =
                             field.colTops()[size_t(z) * latN + size_t(x)];
                         if (colTop >= 0 && y == colTop) {
-                            const glm::vec3 hn = heightfieldNormal(
+                            hfN = heightfieldNormal(
                                 field,
                                 glm::vec3(-51.2f + (x + 0.5f) * voxel,
                                           -51.2f + (y + 0.5f) * voxel,
                                           -51.2f + (z + 0.5f) * voxel));
-                            n = safeNormalize(glm::mix(n, hn, params.heightfieldBlend));
+                            terrainTop = true;
+                            if (!params.terrainAnalytic)
+                                n = safeNormalize(glm::mix(n, hfN,
+                                                           params.heightfieldBlend));
                         }
                     }
 
@@ -1051,11 +1066,43 @@ SurfelSet buildSurfels(const VoxelField& field, const SurfelParams& params) {
                         rChaos = s.obj ? 1.0f : 1.0f + 0.8f * dis;
                     }
 
+                    // TERRAIN ANALYTIC: a terrain top cell is a sample of a
+                    // HEIGHTFIELD, not a voxel face. Its surfel is therefore
+                    // placed ON the heightfield surface (the cell's top face,
+                    // which is exactly what the GPU height texture stores at
+                    // this texel) and oriented by the analytic heightfield
+                    // normal, so the disk is TANGENT to the interpolated
+                    // surface instead of being a facet of the voxel it was
+                    // sampled from.
+                    //
+                    // The normal is applied AFTER the neighbour smoothing, so
+                    // the analytic field is not diluted to 1/(1+neighbours).
+                    // With heightfieldBlend = 1 the terrain's normal field is
+                    // the smooth analytic one; the per-cell voxel jumps (a
+                    // step's 45 deg face mix) no longer reach the shading.
+                    glm::vec3 pos;
+                    if (params.terrainAnalytic && terrainTop &&
+                        glm::dot(hfN, hfN) > 1e-6f) {
+                        n = safeNormalize(glm::mix(n, hfN, params.heightfieldBlend));
+                        // The in-plane tangent was derived from the PREVIOUS
+                        // normal (the anisotropy stage runs inside the
+                        // smoothing block), so it must be re-orthogonalised
+                        // against the new one - the shader projects it anyway,
+                        // but the stored record has to stay self-consistent.
+                        if (glm::dot(tanDir, tanDir) > 1e-8f) {
+                            tanDir = tanDir - n * glm::dot(tanDir, n);
+                            tanDir = safeNormalize(tanDir);
+                        }
+                    }
                     const glm::vec3 cellCentre =
                         glm::vec3(-51.2f + (x + 0.5f) * voxel,
                                   -51.2f + (y + 0.5f) * voxel,
                                   -51.2f + (z + 0.5f) * voxel);
-                    const glm::vec3 pos = cellCentre + n * (0.5f * voxel);
+                    if (params.terrainAnalytic && terrainTop)
+                        // the heightfield surface point: the cell's top face
+                        pos = cellCentre + glm::vec3(0.0f, 0.5f * voxel, 0.0f);
+                    else
+                        pos = cellCentre + n * (0.5f * voxel);
 
                     // baked sun shadow (binary march on the exact oracle) +
                     // bent-normal AO; backfaces skip the march (FS gates too).
@@ -1937,6 +1984,12 @@ struct SurfelCand {
     glm::vec3 pos;
     glm::vec3 n;     // final normal: smoothed, or the axis normal of a face entry
     glm::vec3 rawN;  // pre-smoothing mean normal (the bake's meanNormal rule)
+    // The analytic heightfield normal of a terrain TOP cell (zero = not a
+    // terrain top). It is applied AFTER the neighbour smoothing, so the
+    // analytic field is not diluted to 1/(1+neighbours) - the same order the
+    // bake uses.
+    glm::vec3 hfN { 0.0f };
+    bool terrainTop = false;
     StoreCell cell;
     float aspect = 1.0f;  // 1 = isotropic; >1 stretches along `tan`
     glm::vec3 tan { 0.0f };
@@ -2007,6 +2060,14 @@ void computeCandidateAnisotropy(const ChunkStore& store,
             // direction. A fabricated +Y is exactly what turned untouched
             // cabin walls upwards after a live edit.
             cd.n = glm::dot(avg, avg) > 1e-12f ? safeNormalize(avg) : cd.rawN;
+            // TERRAIN ANALYTIC: the analytic heightfield normal is applied
+            // AFTER the smoothing (the bake's order), so the analytic field
+            // keeps its weight instead of being averaged away by the noisy
+            // per-cell voxel normals.
+            if (params.terrainAnalytic && cd.terrainTop &&
+                glm::dot(cd.hfN, cd.hfN) > 1e-6f)
+                cd.n = safeNormalize(
+                    glm::mix(cd.n, cd.hfN, params.heightfieldBlend));
             if (params.anisotropy)
                 anisotropyFromBend(bendSum, cd.n, cd.aspect, cd.tan);
         }
@@ -2186,9 +2247,19 @@ std::vector<SurfelCand> collectChunkCandidates(const ChunkStore& store, int chun
                 if (params.terrainHeightfieldNormals && !c.obj &&
                     (exposed & (1u << 2))) { // air directly above
                     const glm::vec3 hn = storeHeightfieldNormal(store, wp, y);
-                    if (glm::dot(hn, hn) > 1e-6f)
-                        base.n = safeNormalize(
-                            glm::mix(base.n, hn, params.heightfieldBlend));
+                    if (glm::dot(hn, hn) > 1e-6f) {
+                        // Keep the analytic normal; it is applied after the
+                        // neighbour smoothing (computeCandidateAnisotropy), so
+                        // the smoothing cannot dilute it. With the terrain
+                        // analytic mode off, the historic order applies: the
+                        // mix lands on `n` BEFORE the smoothing and therefore
+                        // survives with a weight of 1/(1+neighbours).
+                        base.hfN = hn;
+                        base.terrainTop = true;
+                        if (!params.terrainAnalytic)
+                            base.n = safeNormalize(
+                                glm::mix(base.n, hn, params.heightfieldBlend));
+                    }
                     // rawN is deliberately LEFT UNBLENDED: the bake applies the
                     // heightfield mix to `n` but its smoothing stage reads the
                     // separate `rawNormals[]`, so blending rawN here would make
@@ -2214,7 +2285,14 @@ void shadeCandidates(const ChunkStore& store, const std::vector<SurfelCand>& can
     const float baseR = params.baseRadius;
     for (size_t i = begin; i < end; ++i) {
         const SurfelCand& cd = cands[i];
-        const glm::vec3 pos = cd.pos + cd.n * (0.5f * VOXEL);
+        // TERRAIN ANALYTIC: a terrain top cell is a sample of a heightfield,
+        // so its surfel sits ON the surface (the cell's top face - exactly
+        // what the height texture stores at this texel) instead of on the
+        // voxel's face along the normal. Same rule as the bake.
+        const glm::vec3 pos =
+            (params.terrainAnalytic && cd.terrainTop)
+                ? cd.pos + glm::vec3(0.0f, 0.5f * VOXEL, 0.0f)
+                : cd.pos + cd.n * (0.5f * VOXEL);
         float shadow = 1.0f;
         if (glm::dot(cd.n, sunDir) > 0.02f)
         {

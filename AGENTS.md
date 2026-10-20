@@ -231,6 +231,18 @@ one costs a whole turn, because the bad call is rejected before any work runs.
   `J` volumetric fog (opt-in, see below). Enclosed-space sky occlusion
   (render-flag bit 8) has no key — it is on by default and `VF_RENDER_FLAGS=255`
   turns it off; see "Enclosed-space shading + light sources" below.
+  **Terrain surfel interpolation** (render-flag **bit 9**, default OFF,
+  `VF_RENDER_FLAGS=1023` turns it on): shade a terrain fragment with the
+  CONTINUOUS heightfield normal instead of the surfel's own, gated
+  geometrically (the fragment agrees with the height texture at its xz, and
+  the surfel's own normal agrees with the heightfield's, so a grass card or
+  a fallen log is never flattened into the ground). Measured neutral on the
+  hamlet and it costs eight texel fetches per terrain fragment, so it ships
+  off. Its companion, the terrain surfel sitting ON the heightfield surface
+  with the analytic normal applied after the neighbour smoothing
+  (`SurfelParams::terrainAnalytic`, default ON, `VF_TERRAIN_ANALYTIC=0` to
+  restore), IS on: see `.opencode/wiki/concepts/terrain-surfel-interpolation.md`
+  for the measurement that says the splat SIZE is not the lever here.
   **Edit brush hotkeys** (state-dependent, and the reason the key list is not
   one flat table): `Tab` is the ONLY View/Edit switch (the plain arm/disarm
   toggle, both directions); `C` = Carve, `A` = Add, `D` = Delete, `S` =

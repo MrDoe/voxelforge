@@ -319,6 +319,14 @@ void App::rebuildSurfels()
         sp.smoothNormals = atoi(e) != 0;
     if (const char* e = getenv("VF_SURFEL_HFBLEND"))
         sp.terrainHeightfieldNormals = atoi(e) != 0;
+    // TERRAIN ANALYTIC: place the terrain's top-cell surfels ON the
+    // heightfield surface and orient them by the analytic heightfield normal
+    // (applied after the neighbour smoothing). OFF by default; the weight of
+    // the analytic field is VF_SURFEL_HFMIX (1.0 = fully analytic).
+    if (const char* e = getenv("VF_TERRAIN_ANALYTIC"))
+        sp.terrainAnalytic = atoi(e) != 0;
+    if (const char* e = getenv("VF_SURFEL_HFMIX"))
+        sp.heightfieldBlend = glm::clamp(float(atof(e)), 0.0f, 1.0f);
     sp.microOccluders = &m_microOccluders;
     vf::voxel::SurfelSet set = vf::voxel::buildSurfels(m_layers.field(), sp);
     // The water is ONE fixed-level plane subdivided into a world-wide 0.2 m

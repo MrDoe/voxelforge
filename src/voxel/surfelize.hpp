@@ -99,6 +99,24 @@ struct SurfelParams {
     float heightfieldBlend = 0.55f;   // blend terrain-top cells toward the analytic
                                        // two-scale heightfield normal (parity with the
                                        // current shader look)
+    // TERRAIN ANALYTIC: treat a terrain top cell as a sample of a HEIGHTFIELD
+    // instead of a voxel face.
+    //
+    // ON by default: the terrain's top-cell surfel is a sample of a
+    // HEIGHTFIELD, so it belongs ON the heightfield surface, oriented by the
+    // heightfield's own normal. Every path (the bake, the live store, the
+    // GPU seed) reads this one default, so they cannot disagree.
+    //
+    // OFF (the historic behaviour): the surfel sits on the voxel's face along
+    // its mean normal, and the analytic heightfield normal is mixed in BEFORE
+    // the neighbour smoothing - which averages the cell's normal with the RAW
+    // normals of its face neighbours, so the analytic field survives with a
+    // weight of only 1/(1+neighbours) (~14 %). The per-cell voxel normals
+    // dominate, and a stepped heightfield reads as hard-edged cobblestones.
+    //
+    // The live/store path mirrors this exactly (the same flag, the same
+    // order) - see concepts/live-edit-surfel-parity.
+    bool terrainAnalytic = true;
     bool smoothNormals = true;
     bool terrainHeightfieldNormals = true;
     // Micro-detail: convert texture detail into real micro-surfel geometry.

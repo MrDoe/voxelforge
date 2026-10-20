@@ -201,6 +201,10 @@ void main()
     float aoBaked = surfelBakedAo(vMat.w);
     vec3 col;
     float hitType = 1.0;
+    // The shading normal. It equals the surfel's own normal everywhere
+    // except on a terrain fragment that lies on the heightfield, where the
+    // continuous heightfield normal replaces it (render flag bit 9).
+    vec3 nShade = n;
     float dbg = sp.uSplat.w;
     if (dbg > 0.5) {
         // debug views (flat, no lighting)
@@ -316,12 +320,43 @@ void main()
         uint mId = uint(vMat.x + 0.5);
         vec3 alb = kPalette[clamp(mId, 0u, 16u)];
         vec2 rr = vec2(vMat.y, vMat.z) / 255.0;
+        // TERRAIN NORMAL (render flag bit 9): shade a terrain fragment with
+        // the CONTINUOUS heightfield normal instead of the surfel's own.
+        //
+        // A surfel's normal is one value for a whole 10 cm cell, so a stepped
+        // heightfield shades as a field of hard-edged patches - the
+        // "cobblestone" read of the terrain. The height texture holds the SAME
+        // surface the SVO reference shades, and its analytic normal varies
+        // smoothly, so a fragment that lies ON the heightfield is shaded with
+        // that normal: the per-surfel patch boundaries disappear and the
+        // terrain reads as one interpolated surface.
+        //
+        // The gate is geometric, not material-based - a material says nothing
+        // about which surface a cell is on - and it needs both tests:
+        //   - the fragment's height agrees with the height texture at its xz
+        //     (a terrain disk's plane deviates from the heightfield by a
+        //     centimetre or two; a prop, a stem or a cliff face is elsewhere);
+        //   - the surfel's OWN normal agrees with the heightfield's normal,
+        //     so a vertical surface standing on the terrain (a grass card, a
+        //     fallen log, a reed stem) is never flattened into the ground.
+        vec3 nShade = n;
+        if ((gRenderFlags & 512) != 0) {
+            float hfY = heightAt(q.xz);
+            if (abs(hfY - q.y) < 0.25) {
+                vec3 hn = splatHeightNormal(q);
+                if (dot(n, hn) > 0.7)
+                    nShade = hn;
+            }
+        }
         // baked sun shadow + bent AO (built from the exact oracle); the
-        // render-flag gates stay live so keys 1/2 keep working
+        // render-flag gates stay live so keys 1/2 keep working.
+        // The shadow GATE stays on the surfel's own normal: the shadow was
+        // baked with it, and re-evaluating the gate per fragment would tear
+        // the terminator along the surfel boundaries.
         float shB = ((gRenderFlags & 2) != 0 && dot(n, kSunDir) > 0.02) ? vShade.w : 1.0;
         float aoB = ((gRenderFlags & 1) != 0) ? clamp(aoBaked, 0.0, 1.0) : 1.0;
         vec3 bentB = normalize(vShade.xyz);
-        col = shadeSurfel(q, rd, alb, rr, ro, n, bentB, shB, aoB, mId, vShade.w);
+        col = shadeSurfel(q, rd, alb, rr, ro, nShade, bentB, shB, aoB, mId, vShade.w);
         float fog = 1.0 - exp(-t * 0.0016);
         vec3 fc = fogColor(rd, q);
         // valley mist over the stream + damp hollows (reference river mood)
@@ -425,5 +460,5 @@ void main()
     // Shading normal for the screen-space effects (SSAO/SSR). Water writes
     // the flat plane normal: SSR's water reflection must stay plane-stable
     // (the ripple normal is a shading-only detail, applied in-shader).
-    oGNorm = vec4(isWater ? vec3(0.0, 1.0, 0.0) : n, 0.0);
+    oGNorm = vec4(isWater ? vec3(0.0, 1.0, 0.0) : nShade, 0.0);
 }

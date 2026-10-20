@@ -5427,3 +5427,64 @@ other check would still pass.
 Also fixed: `visual_check`'s "preview hook modified world.json" failure in the
 previous run was MY doing — I edited the manifest while that gate was running.
 Re-run gates only on a stable tree.
+
+## [2026-10-20] ingest | Terrain surfel interpolation: the splat size is not the lever
+
+The question: the splat backend's terrain reads as cobblestones while the
+SVO reference reads as one surface - can a better interpolation come from
+smaller splats or from non-uniform splat sizes?
+
+**No, and the measurement says why.** Same camera, near-field sand patch,
+power per spatial-frequency band (`tools/surf_spectrum.py`):
+
+| render | 50-100 px | 25-50 px | 12.5-25 px |
+|---|---|---|---|
+| default (radius 1.0) | 16.77 % | 6.66 % | 6.47 % |
+| `VF_SPLAT_RADIUS=0.7` | 15.54 % | 5.96 % | 6.13 % |
+| `VF_SPLAT_RADIUS=1.4` | 17.37 % | 6.21 % | 5.61 % |
+| SVO reference | 7.01 % | 2.76 % | 3.58 % |
+
+The structure is **scale-invariant in the disk radius** (-11 % / +7 % for a
+0.7x / 1.4x disk), and it cannot be otherwise: N smaller disks at
+proportionally smaller spacing accumulate the same alpha profile, so smaller
+disks only move the structure to a finer scale, and a non-uniform size
+changes the coverage, not the interpolation.
+
+The debug views attribute it: the flat-coverage view (1) has 0.21 % of its
+power at the cell scale and the albedo view (5) 1.28 %, while the normal
+view (2) has 10.27 % - the **per-surfel normal field** carries it. A surfel's
+normal is one value per 10 cm cell, so a stepped heightfield shades as
+hard-edged patches, and the base pass seals every pixel with the nearest
+fragment's colour.
+
+Landed:
+
+* `SurfelParams::terrainAnalytic` (default ON): a terrain top cell is a
+  sample of a HEIGHTFIELD, so its surfel now sits ON the heightfield surface
+  (the cell's top face - what the GPU height texture stores at that texel)
+  and is oriented by the analytic heightfield normal, applied AFTER the
+  neighbour smoothing (before, the smoothing diluted it to 1/(1+neighbours)
+  = 14 %, so the noisy per-cell voxel normals dominated). The live/store path
+  mirrors it exactly - the flag lives in `SurfelParams`, so every path
+  inherits it. Measured: the mean |laplacian| of the luma drops 3-7 % in
+  every terrain region. `VF_TERRAIN_ANALYTIC=0` restores the old behaviour.
+* render flag **bit 9** (default OFF): a terrain fragment can be shaded with
+  the CONTINUOUS heightfield normal (the SVO's own formula) instead of the
+  surfel's, gated geometrically (the fragment agrees with the height texture
+  at its xz, and the surfel's own normal agrees with the heightfield's, so a
+  grass card or a fallen log is never flattened into the ground). Measured
+  neutral on the hamlet and it costs eight texel fetches per terrain
+  fragment, so it ships off: `VF_RENDER_FLAGS=1023` turns it on.
+
+**The measurement trap on the way**: the first gate ("the fragment is within
+0.25 m of the heightfield", with no normal test) measured -20 % / -25 % - and
+was an artefact: it flattened the props lying on the sand, so their contrast
+vanished. Every guarded variant restores the number. A metric that improves
+when the scene is flattened is a broken instrument.
+
+Gates: `test-surfel` green (15/15), `test-store` green, `test-visual` at its
+documented pre-existing baseline (the house sky-probe failure only), and
+`test-live-edit` - see the log.
+
+New page: [[concepts/terrain-surfel-interpolation]]. New tool:
+`tools/surf_spectrum.py`.
