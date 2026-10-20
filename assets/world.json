@@ -294,6 +294,20 @@
       "rotX": 0.0,
       "rotZ": 0.0,
       "enabled": true
+    },
+    {
+      "file": "micro/urn.vxw",
+      "role": "micro",
+      "name": "urn",
+      "pos": [
+        12.3,
+        -0.25,
+        12.2
+      ],
+      "rot": 0.0,
+      "rotX": 0.0,
+      "rotZ": 0.0,
+      "enabled": true
     }
   ],
   "lights": [
