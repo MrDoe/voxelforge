@@ -137,6 +137,14 @@ only honest way to bridge two lattices that must stay separate.
   point** (measured: the vase's mean luma 109 → 84 with no occluder anywhere
   near it). It also needs its OWN test — `objDist < 1.2474 && objDist < -0.05`
   — because the coarse volume is the only thing that knows about the house.
+  **Cap the step.** Stepping by the distance to the heightfield is cheap, but
+  beyond ~2 m the far-field distance saturates at the object volume's 1.26 m
+  range, so the step grows to ~1.07 m — wide enough to step clean OVER a
+  canopy or a roof. Measured symptom: an alpaca whose body read shadowed and
+  whose **legs read sunlit** (shadow-on/off ratio 0.87 vs the body's 0.50),
+  because the legs' ray runs lower and the coarse sample lattice straddled the
+  occluder — while the ground under the animal, whose shadow is BAKED with a
+  fine DDA, disagreed with its legs. 40 taps with a hard 0.35 m cap fixes it.
 - **CAST** (`microShadow` in `surfelize.cpp`): the world's sun shadow is
   BAKED per surfel on the CPU from the `VoxelField`, which by design does not
   contain the micro objects, so the bake consults each micro field directly.
