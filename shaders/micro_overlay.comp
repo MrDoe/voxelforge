@@ -472,7 +472,47 @@ float microVisibility(vec3 ro, vec3 rd, float maxDist)
     return 1.0;
 }
 
+// The MAIN WORLD's coarse shadow, as seen by a micro surface.
+//
+// The micro pass deliberately has no access to the world's SVO buffers, but it
+// does bind the two COARSE world representations every backend already shares:
+// uHeight (the 2048^2 terrain heightfield) and uObjVol (the 256^3 r8_snorm
+// object volume). That is enough for the shadow a metre-scale object needs
+// from a 10 cm world - the same coarse march the splat backend's water path
+// uses (softShadowSplat), which is why the two agree.
+//
+// This is the RECEIVE direction only: a micro object is shadowed by the world.
+// The world being shadowed BY a micro object is a separate problem - the
+// world's sun shadow is baked per surfel from the VoxelField, and the micro
+// objects are not in it. See App::shadeWorldWithMicroShadows.
+float worldShadow(vec3 ro, vec3 rd)
+{
+    if ((gRenderFlags & 2) == 0)
+        return 1.0;
+    // BINARY, like the SVO reference backend's exact hits and like the micro
+    // worlds' own microVisibility. NOT the 0.5-per-unoccluded-tap placeholder
+    // that softShadowSplat carries for the water: that returns 0.5 for a fully
+    // LIT point, which would halve the sun on every micro surface (measured:
+    // the vase's mean luma 109 -> 84 with no occluder anywhere near it).
+    float t = 0.05;
+    for (int i = 0; i < 16; ++i) {
+        vec3 sp = ro + rd * t;
+        float sHf = sp.y - heightAt(sp.xz);
+        if (sHf < -0.03)
+            return 0.0; // below the terrain
+        float sObj = objDist(sp);
+        if (sObj < 1.2474 && sObj < -0.05)
+            return 0.0; // inside the coarse object volume
+        t += clamp(max(min(sHf, sObj), pc.b.y * 0.35) * 0.85, 0.05, 1.2);
+        if (t > 20.0)
+            break;
+    }
+    return 1.0;
+}
+
 // common_base.glsl forward-declares these; the micro backend supplies its own.
+// softShadow is the MICRO worlds' own march (self-shadow and micro-to-micro);
+// worldShadow is the coarse world. A micro surface multiplies both.
 float softShadow(vec3 ro, vec3 rd)
 {
     return microVisibility(ro, rd, 24.0);
@@ -545,9 +585,15 @@ vec3 shadeMicro(vec3 p, vec3 rd)
     vec3 n = microNormal(p, 1.0 * microVoxelSize());
     alb = detailAlbedo(alb, p, n, mId);
     n = detailNormal(n, p, mId);
-    float sh = ((gRenderFlags & 2) != 0)
-                     ? softShadow(p + n * (1.0 * microVoxelSize()), kSunDir)
-                     : 1.0;
+    // The sun is occluded by BOTH worlds: the micro worlds (self-shadow and
+    // micro-to-micro) and the main world's coarse heightfield + object volume.
+    // Two binary contributions multiplied is the same verdict the splat
+    // backend gives a water fragment, so a vase standing in the house's shadow
+    // reads exactly as dark as the ground it stands on.
+    const vec3 shOrigin = p + n * (1.0 * microVoxelSize());
+    float sh = 1.0;
+    if ((gRenderFlags & 2) != 0)
+        sh = softShadow(shOrigin, kSunDir) * worldShadow(shOrigin, kSunDir);
 
     float ao = 1.0;
     vec3 bent = n;

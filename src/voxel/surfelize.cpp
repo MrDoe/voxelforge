@@ -1,4 +1,5 @@
 #include "surfelize.hpp"
+#include "voxel/micro_field.hpp"
 #include "voxel/chunk_index.hpp"
 #include <numeric>
 #include <core/log.hpp>
@@ -491,6 +492,7 @@ ThinFootprint thinFootprintAt(SolidAt solidAt, glm::vec3 cellCentre, glm::vec3 n
 
 // Binary sun-occlusion march over field.sample: exact Amanatides DDA over
 // lattice cells for the first 3 m (visits every cell like the SVO
+
 // reference, so thin eaves/logs are never tunnelled), then sphere-tracing
 // with tight clamps to 60 m. 0 = occluded, 1 = clear. Templated on the query
 // so it serves both the base VoxelField and the runtime ChunkStore.
@@ -704,7 +706,47 @@ void emitMicroSurfelsForCell(int x, int y, int z, const Surfel& b,
 
 } // namespace
 
+// Does a MICRO object occlude this sun ray? 0 = occluded, 1 = clear.
+//
+// The march is bounded by each object's world AABB (a ray that misses the box
+// never touches the field), and inside the box it steps a QUARTER of the
+// object's own voxel. That step is the whole point: the world bake's DDA walks
+// 0.1 m cells, which is WIDER than a 5 mm micro object, so reusing it here
+// would step straight over the object and the shadow would be reported at
+// random.
+// How many shadow queries the micro objects have occluded since the last bake
+// report. Logged by buildSurfels: a "cast shadow" that silently darkens
+// nothing is the failure mode to watch for, and the count makes it visible.
+std::atomic<uint64_t> g_microShadowed { 0 };
+
+float microShadow(const std::vector<MicroOccluder>& occ, glm::vec3 ro, glm::vec3 rd)
+{
+    for (const MicroOccluder& o : occ) {
+        if (!o.field)
+            continue;
+        // Ray/AABB slab test, in world space.
+        glm::vec3 inv = glm::vec3(1.0f) / rd;
+        glm::vec3 t0 = (o.aabbMin - ro) * inv;
+        glm::vec3 t1 = (o.aabbMax - ro) * inv;
+        glm::vec3 tlo = glm::min(t0, t1), thi = glm::max(t0, t1);
+        float tEnter = glm::max(glm::max(tlo.x, tlo.y), tlo.z);
+        float tExit = glm::min(glm::min(thi.x, thi.y), thi.z);
+        tEnter = glm::max(tEnter, 0.05f);
+        if (tExit <= tEnter)
+            continue;
+        const float step = 0.25f * o.field->voxel;
+        for (float t = tEnter; t <= tExit; t += step) {
+            if (o.field->sampleSdf(ro + rd * t - o.worldOffset) < 0.0f) {
+                ++g_microShadowed;
+                return 0.0f; // inside a micro object
+            }
+        }
+    }
+    return 1.0f;
+}
+
 SurfelSet buildSurfels(const VoxelField& field, const SurfelParams& params) {
+    g_microShadowed = 0;
     SurfelSet set;
     const auto t0 = std::chrono::steady_clock::now();
     set.chunkRange.assign(size_t(kSurfGridN * kSurfGridN * kSurfGridN) + 1, 0);
@@ -1013,8 +1055,19 @@ SurfelSet buildSurfels(const VoxelField& field, const SurfelParams& params) {
                     // (p + n*0.35): a tight offset buries canopy/thin-object
                     // origins inside neighbouring solid and self-shadows.
                     float shadow = 1.0f;
-                    if (glm::dot(n, sunDir) > 0.02f)
+                    if (glm::dot(n, sunDir) > 0.02f) {
                         shadow = shadowMarch(field, pos + n * 0.3f, sunDir);
+                        // The micro objects are not in the VoxelField, so their
+                        // cast shadow is a second, separate test.
+                        // The micro test gets its OWN origin. The world march
+                        // starts 0.3 m above the surface to avoid self-shadow
+                        // acne, but a micro object is only ~0.3 m TALL - a ray
+                        // starting above it misses it entirely (measured: 1
+                        // surfel darkened instead of ~12).
+                        if (params.microOccluders && !params.microOccluders->empty())
+                            shadow *= microShadow(*params.microOccluders,
+                                                  pos + n * 0.01f, sunDir);
+                    }
                     float ao = 1.0f;
                     glm::vec3 bent = n;
                     aoBake(field, pos + n * 0.02f, n, ao, bent);
@@ -1856,6 +1909,10 @@ SurfelSet buildSurfels(const VoxelField& field, const SurfelParams& params) {
                  set.edgeBridgeCount, set.edgeParentCount, set.lod1Count,
                  set.lod2Count, set.droppedFloating, set.buildMs, ms(t0, tEnum),
                  ms(tEnum, t1));
+    if (params.microOccluders && !params.microOccluders->empty())
+        spdlog::info("surfelize: micro cast shadow darkened {} surfel(s) "
+                     "({} occluder(s))",
+                     g_microShadowed.load(), params.microOccluders->size());
     return set;
 }
 
@@ -2152,7 +2209,12 @@ void shadeCandidates(const ChunkStore& store, const std::vector<SurfelCand>& can
         const glm::vec3 pos = cd.pos + cd.n * (0.5f * VOXEL);
         float shadow = 1.0f;
         if (glm::dot(cd.n, sunDir) > 0.02f)
+        {
             shadow = shadowMarch(store, pos + cd.n * 0.3f, sunDir);
+            if (params.microOccluders && !params.microOccluders->empty())
+                shadow *= microShadow(*params.microOccluders, pos + cd.n * 0.01f,
+                                      sunDir);
+        }
         float ao = 1.0f;
         glm::vec3 bent = cd.n;
         aoBake(store, pos + cd.n * 0.02f, cd.n, ao, bent);

@@ -807,11 +807,34 @@ one costs a whole turn, because the bad call is rejected before any work runs.
   **containing** the hit (`floor((p-mn)/cellSz)`), *not* the
   `trunc((p-mn)/cellSz - 0.5)` cell-**centre** convention the field stencil
   uses (at a face that lands on the air side — black albedo, grass material).
-- **Consequences of the separation, stated plainly:** micro objects self-shadow
-  and shadow each other exactly, but they do **not** receive the main world's
-  shadows and the main world does **not** receive theirs (those marches live
-  in the world shaders and know nothing about this pass). Live edits cannot
-  touch micro geometry: the micro worlds are outside the 16³ chunk stream.
+- **Shadows are two-way and COARSE on both halves.** Micro objects self-shadow
+  and shadow each other exactly, and they exchange shadows with the world
+  through the coarse representations, never through each other's lattices:
+  - **RECEIVE** — `worldShadow` in `micro_overlay.comp` marches `uHeight` (the
+    terrain heightfield) + `uObjVol` (the 256³ coarse object volume), the two
+    coarse world representations the micro shader already binds. Make the
+    verdict **binary**: do NOT copy `softShadowSplat`'s `shadow += 0.5` per
+    unoccluded tap, which returns **0.5 for a fully LIT point** (measured: the
+    vase's mean luma 109 → 84 with no occluder near it).
+  - **CAST** — `microShadow` in `src/voxel/surfelize.cpp`: the world's sun
+    shadow is BAKED per surfel from the `VoxelField`, which by design holds no
+    micro cells, so the bake consults each micro field directly (one binary
+    verdict per surfel — the coarsest possible, and the same shape as every
+    other baked shadow). The march is bounded by the object's world AABB and
+    steps at a **quarter of the object's own voxel** (the world bake's 0.1 m
+    DDA is wider than a 5 mm object and steps straight over it), and it needs
+    its **own ray origin** (`pos + n * 0.01`, not the world march's
+    `pos + n * 0.3` — 0.3 m is above a 0.3 m-tall object: measured 1 surfel
+    darkened instead of 7). `loadMicroObjects()` therefore runs BEFORE
+    `rebuildSurfels()`, and the live-edit re-bake passes the same occluders so
+    an edit cannot erase the shadow.
+  - The occluder list points into `App::m_microFields`, so that vector is
+    **reserved** before anything points into it: a `push_back` that reallocates
+    dangles every pointer, and a garbage `voxel` of 0 makes the march's step 0
+    — measured as a `--shot` spinning at 810 % CPU for minutes.
+- Live edits cannot touch micro geometry: the micro worlds are outside the 16³
+  chunk stream (an edit to the WORLD ground beside a micro object re-bakes that
+  ground and re-applies the cast shadow).
 - Coverage: `tests/test_micro.cpp` (9 cases) pins the SDF's sign convention and
   half-cell offset, the eighth-voxel quantisation, the margin, the dense field
   against the CPU field, the brick packing, a CPU replica of the shader's

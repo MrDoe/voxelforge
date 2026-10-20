@@ -319,6 +319,7 @@ void App::rebuildSurfels()
         sp.smoothNormals = atoi(e) != 0;
     if (const char* e = getenv("VF_SURFEL_HFBLEND"))
         sp.terrainHeightfieldNormals = atoi(e) != 0;
+    sp.microOccluders = &m_microOccluders;
     vf::voxel::SurfelSet set = vf::voxel::buildSurfels(m_layers.field(), sp);
     // The water is ONE fixed-level plane subdivided into a world-wide 0.2 m
     // grid of coplanar surfels (coverage only - the shader intersects the

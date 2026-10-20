@@ -20,6 +20,34 @@
 
 namespace vf::voxel {
 
+// A micro object as a SUN-SHADOW OCCLUDER for the world's baked surfel shadow.
+//
+// The world's sun shadow is BAKED per surfel on the CPU from the VoxelField, so
+// a micro object can only darken the world by being present when the bake runs.
+// That is the "cast" half of the two-way shadow contract, and it is coarse by
+// construction: one binary verdict per surfel, exactly like every other baked
+// shadow in the project.
+//
+// The micro objects are NOT in the VoxelField (they live on their own lattice
+// by design), so the bake consults their fields directly through this.
+struct MicroField; // voxel/micro_field.hpp
+struct MicroOccluder {
+    const MicroField* field = nullptr;
+    // Add this to a FIELD-LOCAL point to reach world space (the layer's `pos`).
+    glm::vec3 worldOffset { 0.f };
+    // The object's world AABB. A ray that misses it never touches the field, so
+    // the cost is bounded by the surfels near the object, not by the world.
+    glm::vec3 aabbMin { 0.f };
+    glm::vec3 aabbMax { 0.f };
+};
+
+// Does a micro object occlude this sun ray? 0 = occluded, 1 = clear.
+// Bounded by each object's world AABB and stepped at a quarter of the object's
+// own voxel - the world bake's 0.1 m DDA would step straight over a 5 mm
+// object. Exposed for the unit test that pins the cast-shadow verdict.
+float microShadow(const std::vector<MicroOccluder>& occ, glm::vec3 ro,
+                  glm::vec3 rd);
+
 struct SurfelParams {
     // In-plane radius (m). Sets the Gaussian kernel footprint: baseRadius
     // 0.14 (1.4 cells) makes the cell corner (0.0707 m off-centre) sit at
@@ -91,6 +119,9 @@ struct SurfelParams {
     // The renderer picks a ring per chunk by chunk-AABB distance, cutting
     // far instance counts 4x / 16x. Default OFF (unit tests pin exact base
     // counts); the app enables it.
+    // Micro objects that cast onto the world. nullptr / empty = none, and the
+    // whole feature is a no-op (the bake is then bit-identical to before).
+    const std::vector<MicroOccluder>* microOccluders = nullptr;
     bool lodRings = false;
     // Material-split LOD merging: a merged block emits a second surfel for
     // its dominant minority material (>=25% of members, >=2 cells) so

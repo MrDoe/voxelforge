@@ -19,6 +19,7 @@
 //   * the material lookup landing on the SOLID cell, not on air filler.
 #include "voxel/micro_field.hpp"
 #include "voxel/micro_svo.hpp"
+#include "voxel/surfelize.hpp"
 #include "voxel/worldfile.hpp"
 
 #include <doctest/doctest.h>
@@ -428,6 +429,50 @@ TEST_CASE("micro world: the trace finds the OBJECT's surface, not the box's face
     // ... and the cell it lands in is solid.
     const ivec3 c = ivec3(glm::floor((hit - w.worldMin) / vox));
     CHECK(f.solid[f.idx(c.x, c.y, c.z)] == 1);
+}
+
+TEST_CASE("micro world: a micro object CASTS a shadow onto the world")
+{
+    // The world's sun shadow is BAKED per surfel, so the "cast" half of the
+    // two-way shadow contract is a test the bake runs against the micro fields
+    // - they are not in the VoxelField. microShadow is that test: it must be
+    // occluded when the sun ray passes THROUGH the object and clear when it
+    // passes beside it, and the world bake's 0.1 m DDA step is too coarse to
+    // find a 5 mm object, which is why it marches at a quarter voxel.
+    const float vox = 0.005f;
+    WorldFileData d = cubeLayer(3, vox); // 7 cells = 3.5 cm, on a 5 mm lattice
+    MicroField f;
+    std::string err;
+    REQUIRE(buildMicroField(d.voxels, d.meta, f, &err));
+
+    const glm::vec3 offset(10.0f, 2.0f, 10.0f);
+    MicroOccluder oc;
+    oc.field = &f;
+    oc.worldOffset = offset;
+    oc.aabbMin = f.origin + offset;
+    oc.aabbMax = oc.aabbMin + f.extent();
+    const std::vector<MicroOccluder> occ { oc };
+
+    const glm::vec3 sun = glm::normalize(glm::vec3(-0.703f, 0.559f, -0.439f));
+    // The object's own centre, NOT the grid's: the air margin is asymmetric
+    // about the object (it sits at cell M..M+objDim), so f.extent()*0.5 is
+    // 2.5 mm outside the object and the ray below would miss it.
+    const int halfCells = 3; // cubeLayer(3, ...): cells 0..6
+    const glm::vec3 centre =
+        offset + glm::vec3(float(2 * halfCells + 1) * vox) * 0.5f;
+
+    // A point on the ground beside the object, with the sun DIRECTLY behind
+    // the object: the ray must pass through it.
+    const glm::vec3 through = centre - sun * 0.30f;
+    CHECK(microShadow(occ, through, sun) == 0.0f);
+
+    // The same point with the ray offset sideways: clear.
+    const glm::vec3 beside = through + glm::vec3(0.5f, 0.0f, 0.0f);
+    CHECK(microShadow(occ, beside, sun) == 1.0f);
+
+    // No occluders at all is a no-op (the bake must be bit-identical when the
+    // feature is off).
+    CHECK(microShadow({}, through, sun) == 1.0f);
 }
 
 TEST_CASE("micro world: the field is CONTINUOUS across a brick boundary")

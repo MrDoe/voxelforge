@@ -33,11 +33,22 @@ void App::loadMicroObjects()
         spdlog::warn("micro: cannot read manifest {} - no micro objects",
                      m_manifestPath);
         m_microSvoPass.setMicroWorlds({});
+        m_microFields.clear();
+        m_microOccluders.clear();
         return;
     }
     const std::string dir = std::filesystem::path(m_manifestPath).parent_path().string();
 
+    std::vector<glm::vec3> occluderOffsets;
     std::vector<vf::voxel::MicroWorld> worlds;
+    m_microFields.clear();
+    m_microOccluders.clear();
+    // RESERVE before anything points into this vector. A push_back that
+    // reallocates moves the fields, and every MicroOccluder::field pointer
+    // would dangle - measured: the surfel bake's micro march read a garbage
+    // `voxel` of 0 and the step became 0, so the march never advanced and a
+    // --shot spun at 810 % CPU for minutes.
+    m_microFields.reserve(layers.size());
     for (const auto& l : layers) {
         if (l.role != "micro" || !l.enabled)
             continue;
@@ -77,12 +88,28 @@ void App::loadMicroObjects()
         }
         vf::voxel::MicroWorld world;
         vf::voxel::synthesizeMicroSvo(field, offset, world);
+        // Keep the field so the world's BAKED surfel shadow can cast onto the
+        // world from it (see MicroOccluder). The AABB is the field's own
+        // extent, which already includes the air margin - a ray that misses it
+        // cannot touch the object.
+        m_microFields.push_back(field);
+        occluderOffsets.push_back(offset);
         spdlog::info("micro: '{}' -> {} voxels on a {:.3f} m lattice ({}x{}x{} cells), "
                      "gridN {}, {} bricks, {:.1f} KB",
                      l.file, data.voxels.size(), field.voxel, field.dim.x, field.dim.y,
                      field.dim.z, world.gridN, world.brickCount(),
                      double(world.bytes()) / 1024.0);
         worlds.push_back(std::move(world));
+    }
+    // Second pass: NOW that no more fields can move, point the occluders at
+    // them. See the reserve above.
+    for (size_t i = 0; i < m_microFields.size(); ++i) {
+        vf::voxel::MicroOccluder oc;
+        oc.field = &m_microFields[i];
+        oc.worldOffset = occluderOffsets[i];
+        oc.aabbMin = m_microFields[i].origin + occluderOffsets[i];
+        oc.aabbMax = oc.aabbMin + m_microFields[i].extent();
+        m_microOccluders.push_back(oc);
     }
     m_microSvoPass.setMicroWorlds(worlds);
 }

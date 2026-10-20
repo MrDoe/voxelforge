@@ -106,11 +106,13 @@ void App::applyWorldReload()
     // explicit light edits ride the same poll; they are tiny, so reload them
     // with the manifest rather than waiting for a restart.
     uploadLightSources();
-    rebuildSurfels();       // splat backend follows the same live field
     // micro objects are SEPARATE SVO worlds, so a manifest edit that adds,
     // removes or repositions one only re-uploads its own buffers - it never
-    // invalidates the world bake above.
+    // invalidates the world bake. They load FIRST because the surfel bake
+    // below consults their fields for the cast-shadow half of the two-way
+    // shadow contract.
     loadMicroObjects();
+    rebuildSurfels();       // splat backend follows the same live field
     // the reload re-adopted the store: re-apply the persisted live overlay
     m_liveEditor.clear();
     m_overlayLoaded = false;

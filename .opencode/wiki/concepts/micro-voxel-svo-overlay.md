@@ -122,15 +122,43 @@ boundary — with a **negative control** (the same measurement against a
 brick-clamped stencil) that proves the continuity check can detect the bug it
 guards.
 
-## Consequences of the separation, stated plainly
+## Shadows: two-way, and coarse on both halves
 
-- Micro objects self-shadow and shadow each other exactly. They do **not**
-  receive the main world's shadows and the main world does **not** receive
-  theirs: those marches live in the world shaders and by design know nothing
-  about this pass. See [[concepts/measurement-discipline]] for why the
-  decision was flagged rather than silently made.
+Micro objects self-shadow and shadow each other exactly, and they participate
+in the world's shadow **in both directions** — coarsely, because that is the
+only honest way to bridge two lattices that must stay separate.
+
+- **RECEIVE** (`worldShadow` in `micro_overlay.comp`): the micro surface
+  marches the two COARSE world representations it already binds — `uHeight`
+  (the terrain heightfield) and `uObjVol` (the 256³ coarse object volume). The
+  verdict is **binary**, like the SVO reference backend's exact hits and like
+  the micro worlds' own `microVisibility`. Do NOT copy `softShadowSplat`'s
+  `shadow += 0.5` per unoccluded tap: that returns **0.5 for a fully LIT
+  point** (measured: the vase's mean luma 109 → 84 with no occluder anywhere
+  near it). It also needs its OWN test — `objDist < 1.2474 && objDist < -0.05`
+  — because the coarse volume is the only thing that knows about the house.
+- **CAST** (`microShadow` in `surfelize.cpp`): the world's sun shadow is
+  BAKED per surfel on the CPU from the `VoxelField`, which by design does not
+  contain the micro objects, so the bake consults each micro field directly.
+  It is one binary verdict per surfel — the coarsest possible, and exactly the
+  same shape as every other baked shadow in the project. Two things matter:
+  the march is bounded by the object's world AABB and steps at a **quarter of
+  the object's own voxel** (the world bake's 0.1 m DDA step is wider than a
+  5 mm object and would step straight over it), and it gets its **own ray
+  origin** (`pos + n * 0.01`) — reusing the world march's `pos + n * 0.3`
+  starts the ray 0.3 m above a 0.3 m-tall object and finds almost nothing
+  (measured: 1 surfel darkened instead of ~12).
+  The micro objects load BEFORE `rebuildSurfels` for this reason, and the
+  live-edit re-bake passes the same occluders so an edit cannot erase the
+  shadow.
+
+The cost stays bounded: the object's AABB is centimetres, so only the surfels
+beside it ever run the micro march, and with no micro layer loaded the bake is
+bit-identical to before (`microOccluders` empty).
+
 - Live edits cannot touch micro geometry: the micro worlds are outside the
-  16³ chunk stream entirely.
+  16³ chunk stream entirely. (An edit to the WORLD ground beside a micro
+  object re-bakes that ground and re-applies the micro cast shadow.)
 - The micro pass is a no-op when no micro layer is loaded (`empty()`), so the
   cost with the feature off is a single branch.
 

@@ -163,6 +163,27 @@ void App::applyEditLive()
     if (edits.empty())
         return;
 
+    // Bounding-box selection: scope this stamp to the cells inside the box.
+    // The hover tint clips to the same set (BrushUBO bBoxLo/bBoxHi), so what
+    // the preview shows is exactly what survives this filter. A stamp that is
+    // entirely outside the box does nothing at all: no store patch, no stroke,
+    // no undo step - the click reads as inert instead of half-applied.
+    if (m_boxSelect.valid()) {
+        const size_t before = edits.size();
+        const size_t kept = applyBoxSelectionScope(edits);
+        m_lastStampOutside = int(before - kept);
+        if (kept == 0) {
+            spdlog::info("box select: stamp fully outside the selection box "
+                         "({} cells dropped)", before);
+            return;
+        }
+        if (m_lastStampOutside > 0)
+            spdlog::info("box select: {} of {} stamp cells kept inside the box",
+                         kept, before);
+    } else {
+        m_lastStampOutside = 0;
+    }
+
     // Paint must not create geometry: the brush ball covers air cells too, so
     // keep only cells that are already solid in the store (Clear is a no-op on
     // air and needs no filter).
@@ -231,6 +252,10 @@ void App::commitStoreEdits(std::vector<vf::voxel::StoreEdit>& edits, int riseCel
     sp.edgeBridgeSize = m_edgeBridgeSize;
     sp.cornerFill = m_cornerFill;
     sp.sunDir = glm::vec3(m_sunDir);
+    // The micro objects' CAST shadow is baked per surfel, so a live-edit
+    // re-bake must consult the same occluders as the world bake - otherwise
+    // editing the ground next to a micro object erases its shadow.
+    sp.microOccluders = &m_microOccluders;
     sp.lodRings = false;
     sp.anisotropy = true;
     if (const char* e = getenv("VF_ANISO"))
@@ -513,6 +538,10 @@ void App::clearLiveEdits()
     sp.edgeBridgeSize = m_edgeBridgeSize;
     sp.cornerFill = m_cornerFill;
     sp.sunDir = glm::vec3(m_sunDir);
+    // The micro objects' CAST shadow is baked per surfel, so a live-edit
+    // re-bake must consult the same occluders as the world bake - otherwise
+    // editing the ground next to a micro object erases its shadow.
+    sp.microOccluders = &m_microOccluders;
     sp.lodRings = false;
     sp.anisotropy = true;
     if (const char* e = getenv("VF_ANISO"))

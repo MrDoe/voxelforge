@@ -43,6 +43,7 @@
 #include "render/texture_atlas.hpp"
 #include "render/volumetric_fog_pass.hpp"
 #include "voxel/chunk_index.hpp"
+#include "voxel/box_select.hpp"
 #include "voxel/editable_world.hpp"
 #include "voxel/layered_world.hpp"
 #include "voxel/live_editor.hpp"
@@ -178,6 +179,12 @@ private:
     // hand them to the GPU overlay pass. They never enter the world record set,
     // the VoxelField, the ChunkStore or the live-edit overlay.
     void loadMicroObjects();
+    // The micro objects as SUN-SHADOW OCCLUDERS for the world's baked surfel
+    // shadow. Filled by loadMicroObjects and consumed by rebuildSurfels, which
+    // is why a world reload loads the micro objects FIRST.
+    std::vector<vf::voxel::MicroOccluder> m_microOccluders;
+    // The fields the occluders point at; owning storage for the pointers.
+    std::vector<vf::voxel::MicroField> m_microFields;
     // Sun: m_sunDir is the single source of truth for where the sun is (it
     // rides the per-frame push constant), so every control that moves the sun
     // funnels through setSunAngles and nothing keeps parallel angle floats.
@@ -607,6 +614,23 @@ private:
     int m_smoothLastColumns = 0;
     int m_smoothLastMaxDelta = 0;
     int m_smoothLastRise = 0;
+    // ---- bounding-box selection (edit/box_select.cpp) -----------------------
+    // A lattice AABB that SCOPES the live-edit brush: while active, a stamp
+    // only touches cells inside it, the hover tint clips to the same set, and
+    // the post pass draws the box as a wireframe. Shift+LMB drag defines it
+    // (corner to corner); X clears it. The Rotate/Move transforms deliberately
+    // ignore it - they act on a whole layer owner, not on cells.
+    vf::voxel::CellBox m_boxSelect;
+    bool m_boxDragging = false;   // Shift+LMB drag in progress
+    glm::ivec3 m_boxAnchor { 0 }; // the corner the drag started from
+    // Last contents report (solid cells / surfels inside the box), published
+    // on release and shown in the Edit section.
+    int m_boxStatCells = 0;
+    int m_boxStatObjects = 0;
+    int m_boxStatSplats = 0;
+    // Cells the LAST stamp dropped for being outside the box (per-stamp
+    // log line when non-zero; a stamp that is entirely outside does nothing).
+    int m_lastStampOutside = 0;
     uint8_t m_editMat = 6;       // palette id for Add and Paint
     // Rotate trackball: m_rotateLayer is the object activated by one click.
     // A subsequent press on the yaw/pitch/roll ring starts the live drag;
@@ -691,6 +715,32 @@ private:
     glm::ivec3 m_lastStampWroteCell { -1, -1, -1 };
 
     void applyEditLive();
+    // ---- bounding-box selection (defined in edit/box_select.cpp) -----------
+    // Start/extend/end the Shift+LMB corner drag. The box is anchored at the
+    // pressed cell and spans to the cell under the cursor, inclusive.
+    void beginBoxSelection(const glm::ivec3& anchor);
+    void updateBoxSelection(const glm::ivec3& hover);
+    // Commit the drag: report the contents (cells + surfels) to the log and
+    // publish the sidebar readouts.
+    void endBoxSelection();
+    void clearBoxSelection();
+    bool boxSelectionActive() const { return m_boxSelect.valid(); }
+    // True when the cell may be edited: no box, or the cell is inside it.
+    // The brush modes call this so a box is one rule, checked in one place.
+    bool boxSelectsCell(const glm::ivec3& v) const
+    {
+        return !m_boxSelect.valid() || m_boxSelect.contains(v);
+    }
+    // Drop out-of-box edits in place (see CellBox::clampEdits).
+    size_t applyBoxSelectionScope(std::vector<vf::voxel::StoreEdit>& edits);
+    // Cell indices + active flag for the BrushUBO (both backends) and the
+    // post-pass wireframe feed: ONE representation, so the drawn box, the
+    // tinted preview and the scoped cell set cannot disagree.
+    void boxSelectionFeeds(glm::vec4& lo, glm::vec4& hi) const;
+    // Count solid cells / object-owned cells / surfels inside the box and log
+    // them (the surfel count re-derives the shared store range builder per
+    // overlapped chunk - same normal pipeline the stamps use).
+    void reportBoxSelection();
     // Fill the ownership class of a HOOK-BUILT pick. An interactive pick gets
     // it from the camera ray (rayPickStore); a headless hook that builds the
     // pick straight from a lattice cell must ask the load-time oracle instead,

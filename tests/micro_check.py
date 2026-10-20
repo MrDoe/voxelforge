@@ -20,7 +20,13 @@ are reproducible rather than remembered:
   3. MICRO-TO-MICRO SHADOW - with the vase present the urn must be DARKER on
      the pixels it occupies. One object cannot show this, which is why two are
      shipped.
-  4. NO WORLD REGRESSION - the house view must be pixel-identical with the
+  4. TWO-WAY SHADOW - the micro objects must RECEIVE the main world's coarse
+     shadow (their luma with the world shadow term off must be brighter), and
+     they must CAST onto the world (the world bake reports surfels darkened
+     by their fields). Both halves are coarse by design: the receive half is
+     the heightfield + coarse object volume, the cast half is one binary
+     verdict per baked surfel.
+  5. NO WORLD REGRESSION - the house view must be pixel-identical with the
      micro layers on and off. The overlay must not be able to touch the 0.1 m
      path.
 
@@ -66,14 +72,19 @@ def note(ok: bool, msg: str) -> None:
         failures.append(msg)
 
 
-def render(out: str, cam: str, w: int = W, h: int = H, mode: str = "") -> None:
+def render(out: str, cam: str, w: int = W, h: int = H, mode: str = "",
+           flags: str = "") -> None:
     cmd = [APP, "--shot", out, "--cam", cam, "--width", str(w), "--height", str(h)]
     if mode:
         cmd += ["--mode", mode]
+    env = os.environ.copy()
+    if flags:
+        env["VF_RENDER_FLAGS"] = flags
     subprocess.run(
         cmd,
         check=True,
         cwd=ROOT,
+        env=env,
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL,
     )
@@ -203,7 +214,42 @@ def main() -> int:
                 % (len(darker), mean_drop),
             )
 
-        # 4. NO WORLD REGRESSION: the house view is untouched.
+        # 4. TWO-WAY SHADOW.
+        #    (a) RECEIVE: with the world's shadow term disabled the micro
+        #        objects must be BRIGHTER. The shipped spot is in the shadow
+        #        of a real world object, so this is a real verdict, not a
+        #        tautology.
+        print("[micro] checking the two-way shadow ...")
+        no_shadow = os.path.join(tmpdir, "on_noshadow.ppm")
+        set_micro({"micro/vase.vxw": True, "micro/urn.vxw": True})
+        render(no_shadow, MICRO_CAM, flags="253")
+        _, _, ns = read_ppm(no_shadow)
+        lit = statistics.mean(luma(ns, i) for i in px)
+        shaded = statistics.mean(luma(a, i) for i in px)
+        note(
+            shaded < lit * 0.97,
+            "micro objects RECEIVE the world's shadow (%.0f lit vs %.0f shadowed luma)"
+            % (lit, shaded),
+        )
+        #    (b) CAST: the world bake must report surfels darkened by the
+        #        micro fields. A "cast shadow" that darkens nothing is the
+        #        failure mode to watch for, and it is silent.
+        proc = subprocess.run(
+            [APP, "--shot", os.path.join(tmpdir, "bake.ppm"), "--cam", MICRO_CAM,
+             "--width", "320", "--height", "200"],
+            cwd=ROOT, env=os.environ.copy(), capture_output=True, text=True,
+            check=True,
+        )
+        import re
+
+        m = re.search(r"micro cast shadow darkened (\d+) surfel", proc.stdout + proc.stderr)
+        note(
+            m is not None and int(m.group(1)) >= 5,
+            "micro objects CAST onto the world (%s surfels darkened)"
+            % (m.group(1) if m else "no report at all"),
+        )
+
+        # 5. NO WORLD REGRESSION: the house view is untouched.
         print("[micro] rendering the house view (no micro object in it) ...")
         house_on = os.path.join(tmpdir, "house_on.ppm")
         house_off = os.path.join(tmpdir, "house_off.ppm")
