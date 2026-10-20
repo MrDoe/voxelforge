@@ -23,11 +23,14 @@ bit-exact escape hatch (measured 0.002% diff).
 
 ## Layout
 
-- `TexAtlas` (`src/render/texture_atlas.cpp`): a fixed **17 layers × 512²**
+- `TexAtlas` (`src/render/texture_atlas.cpp`): a fixed **22 layers × 512²**
   `R8G8B8A8_UNORM` 2D-array image, one layer per material id (layer == mat).
+  The count is `TexAtlas::kLayers` and must equal `kPaletteN`; it was 17 when
+  this page was written, 21 after the `bark`/`moss`/`thatch`/`plaster`
+  materials, and 22 when mat 21 `fleece` was appended for the alpaca.
   Unbound layers get neutral grey filler and a `-1` slot. CPU box-resample,
   blit-built mip chain, repeat+mip sampler, persistently-mapped `TexTable`
-  UBO (`matTex[17]`: x = layer/-1, y = m per tile).
+  UBO (`matTex[kLayers]`: x = layer/-1, y = m per tile).
   The box filter handles any source size (downscale) so a dropped 4K photo
   works; the loader takes **PNG and JPEG** (`STBI_ONLY_PNG` +
   `STBI_ONLY_JPEG` in `heightmap.cpp`).
@@ -36,12 +39,23 @@ bit-exact escape hatch (measured 0.002% diff).
   Raised 256 → 512 on 2026-09-19: the shipped ambientCG sources are already
   512² and were being downsampled on upload. VRAM 5.9 → 23.8 MB (full mip
   chain × 17 layers). See [[concepts/texture-resolution]] for the measured
-  effect (real but modest — a sharpness fix, not a realism lever).
+  effect (real but modest — a sharpness fix, not a realism lever). Adding a
+  material moves `kPaletteN`, the GLSL `kPalette`/`kMatRefl`/`matTex` sizes and
+  `kLayers` **together** — every existing index must stay put, so append only.
 - Bindings **22** (`sampler2DArray uTexAtlas`) and **23** (`TexTable`) in
   both the splat and SVO pipelines (added to the descriptor layouts — the
   array sizes must match `bindingCount` or the build stack-smashes).
 - `loadTextureManifest` resolves paths against the manifest directory, so
   `assets/textures/` and absolute paths both work.
+- **A material is the unit of texture binding — and a TEXTURED material
+  ignores the record's colour.** `detailAlbedo` replaces the albedo with the
+  atlas sample, so per-record `r/g/b` only shows on materials with **no**
+  texture bound. That is not obvious from the record format (which carries a
+  colour per cell) and it bit the micro-voxel alpaca: its per-record cream was
+  invisible because it rode mat 20 `plaster`, which *is* textured. A new
+  surface look therefore needs a new material, not a new record colour — and
+  sub-parts that must NOT share the texture (eyes, hooves, muzzle) need their
+  own materials too. See [[concepts/micro-voxel-svo-overlay]].
 
 ## Shader
 

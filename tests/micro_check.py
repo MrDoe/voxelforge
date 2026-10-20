@@ -59,6 +59,8 @@ APP = sys.argv[1] if len(sys.argv) > 1 else os.path.join(ROOT, "build", "voxelfo
 # at (12.3, -0.25, 12.2), the latter in the vase's shadow (the sun is at
 # 34 deg / 238 deg, so shadows are thrown toward (0.85, 0.53) in xz).
 MICRO_CAM = "11.45,0.30,11.45,12.22,-0.20,12.14"
+# A camera that fills the frame with the ALPACA (the third micro object).
+ALPACA_CAM = "10.95,0.85,11.45,11.75,0.52,12.55"
 # A view with no micro object in it: the house.
 HOUSE_CAM = "2.5,1.3,6.0,6.8,1.0,12.2"
 W, H = 900, 600
@@ -248,6 +250,36 @@ def main() -> int:
             "micro objects CAST onto the world (%s surfels darkened)"
             % (m.group(1) if m else "no report at all"),
         )
+
+        # 4c. FUR. The alpaca's fleece is a TEXTURED material (21), and a
+        #     textured material ignores the record's colour - so a binding
+        #     that silently failed would fall back to a FLAT cream and every
+        #     other check here would still pass. The fur's signature is local
+        #     contrast: a flat palette fill has almost none.
+        print("[micro] checking the alpaca's fleece ...")
+        fur_on = os.path.join(tmpdir, "fur_on.ppm")
+        fur_off = os.path.join(tmpdir, "fur_off.ppm")
+        set_micro({"micro/vase.vxw": True, "micro/urn.vxw": True,
+                   "micro/alpaca.vxw": True})
+        render(fur_on, ALPACA_CAM, 700, 700)
+        set_micro({"micro/vase.vxw": False, "micro/urn.vxw": False,
+                   "micro/alpaca.vxw": False})
+        render(fur_off, ALPACA_CAM, 700, 700)
+        _, _, fa = read_ppm(fur_on)
+        _, _, fb = read_ppm(fur_off)
+        apx = differing(fa, fb, 14)
+        note(len(apx) > 2000, "the alpaca is visible (%d px)" % len(apx))
+        if apx:
+            lum = [luma(fa, i) for i in apx]
+            mean = statistics.mean(lum)
+            # mean absolute deviation from a 3x3-ish blur is overkill; the
+            # spread of the luma itself is enough to tell fur from flat paint.
+            sd = statistics.pstdev(lum)
+            note(
+                sd > 8.0 and mean > 40.0,
+                "the fleece carries texture (luma mean %.0f, spread %.1f)"
+                % (mean, sd),
+            )
 
         # 5. NO WORLD REGRESSION: the house view is untouched.
         print("[micro] rendering the house view (no micro object in it) ...")

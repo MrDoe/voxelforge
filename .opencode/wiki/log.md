@@ -5396,3 +5396,34 @@ shadow.
 Gate: `tests/micro_check.py` now checks both directions (9 checks, all pass);
 `tests/test_micro.cpp` gains a cast-shadow case (10/10). Updated
 [[concepts/micro-voxel-svo-overlay]].
+
+## [2026-10-20] ingest | The alpaca, and the material-is-the-texture-unit lesson
+
+A third micro object: a 1.3 m alpaca at 8 mm voxels (150 k voxels, 170 levels
+tall). `vf_microvox` gained a **non-lathe** generator — an SDF union of body /
+neck / head / muzzle / ears / legs / hooves / tail with a three-octave
+value-noise **fur displacement**; only the sign is used, so approximate
+primitives cost nothing.
+
+Two lessons worth keeping:
+
+1. **A material is the unit of texture binding, and a TEXTURED material
+   ignores the record's colour.** The alpaca's per-record cream was invisible
+   because it rode mat 20 (plaster, textured, shared with the vase). Fix: a new
+   material 21 `fleece` (append-only: `kPaletteN` 21 → 22 with the GLSL
+   `kPalette`/`kMatRefl`/`matTex` sizes and the atlas `kLayers`), and the
+   eyes/hooves ride mat 4 (rock) and the muzzle mat 19 (thatch) so they do not
+   turn furry.
+2. **Fur scale.** The texture repeats in world space at `scale` m/tile; the
+   fleece's clumps are centimetres, so **0.2 m/tile** — a 1 m tile looks like a
+   bedsheet.
+
+The user's `fur.jpeg` (1024²) passes `check_texture.py --material fleece`
+(seam 1.26×, light 0.20×, no stamp, identity 12) and is bound at mat 21.
+`micro_check.py` gained a **fleece check** (the luma spread of the alpaca's own
+pixels) because a failed texture binding falls back to a flat colour that every
+other check would still pass.
+
+Also fixed: `visual_check`'s "preview hook modified world.json" failure in the
+previous run was MY doing — I edited the manifest while that gate was running.
+Re-run gates only on a stable tree.

@@ -91,7 +91,7 @@ expected conclusion given the defect was entirely CPU-side: the shader and both
 backends were innocent.
 
 Related: [[concepts/render-defaults-off]] (the TAA default flip that exposed
-this), [[concepts/taa-history]] for the NaN-sticky history variant of the same
+this), and `concepts/taa-history` (no such page yet) for the NaN-sticky history variant of the same
 "single consumer" trap, and [[concepts/measurement-provenance]] — the number
 quote without this page's "before" column would have looked like a 6-16 L2
 smear that "still works".

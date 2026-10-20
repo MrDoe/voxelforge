@@ -198,6 +198,37 @@ the urn's own pixels: 246 of them (10.3 % of the urn) darken by a mean of
 shadow falling on the urn — micro-to-micro shadowing, with neither object
 knowing anything about the main world.
 
+## Authoring a non-lathe object: the alpaca
+
+`vf_microvox` started as a LATHE (the vase and urn). An animal is not a solid
+of revolution, so `makeAlpaca` evaluates an **SDF over the grid** instead — a
+union of a body ellipsoid, a tapered neck, a head, a muzzle, ears, four
+tapered legs, hooves and a tail — plus a **three-octave value-noise fur
+displacement** on the fleece regions. Only the SIGN of the SDF is used (the
+app derives its own distance field), so the primitives may be approximate
+without any visual cost: that is what makes a hand-written animal cheap.
+
+At 8 mm the alpaca is 1.3 m tall and 150 k voxels on a 57×170×142 lattice
+(2.3 MB layer, 6.8 MB of GPU bricks) — 170 levels, versus the vase's 60.
+
+**The texture lesson.** `assets/world.json` binds a texture per MATERIAL, and
+a textured material ignores the record's colour, so:
+
+- the fleece needed **its own material** (21, appended — `kPaletteN` 21 → 22
+  with the GLSL tables and the atlas `kLayers`; every existing index is
+  unchanged) or a fur photo would have turned the plaster vase furry;
+- the eyes/hooves ride mat 4 (rock) and the muzzle mat 19 (thatch) precisely
+  so they stay crisp and un-furry;
+- the fur's `scale` is **0.2 m/tile**: fleece clumps are centimetres. A
+  world-scale tile (1 m) would make the animal look like it is wrapped in a
+  bedsheet.
+
+A drop-in fur is gated by `tools/check_texture.py --material fleece` (the
+`TARGETS` entry keeps the material's cream identity) and by
+`micro_check.py`'s **fleece check**: a flat palette fill and a real fur photo
+are indistinguishable to every other check, so the gate measures the luma
+spread of the alpaca's own pixels.
+
 ## Verification
 
 | check | result |
