@@ -717,7 +717,9 @@ void emitMicroSurfelsForCell(int x, int y, int z, const Surfel& b,
 // How many shadow queries the micro objects have occluded since the last bake
 // report. Logged by buildSurfels: a "cast shadow" that silently darkens
 // nothing is the failure mode to watch for, and the count makes it visible.
+namespace {
 std::atomic<uint64_t> g_microShadowed { 0 };
+} // namespace
 
 float microShadow(const std::vector<MicroOccluder>& occ, glm::vec3 ro, glm::vec3 rd)
 {
@@ -735,6 +737,12 @@ float microShadow(const std::vector<MicroOccluder>& occ, glm::vec3 ro, glm::vec3
         if (tExit <= tEnter)
             continue;
         const float step = 0.25f * o.field->voxel;
+        // A zero step would spin here forever. It cannot happen with a live
+        // field, but it DID happen once through a dangling MicroOccluder::
+        // field pointer reading a garbage voxel of 0, and the symptom was a
+        // --shot at 810 % CPU for minutes rather than an obvious crash.
+        if (!(step > 0.0f))
+            continue;
         for (float t = tEnter; t <= tExit; t += step) {
             if (o.field->sampleSdf(ro + rd * t - o.worldOffset) < 0.0f) {
                 ++g_microShadowed;
