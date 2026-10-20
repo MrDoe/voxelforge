@@ -100,30 +100,43 @@ def read_ppm(path: str) -> tuple[int, int, bytes]:
         return w, h, f.read()
 
 
-def set_micro(enabled: dict[str, bool]) -> None:
-    """Toggle the micro layers in the manifest.
+MANIFEST = os.path.join(ROOT, "assets", "world.json")
 
-    The manifest is a TRACKED file, so it is rewritten through a temp file and
-    renamed: a bare write truncates it, and a concurrent reader (another
+
+def _write_manifest(doc: dict) -> None:
+    """The manifest is a TRACKED file, so it is rewritten through a temp file
+    and renamed: a bare write truncates it, and a concurrent reader (another
     session's render, a running app's poll) would see a half-written manifest.
     """
-    path = os.path.join(ROOT, "assets", "world.json")
-    with open(path) as f:
+    tmp = MANIFEST + ".microcheck.tmp"
+    with open(tmp, "w") as f:
+        json.dump(doc, f, indent=2)
+        f.flush()
+        os.fsync(f.fileno())
+    os.replace(tmp, MANIFEST)
+
+
+def set_micro(enabled: dict[str, bool], rot: dict[str, float] | None = None) -> None:
+    """Toggle the micro layers in the manifest (and optionally set a rotation)."""
+    with open(MANIFEST) as f:
         doc = json.load(f)
     for layer in doc["layers"]:
         if layer.get("role") == "micro":
             name = layer.get("file", "")
             layer["enabled"] = bool(enabled.get(name, True))
-    tmp = path + ".microcheck.tmp"
-    with open(tmp, "w") as f:
-        json.dump(doc, f, indent=2)
-        f.flush()
-        os.fsync(f.fileno())
-    os.replace(tmp, path)
+            if rot is not None and name in rot:
+                layer["rot"] = rot[name]
+    _write_manifest(doc)
 
 
 def restore_micro() -> None:
-    set_micro({"micro/vase.vxw": True, "micro/urn.vxw": True})
+    """Put the manifest back exactly as it was found."""
+    with open(MANIFEST) as f:
+        doc = json.load(f)
+    for layer in doc["layers"]:
+        if layer.get("role") == "micro":
+            layer["enabled"] = True
+    _write_manifest(doc)
 
 
 def differing(a: bytes, b: bytes, thr: int = 16) -> list[int]:
@@ -286,6 +299,70 @@ def main() -> int:
                 sd > 8.0 and mean > 40.0,
                 "the fleece carries texture (luma mean %.0f, spread %.1f)"
                 % (mean, sd),
+            )
+
+        # 4d. LIVE MOVEMENT: a micro layer's `rot` must actually turn the
+        #     object, and the object must stay PUT (the rotation is about the
+        #     bottom-centre pivot, so the shape spins without drifting).
+        #     Measured by the footprint from directly above: a 90 degree yaw
+        #     swaps the alpaca's long axis, so the footprint's aspect flips.
+        print("[micro] checking the live movement (rotation) ...")
+        # TWO views, because they measure different things:
+        #  * from directly above, the screen's x/y ARE the world x/z, so the
+        #    footprint's aspect is camera-independent - that is the "did it
+        #    turn" measure (the alpaca is long and thin, so a yaw flips it);
+        #  * from the side, the screen's y is the world height, so the
+        #    silhouette's base row IS the pivot's projection - that is the
+        #    "did it stay put" measure. From directly above the base row would
+        #    be a world x/z and would measure nothing.
+        top_cam = "11.72,1.85,12.32,11.78,-0.25,12.30"
+        side_cam = ALPACA_CAM
+
+        def footprint(rot_deg: float, cam: str) -> tuple[int, int, int, int, int] | None:
+            tag = "%d_%s" % (rot_deg, "top" if cam is top_cam else "side")
+            on = os.path.join(tmpdir, "rot%s_on.ppm" % tag)
+            off = os.path.join(tmpdir, "rot%s_off.ppm" % tag)
+            set_micro({"micro/vase.vxw": False, "micro/urn.vxw": False,
+                       "micro/alpaca.vxw": False})
+            render(off, cam, 560, 560)
+            set_micro({"micro/vase.vxw": True, "micro/urn.vxw": True,
+                       "micro/alpaca.vxw": True},
+                      {"micro/alpaca.vxw": rot_deg})
+            render(on, cam, 560, 560)
+            _, _, oa = read_ppm(on)
+            _, _, ob = read_ppm(off)
+            pxs = differing(oa, ob, 14)
+            if not pxs:
+                return None
+            xs = [(i // 3) % 560 for i in pxs]
+            ys = [(i // 3) // 560 for i in pxs]
+            return (min(xs), min(ys), max(xs), max(ys), len(pxs))
+
+        t0 = footprint(0.0, top_cam)
+        t90 = footprint(90.0, top_cam)
+        s0 = footprint(0.0, side_cam)
+        s90 = footprint(90.0, side_cam)
+        note(
+            all(x is not None for x in (t0, t90, s0, s90)),
+            "the alpaca is measurable at both angles",
+        )
+        if t0 and t90 and s0 and s90:
+            # DID IT TURN: from above, the footprint is the object's x/z
+            # extent, and a 90 degree yaw swaps the long axis, so the aspect
+            # flips.
+            a0 = (t0[2] - t0[0]) / max(1, t0[3] - t0[1])
+            a90 = (t90[2] - t90[0]) / max(1, t90[3] - t90[1])
+            note(
+                a0 > 1.0 > a90,
+                "a 90 degree yaw turns the object (footprint aspect %.2f -> %.2f)"
+                % (a0, a90),
+            )
+            # DID IT STAY PUT: from the side, the silhouette's base row is the
+            # pivot's projection and must not move.
+            note(
+                abs(s0[3] - s90[3]) < 12,
+                "the object stays put while it turns (base row %d -> %d)"
+                % (s0[3], s90[3]),
             )
 
         # 5. NO WORLD REGRESSION: the house view is untouched.
