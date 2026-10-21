@@ -47,7 +47,7 @@ fur sidesteps the whole question: it composites over an already-opaque body,
 so transparency is correct by construction and the sky only shows where a
 card reaches past the silhouette.
 
-## The three decisions, and the measurements behind them
+## The four decisions, and the measurements behind them
 
 1. **The ribbon is billboarded about the strand** — its width axis is
    perpendicular to the strand *and* to the camera. A width axis taken from
@@ -64,16 +64,61 @@ card reaches past the silhouette.
 3. **The cards must be dense** — four per surface cell. Two left gaps at
    close range; more buys very little (measured: the neighbour-difference
    metric 19.0 at two cards, 18.2 at four, 16.8 at six).
+4. **The strands must be CURLY, and the amplitude must be a LARGE fraction
+   of the length.** The centre line wanders across the ribbon's plane in a
+   wave that is zero at the root (where the strand is anchored) and grows
+   toward the tip. The ribbon's *plane* is unchanged, so the ray/plane
+   intersection stays exact and the curl costs one sine. At an amplitude of
+   0.16 the wave is a couple of pixels across on a fifteen-pixel strand and
+   the coat still read as **spikes**; at 0.45 it reads as wool — the
+   measured high-frequency noise fell 16.1 → **12.7**, below the bare body's
+   13.5, because a curled strand spreads its ink instead of concentrating it
+   in a needle.
+
+## The bug the curl exposed — and it WAS the spikes
+
+The strand's direction was spelled `groom*cos(spin) + t2*sin(spin)`, which
+is **not a rotation** unless the groom happens to lie along `t1` — and the
+groom is the projection of "down", so it generally does not. The length
+varied with the spin, and at the spin where the two terms cancel the
+direction was pure numerical noise: the card degenerated into a **spoke
+pointing straight out of the surface**.
+
+Measured, with the unit test added to catch it: the strand's angle to the
+normal ranged **8.6°–89.8°** instead of the intended 12°–38°. Expressing
+the groom in the surface's tangent frame and rotating *that* keeps the
+length at one for every spin.
+
+The lesson worth keeping: **the "spiky look" was not an aesthetic
+parameter, it was a bug**, and it only became visible because a new
+assertion (the strand must point out of the surface) was written while
+changing something else. A visual complaint is a measurement request.
+
+## The coat in the GUI
+
+- The sidebar's **Rendering** section carries the coat's **shape**: density,
+  strand length, clump width, curl amplitude and cycles, and how far a
+  strand stands off the surface.
+- The **Textures** section carries the **material** that wears it, because a
+  coat is a property of the material and not of the object: a checkbox per
+  material turns the coat on wherever a micro object uses it. The fleece
+  (21) is the one that ships with a coat — and it was not even *visible* in
+  that panel before, because the panel's loop stopped at material 20.
+- The sliders **rebuild** the coat (the cards are a CPU product, a few
+  hundred milliseconds) and apply on **release**, not per tick. A rebuild
+  keeps the live Move/Rotate preview: that state lives on the fur objects
+  and rides across the upload.
 
 ## What the numbers were
 
 | quantity | value |
 |---|---|
-| the alpaca's cards | **81 848** (4 per surface cell) |
-| the card buffer | 7.9 MB on the GPU |
-| the generation | **177 ms** at load |
+| the alpaca's cards | **122 772** (6 per surface cell) |
+| the card buffer | 15.7 MB on the GPU (96 B per card) |
+| the generation | ~200 ms at load |
 | the frame cost | 0–1 ms at 900×600 (within the run-to-run noise) |
-| the near view's changed pixels | 16 % of the frame, mean \|diff\| 53 |
+| the near view's changed pixels | 16 % of the frame, mean \|diff\| 56 |
+| the coat's high-frequency noise | **12.70**, BELOW the bare body's 13.48 |
 | the fur's effect at 8 m | the alpaca's pixels change; the house view does not |
 
 ## The traps
@@ -96,6 +141,12 @@ card reaches past the silhouette.
   overlay applies them to the field. The fur and the body cannot drift apart.
   The preview is mirrored through an index map (`m_furIndexOfMicro`), because
   a micro object *without* fur has no entry in the fur pass's table.
+- **The meadow got the same lesson** (`common_base.glsl`): a grass blade
+  whose centre line is straight and whose width tapers to a point reads as a
+  spike, so the blade now arches (quadratic, the bend growing toward the
+  tip), keeps much more of its width, and fades over the last fifth instead
+  of the last tenth. Measured on the house view: 1.74 % of the pixels move,
+  the rest of the frame untouched.
 
 ## Gates
 

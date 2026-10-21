@@ -977,9 +977,9 @@ one costs a whole turn, because the bad call is rejected before any work runs.
 - **The cards are generated on the CPU** (`src/voxel/fur_cards.{hpp,cpp}`) from
   the field's SURFACE cells (a solid cell with a non-solid neighbour) whose
   material grows fur — **21 `fleece`**; the vase and the urn (20 plaster) grow
-  nothing. Four cards per surface cell, 3 cm long, 2.5 mm wide, tilted 25–60°
-  out of the surface, groomed down it. The alpaca: **81 848 cards, 7.9 MB**,
-  **177 ms** at load. The cards live in the field's LOCAL frame, so the
+  nothing. Six cards per surface cell, 26 mm long, 4.5 mm wide, tilted 12–38°
+  out of the surface, groomed down it, each with a CURL. The alpaca:
+  **122 772 cards, 15.7 MB**, **~200 ms** at load. The cards live in the field's LOCAL frame, so the
   layer's placement and the live rotation preview are applied by the shader
   exactly as the micro overlay applies them to the field.
 - **The pass is a COMPUTE pass** (`shaders/fur_overlay.comp`,
@@ -989,7 +989,7 @@ one costs a whole turn, because the bad call is rejected before any work runs.
   it needs no depth attachment and touches no opaque pass. It is INERT when
   no object carries fur: the dispatch is skipped and the frame is
   byte-identical. `VF_FUR=0` is the escape hatch.
-- **Three things decide whether the coat reads at all**, and all three are
+- **Four things decide whether the coat reads at all**, and all four are
   measured, not argued:
   1. **The ribbon must be BILLBOARDED about the strand** (its width axis
      perpendicular to the strand AND to the camera). A width axis taken from
@@ -1004,14 +1004,44 @@ one costs a whole turn, because the bad call is rejected before any work runs.
      factor, so the ink is conserved. This alone took the high-frequency
      noise from 20.9 to 19.0.
   3. **The cards must be DENSE.** Two per cell left gaps (the coat was
-     sparse at close range); four is the measured sweet spot. More cards
-     beyond that buy very little.
+     sparse at close range).
+  4. **The strands must be CURLY, and the amplitude must be a LARGE
+     fraction of the length.** The centre line wanders across the ribbon's
+     plane in a wave that is zero at the root and grows toward the tip; the
+     ribbon's PLANE is unchanged, so it costs one sine and the ray/plane
+     intersection stays exact. At an amplitude of 0.16 the wave is a couple
+     of pixels across on a fifteen-pixel strand and the coat still read as
+     SPIKES; at 0.45 it reads as wool — the measured high-frequency noise
+     fell 16.1 → 12.7, BELOW the bare body's 13.5, because a curled strand
+     spreads its ink instead of concentrating it in a needle.
+- **The strand's direction was a BUG, and it is what the "spikes" were.**
+  The obvious spelling — `groom*cos(spin) + t2*sin(spin)` — is not a
+  rotation unless the groom happens to lie along t1, and the groom is the
+  projection of "down", so it generally does not. The length then varied
+  with the spin, and at the spin where the two terms cancel the direction
+  was pure numerical noise: the card degenerated into a **spoke pointing
+  straight out of the surface** (measured: the strand's angle to the normal
+  ranged 8.6°–89.8° instead of the intended 12°–38°). Expressing the groom
+  in the surface's tangent frame and rotating THAT keeps the length at one.
+- **The coat is configurable in the GUI**: the Rendering section carries its
+  SHAPE (density, strand length, clump width, curl amplitude and cycles, and
+  how far a strand stands off the surface) and the Textures section carries
+  the **material** that wears it (a coat is a property of the material, not
+  of the object). The sliders REBUILD the coat — the cards are a CPU
+  product, a few hundred milliseconds — and they apply on RELEASE, not per
+  tick. A rebuild keeps the live preview: the Move offset and the rotation
+  pose live on the fur objects, so a coat rebuilt mid-drag does not drop
+  the drag.
 - **The alpha is a Gaussian across the width** — the same kernel shape the
   splat backend uses, but on a sliver instead of a disk, so the edges are
   transparent rather than a hard rim. The accumulation is the standard
   many-layer approximation `1 - exp(-Σα)`, which is exact for the small
   alphas a coat is made of, and the coverage composites the fur OVER the
-  body.
+  body. The card record is 96 B, six vec4s (the sixth is the curl).
+- **The meadow got the same treatment**: a grass blade whose centre line is
+  straight and whose width tapers to a point reads as a spike, so the blade
+  now arches (quadratic, the bend growing toward the tip), keeps much more
+  of its width, and fades over the last fifth instead of the last tenth.
 - **The texture is sampled PER CARD**, not once per pixel: the fleece's
   clumps are centimetres across, and one flat colour for the whole pixel
   reads as washed-out plastic. The sky ambient is evaluated ONCE per pixel

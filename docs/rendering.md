@@ -700,6 +700,25 @@ object carrying fur the dispatch is skipped and the frame is byte-identical
    ink is conserved.
 3. **The cards must be dense** - four per surface cell. Two left gaps at
    close range; more buys very little.
+4. **The strands must be CURLY, and the amplitude must be a large fraction
+   of the length.** The centre line wanders across the ribbon's plane in a
+   wave that is zero at the root (where the strand is anchored) and grows
+   toward the tip; the ribbon's *plane* is unchanged, so the ray/plane
+   intersection stays exact and the curl costs one sine. At an amplitude of
+   0.16 the wave is a couple of pixels across on a fifteen-pixel strand and
+   the coat still read as spikes; at 0.45 it reads as wool (the measured
+   high-frequency noise fell from 16.1 to 12.7, below the bare body's 13.5).
+
+**A bug the curl exposed.** The strand's direction was spelled
+`groom*cos(spin) + t2*sin(spin)`, which is not a rotation unless the groom
+happens to lie along `t1` - and the groom is the projection of "down", so
+it generally does not. The length varied with the spin, and at the spin
+where the two terms cancel the direction was numerical noise: the card
+degenerated into a **spoke pointing straight out of the surface** (the
+strand's angle to the normal measured 8.6 to 89.8 degrees instead of the
+intended 12 to 38). Expressing the groom in the surface's tangent frame and
+rotating *that* keeps the length at one - and that was what the "spikes"
+were.
 
 **The alpha** is a Gaussian across the width (the splat backend's kernel
 shape, on a sliver instead of a disk, so the edges are transparent rather
@@ -709,6 +728,16 @@ composites the fur over the body. The **texture is sampled per card**: the
 fleece's clumps are centimetres across, and one flat colour per pixel reads
 as washed-out plastic. The sky ambient is evaluated once per pixel (the sun
 term is the cards' average).
+
+**The coat in the GUI.** The sidebar's **Rendering** section carries the
+coat's shape (density, strand length, clump width, curl amplitude and
+cycles, and how far a strand stands off the surface) and the **Textures**
+section carries the *material* that wears it - a coat is a property of the
+material, not of the object, so a checkbox per material turns the coat on
+wherever a micro object uses it. The sliders rebuild the coat (the cards
+are a CPU product, a few hundred milliseconds) and apply on **release**,
+not per tick; a rebuild keeps the live Move/Rotate preview, because that
+state lives on the fur objects and rides across the upload.
 
 **Descriptor bindings** (set 0, the fur pass): 0/1/2 the cards and the two
 bucket arrays (storage buffers), 8/9 the terrain height texture and the
