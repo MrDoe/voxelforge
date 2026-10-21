@@ -994,6 +994,12 @@ bool writeManifest(const std::string& path, const std::vector<WorldLayer>& layer
         // scale stays absent (identity) for byte-identical manifests
         if (l.scale != 1.0f)
             std::fprintf(f, ", \"scale\": %.3f", l.scale);
+        // `behaviour` is LOADED by parseWorldLayer but was not written here, so
+        // the app's own rewrite (which builds world.json from this struct)
+        // silently erased the alpaca's walker on the next run. Emit it only
+        // when set, so manifests that never used the key round-trip unchanged.
+        if (!l.behaviour.empty())
+            std::fprintf(f, ", \"behaviour\": \"%s\"", l.behaviour.c_str());
         std::fprintf(f, " }%s\n", i + 1 < layers.size() ? "," : "");
     }
     std::fprintf(f, "  ]");

@@ -166,3 +166,11 @@ refuses a wall but not thin air.
 - The walker ring test runs `microFootprintBlocked` **after** the steering, so
   a blocked candidate that the code failed to withdraw shows up in the
   self-check rather than only in a screenshot.
+- **Zero walkers is a FAILURE, not a pass.** Every walker assertion is inside
+  the per-walker loop, so an empty behaviour list logged `0 walker(s) ... PASS`
+  — a vacuous green. It now logs an error naming the likely cause. That is not
+  hypothetical: `writeManifest` emitted the layer keys it knew and **omitted
+  `WorldLayer::behaviour`** (the loader read the key, the writer did not), so
+  one app run rewrote `world.json` and erased the alpaca's walker. The writer
+  now emits the key when set; keep that in mind for any new layer field —
+  a loaded key that the writer drops survives exactly one run.

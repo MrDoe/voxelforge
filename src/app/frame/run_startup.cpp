@@ -7,6 +7,7 @@
 #include "app/ui/gizmo_math.hpp"
 #include "app/ui/ui_primitives.hpp"
 #include "app/world/store_overlay.hpp"
+#include "voxel/collision.hpp"
 
 #include <algorithm>
 #include <cmath>
@@ -349,6 +350,189 @@ void App::advancePrevCam()
 // The render-flag / photorealism / SSAO / TAA environment overrides, read once
 // at startup rather than per frame: these are CI knobs, and the sidebar owns
 // the interactive equivalents.
+void App::runCollisionSelfCheck()
+{
+    // A headless DIAGNOSTIC, not a render mode: it drives the shipping paths
+    // (resolveCameraMove / updateMicroBehaviours) and logs the outcome, so a
+    // script can assert behaviour without a pointer. It runs before the first
+    // frame, so a shot taken with VF_TEST_COLLISION=1 shows the walkers after
+    // the simulated seconds - that is deliberate, the check is the artefact.
+    if (!m_collisionEnabled) {
+        spdlog::warn("collision check: SKIP (VF_NO_COLLIDE)");
+        return;
+    }
+    if (!m_layers.loaded()) {
+        spdlog::warn("collision check: SKIP (world not loaded)");
+        return;
+    }
+    int failures = 0;
+
+    // 1. Camera vs the WORLD. A 20 m drop at the start camera must be refused
+    // above the terrain: the terrain is the one surface every scene has, and
+    // "inside solid at the end" is the unambiguous failure.
+    {
+        vf::voxel::SolidTest solid = [this](const glm::vec3& p) {
+            return solidAt(p);
+        };
+        // Start 2 m ABOVE the camera so the sweep actually travels: a drop
+        // from a point already at its stop is a vacuous pass.
+        const glm::vec3 from = m_camera.pos + glm::vec3(0.0f, 2.0f, 0.0f);
+        const auto r = vf::voxel::moveSphere(solid, from,
+                                             glm::vec3(0.0f, -20.0f, 0.0f),
+                                             vf::voxel::kCameraRadius);
+        const bool inside = solid(r.pos);
+        const float fell = from.y - r.pos.y;
+        spdlog::info("collision check: camera drop from y={:.2f}: stopped at "
+                     "y={:.2f} (fell {:.2f} m, hit={}, inside={})",
+                     from.y, r.pos.y, fell, r.hit, inside);
+        if (inside || !r.hit || fell >= 20.0f || fell < 0.5f) {
+            spdlog::error("collision check: camera FAILED to stop in terrain");
+            ++failures;
+        }
+    }
+
+    // 2. Camera vs a MICRO object. Approach each object's solid centre along
+    // the first free cardinal direction; the sweep must stop OUTSIDE and be
+    // refused. A micro-only predicate keeps a nearby world wall out of it.
+    {
+        const glm::vec3 trials[4] = {
+            glm::vec3(1, 0, 0), glm::vec3(-1, 0, 0), glm::vec3(0, 0, 1),
+            glm::vec3(0, 0, -1)
+        };
+        for (size_t i = 0; i < m_microFields.size(); ++i) {
+            const vf::voxel::MicroField& f = m_microFields[i];
+            const vf::voxel::MicroOccluder& o = m_microOccluders[i];
+            if (f.size3() == 0 || f.solidMax.x < f.solidMin.x)
+                continue;
+            const glm::vec3 grid = o.worldOffset + f.origin;
+            const glm::vec3 lo = grid + glm::vec3(f.solidMin) * f.voxel;
+            const glm::vec3 hi = grid + glm::vec3(f.solidMax + 1) * f.voxel;
+            const glm::vec3 centre = 0.5f * (lo + hi);
+            // Only THIS object answers: a neighbour 0.3 m away must not make
+            // every approach report the same stop.
+            vf::voxel::SolidTest microOnly = [this, i](const glm::vec3& p) {
+                return microFieldSolidAt(i, p);
+            };
+            bool tested = false;
+            for (const glm::vec3& dir : trials) {
+                const glm::vec3 from = centre + dir * 1.0f;
+                if (microOnly(from))
+                    continue; // the start is already inside this object
+                const auto r = vf::voxel::moveSphere(
+                    microOnly, from, -dir * 2.0f, vf::voxel::kCameraRadius);
+                const bool inside = microOnly(r.pos);
+                const float moved = glm::length(from - r.pos);
+                spdlog::info("collision check: micro '{}' approach along "
+                             "({:.0f},{:.0f},{:.0f}): stopped {:.2f} m in "
+                             "(hit={}, inside={})",
+                             o.layerFile, dir.x, dir.y, dir.z, moved, r.hit,
+                             inside);
+                if (inside || !r.hit || moved >= 2.0f) {
+                    spdlog::error("collision check: micro '{}' FAILED to stop",
+                                  o.layerFile);
+                    ++failures;
+                }
+                tested = true;
+                break;
+            }
+            if (!tested)
+                spdlog::warn("collision check: micro '{}' has no free approach",
+                             o.layerFile);
+        }
+    }
+
+    // 3. The WALKERS. Simulate the shipping response and assert the two
+    // properties the feature exists for: never below the terrain, never
+    // overlapping a world object or another micro object.
+    int active = 0;
+    std::vector<glm::vec3> startOffsets;
+    startOffsets.reserve(m_microBehaviours.size());
+    for (const auto& b : m_microBehaviours) {
+        startOffsets.push_back(b.offset);
+        if (b.active)
+            ++active;
+    }
+    // A zero-walker scene must FAIL, not pass vacuously: every assertion below
+    // is inside the walker loop, so an empty behaviour list used to log
+    // "0 walker(s) ... PASS". That is exactly what a manifest rewrite that
+    // drops the layer's "behaviour" key produces, so the diagnostic names it.
+    if (active == 0) {
+        spdlog::error("collision check: no active walker - the micro layer "
+                      "is disabled or world.json lost its 'behaviour' key");
+        ++failures;
+    }
+    int steps = 600;
+    if (const char* e = getenv("VF_TEST_COLLISION_STEPS"))
+        steps = std::clamp(atoi(e), 1, 6000);
+    int sunken = 0, overlapped = 0;
+    float minClear = 1e9f;
+    for (int s = 0; s < steps; ++s) {
+        updateMicroBehaviours(1.0f / 60.0f);
+        for (size_t i = 0; i < m_microBehaviours.size(); ++i) {
+            const vf::voxel::MicroBehaviour& b = m_microBehaviours[i];
+            if (!b.active || i >= m_microFields.size() ||
+                i >= m_microOccluders.size())
+                continue;
+            const vf::voxel::MicroField& f = m_microFields[i];
+            const vf::voxel::MicroOccluder& o = m_microOccluders[i];
+            if (f.size3() == 0 || f.solidMax.x < f.solidMin.x)
+                continue;
+            const glm::vec3 grid = o.worldOffset + f.origin;
+            const glm::vec3 lo = grid + glm::vec3(f.solidMin) * f.voxel;
+            const glm::vec3 hi = grid + glm::vec3(f.solidMax + 1) * f.voxel;
+            float ground =
+                terrainTopAt(0.5f * (lo.x + hi.x) + b.offset.x,
+                                0.5f * (lo.z + hi.z) + b.offset.z);
+            const float xs[2] = { lo.x + b.offset.x, hi.x + b.offset.x };
+            const float zs[2] = { lo.z + b.offset.z, hi.z + b.offset.z };
+            for (float x : xs)
+                for (float z : zs)
+                    ground = std::max(ground, terrainTopAt(x, z));
+            const float bottom = lo.y + b.offset.y;
+            if (ground > -1e8f) {
+                minClear = std::min(minClear, bottom - ground);
+                if (bottom < ground - 0.005f)
+                    ++sunken;
+            }
+            if (microFootprintBlocked(int(i), b.offset))
+                ++overlapped;
+        }
+    }
+    spdlog::info("collision check: {} walker(s), {} steps: {} sunken, {} "
+                 "overlapping (min ground clearance {:.3f} m)",
+                 active, steps, sunken, overlapped,
+                 minClear > 1e8f ? 0.0f : minClear);
+    // A walker that never moved would make the checks above vacuous.
+    for (size_t i = 0; i < m_microBehaviours.size(); ++i) {
+        if (!m_microBehaviours[i].active || i >= startOffsets.size())
+            continue;
+        const float moved =
+            glm::length(m_microBehaviours[i].offset - startOffsets[i]);
+        spdlog::info("collision check: walker {} ('{}') moved {:.2f} m",
+                     i,
+                     i < m_microOccluders.size()
+                         ? m_microOccluders[i].layerFile.c_str()
+                         : "?",
+                     moved);
+        if (steps >= 60 && moved < 0.05f) {
+            spdlog::error("collision check: walker FAILED to move - the "
+                          "obstacle checks are vacuous");
+            ++failures;
+        }
+    }
+    if (sunken) {
+        spdlog::error("collision check: walker FAILED to stay on the terrain "
+                      "({} frame(s) sunk)", sunken);
+        ++failures;
+    }
+    if (overlapped) {
+        spdlog::error("collision check: walker FAILED to stay clear of "
+                      "objects ({} frame(s) overlapping)", overlapped);
+        ++failures;
+    }
+    spdlog::info("collision check: {}", failures == 0 ? "PASS" : "FAIL");
+}
+
 void App::applyStartupEnvOverrides(FrameInputs& fx)
 {
     // "frames:path": after N presented frames, dump the swapchain (incl. HUD)
@@ -416,7 +600,16 @@ void App::applyStartupEnvOverrides(FrameInputs& fx)
         m_lightBudget = std::clamp(atoi(e), 1, vf::voxel::kMaxLights);
     if (const char* e = getenv("VF_LIGHT_K"))
         m_lightK = std::clamp(atoi(e), 1, vf::voxel::worldfile::kLightKMax);
+    // Collision escape hatch: fly through geometry (inspecting a sealed
+    // interior, or an A/B that wants the pre-collision free camera).
+    // VF_NO_COLLIDE=0 keeps collision on, so the variable reads as a flag.
+    if (const char* e = getenv("VF_NO_COLLIDE"))
+        m_collisionEnabled = atoi(e) == 0;
     uploadLightSources();
+    // Headless collision diagnostic; runs AFTER the env overrides so
+    // VF_NO_COLLIDE is honoured.
+    if (getenv("VF_TEST_COLLISION"))
+        runCollisionSelfCheck();
 }
 
 } // namespace app
