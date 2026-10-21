@@ -142,14 +142,21 @@ def main() -> int:
         note(cnt == 0 or (0 <= minx and maxx < W and 0 <= miny and maxy < H),
              "the change's bounding box is inside the frame")
 
-        # ---- 2b: the coat is at least as SMOOTH as the surface under it ---
-        # A straight, spiky coat concentrates its ink in narrow streaks, and a
-        # narrow streak is HIGH-frequency energy: the coat reads as crunchier
-        # than the body it covers. A curled strand spreads the same ink over
-        # more pixels, so the coat's high-frequency content falls BELOW the
-        # bare body's. That is a falsifiable claim about the shape, and it is
-        # the numeric form of "curly, not spiky": with the curl removed this
-        # check fails (measured: 16.1 against the body's 13.5).
+        # ---- 2b: the coat is DETAILED, and it keeps the fleece's texture --
+        # Two numbers, both about the coat being a coat and not a wash:
+        #
+        #   detail - the mean |difference| between horizontal neighbours. A
+        #     coat whose strands are smeared into a haze has LITTLE of it;
+        #     a coat with readable strands has more than the bare body.
+        #   spread - the luma's standard deviation. A flat wash has the
+        #     body's low spread; a coat that keeps the fleece's texture has
+        #     a much higher one.
+        #
+        # The first check caught a BLUR once already: a large curl (0.45)
+        # spreads a strand's ink over a wide band, and the coat's detail fell
+        # to 12.7 - BELOW the bare body's 13.5. So the claim is directional:
+        # the coat must be at least as detailed as the body under it, and it
+        # must keep at least the body's texture contrast.
         def neighbour_diff(buf: bytes, x0: int, y0: int, x1: int, y1: int) -> float:
             tot = 0
             cnt = 0
@@ -162,15 +169,31 @@ def main() -> int:
                     cnt += 3
             return tot / max(cnt, 1)
 
-        fur_hf = neighbour_diff(on, 260, 100, 520, 480)
-        body_hf = neighbour_diff(off1, 260, 100, 520, 480)
-        print(f"  high-frequency: fur {fur_hf:.2f} vs the bare body {body_hf:.2f}")
+        def luma_spread(buf: bytes, x0: int, y0: int, x1: int, y1: int) -> float:
+            vals = []
+            for y in range(y0, min(y1, H)):
+                row = y * W
+                for x in range(x0, min(x1, W)):
+                    o = (row + x) * 3
+                    vals.append((buf[o] * 299 + buf[o + 1] * 587 + buf[o + 2] * 114)
+                                / 1000.0)
+            m = sum(vals) / max(len(vals), 1)
+            return (sum((v - m) ** 2 for v in vals) / max(len(vals), 1)) ** 0.5
+
+        fur_det = neighbour_diff(on, 260, 100, 520, 480)
+        body_det = neighbour_diff(off1, 260, 100, 520, 480)
+        fur_spr = luma_spread(on, 260, 100, 520, 480)
+        body_spr = luma_spread(off1, 260, 100, 520, 480)
+        print(f"  detail: fur {fur_det:.2f} vs the bare body {body_det:.2f}   "
+              f"spread: fur {fur_spr:.2f} vs {body_spr:.2f}")
         # The margin covers the run-to-run noise of the metric itself (the
-        # scene's animated grass moves a little between renders); the signal
-        # is 2.5, an order of magnitude above it.
-        note(fur_hf <= body_hf + 1.0,
-             f"the coat is at least as smooth as the body under it "
-             f"({fur_hf:.2f} vs {body_hf:.2f})")
+        # scene's animated grass moves a little between renders).
+        note(fur_det >= body_det - 0.5,
+             f"the coat's strands are readable, not a haze ({fur_det:.2f} vs "
+             f"the body's {body_det:.2f})")
+        note(fur_spr >= body_spr,
+             f"the coat keeps the fleece's texture ({fur_spr:.2f} vs the "
+             f"body's {body_spr:.2f})")
 
         # ---- 3: the fur touches nothing else ------------------------------
         # The house view has no micro object in it at all, so the fur must

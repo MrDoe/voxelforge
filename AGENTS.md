@@ -1017,15 +1017,24 @@ one costs a whole turn, because the bad call is rejected before any work runs.
      noise from 20.9 to 19.0.
   3. **The cards must be DENSE.** Two per cell left gaps (the coat was
      sparse at close range).
-  4. **The strands must be CURLY, and the amplitude must be a LARGE
-     fraction of the length.** The centre line wanders across the ribbon's
-     plane in a wave that is zero at the root and grows toward the tip; the
-     ribbon's PLANE is unchanged, so it costs one sine and the ray/plane
-     intersection stays exact. At an amplitude of 0.16 the wave is a couple
-     of pixels across on a fifteen-pixel strand and the coat still read as
-     SPIKES; at 0.45 it reads as wool — the measured high-frequency noise
-     fell 16.1 → 12.7, BELOW the bare body's 13.5, because a curled strand
-     spreads its ink instead of concentrating it in a needle.
+  4. **The strands must be CURLY, and the amplitude is measured against the
+     clump's WIDTH, not its length.** The centre line wanders across the
+     ribbon's plane in a wave that is zero at the root (where the strand is
+     anchored) and grows toward the tip; the ribbon's PLANE is unchanged, so
+     it costs one sine and the ray/plane intersection stays exact.
+     **The first attempt got the attribution wrong, and the NEGATIVE
+     CONTROL caught it.** A sweep that varied the curl, the width, the
+     density and the length together said the curl had taken the coat's
+     high-frequency metric from 16.1 to 12.7 — but re-rendering with ONLY
+     the curl removed changed it by 0.03. The win belonged to the DENSITY
+     and the WIDTH. And the direction was backwards: a big curl (0.45) makes
+     the coat **BLURRIER**, not softer, because a wave that wanders many
+     clump-widths sideways smears the strand's ink over a band (the metric
+     fell to 12.70, BELOW the bare body's 13.48 — the coat read as a haze).
+     The measured default is an amplitude of **0.20** (about two clump
+     widths): the coat's detail is 14.76 against the body's 13.48 — the
+     strands are READABLE — and its luma spread 36.98 against the body's
+     28.82, so the fleece's texture still shows.
 - **The strand's direction was a BUG, and it is what the "spikes" were.**
   The obvious spelling — `groom*cos(spin) + t2*sin(spin)` — is not a
   rotation unless the groom happens to lie along t1, and the groom is the

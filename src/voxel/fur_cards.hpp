@@ -92,14 +92,14 @@ struct FurObject {
 // How the fur grows.
 struct FurParams {
     // The card length (m). Alpaca fleece clumps are a few centimetres.
-    float length = 0.026f;
+    float length = 0.030f;
     // The card width (m). A clump is a sliver, not a disk.
-    float width = 0.0045f;
+    float width = 0.0028f;
     // The cards per surface cell. Four is the measured sweet spot: two left
     // gaps (the coat was sparse at close range), and the extra cards bought
     // very little beyond that. Six, with the wider clumps above, is what the
     // softest measured coat used.
-    int perCell = 6;
+    int perCell = 5;
     // A card's peak alpha.
     float alpha = 0.34f;
     // The strand's TILT out of the surface (degrees). A steep strand reads
@@ -109,15 +109,18 @@ struct FurParams {
     // The CURL: how far the centre line wanders, as a fraction of the
     // strand's length, and how many cycles it makes over it.
     //
-    // The amplitude has to be a LARGE fraction of the length to read at all:
-    // at 0.16 the wave is a couple of pixels across on a strand fifteen
-    // pixels long, and the coat still read as spikes. At 0.45 the wave is
-    // about half the strand's length, and the coat reads as wool - the
-    // measured high-frequency noise fell from 16.1 to 12.7, BELOW the bare
-    // body's 13.5, because a curled strand spreads its ink instead of
-    // concentrating it in a needle.
-    float curlAmp = 0.45f;
-    float curlCycles = 1.0f;
+    // The amplitude is a fraction of the strand's LENGTH, but it is the
+    // clump's WIDTH that decides whether the coat reads as wool or as a
+    // HAZE: a wave that wanders many widths sideways smears the strand out.
+    //
+    // Measured, and the story is not the obvious one: a big curl (0.45) does
+    // NOT make the coat softer - it makes it BLURRIER, because the strand's
+    // ink is spread over a wide band (the fine-detail metric fell from 14.8
+    // to 12.7, BELOW the bare body's 13.5). At 0.20 the wave is about two
+    // clump widths, the coat stays crisp, and the fleece's texture still
+    // reads (the luma spread 37.0 against the bare body's 28.8).
+    float curlAmp = 0.20f;
+    float curlCycles = 1.2f;
     // The grid's cell size (m). Bigger than the card length, so a card
     // overlaps one or two cells.
     float cellSize = 0.040f;
