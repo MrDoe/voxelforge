@@ -447,6 +447,94 @@ void App::runPostInputTestHooks(const char* testRotateLive)
         }
     }
 
+    // VF_TEST_MOVE_DRAG: drag a micro object with the POINTER - the whole
+    // Move lane, end to end: the grab (a plain click on the object), the
+    // axis handle, the drag, and the staged delta. It is the only test that
+    // exercises the thing a user actually does ("moving microvoxel objects
+    // does not work"), and it drives the REAL input path through the
+    // pointer seam.
+    if (const char* testMoveDrag = getenv("VF_TEST_MOVE_DRAG");
+        testMoveDrag && *testMoveDrag) {
+        static int phase = 0;
+        static glm::vec2 objPt { 0.f, 0.f };
+        static glm::vec2 handlePt { 0.f, 0.f };
+        switch (phase) {
+        case 0: {
+            m_editActive = true;
+            m_editBrush = EditBrush::Move;
+            m_panel = Panel::Edit;
+            const ImVec2 disp = ImGui::GetIO().DisplaySize;
+            const int W = int(disp.x > 0.f ? disp.x : m_window.framebufferSize().x);
+            const int H = int(disp.y > 0.f ? disp.y : m_window.framebufferSize().y);
+            bool found = false;
+            for (int y = 0; y < H && !found; y += 3) {
+                for (int x = 0; x < W && !found; x += 3) {
+                    const vf::voxel::PickHit h = pickAtWindowPos(double(x), double(y));
+                    if (h.hit && !h.microFile.empty()) {
+                        objPt = glm::vec2(float(x), float(y));
+                        found = true;
+                    }
+                }
+            }
+            spdlog::info("VF_TEST_MOVE_DRAG: the object is at ({:.0f},{:.0f})",
+                         double(objPt.x), double(objPt.y));
+            phase = 1;
+            break;
+        }
+        case 1:  // the grab: a plain click on the object
+            m_testPointer.valid = true;
+            m_testPointer.x = objPt.x;
+            m_testPointer.y = objPt.y;
+            m_testPointer.ctrl = false;
+            m_testPointer.lmb = true;
+            phase = 2;
+            break;
+        case 2:  // release
+            m_testPointer.lmb = false;
+            phase = 3;
+            break;
+        case 3: {  // the axis handle: the end of the X axis line
+            const vf::voxel::WorldAABB b = layerBounds(m_moveLayer);
+            if (b.valid() && m_gizmoValid) {
+                const glm::vec3 c = 0.5f * (b.lo + b.hi);
+                const ImVec2 disp = ImGui::GetIO().DisplaySize;
+                const glm::ivec2 fb(int(disp.x), int(disp.y));
+                const float fov = tanf(glm::radians(60.0f) * 0.5f);
+                const MoveAxisLine line = moveAxisScreenLine(
+                    c, MoveAxis::X, m_camera, fov, fb, m_gizmoRadius);
+                handlePt = glm::vec2(line.b.x, line.b.y);
+                spdlog::info("VF_TEST_MOVE_DRAG: the X handle is at ({:.0f},{:.0f}) "
+                             "(the gizmo's centre ({:.0f},{:.0f}), r {:.0f})",
+                             double(handlePt.x), double(handlePt.y),
+                             double(m_gizmoCentre.x), double(m_gizmoCentre.y),
+                             double(m_gizmoRadius));
+            }
+            m_testPointer.x = handlePt.x;
+            m_testPointer.y = handlePt.y;
+            m_testPointer.lmb = true;
+            phase = 4;
+            break;
+        }
+        case 4:  // the drag: 40 px along the handle
+            m_testPointer.x = handlePt.x + 40.0f;
+            m_testPointer.y = handlePt.y;
+            m_testPointer.lmb = true;
+            phase = 5;
+            break;
+        case 5:  // release: the delta is staged
+            m_testPointer.lmb = false;
+            spdlog::info("VF_TEST_MOVE_DRAG: the drag ended with delta "
+                         "({:+.3f},{:+.3f},{:+.3f}) staged={} layer='{}'",
+                         double(m_moveDelta.x), double(m_moveDelta.y),
+                         double(m_moveDelta.z), int(m_moveStaged), m_moveLayer);
+            phase = 6;
+            break;
+        default:
+            m_testPointer.valid = false;
+            break;
+        }
+    }
+
     // VF_TEST_CLICK_SCAN: drive the REAL interactive input path - the gates
     // (text field, mouse capture, ctrl/armed) and the selection itself -
     // without a mouse, by injecting a pointer position and a button state

@@ -436,7 +436,9 @@ def main() -> int:
         #    silhouette's base row IS the pivot's projection - that is the
         #    "did it stay put" measure. From directly above the base row would
         #    be a world x/z and would measure nothing.
-        top_cam = micro_cam("alpaca", 0.17, 2.10, 0.32, 0.23, 0.0, 0.40)
+        # STRAIGHT DOWN: the footprint is then the animal's true x/z extent,
+        # and a 90 degree yaw swaps the two axes.
+        top_cam = micro_cam("alpaca", 0.0, 2.10, 0.0, 0.0, 0.0, 0.0)
         side_cam = alpaca_cam()
 
         def footprint(rot_deg: float, cam: str) -> tuple[int, int, int, int, int] | None:
@@ -473,8 +475,10 @@ def main() -> int:
             # flips.
             a0 = (t0[2] - t0[0]) / max(1, t0[3] - t0[1])
             a90 = (t90[2] - t90[0]) / max(1, t90[3] - t90[1])
+            # The aspect must CROSS 1: the yaw swaps the animal's long and
+            # short axes, so it flips whichever way round the camera looks.
             note(
-                a0 > 1.0 > a90,
+                (a0 - 1.0) * (a90 - 1.0) < 0.0,
                 "a 90 degree yaw turns the object (footprint aspect %.2f -> %.2f)"
                 % (a0, a90),
             )
@@ -582,6 +586,27 @@ def main() -> int:
              "the Ctrl+LMB pick selects a micro object (%d picks)" % picked)
         note(activated > 0,
              "a plain click activates a micro object (%d activations)" % activated)
+
+        # 5d. THE MOVE DRAG. Dragging a micro object with the pointer is
+        #     what a user actually does ("moving microvoxel objects does not
+        #     work"), and it is the only path that exercises the whole Move
+        #     lane: the grab, the axis handle, the drag and the staged delta.
+        #     VF_TEST_MOVE_DRAG drives it through the app's pointer seam.
+        print("[micro] checking the move drag ...")
+        drag_env = os.environ.copy()
+        drag_env["VF_TEST_MOVE_DRAG"] = "1"
+        drag_env["VF_OVERLAY_PATH"] = os.path.join(tmpdir, "overlay.vxw")
+        proc = subprocess.run(
+            [APP, "--smoke", "200", "--width", "900", "--height", "600"],
+            cwd=ROOT, env=drag_env, capture_output=True, text=True, check=True)
+        out = proc.stdout + proc.stderr
+        grabbed = "move: grabbed micro/" in out
+        m = re.search(r"the drag ended with delta \(([-+0-9.]+),([-+0-9.]+),"
+                      r"([-+0-9.]+)\)", out)
+        moved = m is not None and any(abs(float(m.group(i))) > 0.05 for i in (1, 2, 3))
+        note(grabbed, "a micro object can be grabbed for a move")
+        note(moved, "the drag moves the micro object (%s)"
+             % (("delta %s,%s,%s m" % m.groups()) if m else "no delta"))
 
         # 5e. THE AUTONOMOUS BEHAVIOUR. The animal walks on its own, and
         #     the AI can tell it what to do ("let the alpaca run").
