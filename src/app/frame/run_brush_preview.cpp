@@ -306,10 +306,19 @@ void App::updateBrushPreview()
     // highlight feeds: selected (strong) + hover (faint) -> shader UBO
     {
         glm::vec4 selFeed(0.f), hovFeed(0.f);
+        // A MICRO hit is not a world cell: its lattice is 5 mm and its world
+        // cell (the one the brush and the box selection index) can be a
+        // metre away from the surface - the outline would float in the air
+        // NEXT to the object, which reads as "nothing was selected". Feed
+        // the hit POINT for a micro object, so the box lands on it.
         if (m_hasSelection)
-            selFeed = glm::vec4(vf::voxel::voxelCenter(m_selectedHit.voxel), 1.f);
+            selFeed = m_selectedHit.microFile.empty()
+                ? glm::vec4(vf::voxel::voxelCenter(m_selectedHit.voxel), 1.f)
+                : glm::vec4(m_selectedHit.pos, 1.f);
         if (previewHit.hit)
-            hovFeed = glm::vec4(vf::voxel::voxelCenter(previewHit.voxel), 1.f);
+            hovFeed = previewHit.microFile.empty()
+                ? glm::vec4(vf::voxel::voxelCenter(previewHit.voxel), 1.f)
+                : glm::vec4(previewHit.pos, 1.f);
         m_postPass.setSelection(selFeed);
         m_postPass.setHover(hovFeed);
         // Bounding-box wireframe: the same cells the stamp and the tint use,

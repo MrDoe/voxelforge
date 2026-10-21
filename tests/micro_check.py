@@ -470,6 +470,30 @@ def main() -> int:
             "the alpaca is still on screen in the preview (%d px)" % len(still),
         )
 
+        # 5c. THE INTERACTIVE PATH. The Ctrl+LMB pick and the plain click that
+        #     activates an object are TWO different code paths, and the gates
+        #     around them (the text-field gate, the mouse capture, the armed
+        #     tool) had never been exercised by anything: the earlier hooks
+        #     proved the micro march in isolation, so a selection that failed
+        #     in the app could still pass the gate.
+        #     VF_TEST_CLICK_SCAN drives the REAL input path with an injected
+        #     pointer - no mouse, no synthetic input.
+        print("[micro] checking the interactive selection path ...")
+        click_env = os.environ.copy()
+        click_env["VF_TEST_CLICK_SCAN"] = "1"
+        click_env["VF_OVERLAY_PATH"] = os.path.join(tmpdir, "overlay.vxw")
+        proc = subprocess.run(
+            [APP, "--smoke", "240", "--width", "900", "--height", "600"],
+            cwd=ROOT, env=click_env, capture_output=True, text=True, check=True,
+        )
+        out = proc.stdout + proc.stderr
+        picked = len(re.findall(r"pick selected .* layer micro/", out))
+        activated = len(re.findall(r"rotate: activated micro/", out))
+        note(picked > 0,
+             "the Ctrl+LMB pick selects a micro object (%d picks)" % picked)
+        note(activated > 0,
+             "a plain click activates a micro object (%d activations)" % activated)
+
         # 6. NO WORLD REGRESSION: the house view is untouched.
         print("[micro] rendering the house view (no micro object in it) ...")
         house_on = os.path.join(tmpdir, "house_on.ppm")

@@ -193,6 +193,25 @@ private:
     };
     MicroObjectPick pickMicroObjects(const std::vector<vf::voxel::MicroOccluder>& occ,
                                      glm::vec3 ro, glm::vec3 rd) const;
+    // THE pick, at a window position (logical pixels, top-left origin): the
+    // screen->ray conversion, the world's store march and the micro objects'
+    // march, with the nearer hit winning. processInput uses it, and so does
+    // the VF_TEST_PICK_SCAN hook - so a test measures exactly what the
+    // pointer does, not a re-implementation of half of it.
+    vf::voxel::PickHit pickAtWindowPos(double mx, double my);
+    // A TEST-ONLY pointer override. The interactive input path (the gates
+    // that decide whether a pick happens at all, and the selection itself)
+    // used to be reachable ONLY with a real mouse, which meant it could not
+    // be tested without taking the user's pointer. This override injects a
+    // window position and a button state into processInput, so a headless
+    // run can drive the REAL path.
+    struct TestPointer {
+        bool valid = false;
+        double x = 0.0, y = 0.0;
+        bool ctrl = false;
+        bool lmb = false;
+    };
+    TestPointer m_testPointer;
     // Is this manifest file a MICRO layer (a separate SVO world)?
     static bool isMicroLayer(const std::string& file) { return file.rfind("micro/", 0) == 0; }
     // The world-space AABB of a layer, for either kind: a world layer's box

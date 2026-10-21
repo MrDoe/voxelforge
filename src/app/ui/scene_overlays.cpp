@@ -58,7 +58,11 @@ void App::drawSceneOverlays()
     } else if (m_gizmoValid && m_editBrush == EditBrush::Move &&
                !m_moveLayer.empty()) {
         ImDrawList* dl = ImGui::GetForegroundDrawList();
-        const vf::voxel::WorldAABB b = m_layers.layerBox(m_moveLayer);
+        // layerBounds(), not m_layers.layerBox(): a MICRO object is not in
+        // the merged world, so the world's box is empty and the axis handles
+        // were never DRAWN - the object could be grabbed by the maths but
+        // showed nothing to grab.
+        const vf::voxel::WorldAABB b = layerBounds(m_moveLayer);
         if (b.valid()) {
             const glm::vec3 centre = 0.5f * (b.lo + b.hi);
             const ImVec2 display = io.DisplaySize;
@@ -108,8 +112,18 @@ void App::drawSceneOverlays()
         const ImVec2 centre(io.DisplaySize.x * 0.5f, io.DisplaySize.y * 0.5f);
         const ImVec2 marker(centre.x - 42.0f, centre.y + 25.0f);
         dl->AddCircleFilled(marker, 3.5f, IM_COL32(64, 224, 160, 235), 16);
+        // Name the SELECTED LAYER, not "a voxel": a MICRO object is not a
+        // voxel at all (it lives on its own fine lattice), and the layer
+        // name is what the user can act on - it is also the World panel's
+        // row that lights up.
+        const char* label = m_selectedLayer.empty()
+                                ? "Selected voxel"
+                                : "Selected";
         dl->AddText(ImVec2(centre.x - 33.0f, centre.y + 20.0f),
-                    IM_COL32(160, 245, 210, 245), "Selected voxel");
+                    IM_COL32(160, 245, 210, 245), label);
+        if (!m_selectedLayer.empty())
+            dl->AddText(ImVec2(centre.x - 33.0f + 62.0f, centre.y + 20.0f),
+                        IM_COL32(160, 245, 210, 245), m_selectedLayer.c_str());
     }
 
     drawHotkeyBar();

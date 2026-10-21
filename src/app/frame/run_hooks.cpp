@@ -13,6 +13,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <map>
 
 #include <spdlog/spdlog.h>
 
@@ -291,6 +292,124 @@ void App::runPostInputTestHooks(const char* testRotateLive)
                     m_layers.layerId(m_moveLayer));
                 refreshPreviewLights(); // carried lamps + derived clusters ride the synthetic pose
             }
+        }
+    }
+
+    // VF_TEST_CLICK_SCAN: drive the REAL interactive input path - the gates
+    // (text field, mouse capture, ctrl/armed) and the selection itself -
+    // without a mouse, by injecting a pointer position and a button state
+    // into processInput (App::m_testPointer).
+    //
+    // The positions come from the SAME pick the pointer uses
+    // (pickAtWindowPos), so the scan finds the pixels where a micro object
+    // actually is and clicks one of them. This is the end-to-end proof that
+    // a micro object can be SELECTED: the earlier hooks only proved the
+    // micro march in isolation, and the gates around it went unmeasured.
+    if (const char* testClickScan = getenv("VF_TEST_CLICK_SCAN");
+        testClickScan && *testClickScan) {
+        static int phase = 0;          // 0 = find, 1 = press, 2 = release
+        static bool plain = false;     // the plain click (no ctrl): the
+                                       // activation gesture of the Rotate mode
+        static std::vector<glm::vec2> spots;
+        static size_t next = 0;
+        if (phase == 0) {
+            // Find the pixels where a micro object wins the real pick.
+            const ImVec2 disp = ImGui::GetIO().DisplaySize;
+            const int W = int(disp.x > 0.f ? disp.x : m_window.framebufferSize().x);
+            const int H = int(disp.y > 0.f ? disp.y : m_window.framebufferSize().y);
+            for (int y = 0; y < H && spots.size() < 12; y += 4) {
+                for (int x = 0; x < W && spots.size() < 12; x += 4) {
+                    const vf::voxel::PickHit h = pickAtWindowPos(double(x), double(y));
+                    if (h.hit && !h.microFile.empty())
+                        spots.push_back(glm::vec2(float(x), float(y)));
+                }
+            }
+            spdlog::info("VF_TEST_CLICK_SCAN: {} micro pixels found", spots.size());
+            phase = 1;
+        } else if (phase == 1 && next < spots.size()) {
+            m_testPointer.valid = true;
+            m_testPointer.x = spots[next].x;
+            m_testPointer.y = spots[next].y;
+            m_testPointer.ctrl = !plain;
+            m_testPointer.lmb = true;      // the press edge
+            phase = 2;
+        } else if (phase == 2) {
+            m_testPointer.lmb = false;     // release: the edges clear
+            m_testPointer.ctrl = false;
+            phase = 3;
+        } else if (phase == 3) {
+            ++next;
+            if (next >= spots.size()) {
+                if (plain) {
+                    m_testPointer.valid = false;
+                    spdlog::info("VF_TEST_CLICK_SCAN: done, {} ctrl-clicks and "
+                                 "{} plain-clicks", spots.size(), spots.size());
+                    phase = 4;
+                } else {
+                    // The SECOND gesture: a plain click in the Rotate mode
+                    // with the tool ARMED activates the object under the
+                    // pointer (the trackball appears). It is a different
+                    // code path from the Ctrl+LMB pick - and it is the one
+                    // a user reaches for when they say "select this".
+                    plain = true;
+                    next = 0;
+                    m_editActive = true;
+                    m_editBrush = EditBrush::Rotate;
+                    m_panel = Panel::Edit;
+                    phase = 1;
+                }
+            } else {
+                phase = 1;
+            }
+        }
+    }
+
+    // VF_TEST_PICK_SCAN: pick over a GRID OF WINDOW POSITIONS through the
+    // app's REAL pick path (pickAtWindowPos - the same screen->ray
+    // conversion, the same store march, the same store-vs-micro competition
+    // the pointer uses) and report what won where.
+    //
+    // Why a grid and not a single point: the question is "can the pointer
+    // select a micro object at all", and the answer is a SET of pixels, not
+    // a coordinate someone typed. The earlier VF_TEST_MICRO_PICK hook only
+    // proved that pickMicroObjects() finds an object in isolation - it never
+    // went through the screen->ray conversion or the competition with the
+    // world's store, so it could pass while the app's selection did not.
+    if (const char* testPickScan = getenv("VF_TEST_PICK_SCAN");
+        testPickScan && *testPickScan) {
+        static bool logged = false;
+        if (!logged) {
+            logged = true;
+            const ImVec2 disp = ImGui::GetIO().DisplaySize;
+            const int W = int(disp.x > 0.f ? disp.x : m_window.framebufferSize().x);
+            const int H = int(disp.y > 0.f ? disp.y : m_window.framebufferSize().y);
+            const int step = std::max(2, (testPickScan[0] == 'f') ? 4 : 12);
+            int microHits = 0, storeHits = 0, misses = 0;
+            std::map<std::string, int> perFile;
+            int firstX = -1, firstY = -1;
+            for (int y = 0; y < H; y += step) {
+                for (int x = 0; x < W; x += step) {
+                    const vf::voxel::PickHit h = pickAtWindowPos(double(x), double(y));
+                    if (!h.hit) {
+                        ++misses;
+                    } else if (!h.microFile.empty()) {
+                        ++microHits;
+                        ++perFile[h.microFile];
+                        if (firstX < 0) { firstX = x; firstY = y; }
+                    } else {
+                        ++storeHits;
+                    }
+                }
+            }
+            spdlog::info("VF_TEST_PICK_SCAN: {}x{} step {} -> {} micro hits, "
+                         "{} store hits, {} misses; first micro hit at ({}, {})",
+                         W, H, step, microHits, storeHits, misses, firstX, firstY);
+            for (const auto& kv : perFile)
+                spdlog::info("VF_TEST_PICK_SCAN: '{}' selected at {} pixels",
+                             kv.first, kv.second);
+            if (microHits == 0)
+                spdlog::warn("VF_TEST_PICK_SCAN: NO micro object is selectable "
+                             "through the real pick path");
         }
     }
 

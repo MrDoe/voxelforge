@@ -94,6 +94,56 @@ void App::drainInputWhileTextFocused()
 // scope in the original frame body and the inner scopes interlock (a ring hit
 // is tested before ImGui capture, and the sidebar grip yields to both), so it
 // is moved as a unit rather than split further.
+vf::voxel::PickHit App::pickAtWindowPos(double mx, double my)
+{
+    // THE pick, in one place, so that what a test measures and what the
+    // pointer does are the same code: the screen->ray conversion, the
+    // world's store march and the micro objects' march, and the rule that
+    // the NEARER of the two hits wins.
+    //
+    // It used to live inline in processInput, which meant a test could only
+    // measure the micro half of it (pickMicroObjects) and the other half -
+    // the screen->ray conversion and the competition - went unmeasured.
+    ImGuiIO& pickIo = ImGui::GetIO();
+    glm::ivec2 fb = m_window.framebufferSize();
+    // GLFW cursor coordinates are logical window pixels, while
+    // framebufferSize() is physical pixels. Use ImGui's logical space
+    // for picking so high-DPI activation clicks hit the same object as
+    // the trackball rings.
+    const ImVec2 pickDisplay = pickIo.DisplaySize;
+    if (pickDisplay.x > 0.f && pickDisplay.y > 0.f)
+        fb = glm::ivec2(int(pickDisplay.x), int(pickDisplay.y));
+    const float tanHalf = tanHalfFov60();
+    const float aspect = float(fb.x) / float(fb.y);
+    const glm::vec3 rd =
+        vf::voxel::screenRayDir(mx, my, fb.x, fb.y, tanHalf, aspect,
+                                 m_camera.forward(), m_camera.right(), m_camera.up());
+    vf::voxel::PickHit hit = vf::voxel::rayPickStore(m_layers.store(),
+                                                      m_camera.pos, rd);
+    // A MICRO object is not in the world's store (it is a separate SVO
+    // world on its own fine lattice), so the store's march never sees
+    // it and the pointer would pass straight through a micro object.
+    // March the micro fields too and keep the nearer hit.
+    const MicroObjectPick mp = pickMicroObjects(m_microOccluders, m_camera.pos, rd);
+    if (mp.hit && (!hit.hit || mp.dist < hit.dist)) {
+        hit.hit = true;
+        hit.pos = mp.pos;
+        hit.normal = mp.normal;
+        hit.dist = mp.dist;
+        hit.object = true;
+        hit.layer = 0;      // no world owner id
+        // The voxel field is a WORLD-lattice coordinate: the brush, the
+        // box selection and describeSurfelsAt all index the world with it.
+        // A micro object lives on its OWN lattice, so its cell index would
+        // send every one of them to the wrong place (and the chunk
+        // arithmetic with it, to the wrong chunk). Use the world cell under
+        // the hit.
+        hit.voxel = vf::voxel::worldToVoxel(mp.pos);
+        hit.microFile = mp.file;
+    }
+    return hit;
+}
+
 void App::processInput(bool textCaptures, bool rotateLiveTest)
 {
     // A text field owns the keyboard. Drain the buttons, touch nothing else:
@@ -111,6 +161,15 @@ void App::processInput(bool textCaptures, bool rotateLiveTest)
                     glfwGetKey(m_window.handle(), GLFW_KEY_RIGHT_CONTROL)==GLFW_PRESS;
         double mx=0,my=0;
         glfwGetCursorPos(m_window.handle(), &mx, &my);
+        // A TEST-ONLY pointer override: the headless hooks drive the REAL
+        // input path (the gates and the selection) without a mouse. See
+        // App::m_testPointer.
+        const bool testPointer = m_testPointer.valid;
+        if (testPointer) {
+            ctrl = m_testPointer.ctrl;
+            mx = m_testPointer.x;
+            my = m_testPointer.y;
+        }
         glm::ivec2 fb = m_window.framebufferSize();
         // GLFW cursor coordinates are logical window pixels, while
         // framebufferSize() is physical pixels. Use ImGui's logical space
@@ -130,42 +189,15 @@ void App::processInput(bool textCaptures, bool rotateLiveTest)
         bool wantMouse = pickIo.WantCaptureMouse ||
                         sidebarResizeCapturesMouse;
         bool lmb = glfwGetMouseButton(m_window.handle(), GLFW_MOUSE_BUTTON_LEFT)==GLFW_PRESS;
+        if (testPointer)
+            lmb = m_testPointer.lmb;
         bool shift = glfwGetKey(m_window.handle(), GLFW_KEY_LEFT_SHIFT)==GLFW_PRESS ||
                      glfwGetKey(m_window.handle(), GLFW_KEY_RIGHT_SHIFT)==GLFW_PRESS;
         // hover while Ctrl held (anchor pick) OR while the edit tool is active
         // (so an LMB click can stamp a carve/add at the pointed surface)
         bool computeHover = (ctrl || m_editActive) && !wantMouse && fb.x>0 && fb.y>0;
         if (computeHover) {
-            float tanHalf = tanHalfFov;
-            float aspect = float(fb.x)/float(fb.y);
-            glm::vec3 rd = vf::voxel::screenRayDir(mx,my,fb.x,fb.y,tanHalf,aspect,
-                                                   m_camera.forward(), m_camera.right(), m_camera.up());
-            m_hoverHit = vf::voxel::rayPickStore(m_layers.store(),
-                                                 m_camera.pos, rd);
-            // A MICRO object is not in the world's store (it is a separate SVO
-            // world on its own fine lattice), so the store's march never sees
-            // it and the pointer would pass straight through a micro object.
-            // March the micro fields too and keep the nearer hit.
-            {
-                const MicroObjectPick mp =
-                    pickMicroObjects(m_microOccluders, m_camera.pos, rd);
-                if (mp.hit && (!m_hoverHit.hit || mp.dist < m_hoverHit.dist)) {
-                    m_hoverHit.hit = true;
-                    m_hoverHit.pos = mp.pos;
-                    m_hoverHit.normal = mp.normal;
-                    m_hoverHit.dist = mp.dist;
-                    m_hoverHit.object = true;
-                    m_hoverHit.layer = 0;      // no world owner id
-                    // The voxel field is a WORLD-lattice coordinate: the
-                    // brush, the box selection and describeSurfelsAt all
-                    // index the world with it. A micro object lives on its
-                    // OWN lattice, so its cell index would send every one of
-                    // them to the wrong place (and the chunk arithmetic with
-                    // it, to the wrong chunk). Use the world cell under the hit.
-                    m_hoverHit.voxel = vf::voxel::worldToVoxel(mp.pos);
-                    m_hoverHit.microFile = mp.file;
-                }
-            }
+            m_hoverHit = pickAtWindowPos(mx, my);
             // A real pick - hit OR miss - supersedes the latch: it is the
             // pointer's current opinion about the scene. m_latchedHover.hit is
             // the single source of truth for "is there a latched preview";
@@ -210,6 +242,22 @@ void App::processInput(bool textCaptures, bool rotateLiveTest)
             // not reach any neighbour is the "floating in space" case; the
             // report prints its stable id so it can be named.
             describeSurfelsAt(m_selectedHit.voxel);
+        }
+        if (testPointer) {
+            // The gates that decide whether a pick happens AT ALL, reported
+            // for the injected pointer: a selection that does not happen must
+            // say which gate refused it.
+            spdlog::info("test pointer ({:.0f},{:.0f}) ctrl={} lmb={} "
+                         "wantMouse={} textCaptures={} editActive={} "
+                         "hoverHit={} picked='{}' selected='{}' "
+                         "rotateLayer='{}' gizmo={}",
+                         mx, my, int(ctrl), int(lmb), int(wantMouse),
+                         int(textCaptures), int(m_editActive),
+                         int(m_hoverHit.hit),
+                         rotateTargetLayer(m_hoverHit),
+                         m_hasSelection ? rotateTargetLayer(m_selectedHit)
+                                         : std::string("<none>"),
+                         m_rotateLayer, int(m_gizmoValid));
         }
         // Bounding-box selection: Shift+LMB drag defines the box corner to
         // corner as an inclusive lattice AABB - the pressed cell is the
