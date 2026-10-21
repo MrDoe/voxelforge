@@ -6019,3 +6019,26 @@ sections run clean, no ImGui assertion.
 
 Committed as 8f45e63 on top of 2f03aba. See
 [[concepts/sidebar-ui-vocabulary]].
+
+## 2026-10-21 ingest | The wheel scrolls the sidebar; the speed is a setting
+
+The mouse wheel scaled the camera's movement speed, invisibly:
+`Camera::update` did `speed *= exp(-scroll * 0.15)` from the platform
+window's own scroll accumulator, and nothing on screen said what the speed
+was. ImGui's GLFW backend **chains** the app's scroll callback, so a scroll
+over the sidebar changed how fast the camera flew - and the sidebar is an
+overlay, so there is no "outside" to scroll it.
+
+- The speed is now the Render panel's VIEW group slider (0.5-40 m/s, with a
+  readout); Shift/Ctrl keep the 3.5x / 0.25x modifiers.
+- The app installs no scroll callback at all; the wheel belongs to the UI and
+  the sidebar's pane scrolls with it.
+- AGENTS.md, README.md and docs/getting-started.md stop claiming a wheel
+  binding.
+
+The lesson, recorded because the earlier log entry got it wrong: `grep
+io.MouseWheel` finds nothing, because the app did not use ImGui's wheel - it
+used `Window::scrollDelta()`. **A grep of one input path is not a proof that
+an input is unbound**; follow the binding to its consumer.
+
+See [[concepts/sidebar-ui-vocabulary]].
