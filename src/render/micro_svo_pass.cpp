@@ -210,10 +210,14 @@ bool MicroSvoPass::setMicroWorlds(const std::vector<voxel::MicroWorld>& worlds)
             MicroBoneRow& br = row.bone[bi];
             br.a[0] = b.a.x; br.a[1] = b.a.y; br.a[2] = b.a.z;
             br.b[0] = b.b.x; br.b[1] = b.b.y; br.b[2] = b.b.z;
-            // The transform's translation: the bone's local rotation is
-            // about its own joint, so the translation carries the joint
-            // (the app recomposes it every frame with the parent's).
-            br.xform[0] = b.a.x; br.xform[1] = b.a.y; br.xform[2] = b.a.z;
+            // The transform starts as the IDENTITY (no rotation, no
+            // translation). It must NOT start as "the joint": the slot is
+            // the transform's TRANSLATION, and a joint is a world position -
+            // putting one there translated every object by metres (the vase
+            // and the urn vanished from the scene). The behaviour pushes the
+            // real transform every frame, and an object with no behaviour
+            // keeps the identity.
+            br.xform[0] = 0.f; br.xform[1] = 0.f; br.xform[2] = 0.f;
             br.r0[0] = 1.f;
             br.r1[1] = 1.f;
             br.r2[2] = 1.f;
