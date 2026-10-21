@@ -538,6 +538,58 @@ was checked and excluded (102 darkened surfels, the alpaca sits below the
 house view's right edge). Recovering that delta needs its own bisect from
 HEAD without these two files.
 
+### The bisect: it is the single-face flag's "snap"
+
+The delta is **named**, not guessed. A bisect over the house shot (the
+recipe below) puts the first bad commit at `caf192c` ("flag single-face
+disks for the shader face clip"), and the cause is confirmed causally:
+with **only** the snap condition disabled
+(`params.smoothNormals && faceEntry[i] == 0 && !faceClip` -> without the
+`&& !faceClip`), the house shot reads **4.91 %** again - the pre-flag value
+exactly. The flag's quarter-step itself is invisible (every reader rounds
+it away).
+
+The snap gives the 97,258 single-face object disks (28.3 %) the **exact
+axis normal** instead of the smoothed one, and the shading follows the
+normal, so the walls' shading changes and more of their pixels fall under
+luma 30. Its own A/B had measured the *tree* view ("the snap alone is
+visually neutral": 13.6 % of the pixels moved by a mean of 0.96) but not the
+house's black-in-silhouette, which is where it shows.
+
+The snap exists so the shader can derive the face square for the face clip
+- and the clip was reverted (a net loss: the seam is the edge, not the
+corner). So while the clip is off, the snap has no consumer and costs the
+gate a pass. The flat-top kernel (which does need the exact axis normal)
+will reintroduce it - and with it the same look change, which belongs with
+that decision and its own A/B.
+
+### How to bisect a gate regression without disturbing the other sessions
+
+A gate that turns red is a *number* that moved, and the number is
+reproducible, so it can be bisected - but a bisect checks out revisions,
+which under a shared tree breaks every other session's build. The recipe
+that works:
+
+1. **A scratch worktree, never the shared tree**:
+   `git worktree add /tmp/<scratch>/wt <good-commit>`, configure and build
+   it once (`cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release &&
+   ninja -C build`). The peers keep working in the shared tree; a
+   mid-rework UI pass there cannot disturb the bisect, and the bisect cannot
+   disturb them.
+2. **One shot per revision, not the whole gate**: the house shot at the
+   gate's camera and size - `--cam 2.5 1.3 6.0 6.8 1.0 12.2 --width 480
+   --height 270` with `VF_NO_OVERLAY=1` - and the metric from
+   `visual_check.py`'s own `analyze()` (the `black_in_obj` fraction). The
+   full gate per step is far too slow.
+3. **Verify both ends before starting**: the "good" end must reproduce the
+   number that started the hunt *exactly* (4.91 % at `0cee2f1`) and the
+   "bad" end the current one (5.42 % at HEAD). If the good end does not
+   reproduce, the manifest or the world state moved and the bisect would be
+   measuring the wrong thing.
+4. `git bisect start <bad> <good>` then `git bisect run <script>`, with the
+   script exiting 0/1 on the metric and **125** on a build or render
+   failure (a broken revision is not evidence).
+
 The two real causes, in order of size:
 
 1. **The exact verdict ENCLOSES disks the 0.4 m volume called open** (56 %

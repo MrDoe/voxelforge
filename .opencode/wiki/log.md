@@ -5915,3 +5915,35 @@ selection "does nothing". Up close it is 580 px. A micro object is
 selectable; it is small.
 
 See [[concepts/micro-voxel-svo-overlay]].
+
+## [2026-10-21] fix | The house gate's 4.91 -> 5.52 delta is NAMED: the single-face flag's snap
+
+The house shot's black-in-silhouette reads 5.42-5.52% against the 5% bound,
+and the 4.91% that used to pass belongs to an older tree state. A bisect over
+the house shot (in a scratch WORKTREE, so the shared tree never moved and
+the other sessions' gates were never disturbed) names the first bad commit:
+**caf192c, "flag single-face disks for the shader face clip"**.
+
+The cause is confirmed causally, not just by the bisect: with only the snap
+condition disabled (`params.smoothNormals && faceEntry[i] == 0 && !faceClip`
+-> without the `&& !faceClip`), the house shot reads **4.91%** again, the
+pre-flag value exactly. The flag's quarter-step is invisible - every reader
+rounds it away - so the whole delta is the snap: the 97,258 single-face
+object disks (28.3%) get the EXACT axis normal instead of the smoothed one,
+the shading follows the normal, and more of the walls' pixels fall under
+luma 30. The snap's own A/B had measured the tree view (13.6% of the pixels
+moved by a mean of 0.96) and not the house's black-in-silhouette, which is
+where it shows.
+
+The snap exists so the shader can derive the face square for the face clip,
+and the clip was reverted (a net loss - the seam is the edge, not the
+corner). So while the clip is off, the snap has no consumer and costs the
+gate a pass; the flat-top kernel (which needs the exact axis normal) will
+reintroduce it, together with the same look change.
+
+The 5% bound is NOT loosened. The recipe for bisecting a gate regression
+without disturbing the other sessions - scratch worktree, one shot per
+revision, the gate's own classifier, both ends verified first, and exit 125
+for a broken revision - is in [[concepts/splat-canopy-parity]].
+
+See [[concepts/splat-canopy-parity]].
