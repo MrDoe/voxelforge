@@ -5990,3 +5990,56 @@ And a real bug the rework exposed: `kMatNames` had 21 entries while
 combo. Fixed in `ui_types.hpp` and in the three loops that used 21.
 
 See [[concepts/sidebar-ui-vocabulary]] and [[entities/hud-sidebar]].
+
+## [2026-10-21] ingest | Fur cards over the micro objects (and the premise that was wrong)
+
+The question was "can we use real Gaussian splats instead of the filled
+circular surfels for the alpaca's fur?" The premise was wrong and that is the
+first thing worth recording: **the alpaca is not a surfel at all**. It is a
+micro-voxel object (`role: "micro"` -> `MicroField` -> `MicroWorld` ->
+`MicroSvoPass` -> `micro_overlay.comp`), a sphere-traced solid on its own 8 mm
+lattice. Its surface is exact, opaque and hard-edged - right for a ceramic
+vase, wrong for an animal, whose coat is fuzz and whose SILHOUETTE is the
+thing that says so. The old pre-rework scene did have a baked
+`assets/alpaca.vxw` world object that WAS surfel-rendered, which is probably
+where the assumption came from.
+
+**The answer: yes, but as a separate translucent layer, not as a change to
+the splat kernel.** A surfel is a disk lying IN the tangent plane, and the
+opaque base seal (the nearest fragment written at alpha 1) is exactly what
+turns a lone silhouette splat into a hard-edged blob - the documented fix is
+a coverage count in the unused D24_S8 stencil, not kernel tuning. So the fur
+is its own compute pass (`fur_overlay.comp`) that composites hair cards over
+the already-opaque body: the sky only shows where a card reaches past the
+silhouette, and no opaque pass changes.
+
+Three decisions decide whether the coat reads, and all three are measured:
+
+- **The ribbon is billboarded about the strand** (its width axis is
+  perpendicular to the strand AND to the camera). A surface-aligned width
+  axis puts the ribbon in the tangent plane, so at the silhouette - where the
+  fuzz is most wanted - it is edge-on and vanishes. Near view: mean |diff|
+  32 -> 53, high-frequency noise 18.4 -> 15.4 (the bare body is 12.8).
+- **A card is never thinner than ~1.5 px**: widened to 1.5 px with its alpha
+  scaled to match, so the ink is conserved. Alone: the noise 20.9 -> 19.0.
+- **The cards must be dense**: four per surface cell (two left gaps).
+
+Other decisions: the texture is sampled PER CARD (the fleece's clumps are
+centimetres across; one flat colour per pixel reads as washed-out plastic),
+the sky ambient is evaluated once per pixel (a sky evaluation per card hit
+would cost a dozen per pixel), the accumulation is `1 - exp(-sum alpha)`, and
+the cards live in the field's LOCAL frame so the live rotation preview
+applies to the fur exactly as it applies to the body.
+
+The instrument was broken TWICE before the feature looked broken: a camera
+that "should" have framed the alpaca was actually pointing at a cabin wall,
+so the fur's effect at 8 m measured as exactly zero. A broken instrument
+produces a false negative, which is the most convincing kind.
+
+Numbers: 81 848 cards, 7.9 MB GPU, 177 ms at load, 0-1 ms per frame at
+900x600 (inside the run-to-run noise). Gates: `tests/fur_check.py` (the new
+`fur` group: noise floor first, then the signal, the confinement, the
+backend-independence and the escape hatch) and four new cases in
+`tests/test_micro.cpp`.
+
+See [[concepts/fur-cards]].
