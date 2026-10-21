@@ -399,6 +399,43 @@ transpose to go the other way (world → baked).
 writing the manifest, and `tests/micro_check.py` measures it (the preview
 changes the frame, and the object is still there).
 
+### The crash that never reproduced: what ASAN ruled out
+
+The user's session died with **"double free or corruption (out)"** right after
+`edit mode -> move (disarmed)` — a heap corruption, and a heap corruption is
+never "just a rendering bug". One real bug of mine could produce exactly that
+signature: `m_hoverHit.voxel` is a **world-lattice** cell, and a micro
+object's cell index (a 5 mm lattice) written there sends the brush, the box
+selection and `describeSurfelsAt` to the wrong chunk with a wildly out-of-range
+index. That is fixed ✓ — but it was never *proven* to be the crash, and
+"probably" is not a diagnosis.
+
+So the ASAN build (`/tmp/opencode/asan`, `-fsanitize=address`) drove the paths
+that can be driven **without a mouse** (the user asked for that, and it is
+also the only way to test a headlessly):
+
+| path under ASAN | result |
+|---|---|
+| the pick toward all three micro objects (`VF_TEST_MICRO_PICK=1`) | clean |
+| the Move preview on the alpaca and on the vase (`VF_TEST_MOVE_LIVE=...,micro/...`) | clean |
+| the Rotate preview on the alpaca (`VF_TEST_ROTATE_LIVE` + `VF_ROTATE_LAYER`) | clean |
+| the Move preview **and** a bounding-box selection together | clean |
+| a **world reload** → the micro objects re-baked and the occluder list re-pointed at them | clean |
+
+The reload case is the one that matters most and the one that was hardest to
+reach: the app polls the **layer files'** mtimes (not the manifest), the
+micro layers are not in the merged world, so touching `micro/alpaca.vxw` does
+nothing — a **world** layer's mtime has to change, **while the app runs**
+(the initial load records the signatures, so a file touched before the start
+is already in them). `VF_SYNC_RELOAD=1` makes the rebuild inline so it lands
+inside the measured window.
+
+**What is left**: the interactive path — the real Ctrl+LMB click, the panel's
+Move button, the trackball drag — cannot be driven without taking the user's
+mouse. So the honest status is *not reproduced*, with the plausible suspects
+that could be reached all clean. The one bug of mine that would produce that
+signature is fixed, and the fix is pinned by the world-lattice rule above.
+
 ## Verification
 
 | check | result |

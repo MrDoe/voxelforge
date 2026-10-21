@@ -274,7 +274,7 @@ void App::runPostInputTestHooks(const char* testRotateLive)
                     spdlog::warn("VF_TEST_MOVE_LIVE: no enabled object "
                                  "layer to select - preview not armed");
                 }
-            } else if (!m_layers.layerPivot(m_moveLayer, pivot)) {
+            } else if (!layerPivotWorld(m_moveLayer, pivot)) {
                 static bool loggedMoveNoPivot = false;
                 if (!loggedMoveNoPivot) {
                     loggedMoveNoPivot = true;

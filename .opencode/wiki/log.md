@@ -5790,3 +5790,31 @@ shader as a comment), and the reverted tree measures bit-for-bit the
 baseline again (21,856 px, luma 19.6 at the mask, frame 93.3).
 
 See [[concepts/splat-canopy-parity]].
+
+## [2026-10-21] investigate | The heap corruption: ASAN rules out every headless path
+
+The user's "double free or corruption (out)" (right after `edit mode -> move
+(disarmed)`) is a heap corruption, so it is never "just a rendering bug". One
+real bug of mine could produce that signature — a micro-lattice cell index
+written into `m_hoverHit.voxel`, a world-lattice field — and it is fixed, but
+it was never *proven* to be the crash.
+
+So the ASAN build drove every path that can be driven WITHOUT a mouse (the
+user asked for that, and it is the only headless way to test): the pick
+toward all three micro objects, the Move preview on the alpaca and the vase,
+the Rotate preview, Move together with a bounding-box selection, and a
+**world reload** that re-bakes the micro objects and re-points the occluder
+list (which holds pointers into `m_microFields`) at them. **All clean.**
+
+The reload case was the hardest to reach and the most likely: the app polls
+the **layer files'** mtimes, the micro layers are not in the merged world, so
+touching `micro/alpaca.vxw` does nothing — a **world** layer's mtime has to
+change, **while the app runs** (the initial load records the signatures, so a
+file touched before the start is already in them), and `VF_SYNC_RELOAD=1`
+makes the rebuild inline so it lands inside the measured window.
+
+What is left is the interactive path (the real Ctrl+LMB click, the panel's
+Move button, the trackball drag), which cannot be driven without taking the
+user's mouse. The honest status is *not reproduced*.
+
+See [[concepts/micro-voxel-svo-overlay]].
