@@ -67,9 +67,13 @@ APP = sys.argv[1] if len(sys.argv) > 1 else os.path.join(ROOT, "build", "voxelfo
 # 34 deg / 238 deg, so shadows are thrown toward (0.85, 0.53) in xz).
 MICRO_CAM = "11.45,0.30,11.45,12.22,-0.20,12.14"
 # A camera that fills the frame with the ALPACA (the third micro object).
-# The alpaca's view is BUILT from the manifest (see micro_cam): the
-# animal is moved around by hand and by its own behaviour.
-ALPACA_CAM = micro_cam("alpaca", -0.60, 0.40, -0.55, 0.20, 0.07, 0.05)
+# The alpaca's view is BUILT from the manifest (see micro_cam): the animal
+# is moved around by hand and by its own behaviour, so a hardcoded camera
+# slowly starts measuring empty ground. It is a FUNCTION, not a constant:
+# the manifest is read at run time, and the module-level constants are
+# evaluated at import - before the helper below exists.
+def alpaca_cam() -> str:
+    return micro_cam("alpaca", -0.60, 0.40, -0.55, 0.20, 0.07, 0.05)
 # A view with no micro object in it: the house.
 HOUSE_CAM = "2.5,1.3,6.0,6.8,1.0,12.2"
 W, H = 900, 600
@@ -398,10 +402,10 @@ def main() -> int:
         fur_off = os.path.join(tmpdir, "fur_off.ppm")
         set_micro({"micro/vase.vxw": True, "micro/urn.vxw": True,
                    "micro/alpaca.vxw": True})
-        render(fur_on, ALPACA_CAM, 700, 700)
+        render(fur_on, alpaca_cam(), 700, 700)
         set_micro({"micro/vase.vxw": False, "micro/urn.vxw": False,
                    "micro/alpaca.vxw": False})
-        render(fur_off, ALPACA_CAM, 700, 700)
+        render(fur_off, alpaca_cam(), 700, 700)
         _, _, fa = read_ppm(fur_on)
         _, _, fb = read_ppm(fur_off)
         apx = differing(fa, fb, 14)
@@ -433,7 +437,7 @@ def main() -> int:
         #    "did it stay put" measure. From directly above the base row would
         #    be a world x/z and would measure nothing.
         top_cam = micro_cam("alpaca", 0.17, 2.10, 0.32, 0.23, 0.0, 0.40)
-        side_cam = ALPACA_CAM
+        side_cam = alpaca_cam()
 
         def footprint(rot_deg: float, cam: str) -> tuple[int, int, int, int, int] | None:
             tag = "%d_%s" % (rot_deg, "top" if cam is top_cam else "side")
@@ -527,13 +531,13 @@ def main() -> int:
         rot_bg = os.path.join(tmpdir, "rot_preview_bg.ppm")
         set_micro({"micro/vase.vxw": False, "micro/urn.vxw": False,
                    "micro/alpaca.vxw": True})
-        render(rot_off, ALPACA_CAM, 600, 600)
-        render(rot_on, ALPACA_CAM, 600, 600,
+        render(rot_off, alpaca_cam(), 600, 600)
+        render(rot_on, alpaca_cam(), 600, 600,
                extra_env={"VF_TEST_ROTATE_LIVE": "90,0,0",
                           "VF_ROTATE_LAYER": "micro/alpaca.vxw"})
         set_micro({"micro/vase.vxw": False, "micro/urn.vxw": False,
                    "micro/alpaca.vxw": False})
-        render(rot_bg, ALPACA_CAM, 600, 600)
+        render(rot_bg, alpaca_cam(), 600, 600)
         _, _, ra = read_ppm(rot_on)
         _, _, rb = read_ppm(rot_off)
         _, _, rbg = read_ppm(rot_bg)
