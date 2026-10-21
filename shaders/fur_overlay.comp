@@ -35,7 +35,7 @@ layout(local_size_x = 8, local_size_y = 8, local_size_z = 1) in;
 layout(set = 0, binding = 13, rgba16f) uniform highp image2D uOutHdr;
 layout(set = 0, binding = 14, rgba16f) uniform highp image2D uOutGPos;
 
-// The cards: five vec4s each (rootLen, dirWidth, nrmAlpha, tint, shade).
+// The cards: six vec4s each (rootLen, dirWidth, nrmAlpha, tint, shade, curl).
 layout(std430, set = 0, binding = 0) readonly buffer FurCards { vec4 fCard[]; };
 // The bucket grid: the per-cell offsets into the item list, and the items.
 layout(std430, set = 0, binding = 1) readonly buffer FurCellStart { uint fCellStart[]; };
@@ -149,11 +149,12 @@ float cardHit(int w, uint ci, vec3 roL, vec3 rdL, float tMax, vec3 rd,
               inout vec3 sumSun, inout vec3 sumPos, inout vec3 sumNrm,
               inout vec3 sumAlb, inout float sumAo)
 {
-    const vec4 rootLen = fCard[ci * 5u + 0u];
-    const vec4 dirWidth = fCard[ci * 5u + 1u];
-    const vec4 nrmAlpha = fCard[ci * 5u + 2u];
-    const vec4 tint = fCard[ci * 5u + 3u];
-    const vec4 shade = fCard[ci * 5u + 4u];
+    const vec4 rootLen = fCard[ci * 6u + 0u];
+    const vec4 dirWidth = fCard[ci * 6u + 1u];
+    const vec4 nrmAlpha = fCard[ci * 6u + 2u];
+    const vec4 tint = fCard[ci * 6u + 3u];
+    const vec4 shade = fCard[ci * 6u + 4u];
+    const vec4 curl = fCard[ci * 6u + 5u];
 
     const vec3 root = rootLen.xyz;
     const vec3 dir = dirWidth.xyz;
@@ -234,7 +235,14 @@ float cardHit(int w, uint ci, vec3 roL, vec3 rdL, float tMax, vec3 rd,
     const float minW = kMinCardPx * mpp;
     const float wEff = max(wid, minW);
     const float energy = wid / wEff; // the peak alpha follows the width
-    const float u = dot(hit - root, side) / wEff;
+    // The CURL. The strand is not a straight needle: its CENTRE LINE wanders
+    // across the ribbon's plane in a wave that is zero at the root (where the
+    // strand is anchored) and grows toward the tip. That is the difference
+    // between a SPIKE and a piece of wool, and it costs one sine: the
+    // ribbon's PLANE is unchanged, so the ray/plane intersection above is
+    // still exact - only the centre line moves.
+    const float wave = curl.x * sin(6.2831853 * curl.y * sAlong + curl.z) * sAlong;
+    const float u = (dot(hit - root, side) - wave) / wEff;
     if (abs(u) > 0.5)
         return 0.0;
 
@@ -245,9 +253,11 @@ float cardHit(int w, uint ci, vec3 roL, vec3 rdL, float tMax, vec3 rd,
     // wisp.
     const float x = u * 2.0;
     const float across = exp(-2.6 * x * x);
-    const float along = sqrt(max(1.0 - sAlong, 0.0)) *
-                        smoothstep(0.0, 0.06, sAlong) *
-                        smoothstep(1.0, 0.82, sAlong);
+    // Along the strand it keeps most of its width and fades out over the
+    // last quarter, so the tip is a soft wisp and not a needle point.
+    const float along = (1.0 - 0.45 * sAlong * sAlong) *
+                        smoothstep(0.0, 0.05, sAlong) *
+                        smoothstep(1.0, 0.72, sAlong);
     const float a = nrmAlpha.w * across * along * energy;
     if (a < 0.004)
         return 0.0;
@@ -404,7 +414,7 @@ void accumulateWorld(int w, vec3 ro, vec3 rd, float sceneT, inout float sumA,
                                     sumNrm, sumAlb, sumAo);
             if (a > 0.0) {
                 sumA += a;
-                matId = uint(fCard[card * 5u + 4u].z + 0.5);
+                matId = uint(fCard[card * 6u + 4u].z + 0.5);
             }
         }
         // Advance to the next cell.

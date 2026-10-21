@@ -230,10 +230,32 @@ bool buildFurCards(const MicroField& field, const FurParams& params, FurObject& 
             const float j2 = hashSigned(x, y, z, slot + 2);
             const glm::vec3 root = r.p + (r.t1 * j1 + r.t2 * j2) * (0.42f * vox);
             // The groom direction, spun around the normal by a hashed angle
-            // and tilted out of the surface by a hashed amount.
+            // and tilted out of the surface by a hashed amount. The tilt is
+            // SHALLOW: a steep strand reads as a spike sticking out of the
+            // body, and wool lies close to it.
             const float spin = hash01(x, y, z, slot + 3) * 6.2831853f;
-            const float tilt = 0.44f + 0.60f * hash01(x, y, z, slot + 4);
-            const glm::vec3 spun = groom * std::cos(spin) + r.t2 * std::sin(spin);
+            const float tilt = glm::radians(
+                params.tiltMin +
+                (params.tiltMax - params.tiltMin) * hash01(x, y, z, slot + 4));
+            // The groom direction, SPUN inside the surface's own tangent
+            // frame.
+            //
+            // The obvious spelling - groom*cos(spin) + t2*sin(spin) - is NOT
+            // a rotation unless the groom happens to lie along t1, and the
+            // groom is the projection of "down", so it generally does not.
+            // The length then varies with the spin, and at the spin where the
+            // two terms cancel the direction is pure numerical noise: the
+            // card degenerated into a SPOKE pointing straight out of the
+            // surface (measured: the strand's angle to the normal ranged
+            // from 8.6 to 89.8 degrees instead of the intended 12..38).
+            //
+            // Expressing the groom in the tangent frame and rotating THAT
+            // keeps the length at one for every spin.
+            const float g1 = glm::dot(groom, r.t1);
+            const float g2 = glm::dot(groom, r.t2);
+            const float cs = std::cos(spin), sn = std::sin(spin);
+            const glm::vec3 spun = r.t1 * (g1 * cs - g2 * sn) +
+                                   r.t2 * (g1 * sn + g2 * cs);
             const glm::vec3 dir = glm::normalize(spun * std::cos(tilt) +
                                                  r.n * std::sin(tilt));
             FurCard c;
@@ -241,8 +263,17 @@ bool buildFurCards(const MicroField& field, const FurParams& params, FurObject& 
             c.rootLen = glm::vec4(root, len);
             c.dirWidth = glm::vec4(dir, params.width * (0.70f + 0.60f * hash01(x, y, z, slot + 6)));
             c.nrmAlpha = glm::vec4(r.n, params.alpha * (0.55f + 0.90f * hash01(x, y, z, slot + 7)));
-            c.tint = glm::vec4(r.col, len * 0.30f * hash01(x, y, z, slot + 8));
+            // The twist about the strand, and the CURL: the centre line's
+            // amplitude, its cycles over the strand's length and its phase.
+            // The amplitude scales with the length, so a short clump curls
+            // less in metres and a long one curls more.
+            c.tint = glm::vec4(r.col, hashSigned(x, y, z, slot + 8) * 0.9f);
             c.shade = glm::vec4(ao, sh, float(r.mat), 0.f);
+            c.curl = glm::vec4(len * params.curlAmp *
+                                   (0.55f + 0.90f * hash01(x, y, z, slot + 9)),
+                               params.curlCycles *
+                                   (0.65f + 0.70f * hash01(x, y, z, slot + 10)),
+                               hash01(x, y, z, slot + 11) * 6.2831853f, 0.f);
             out.cards.push_back(c);
         }
     }
@@ -260,7 +291,7 @@ bool buildFurCards(const MicroField& field, const FurParams& params, FurObject& 
     for (const FurCard& c : out.cards) {
         const glm::vec3 root = glm::vec3(c.rootLen);
         const glm::vec3 tip = root + glm::vec3(c.dirWidth) * c.rootLen.w;
-        const glm::vec3 pad(c.dirWidth.w * 0.5f + c.tint.w);
+        const glm::vec3 pad(c.dirWidth.w * 0.5f + c.curl.x);
         lo = glm::min(lo, glm::min(root, tip) - pad);
         hi = glm::max(hi, glm::max(root, tip) + pad);
     }
@@ -276,7 +307,10 @@ bool buildFurCards(const MicroField& field, const FurParams& params, FurObject& 
     auto cardRange = [&](const FurCard& c, glm::ivec3& c0, glm::ivec3& c1) {
         const glm::vec3 root = glm::vec3(c.rootLen);
         const glm::vec3 tip = root + glm::vec3(c.dirWidth) * c.rootLen.w;
-        const glm::vec3 pad(c.dirWidth.w * 0.5f + c.tint.w);
+        // The pad covers the half width AND the curl: the centre line wanders
+        // off the straight root-to-tip line by up to the curl amplitude, and a
+        // card filed in the wrong cell is a card the DDA never finds.
+        const glm::vec3 pad(c.dirWidth.w * 0.5f + c.curl.x);
         const glm::vec3 a = glm::min(root, tip) - pad;
         const glm::vec3 b = glm::max(root, tip) + pad;
         c0 = glm::clamp(glm::ivec3(glm::floor((a - out.grid.origin) / cs)),
