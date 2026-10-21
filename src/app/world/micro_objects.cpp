@@ -39,6 +39,7 @@ void App::loadMicroObjects()
         m_microOccluders.clear();
         m_furObjects.clear();
         m_furIndexOfMicro.clear();
+        m_furSourceField.clear();
         m_furPass.setObjects({});
         return;
     }
@@ -56,6 +57,7 @@ void App::loadMicroObjects()
     m_microOccluders.clear();
     m_furObjects.clear();
     m_furIndexOfMicro.clear();
+    m_furSourceField.clear();
     // RESERVE before anything points into this vector. A push_back that
     // reallocates moves the fields, and every MicroOccluder::field pointer
     // would dangle - measured: the surfel bake's micro march read a garbage
@@ -141,22 +143,10 @@ void App::loadMicroObjects()
         // the fur and the body can never drift apart.
         int furIndex = -1;
         if (furEnabled && !world.chunkGrid.empty()) {
-            vf::voxel::FurParams fp;
-            fp.sunDir = glm::vec3(m_sunDir);
-            if (const char* e = getenv("VF_FUR_PER_CELL"))
-                fp.perCell = std::max(1, atoi(e));
-            if (const char* e = getenv("VF_FUR_LEN"))
-                fp.length = float(atof(e));
-            if (const char* e = getenv("VF_FUR_WID"))
-                fp.width = float(atof(e));
-            vf::voxel::FurObject fo;
-            std::string ferr;
             const auto t0 = std::chrono::steady_clock::now();
-            if (vf::voxel::buildFurCards(field, fp, fo, &ferr)) {
-                fo.worldMin = field.origin + offset;
-                furIndex = int(m_furObjects.size());
-                const size_t nCards = fo.cards.size();
-                m_furObjects.push_back(std::move(fo));
+            furIndex = growFurCards(field, offset);
+            if (furIndex >= 0) {
+                const size_t nCards = m_furObjects[size_t(furIndex)].cards.size();
                 const double ms = std::chrono::duration<double, std::milli>(
                                       std::chrono::steady_clock::now() - t0)
                                       .count();
@@ -173,6 +163,7 @@ void App::loadMicroObjects()
         // the SAME count or the preview would land on the wrong object.
         if (!world.chunkGrid.empty()) {
             m_furIndexOfMicro.push_back(furIndex);
+            m_furSourceField.push_back(furIndex >= 0 ? int(m_microFields.size()) - 1 : -1);
             ++microWorldCount;
         }
         worlds.push_back(std::move(world));
@@ -279,6 +270,74 @@ bool App::layerPivotWorld(const std::string& file, glm::vec3& pivot) const
     return false;
 }
 
+// Grow the fur cards for ONE micro field and append them to m_furObjects.
+// Returns the new object's fur index, or -1 when it grows no coat.
+//
+// The cards are a function of the field and the parameters, so this is the
+// only place that knows how to make one: the load and the rebuild (the
+// sidebar's sliders changed) share it.
+int App::growFurCards(const vf::voxel::MicroField& field, glm::vec3 worldOffset)
+{
+    if (!m_furEnabled)
+        return -1;
+    vf::voxel::FurParams fp;
+    fp.sunDir = glm::vec3(m_sunDir);
+    fp.perCell = m_furPerCell;
+    fp.length = m_furLength;
+    fp.width = m_furWidth;
+    fp.curlAmp = m_furCurl;
+    fp.curlCycles = m_furCycles;
+    fp.tiltMax = m_furTilt;
+    fp.tiltMin = std::min(12.0f, m_furTilt);
+    fp.materials = m_furMaterials;
+    vf::voxel::FurObject fo;
+    std::string ferr;
+    if (!vf::voxel::buildFurCards(field, fp, fo, &ferr))
+        return -1;
+    fo.worldMin = field.origin + worldOffset;
+    m_furObjects.push_back(std::move(fo));
+    return int(m_furObjects.size()) - 1;
+}
+
+// Re-grow every coat with the current parameters and upload it.
+//
+// The cards are a CPU product (a few hundred milliseconds for the alpaca),
+// so this is called when a slider is RELEASED, not per tick.
+void App::rebuildFurCards()
+{
+    if (!m_microSvoPass.empty() || !m_furObjects.empty() || !m_microFields.empty()) {
+        // The preview state lives on the fur objects, so it is carried over
+        // rather than lost: a coat rebuilt mid-drag must not drop the drag.
+        std::vector<glm::vec3> previews;
+        std::vector<glm::mat3> rots;
+        std::vector<glm::vec3> pivots;
+        std::vector<bool> previewActive, rotActive;
+        for (const vf::voxel::FurObject& o : m_furObjects) {
+            previews.push_back(o.preview);
+            rots.push_back(o.rot);
+            pivots.push_back(o.pivot);
+            previewActive.push_back(o.previewActive);
+            rotActive.push_back(o.rotActive);
+        }
+        m_furObjects.clear();
+        for (size_t i = 0; i < m_furSourceField.size(); ++i) {
+            const int fi = m_furSourceField[i];
+            if (fi < 0 || fi >= int(m_microFields.size()))
+                continue;
+            const int idx = growFurCards(m_microFields[size_t(fi)],
+                                         m_microOccluders[size_t(fi)].worldOffset);
+            if (idx >= 0 && idx < int(previews.size())) {
+                m_furObjects[size_t(idx)].preview = previews[size_t(idx)];
+                m_furObjects[size_t(idx)].previewActive = previewActive[size_t(idx)];
+                m_furObjects[size_t(idx)].rot = rots[size_t(idx)];
+                m_furObjects[size_t(idx)].pivot = pivots[size_t(idx)];
+                m_furObjects[size_t(idx)].rotActive = rotActive[size_t(idx)];
+            }
+        }
+        m_furPass.setObjects(m_furObjects);
+    }
+}
+
 void App::updateMicroMovePreview()
 {
     // The preview offset belongs to the SELECTED micro object while it is
@@ -294,11 +353,15 @@ void App::updateMicroMovePreview()
         return;
     }
     m_microSvoPass.setWorldPreview(size_t(idx), m_moveDelta, true);
-    // The fur follows the body it belongs to.
+    // The fur follows the body it belongs to - and the OBJECT keeps the
+    // offset, so a coat rebuilt mid-drag does not drop the drag.
     if (idx < int(m_furIndexOfMicro.size())) {
         const int fi = m_furIndexOfMicro[size_t(idx)];
-        if (fi >= 0)
+        if (fi >= 0) {
             m_furPass.setWorldPreview(size_t(fi), m_moveDelta, true);
+            m_furObjects[size_t(fi)].preview = m_moveDelta;
+            m_furObjects[size_t(fi)].previewActive = true;
+        }
     }
 }
 
@@ -311,8 +374,10 @@ void App::clearMicroRotatePreview()
     for (size_t i = 0; i < m_microOccluders.size(); ++i)
         m_microSvoPass.setWorldRotation(i, glm::mat3(1.0f), glm::vec3(0.0f),
                                          false);
-    for (size_t i = 0; i < m_furObjects.size(); ++i)
+    for (size_t i = 0; i < m_furObjects.size(); ++i) {
         m_furPass.setWorldRotation(i, glm::mat3(1.0f), glm::vec3(0.0f), false);
+        m_furObjects[i].rotActive = false;
+    }
 }
 
 } // namespace app

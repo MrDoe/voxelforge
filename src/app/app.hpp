@@ -247,6 +247,29 @@ private:
     // are indexed differently on purpose: the fur pass has its own table, and
     // a micro object without fur simply has no entry in it.
     std::vector<int> m_furIndexOfMicro;
+    // The field each fur object was grown from, so the coat can be REBUILT
+    // (the parameters changed) without re-reading the layers.
+    std::vector<int> m_furSourceField;
+    // The FUR COAT's look. The sliders live in the sidebar's Rendering
+    // section; the per-material switch lives in Textures, because a coat is a
+    // property of the MATERIAL, not of the object.
+    bool m_furEnabled = true;
+    int m_furPerCell = 6;
+    float m_furLength = 0.026f;
+    float m_furWidth = 0.0045f;
+    float m_furCurl = 0.45f;
+    float m_furCycles = 1.0f;
+    float m_furTilt = 38.0f;
+    // The materials that grow a coat. 21 is `fleece`.
+    std::vector<uint8_t> m_furMaterials { 21 };
+    // Grow the cards with the current parameters and upload them. The cards
+    // are a function of the field and the parameters, so this is the same
+    // work the load does - a few hundred milliseconds, which is why the
+    // sliders apply on release and not per tick.
+    void rebuildFurCards();
+    // Grow the cards for ONE micro field and append them to m_furObjects.
+    // Returns the new object's fur index, or -1 when it grows no coat.
+    int growFurCards(const vf::voxel::MicroField& field, glm::vec3 worldOffset);
     // Sun: m_sunDir is the single source of truth for where the sun is (it
     // rides the per-frame push constant), so every control that moves the sun
     // funnels through setSunAngles and nothing keeps parallel angle floats.

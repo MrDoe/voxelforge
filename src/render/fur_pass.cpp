@@ -124,10 +124,28 @@ bool FurPass::setObjects(const std::vector<voxel::FurObject>& objects)
         row.world[0] = o.worldMin.x;
         row.world[1] = o.worldMin.y;
         row.world[2] = o.worldMin.z;
-        // The preview starts inactive; the identity rotation is the neutral
-        // pose, and pivot.w = 0 is what tells the shader there is nothing to
-        // rotate.
-        row.rot0[0] = row.rot1[1] = row.rot2[2] = 1.0f;
+        // The live preview rides along with the object, so a REBUILD (the
+        // coat's parameters changed) does not drop a preview that is in
+        // flight: the Move offset and the rotation preview are the object's
+        // state, not the cards'.
+        row.preview[0] = o.preview.x;
+        row.preview[1] = o.preview.y;
+        row.preview[2] = o.preview.z;
+        row.preview[3] = o.previewActive ? 1.0f : 0.0f;
+        if (o.rotActive) {
+            row.rot0[0] = o.rot[0][0]; row.rot0[1] = o.rot[0][1]; row.rot0[2] = o.rot[0][2];
+            row.rot1[0] = o.rot[1][0]; row.rot1[1] = o.rot[1][1]; row.rot1[2] = o.rot[1][2];
+            row.rot2[0] = o.rot[2][0]; row.rot2[1] = o.rot[2][1]; row.rot2[2] = o.rot[2][2];
+            row.pivot[0] = o.pivot.x;
+            row.pivot[1] = o.pivot.y;
+            row.pivot[2] = o.pivot.z;
+            row.pivot[3] = 1.0f;
+        } else {
+            // The identity rotation is the neutral pose, and pivot.w = 0 is
+            // what tells the shader there is nothing to rotate.
+            row.rot0[0] = row.rot1[1] = row.rot2[2] = 1.0f;
+            row.pivot[3] = 0.0f;
+        }
         cards.insert(cards.end(), o.cards.begin(), o.cards.end());
         cellStart.insert(cellStart.end(), o.cellStart.begin(), o.cellStart.end());
         cellItems.insert(cellItems.end(), o.cellItems.begin(), o.cellItems.end());

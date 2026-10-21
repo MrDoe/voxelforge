@@ -253,6 +253,62 @@ void App::drawPanelRender()
                               "measured no visible change on the hamlet "
                               "(stays inside the rerun noise floor). Rebuilds.");
     }
+    // ---- Fur coat: the hair cards over the micro objects ------------------
+    // The coat is a CPU product (the cards are grown from the field's
+    // surface cells), so every slider here REBUILDS it - and it applies on
+    // RELEASE, not per tick, because growing the alpaca's coat costs a few
+    // hundred milliseconds.
+    if (ImGui::CollapsingHeader("Fur coat", ImGuiTreeNodeFlags_DefaultOpen)) {
+        bool furDirty = false;
+        ImGui::SetNextItemWidth(-1.0f);
+        if (ImGui::Checkbox("Enabled", &m_furEnabled))
+            furDirty = true;
+        if (ImGui::IsItemHovered())
+            ImGui::SetTooltip("The hair cards over a micro object. Off is the "
+                              "bit-exact escape hatch: the pass never "
+                              "dispatches.");
+        ImGui::SetNextItemWidth(-1.0f);
+        if (ImGui::SliderInt("Density##furPerCell", &m_furPerCell, 1, 12,
+                             "%d / cell"))
+            furDirty = true;
+        if (ImGui::IsItemHovered())
+            ImGui::SetTooltip("Cards per surface cell. Two left gaps at close "
+                              "range; six with the wider clumps is the "
+                              "softest measured coat.");
+        ImGui::SetNextItemWidth(-1.0f);
+        if (ImGui::SliderFloat("Strand length##furLen", &m_furLength, 0.008f,
+                               0.060f, "%.0f mm", ImGuiSliderFlags_Logarithmic))
+            furDirty = true;
+        ImGui::SetNextItemWidth(-1.0f);
+        if (ImGui::SliderFloat("Clump width##furWid", &m_furWidth, 0.001f,
+                               0.012f, "%.1f mm", ImGuiSliderFlags_Logarithmic))
+            furDirty = true;
+        ImGui::SetNextItemWidth(-1.0f);
+        if (ImGui::SliderFloat("Curl##furCurl", &m_furCurl, 0.0f, 0.8f, "%.2f"))
+            furDirty = true;
+        if (ImGui::IsItemHovered())
+            ImGui::SetTooltip("How far the strand's centre line wanders, as a "
+                              "fraction of its length. At 0.16 the wave is a "
+                              "couple of pixels and the coat still reads as "
+                              "spikes; at 0.45 it reads as wool.");
+        ImGui::SetNextItemWidth(-1.0f);
+        if (ImGui::SliderFloat("Curl cycles##furCycles", &m_furCycles, 0.2f,
+                               3.0f, "%.2f"))
+            furDirty = true;
+        ImGui::SetNextItemWidth(-1.0f);
+        if (ImGui::SliderFloat("Lift##furTilt", &m_furTilt, 0.0f, 70.0f,
+                               "%.0f deg"))
+            furDirty = true;
+        if (ImGui::IsItemHovered())
+            ImGui::SetTooltip("How far the strand stands off the surface. A "
+                              "steep strand reads as a spike; wool lies close "
+                              "to the body.");
+        if (furDirty) {
+            rebuildFurCards();
+            ImGui::TextDisabled("Coat rebuilt.");
+        }
+    }
+
     ImGui::SetNextItemWidth(-1.0f);
     ImGui::SliderFloat("Exposure", &m_exposure, 0.1f, 4.0f, "%.2f");
 

@@ -20,7 +20,10 @@ void App::drawPanelTextures()
     sectionHeader("MATERIAL TEXTURES", "Drop files into assets/textures/");
     ImGui::TextWrapped("Changes save to world.json and hot-reload.");
     bool textureChanged = false;
-    for (int material = 0; material < 21; ++material) {
+    // The loop runs over the WHOLE palette now, not just 0..20: material 21
+    // is `fleece`, the one that ships with a fur coat, and a material the
+    // panel cannot show is a material the user cannot configure.
+    for (int material = 0; material < 22; ++material) {
         if (material >= 10 && material <= 15)
             continue;
         auto binding = std::find_if(
@@ -52,6 +55,24 @@ void App::drawPanelTextures()
                 }
             ImGui::EndCombo();
         }
+        // A COAT is a property of the MATERIAL: a material that grows fur
+        // gets a coat of hair cards wherever a micro object uses it. The
+        // fleece (21) is the one that ships with one.
+        bool fur = std::find(m_furMaterials.begin(), m_furMaterials.end(),
+                             uint8_t(material)) != m_furMaterials.end();
+        if (ImGui::Checkbox("Fur coat", &fur)) {
+            if (fur)
+                m_furMaterials.push_back(uint8_t(material));
+            else
+                m_furMaterials.erase(
+                    std::remove(m_furMaterials.begin(), m_furMaterials.end(),
+                                uint8_t(material)),
+                    m_furMaterials.end());
+            rebuildFurCards();
+        }
+        if (ImGui::IsItemHovered())
+            ImGui::SetTooltip("Grow a hair-card coat on the micro objects "
+                              "that use this material. Rebuilds the coat.");
         if (binding != m_texBindings.end()) {
             ImGui::SetNextItemWidth(-60.0f);
             if (ImGui::DragFloat("##scale", &binding->scale, 0.05f, 0.05f,
