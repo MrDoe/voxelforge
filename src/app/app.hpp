@@ -49,6 +49,7 @@
 #include "voxel/live_editor.hpp"
 #include "voxel/mesh_import.hpp"
 #include "voxel/mesh_voxel.hpp"
+#include "voxel/micro_behaviour.hpp"
 #include "voxel/picking.hpp"
 #include "voxel/surfelize.hpp"
 #include "voxel/worldfile.hpp"
@@ -230,12 +231,19 @@ private:
     // holds it: a micro object has no world owner id, so the splat pass's
     // rotate preview cannot show it).
     void clearMicroRotatePreview();
+    // Advance the AUTONOMOUS BEHAVIOURS (a micro layer with a "behaviour"
+    // in the manifest walks on its own) and push their transforms to the
+    // micro pass. Called once per frame.
+    void updateMicroBehaviours(float dt);
     // The micro objects as SUN-SHADOW OCCLUDERS for the world's baked surfel
     // shadow. Filled by loadMicroObjects and consumed by rebuildSurfels, which
     // is why a world reload loads the micro objects FIRST.
     std::vector<vf::voxel::MicroOccluder> m_microOccluders;
     // The fields the occluders point at; owning storage for the pointers.
     std::vector<vf::voxel::MicroField> m_microFields;
+    // One behaviour per micro world (parallel to m_microOccluders). A layer
+    // with a "behaviour" in the manifest walks on its own.
+    std::vector<vf::voxel::MicroBehaviour> m_microBehaviours;
     // Sun: m_sunDir is the single source of truth for where the sun is (it
     // rides the per-frame push constant), so every control that moves the sun
     // funnels through setSunAngles and nothing keeps parallel angle floats.

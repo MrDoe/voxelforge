@@ -153,7 +153,6 @@ void App::processInput(bool textCaptures, bool rotateLiveTest)
         drainInputWhileTextFocused();
         return;
     }
-    const float tanHalfFov = tanHalfFov60();
     // Voxel picking: Ctrl+LMB
     {
         ImGuiIO& pickIo = ImGui::GetIO();
@@ -258,6 +257,16 @@ void App::processInput(bool textCaptures, bool rotateLiveTest)
                          m_hasSelection ? rotateTargetLayer(m_selectedHit)
                                          : std::string("<none>"),
                          m_rotateLayer, int(m_gizmoValid));
+            if (m_editBrush == EditBrush::Move)
+                spdlog::info("test move: layer='{}' moving={} axis={} "
+                             "delta=({:+.3f},{:+.3f},{:+.3f}) staged={} "
+                             "gizmoCentre=({:.1f},{:.1f}) gizmoR={:.1f} "
+                             "dragged={}",
+                             m_moveLayer, int(m_moving), int(m_moveAxis),
+                             double(m_moveDelta.x), double(m_moveDelta.y),
+                             double(m_moveDelta.z), int(m_moveStaged),
+                             double(m_gizmoCentre.x), double(m_gizmoCentre.y),
+                             double(m_gizmoRadius), int(m_dragging));
         }
         // Bounding-box selection: Shift+LMB drag defines the box corner to
         // corner as an inclusive lattice AABB - the pressed cell is the

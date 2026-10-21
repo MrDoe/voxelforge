@@ -51,6 +51,11 @@ struct alignas(16) MicroWorldRow {
     // the RENDERED position is rotated out of it. A micro object has no world
     // owner id, so the splat pass's rotate preview cannot show it - this is
     // its only live rotation.
+    // anim = the AUTONOMOUS BEHAVIOUR's offset (xyz) + an active flag (w);
+    // arot0..2 = its rotation matrix (row-major) and apivot = its pivot
+    // (xyz, world m). Same contract as the rotation preview: the field stays
+    // in the baked frame and the transform is applied when it is sampled, so
+    // a walk costs no re-bake.
     float geo[4];
     uint32_t base[4];
     float lo[4];
@@ -60,8 +65,13 @@ struct alignas(16) MicroWorldRow {
     float rot1[4];
     float rot2[4];
     float pivot[4];
+    float anim[4];
+    float arot0[4];
+    float arot1[4];
+    float arot2[4];
+    float apivot[4];
 };
-static_assert(sizeof(MicroWorldRow) == 144, "std140 slot size");
+static_assert(sizeof(MicroWorldRow) == 224, "std140 slot size");
 
 } // namespace
 
@@ -178,6 +188,9 @@ bool MicroSvoPass::setMicroWorlds(const std::vector<voxel::MicroWorld>& worlds)
         // is what tells the shader there is nothing to rotate.
         row.rot0[0] = row.rot1[1] = row.rot2[2] = 1.0f;
         row.pivot[3] = 0.0f;
+        // The behaviour's transform starts as the identity, inactive.
+        row.arot0[0] = row.arot1[1] = row.arot2[2] = 1.0f;
+        row.anim[3] = 0.0f;
 
         const uint32_t nodeOff = uint32_t(payload.size());
         const uint32_t handleOff = uint32_t(handles.size());
@@ -257,6 +270,26 @@ void MicroSvoPass::setWorldRotation(size_t worldIndex, glm::mat3 R, glm::vec3 pi
     row.pivot[1] = pivot.y;
     row.pivot[2] = pivot.z;
     row.pivot[3] = active ? 1.0f : 0.0f;
+    vmaFlushAllocation(m_ctx->allocator(), m_worldTable.alloc, 0, VK_WHOLE_SIZE);
+}
+
+void MicroSvoPass::setWorldAnimation(size_t worldIndex, glm::vec3 offset, glm::mat3 R,
+                                     glm::vec3 pivot, bool active)
+{
+    if (!m_worldTable.mapped || worldIndex >= size_t(m_worldCount))
+        return;
+    auto* rows = reinterpret_cast<MicroWorldRow*>(m_worldTable.mapped);
+    MicroWorldRow& row = rows[worldIndex];
+    row.anim[0] = offset.x;
+    row.anim[1] = offset.y;
+    row.anim[2] = offset.z;
+    row.anim[3] = active ? 1.0f : 0.0f;
+    row.arot0[0] = R[0][0]; row.arot0[1] = R[0][1]; row.arot0[2] = R[0][2];
+    row.arot1[0] = R[1][0]; row.arot1[1] = R[1][1]; row.arot1[2] = R[1][2];
+    row.arot2[0] = R[2][0]; row.arot2[1] = R[2][1]; row.arot2[2] = R[2][2];
+    row.apivot[0] = pivot.x;
+    row.apivot[1] = pivot.y;
+    row.apivot[2] = pivot.z;
     vmaFlushAllocation(m_ctx->allocator(), m_worldTable.alloc, 0, VK_WHOLE_SIZE);
 }
 

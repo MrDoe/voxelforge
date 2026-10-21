@@ -399,6 +399,52 @@ transpose to go the other way (world → baked).
 writing the manifest, and `tests/micro_check.py` measures it (the preview
 changes the frame, and the object is still there).
 
+### The selection was invisible — and the interactive path had never been tested
+
+The user reported "selection still doesn't work", and the app **was**
+selecting: the pick fired and the activation fired. What was missing was the
+part a user actually looks at, and it was missing in three places at once:
+
+- **The Move axis handles were never drawn.** The overlay asked
+  `m_layers.layerBox()` — the **world's** box, which is empty for a layer
+  that is not in the merged world — so a micro object could be grabbed by
+  the maths and showed nothing to grab. `layerBounds()` is micro-aware ✓.
+- **The selection outline floated in the air next to the object.** The feed
+  was the **world cell** under the hit; a micro object lives on its own 5 mm
+  lattice, so that cell can be a metre from the surface. The hit **point**
+  is fed now, so the box lands on the object.
+- **The label said "Selected voxel"** — a micro object is not a voxel. It
+  now names the selected layer (the World panel's row lights up too).
+
+**The real lesson is the instrument.** Every hook written earlier proved
+that `pickMicroObjects()` finds an object **in isolation**. The
+screen→ray conversion, the store-vs-micro competition and the gates around
+the selection were never measured — so a selection that failed in the app
+could still pass the gate. Three changes follow:
+
+1. The pick is now **one method** (`App::pickAtWindowPos`) that
+   `processInput` uses and a test can call ✓ — a test measures what the
+   pointer does, not half of it.
+2. `App::m_testPointer` injects a window position and a button state into
+   `processInput` ✓, so the **real** path (the text-field gate, the mouse
+   capture, the ctrl/armed gates, the selection) can be driven headlessly.
+   The user's rule is that a test must not take the pointer ✓, and this is
+   how the interactive path becomes testable at all ✓.
+3. `VF_TEST_CLICK_SCAN` finds the pixels where a micro object wins the real
+   pick and clicks them, through **both** gestures: the Ctrl+LMB pick and
+   the plain click that activates an object in the Rotate mode ✓.
+   `tests/micro_check.py` asserts both ✓.
+
+Measured: **12/12 picks and 12/12 activations**, every gate clear
+(`wantMouse=0 textCaptures=0`).
+
+**And the thing the user was actually fighting**: from the app's **default**
+view the alpaca is a ~28×10 px sliver 15 m away — three hits on a 12 px scan
+grid ✓. A one-pixel miss picks the ground, and the ground is a *different*
+layer, so the selection "does nothing". Up close the same object is 580 px ✓.
+**A micro object is selectable; it is small** — and the app's default camera
+is a house view, not an object view ✓.
+
 ### The crash that never reproduced: what ASAN ruled out
 
 The user's session died with **"double free or corruption (out)"** right after

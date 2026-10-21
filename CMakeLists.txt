@@ -94,6 +94,7 @@ add_library(vf_core STATIC src/core/camera.cpp
                           src/voxel/live_editor.cpp
                           src/voxel/surfelize.cpp
                           src/voxel/micro_field.cpp src/voxel/micro_svo.cpp
+                          src/voxel/micro_behaviour.cpp
                           src/voxel/heightmap.cpp src/voxel/worldfile.cpp
                           src/voxel/picking.cpp src/voxel/editable_world.cpp
                           src/ai/ollama_client.cpp)

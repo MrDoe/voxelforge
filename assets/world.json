@@ -321,7 +321,8 @@
       "rot": 0.0,
       "rotX": 0.0,
       "rotZ": 0.0,
-      "enabled": true
+      "enabled": true,
+      "behaviour": "grazer"
     }
   ],
   "lights": [

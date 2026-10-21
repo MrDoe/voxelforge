@@ -49,6 +49,14 @@ public:
     void setWorldRotation(size_t worldIndex, glm::mat3 R, glm::vec3 pivot,
                           bool active);
 
+    // Set the AUTONOMOUS BEHAVIOUR's transform of one micro world: an
+    // offset and a rotation about a pivot. Same contract as the Move offset
+    // and the Rotate preview - the field stays in the baked frame and the
+    // transform is applied when it is sampled, so a walk costs no re-bake.
+    // `active` clears it (the object is static again).
+    void setWorldAnimation(size_t worldIndex, glm::vec3 offset, glm::mat3 R,
+                           glm::vec3 pivot, bool active);
+
     bool empty() const { return m_worldCount == 0; }
     size_t worldCount() const { return m_worldCount; }
     size_t gpuBytes() const;

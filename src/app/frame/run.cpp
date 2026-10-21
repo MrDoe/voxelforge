@@ -209,6 +209,10 @@ int App::run(const Args& args)
         }
         runPreInputTestHooks();
         pollWorldAndTextures(dt);
+        // The micro objects' autonomous behaviours (a walking animal). The
+        // transform is pushed to the micro pass, so it costs one matrix and
+        // a vector per object per frame.
+        updateMicroBehaviours(dt);
         // VF_TEST_ROTATE_LIVE is a synthetic, PERSISTENT preview state. It is
         // hoisted here because two consumers need it - processInput (which must
         // not treat a synthetic pose as a live drag) and the post-input hook

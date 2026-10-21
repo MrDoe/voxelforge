@@ -481,6 +481,8 @@ bool loadManifest(const std::string& path, std::vector<WorldLayer>& out)
                         j.boolean(layer.enabled);
                     else if (k == "scale")
                         j.num(layer.scale);
+                    else if (k == "behaviour")
+                        j.str(layer.behaviour);
                     else if (k == "pos") {
                         if (!j.eat('['))
                             return false;
