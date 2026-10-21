@@ -6043,3 +6043,49 @@ backend-independence and the escape hatch) and four new cases in
 `tests/test_micro.cpp`.
 
 See [[concepts/fur-cards]].
+
+## [2026-10-21] ingest | Curly strands, and the bug that WAS the spikes
+
+The feedback on the first fur was "more curly, less spikes". Chasing it
+turned up a real BUG, and the bug was most of the spikes.
+
+**The strand's direction was not a rotation.** It was spelled
+`groom*cos(spin) + t2*sin(spin)`, which only preserves the length when the
+groom happens to lie along `t1` - and the groom is the projection of
+"down", so it generally does not. The length varied with the spin, and at
+the spin where the two terms cancel the direction was numerical noise: the
+card degenerated into a **spoke pointing straight out of the surface**.
+Measured (the unit test that caught it): the strand's angle to the normal
+ranged 8.6-89.8 degrees instead of the intended 12-38. Expressing the
+groom in the surface's tangent frame and rotating THAT keeps the length at
+one for every spin.
+
+**The curl.** The centre line now wanders across the ribbon's plane in a
+wave that is zero at the root (where the strand is anchored) and grows
+toward the tip; the ribbon's PLANE is unchanged, so the ray/plane
+intersection stays exact and the curl costs one sine. The amplitude has to
+be a LARGE fraction of the length to read at all: at 0.16 the wave is a
+couple of pixels across on a fifteen-pixel strand and the coat still read
+as spikes; at 0.45 it reads as wool. The measured high-frequency noise
+fell 16.1 -> **12.7**, BELOW the bare body's 13.5, because a curled strand
+spreads its ink instead of concentrating it in a needle.
+
+**The coat is now configurable in the GUI.** The Rendering section carries
+its SHAPE (density, strand length, clump width, curl amplitude and cycles,
+how far a strand stands off the surface) and the Textures section carries
+the MATERIAL that wears it - a coat is a property of the material, not of
+the object. The fleece (21) was not even VISIBLE in the Textures panel
+before, because that panel's loop stopped at material 20. The sliders
+rebuild the coat (a CPU product) and apply on RELEASE; a rebuild keeps
+the live Move/Rotate preview, because that state lives on the fur objects.
+
+**The meadow got the same lesson**: a grass blade whose centre line is
+straight and whose width tapers to a point reads as a spike, so the blade
+now arches, keeps much more of its width, and fades over the last fifth
+instead of the last tenth. Measured on the house view: 1.74% of the pixels
+move.
+
+The lesson worth keeping: **a visual complaint is a measurement request**,
+and the thing it measures can be a bug rather than a parameter.
+
+See [[concepts/fur-cards]].
