@@ -44,6 +44,8 @@ layout(std140, set = 0, binding = 13) uniform BrushUBO {
     vec4 bAxis;   // xyz = unit axis, w = half length m (0 = ball, <0 = dome)
     vec4 bTint;   // rgb = tint colour, a = strength (0 disables)
     vec4 bMeta;   // x = optional owning layer ID; 0 = spatial volume only
+    vec4 bBoxLo;  // bounding-box selection: INCLUSIVE lattice cell lo, w = 1 active
+    vec4 bBoxHi;  // ... and hi. w = 0 on either disables the clip.
 } uBrush;
 
 layout(push_constant) uniform PC {
@@ -201,7 +203,8 @@ void main()
     // exactly the geometry the CPU rasterizer's cell set describes.
     if (solidHit && gHitType < 1.5 &&
         sharedInBrushVolume(gWorld, 0.0, uBrush.bVolume, uBrush.bAxis,
-                            uBrush.bTint, uBrush.bMeta, pc.b.y))
+                            uBrush.bTint, uBrush.bMeta, pc.b.y, pc.b.x,
+                            uBrush.bBoxLo, uBrush.bBoxHi))
         col = mix(col, uBrush.bTint.rgb, uBrush.bTint.a);
 
     // Deferred output: linear HDR scene radiance (pre-tonemap). The post pass

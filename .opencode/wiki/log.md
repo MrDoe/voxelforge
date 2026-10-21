@@ -1,5 +1,5 @@
 # log
-Append-only timeline — 74 dated session entries, 5267 lines. Entries are appended
+Append-only timeline — 74 dated session entries, 5547 lines. Entries are appended
 in **session order, not date order**, so this index is the only chronological view.
 Do not infer causation from vertical position in the file itself.
 
@@ -5526,3 +5526,22 @@ patched saved layer DICTS while the manifest is re-read on every write (stale
 references), and it never restored a rotation it had set (a full gate run left
 the shipped alpaca turned 90 degrees). It now snapshots values keyed by file
 and restores them; a full run leaves `git diff assets/world.json` empty.
+
+## [2026-10-21] correction | The bridge gate is real; the pixel proof was not
+
+Re-checked after the repo moved (`microvoxel-svo-overlay` is now 25 commits
+ahead of `master`; `master` still has none of this work). The tightened-only
+bridge gate is intact and unmodified — `tightened[]` in the bake,
+`cd.thinTall <= 0` in the live path — the regression fixtures still pass, and
+the scene count is unchanged: **44,610** bridges fixed vs **63,537** with
+`VF_ANISO=0` as the pre-fix control.
+
+Corrected the pixel claim on [[concepts/edge-aware-surfel-radius]]. The
+"artifact view 20,481 → 1 px" figure was taken WITHOUT `VF_EDGE_FILL=1` while
+`edgeFill` already defaulted **off**, so it compared bridges-off against
+bridges-off; 23 px is the same-binary rerun floor. With fill forced on, the
+artifact view still changes **3.02 %** of pixels and a cabin-wall close-up
+**4.49 %** — large contiguous regions with flat frame luma, i.e. coverage
+being restored rather than dark disks added, but not zero. The geometry-level
+record count is the claim that survives; the old pixel numbers should not be
+quoted.

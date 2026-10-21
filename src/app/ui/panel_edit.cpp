@@ -342,6 +342,29 @@ void App::drawPanelEdit()
                             : "Preview tints exactly the affected surfels.");
     }
 
+    ImGui::SeparatorText("Selection box");
+    if (m_boxSelect.valid()) {
+        ImGui::TextDisabled("(%d,%d,%d) -> (%d,%d,%d)", m_boxSelect.lo.x,
+                            m_boxSelect.lo.y, m_boxSelect.lo.z, m_boxSelect.hi.x,
+                            m_boxSelect.hi.y, m_boxSelect.hi.z);
+        const glm::ivec3 d = m_boxSelect.sizeCells();
+        const glm::vec3 m = glm::vec3(d) * vf::voxel::VOXEL;
+        ImGui::Text("%dx%dx%d cells  (%.1f x %.1f x %.1f m)", d.x, d.y, d.z, m.x,
+                    m.y, m.z);
+        ImGui::TextDisabled("%d solid cells  |  %d object-owned  |  %d splats",
+                            m_boxStatCells, m_boxStatObjects, m_boxStatSplats);
+        if (m_lastStampOutside > 0)
+            ImGui::TextDisabled("last stamp: %d cells dropped outside the box",
+                                m_lastStampOutside);
+        if (ImGui::Button("Clear box (X)##clearBox", ImVec2(-1.0f, 30.0f)))
+            clearBoxSelection();
+        ImGui::TextDisabled("Every brush edit is scoped to these cells.");
+    } else {
+        ImGui::TextWrapped("Shift+LMB drag in the scene draws a box that scopes "
+                           "every brush edit to the cells inside it. X clears "
+                           "it; with no box the whole world is editable.");
+    }
+
     ImGui::Separator();
     ImGui::BeginDisabled(m_undo.empty());
     if (ImGui::Button("Undo (Ctrl+Z)", ImVec2(-1.0f, 30.0f)))

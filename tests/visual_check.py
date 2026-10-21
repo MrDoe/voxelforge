@@ -18,6 +18,7 @@ import re
 import struct
 import json
 import math
+import time
 
 SHOTS = [
     # (name, cam args)
@@ -484,6 +485,21 @@ def main():
         if manifest_before is not None:
             with open(manifest_path, "rb") as manifest_file:
                 manifest_after = manifest_file.read()
+            if manifest_after != manifest_before:
+                # A concurrent WRITER can trip this guard, not only the code
+                # under test. Another session's A/B harness legitimately
+                # toggles a layer's `enabled` flag in this same file for the
+                # duration of a render (~1 s), and even an atomic temp+rename
+                # write is still observable between its disable and restore
+                # (there is no env override for the compile-time
+                # VOXELFORGE_ASSET_DIR). One settled re-read separates that
+                # transient from a REAL write by the app under test: the
+                # preview hooks (VF_TEST_ROTATE_LIVE / VF_TEST_MOVE_LIVE) never
+                # commit, so a byte difference that SURVIVES a 2 s settle is a
+                # genuine commit and still fails below.
+                time.sleep(2.0)
+                with open(manifest_path, "rb") as manifest_file:
+                    manifest_after = manifest_file.read()
             if manifest_after != manifest_before:
                 failures.append("layer ownership: preview hook modified world.json")
             else:

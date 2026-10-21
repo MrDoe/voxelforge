@@ -170,6 +170,22 @@ int App::runStartupTestHooks()
         }
     }
 
+    // VF_TEST_BOX="x0,y0,z0,x1,y1,z1": activate the bounding-box selection
+    // BEFORE the edit hook below, so a headless shot can prove the scoping:
+    // a stamp outside the box changes nothing, a stamp inside changes the
+    // world, and the contents report names both counts.
+    if (const char* tb = getenv("VF_TEST_BOX"); tb && *tb) {
+        glm::ivec3 a(0), b(0);
+        if (sscanf(tb, "%d,%d,%d,%d,%d,%d", &a.x, &a.y, &a.z, &b.x, &b.y, &b.z) ==
+            6) {
+            beginBoxSelection(glm::min(a, b));
+            updateBoxSelection(glm::max(a, b));
+            endBoxSelection();
+        } else {
+            spdlog::warn("bad VF_TEST_BOX; expected x0,y0,z0,x1,y1,z1");
+        }
+    }
+
     // VF_TEST_EDIT="x,y,z,carve|add|delete|paint|smooth": apply one live store
     // edit right after load so headless shots can verify the patch path
     // deterministically. VF_EDIT_DIAM / VF_EDIT_DEPTH override the brush size;

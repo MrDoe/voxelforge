@@ -112,12 +112,18 @@ public:
     // marks the tapered volume, not the full-depth one. 0 = hard edge.
     void setBrush(const glm::vec4& volume, const glm::vec4& axis,
                   const glm::vec4& tint, uint8_t layerId = 0,
-                  float falloff = 0.0f)
+                  float falloff = 0.0f, const glm::vec4& boxLo = glm::vec4(0.f),
+                  const glm::vec4& boxHi = glm::vec4(0.f))
     {
         m_brush[0] = volume;
         m_brush[1] = axis;
         m_brush[2] = tint;
         m_brush[3] = glm::vec4(float(layerId), falloff, 0.f, 0.f);
+        // Bounding-box selection (inclusive lattice cells, w = 1 active):
+        // the stamp is scoped to these cells on the CPU, so the tint clips
+        // to the same set (see CellBox::clampEdits + common_surfel.glsl).
+        m_brush[4] = boxLo;
+        m_brush[5] = boxHi;
     }
 
     // Live trackball drag preview: rotate only surfels owned by `layerId`.
@@ -242,8 +248,8 @@ private:
     // Brush hover preview: persistently mapped 4xvec4 UBO (bind 13). The
     // metadata lane optionally restricts tint/debug to one owning layer.
     Buffer m_brushBuf {};
-    glm::vec4 m_brush[4] { glm::vec4(0.f), glm::vec4(0.f), glm::vec4(0.f),
-                           glm::vec4(0.f) };
+    glm::vec4 m_brush[6] { glm::vec4(0.f), glm::vec4(0.f), glm::vec4(0.f),
+                           glm::vec4(0.f), glm::vec4(0.f), glm::vec4(0.f) };
     // Explicit point lights (bind 25; same UBO in the forward and tile sets).
     Buffer m_lightsBuf {};
     // Live selected-layer transform (bind 14): exact owner rotation plus an

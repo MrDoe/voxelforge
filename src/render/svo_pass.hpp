@@ -65,12 +65,17 @@ public:
     // marks the tapered volume, not the full-depth one. 0 = hard edge.
     void setBrush(const glm::vec4& volume, const glm::vec4& axis,
                   const glm::vec4& tint, uint8_t layerId = 0,
-                  float falloff = 0.0f)
+                  float falloff = 0.0f, const glm::vec4& boxLo = glm::vec4(0.f),
+                  const glm::vec4& boxHi = glm::vec4(0.f))
     {
         m_brush[0] = volume;
         m_brush[1] = axis;
         m_brush[2] = tint;
         m_brush[3] = glm::vec4(float(layerId), falloff, 0.f, 0.f);
+        // Bounding-box selection clip (inclusive lattice cells, w = 1 active):
+        // same feed, same cells and the same test as the splat backend.
+        m_brush[4] = boxLo;
+        m_brush[5] = boxHi;
     }
     void setLights(const vf::voxel::LightUBO& lights);
 
@@ -114,11 +119,12 @@ private:
     Buffer m_selection {};
     glm::vec4 m_selFeed { 0.f }; // staged on CPU, flushed in record()
     glm::vec4 m_hovFeed { 0.f };
-    // Brush preview volume (binding 13), 64 B, flushed in record() like the
-    // selection feeds. Zero-initialised: bTint.a == 0 disables the preview.
+    // Brush preview volume (binding 13), 96 B (4 -> 6 vec4 when the box feed
+    // landed), flushed in record() like the selection feeds. Zero-initialised:
+    // bTint.a == 0 disables the preview, bBoxHi.w == 0 disables the clip.
     Buffer m_brushBuf {};
-    glm::vec4 m_brush[4] { glm::vec4(0.f), glm::vec4(0.f), glm::vec4(0.f),
-                           glm::vec4(0.f) };
+    glm::vec4 m_brush[6] { glm::vec4(0.f), glm::vec4(0.f), glm::vec4(0.f),
+                           glm::vec4(0.f), glm::vec4(0.f), glm::vec4(0.f) };
     // Point light UBO (binding 25), written by setLights().
     Buffer m_lightsBuf {};
 

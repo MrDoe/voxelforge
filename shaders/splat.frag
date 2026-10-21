@@ -49,6 +49,8 @@ layout(std140, set = 0, binding = 13) uniform BrushUBO {
     vec4 bAxis;   // xyz = unit axis, w = half length m (0 = ball, <0 = dome)
     vec4 bTint;   // rgb = tint colour, a = strength
     vec4 bMeta;   // x = optional owning layer ID; 0 = spatial volume only
+    vec4 bBoxLo;  // bounding-box selection: INCLUSIVE lattice cell lo, w = 1 active
+    vec4 bBoxHi;  // ... and hi. w = 0 on either disables the clip.
 } uBrush;
 
 layout(location = 0) in vec3 vCenter;
@@ -84,7 +86,8 @@ const float kWaterLevel = -0.9;
 bool inBrushVolume(vec3 p, float packedAo)
 {
     return sharedInBrushVolume(p, packedAo, uBrush.bVolume, uBrush.bAxis,
-                               uBrush.bTint, uBrush.bMeta, pc.b.y);
+                               uBrush.bTint, uBrush.bMeta, pc.b.y, pc.b.x,
+                               uBrush.bBoxLo, uBrush.bBoxHi);
 }
 
 #include "common_base.glsl"

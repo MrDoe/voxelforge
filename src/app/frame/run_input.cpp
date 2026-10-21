@@ -156,7 +156,13 @@ void App::processInput(bool textCaptures, bool rotateLiveTest)
                     m_hoverHit.dist = mp.dist;
                     m_hoverHit.object = true;
                     m_hoverHit.layer = 0;      // no world owner id
-                    m_hoverHit.voxel = mp.cell; // the MICRO cell
+                    // The voxel field is a WORLD-lattice coordinate: the
+                    // brush, the box selection and describeSurfelsAt all
+                    // index the world with it. A micro object lives on its
+                    // OWN lattice, so its cell index would send every one of
+                    // them to the wrong place (and the chunk arithmetic with
+                    // it, to the wrong chunk). Use the world cell under the hit.
+                    m_hoverHit.voxel = vf::voxel::worldToVoxel(mp.pos);
                     m_hoverHit.microFile = mp.file;
                 }
             }

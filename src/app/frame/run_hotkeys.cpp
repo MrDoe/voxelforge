@@ -198,6 +198,15 @@ void App::handleHotkeys(bool textCaptures, bool headlessRun)
                 if (mk.pressed)
                     chooseEditMode(mk.mode);
         }
+        // X: drop the bounding-box selection so the whole world is editable
+        // again (an absent box is the classic, unscoped brush). The edge is
+        // read unconditionally - these latches are stateful, and skipping a
+        // call leaves it stale for a later frame - but only a box that exists
+        // (or an armed tool) is cleared, so a stray X in View mode logs
+        // nothing and changes nothing.
+        const bool xEdge = edge(GLFW_KEY_X, hw);
+        if (xEdge && (m_editActive || boxSelectionActive()))
+            clearBoxSelection();
         // Sidebar chrome. No extra text-field guard is needed here any more:
         // the function returns before this point while one is focused, so these
         // chords are already suppressed - and Tab in particular is a real

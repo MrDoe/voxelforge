@@ -18,6 +18,9 @@ Renders the close-up view several times and asserts:
     footprint green (VF_TEST_BRUSH, no edit applied), the Depth slider being
     visible at all and the SVO backend showing the same preview,
   - a 1-voxel Add/Carve stamps EXACTLY one cell (the per-voxel sculpt mode),
+  - the bounding-box selection scopes the brush: a stamp fully outside the box
+    changes nothing (and never commits), a stamp inside lands, the contents
+    report counts solid cells + surfels, and the wireframe is visible,
   - Undo is a TRUE INVERSE of the edit - the post-undo surfel run must equal
     the add-only run - on a chunk carrying object geometry (terrain-only edits
     cannot catch a too-wide refresh),
@@ -780,6 +783,147 @@ def check_pair(binary, tmp, tag, mode, failures, min_diff=0.02, max_diff=0.60,
     return logs
 
 
+def check_box_select(binary, tmp, failures):
+    """The bounding-box selection SCOPES the brush: a stamp outside the box
+    changes nothing, one inside changes the world, a straddling stamp logs the
+    cells it dropped, the hover tint clips with the box, the wireframe renders,
+    and the contents report counts cells + splats.
+
+    Every case is compared against its OWN boxed baseline (box drawn, no edit),
+    so the wireframe cannot masquerade as an edit and an edit cannot hide
+    behind one. The non-vacuity premise (an unscoped stamp at the same cell
+    DOES change the frame) is asserted first: a check that compares two
+    identical frames would pass on a completely inert stamp."""
+    box_small = "431,505,451,433,513,453"   # CELL +-1 in x/z, STRADDLING the
+                                            # terrain surface (a buried box
+                                            # legitimately holds no surfels)
+    box_far = "446,508,466,452,510,472"      # clear of the 2 m carve ball at
+                                             # CELL (radius 10 cells: x 422-442,
+                                             # z 442-462), and in frame
+    box_wide = "417,494,437,447,524,467"       # spans the whole close view
+    stamp = {
+        "VF_TEST_EDIT": f"{CELL},carve",       # carve so the removed volume
+        "VF_EDIT_DIAM": "2.0",                 # covers several cells
+        "VF_EDIT_DEPTH": "1.0",
+        # Pin the hover with the preview-only hook too: VF_TEST_EDIT arms the
+        # tool at STARTUP, and the frame loop then re-picks at the window
+        # cursor, so without this the two compared frames would disagree over
+        # WHERE the preview is instead of what the box scoped.
+        "VF_TEST_BRUSH": f"{CELL},carve",
+    }
+
+    base = os.path.join(tmp, "box_base.ppm")
+    r = render(binary, base)
+    if r.returncode != 0 or not os.path.exists(base):
+        failures.append("box select: baseline render failed")
+        return
+
+    # ---- premise: without a box the stamp is real -------------------------
+    free = os.path.join(tmp, "box_free.ppm")
+    rf = render(binary, free, dict(stamp))
+    if rf.returncode != 0 or not os.path.exists(free):
+        failures.append("box select: unscoped render failed")
+        return
+    w, h, a = read_ppm(base)
+    _, _, b = read_ppm(free)
+    d_free = diff_stats(w, h, a, w, h, b)[0]
+    logs = (rf.stdout or "") + (rf.stderr or "")
+    m = re.search(r"live edit: (\d+) cells", logs)
+    if not m:
+        failures.append("box select: no 'live edit: N cells' log for the "
+                        "unscoped stamp - CELL is stale")
+        return
+    if int(m.group(1)) < 10:
+        failures.append(f"box select: unscoped stamp touched {m.group(1)} "
+                        "cells - the premise stamp is too small to see")
+    print(f"[box] unscoped stamp: {m.group(1)} cells, {d_free*100:.2f}% pixels")
+    if d_free < 0.01:
+        failures.append(f"box select: unscoped stamp moved only {d_free*100:.2f}% "
+                        "of pixels - the premise check is vacuous here")
+
+    # ---- OUTSIDE the box: not one pixel beyond the preview ----------------
+    # The control is VF_TEST_BRUSH at the SAME cell with the SAME box: it arms
+    # the tool and draws exactly the hover preview (tint + outline) without
+    # editing. The scoped stamp must be pixel-identical to that control, which
+    # pins BOTH halves of the scoping at once - the CPU clamp (the stamp
+    # commits nothing) and the shader clip (the tint promises nothing outside
+    # the box). A broken clip would tint the visible carve volume here.
+    prev = {"VF_TEST_BRUSH": f"{CELL},carve", "VF_EDIT_DIAM": "2.0",
+            "VF_EDIT_DEPTH": "1.0"}
+    out_base = os.path.join(tmp, "box_far_prev.ppm")
+    out_edit = os.path.join(tmp, "box_far_edit.ppm")
+    render(binary, out_base, dict(prev, VF_TEST_BOX=box_far))
+    ro = render(binary, out_edit, dict(stamp, VF_TEST_BOX=box_far))
+    if ro.returncode != 0 or not os.path.exists(out_edit):
+        failures.append("box select: outside-box render failed")
+    else:
+        _, _, ba = read_ppm(out_base)
+        _, _, bb = read_ppm(out_edit)
+        d_out = diff_stats(w, h, ba, w, h, bb)[0]
+        logs_o = (ro.stdout or "") + (ro.stderr or "")
+        print(f"[box] out-of-box stamp vs its own preview: {d_out*100:.4f}% pixels")
+        if d_out > 0.0:
+            failures.append(f"box select: a stamp outside the box still changed "
+                            f"{d_out*100:.4f}% of pixels (the CPU clamp or the "
+                            "tint clip is not scoping)")
+        if "fully outside the selection box" not in logs_o:
+            failures.append("box select: no 'fully outside the selection box' "
+                            "log for a stamp that missed the box")
+        # the stamp must never reach the store: applyEditLive returns before
+        # commitStoreEdits, so there is no "live edit: N cells" line at all
+        if re.search(r"live edit: [1-9]\d* cells", logs_o):
+            failures.append("box select: an out-of-box stamp still committed "
+                            "cells to the store")
+
+    # ---- INSIDE the box: the world changes, the report counts it ----------
+    in_base = os.path.join(tmp, "box_small_prev.ppm")
+    in_edit = os.path.join(tmp, "box_small_edit.ppm")
+    render(binary, in_base, dict(prev, VF_TEST_BOX=box_small))
+    ri = render(binary, in_edit, dict(stamp, VF_TEST_BOX=box_small))
+    if ri.returncode != 0 or not os.path.exists(in_edit):
+        failures.append("box select: inside-box render failed")
+    else:
+        _, _, ba = read_ppm(in_base)
+        _, _, bb = read_ppm(in_edit)
+        d_in = diff_stats(w, h, ba, w, h, bb)[0]
+        print(f"[box] in-box stamp vs its own preview: {d_in*100:.2f}% pixels")
+        if d_in < 0.005:
+            failures.append(f"box select: a stamp inside the box moved only "
+                            f"{d_in*100:.3f}% of pixels - the box ate the edit")
+        logs_i = (ri.stdout or "") + (ri.stderr or "")
+        rep = re.search(r"box select: dims (\d+)x(\d+)x(\d+)\s+cells (\d+) solid "
+                        r"\((\d+) object-owned\)\s+splats (\d+)", logs_i)
+        if not rep:
+            failures.append("box select: no contents report line")
+        else:
+            cells = int(rep.group(4))
+            splats = int(rep.group(6))
+            print(f"[box] contents: {cells} solid cells, {splats} splats")
+            if cells <= 0:
+                failures.append("box select: box holds no solid cells - is the "
+                                "coordinate right?")
+            if splats <= 0:
+                failures.append("box select: box holds no surfels - the box is "
+                                "fully buried; make it straddle a surface")
+        # a straddling stamp must log the cells it dropped
+        straddle = re.search(r"box select: (\d+) of (\d+) stamp cells kept "
+                             r"inside the box", logs_i)
+        if straddle and int(straddle.group(2)) <= int(straddle.group(1)):
+            failures.append("box select: straddling stamp kept everything, the "
+                            "clip is not scoping")
+
+    # ---- the wireframe renders at all -------------------------------------
+    wire = os.path.join(tmp, "box_wire.ppm")
+    render(binary, wire, {"VF_TEST_BOX": box_wide})
+    _, _, bw = read_ppm(wire)
+    d_wire = diff_stats(w, h, a, w, h, bw, thresh=8)[0]
+    px = int(d_wire * w * h)
+    print(f"[box] wireframe pixels vs untouched: {px}")
+    if px < 30:
+        failures.append(f"box select: wireframe nearly invisible ({px} px) - "
+                        "the box outline is not drawn")
+
+
 def main():
     # `--only <name>` runs a single self-contained check group and renders its
     # own baselines, so a preview-only change is verifiable without paying for
@@ -801,17 +945,20 @@ def main():
     failures = []
 
     if only is not None:
-        if only != "preview":
-            print(f"unknown --only group {only!r} (known: preview)")
+        if only not in ("preview", "box"):
+            print(f"unknown --only group {only!r} (known: preview, box)")
             return 2
         with tempfile.TemporaryDirectory() as tmp:
-            check_preview(binary, tmp, failures,
-                          os.path.join(tmp, "splat_base.ppm"))
+            if only == "preview":
+                check_preview(binary, tmp, failures,
+                              os.path.join(tmp, "splat_base.ppm"))
+            else:
+                check_box_select(binary, tmp, failures)
         if failures:
             for f in failures:
                 print("FAIL:", f)
             return 1
-        print("preview_check PASSED")
+        print(f"{only}_check PASSED")
         return 0
 
     if FAST:
@@ -874,6 +1021,9 @@ def main():
         check_preview(binary, tmp, failures,
                       os.path.join(tmp, "splat_base.ppm"))
         check_per_voxel(binary, tmp, failures)
+        # the bounding-box selection: out-of-box stamps are inert, in-box
+        # stamps land, the report counts cells + surfels, the wireframe draws
+        check_box_select(binary, tmp, failures)
         check_object_undo_surgical(binary, tmp, failures)
         # a dug volume below the water level reads as the fixed-level plane
         check_water_fill(binary, tmp, failures)

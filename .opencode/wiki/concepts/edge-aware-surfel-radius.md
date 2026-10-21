@@ -43,10 +43,24 @@ bridge was a redundant disk whose 45° crease normal shades darker than the
 face it lands on. On a thin beam the result was a vertical **"diamond chain"**
 of dark disks.
 
-Measured: hamlet bridges 63,537 → 44,610 records; the artifact view's
-fill on-vs-off changed pixels 20,481 → 1; cabin 2–3-cell corner posts (real
-hard edges) still bridge and still carry ~0.54 L² / 1.14 % px >12 — that part
-is load-bearing sealing, not an artifact.
+Measured (2026-10-21, re-verified on the current tree): hamlet bridges
+**63,537 → 44,610** records, with `VF_ANISO=0` as the pre-fix control that
+restores 63,537 and the default as the fixed path. Cabin 2–3-cell corner posts
+(real hard edges) still bridge and still carry ~0.54 L² / 1.14 % px >12 — that
+part is load-bearing sealing, not an artifact.
+
+**Measurement trap — the "0 px artifact view" figure previously on this page
+was wrong.** It was taken without setting `VF_EDGE_FILL=1`, and `edgeFill`
+now defaults **off**, so it compared bridges-off against bridges-off and
+reported noise (23 px is the same-binary rerun floor). With fill explicitly
+forced on, the same artifact view changes **3.02 %** of pixels (480×270) and a
+cabin-wall close-up changes **4.49 %** (960×540). Those deltas are dominated
+by a few large contiguous regions rather than a chain of small blobs, and the
+frame mean luma is flat, so they read as coverage being restored rather than
+dark disks being added — but they are **not zero**, and any future fill A/B
+must set `VF_EDGE_FILL=1`/`VF_CORNER_FILL=1` explicitly or it measures
+nothing. The geometry-level record count is the reliable claim; the pixel
+claims on this page prior to 2026-10-21 should not be quoted.
 
 ## Crease interpolation
 

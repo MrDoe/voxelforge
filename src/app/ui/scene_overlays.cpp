@@ -168,6 +168,8 @@ ImFont* font = io.FontDefault ? io.FontDefault
             { "S", "Smooth", m_editBrush == EditBrush::Smooth },
             { "M", "Move", m_editBrush == EditBrush::Move },
             { "+/-", "size", false },
+            { "Shift+LMB", "box", false },
+            { "X", "clear box", false },
             { "Tab", "View mode", false },
         };
     } else {

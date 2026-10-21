@@ -95,6 +95,14 @@ bool surfelBelongsToLayer(float packedAo, uint layerId)
 //   bTint:   rgb = tint colour, a = strength (a <= 0 disables the preview)
 //   bMeta:   x   = optional owning layer ID; 0 = spatial volume only
 //            y   = radial falloff CURVE index (0 = Constant, i.e. no taper)
+//   bBoxLo/bBoxHi: the ACTIVE bounding-box selection in INCLUSIVE lattice
+//            cell indices (w = 1). A stamp is scoped to the box on the CPU
+//            (CellBox::clampEdits), so the tint must clip to the same cells
+//            or it would promise material outside the box that the stamp
+//            never writes. The test converts the surfel centre to a cell with
+//            floor((p + worldSize/2) / voxelSize) - the same integer compare
+//            the CPU makes on the edit's lattice coords. `worldSize` rides
+//            pc.b.x; it is passed in for the same reason voxelSize is.
 
 // The CPU's EditableWorld::FalloffCurve set, indexed by bMeta.y. Duplicated
 // here so the hover tint marks the volume the stamp actually emits; the two
@@ -115,13 +123,23 @@ float brushFalloffCurve(int idx, float q)
 // `voxelSize` is passed in rather than read from a push constant because this
 // header is included before the pipeline's own constant block is declared.
 bool sharedInBrushVolume(vec3 p, float packedAo, vec4 bVolume, vec4 bAxis,
-                         vec4 bTint, vec4 bMeta, float voxelSize)
+                         vec4 bTint, vec4 bMeta, float voxelSize, float worldSize,
+                         vec4 bBoxLo, vec4 bBoxHi)
 {
     if (bTint.a <= 0.0)
         return false;
     const uint layer = uint(max(0.0, bMeta.x));
     if (layer > 0u && !surfelBelongsToLayer(packedAo, layer))
         return false;
+    // Bounding-box selection clip: the stamp only writes cells inside the
+    // box, so the tint must not mark the rest of the brush volume. Water is
+    // skipped here - the fixed-level plane is skipped at the tint site.
+    if (bBoxHi.w > 0.5) {
+        ivec3 cell = ivec3(floor((p + 0.5 * worldSize) / voxelSize));
+        if (any(lessThan(cell, ivec3(floor(bBoxLo.xyz)))) ||
+            any(greaterThan(cell, ivec3(floor(bBoxHi.xyz)))))
+            return false;
+    }
     vec3 rel = p - bVolume.xyz;
     const float r2 = bVolume.w * bVolume.w;
     if (bVolume.w == 0.0) {

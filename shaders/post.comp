@@ -29,6 +29,12 @@ layout(std140, set = 0, binding = 3) uniform SelectionUBO {
     vec4 uDepthFar;
     vec4 uDepthNear;
     vec4 uDepthTint;
+    // Bounding-box selection (LATTICE CELL indices, inclusive): world corners
+    // are derived below from pc.b.x (worldSize) / pc.b.y (voxelSize). w = 1 on
+    // both marks the box active. Same inclusive cells the CPU scopes every
+    // stamp to (src/voxel/box_select.hpp).
+    vec4 uBoxLo;
+    vec4 uBoxHi;
 };
 
 layout(push_constant) uniform PC {
@@ -263,6 +269,45 @@ void main()
                 if (edge < 0.10)
                     col = mix(col, vec3(0.88, 0.94, 1.0), 0.30);
             }
+        }
+    }
+
+    // ---- bounding-box selection wireframe ------------------------------------
+    // The scope of the live edit brush: a screen-space stroke of the 12 AABB
+    // edges, projected from the SAME inclusive lattice cells the CPU clamps
+    // every stamp to. Drawn like the depth indicator - NOT gated on hitType -
+    // because a box that goes behind terrain must still show where it is.
+    if ((gRenderFlags & 16) != 0 && uBoxHi.w > 0.5 && pc.a.z > 0.0 &&
+        pc.a.w > 0.0) {
+        const vec3 bmin = -0.5 * pc.b.x + uBoxLo.xyz * pc.b.y;
+        const vec3 bmax = -0.5 * pc.b.x + (uBoxHi.xyz + 1.0) * pc.b.y;
+        vec3 c[8];
+        for (int i = 0; i < 8; ++i)
+            c[i] = vec3((i & 1) != 0 ? bmax.x : bmin.x,
+                        (i & 2) != 0 ? bmax.y : bmin.y,
+                        (i & 4) != 0 ? bmax.z : bmin.z);
+        const ivec2 pairs[12] = ivec2[12](ivec2(0, 1), ivec2(1, 3),
+                                          ivec2(3, 2), ivec2(2, 0),
+                                          ivec2(4, 5), ivec2(5, 7),
+                                          ivec2(7, 6), ivec2(6, 4),
+                                          ivec2(0, 4), ivec2(1, 5),
+                                          ivec2(2, 6), ivec2(3, 7));
+        const vec2 frag = vec2(gl_GlobalInvocationID.xy) + 0.5;
+        const float pulse = 0.70 + 0.15 * sin(pc.misc.y * 4.0);
+        const vec3 boxCol = vec3(0.30, 1.00, 0.85);
+        for (int e = 0; e < 12; ++e) {
+            const int a = pairs[e].x, b = pairs[e].y;
+            vec3 av = projectToScreen(c[a]);
+            vec3 bv = projectToScreen(c[b]);
+            // one end behind the camera: skip the edge rather than smear it
+            if (av.z <= 0.0 || bv.z <= 0.0)
+                continue;
+            const float d = segDist2(frag, av.xy, bv.xy);
+            const float core = 1.5;  // px, fully opaque
+            const float halo = 5.0;  // px, faded to nothing
+            const float alpha = 1.0 - smoothstep(core, halo, d);
+            if (alpha > 0.002)
+                col = mix(col, boxCol, alpha * pulse);
         }
     }
 

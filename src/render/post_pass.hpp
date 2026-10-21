@@ -18,6 +18,16 @@ public:
 
     void setSelection(const glm::vec4& sel) { m_selFeed = sel; }
     void setHover(const glm::vec4& hov) { m_hovFeed = hov; }
+    // Bounding-box selection wireframe (uv coords are LATTICE CELL indices,
+    // not world metres: the same inclusive [lo, hi] the CPU applies to every
+    // stamp, so the drawn box and the scoped cell set cannot disagree. w = 1
+    // on both marks it active; the shader derives world corners from the push
+    // constants' worldSize/voxelSize).
+    void setBox(const glm::vec4& lo, const glm::vec4& hi)
+    {
+        m_boxLo = lo;
+        m_boxHi = hi;
+    }
     // Brush depth indicator: three world points (hit, far end, fixed end) plus
     // the brush tint colour, drawn by the post pass because the splat/SVO tint
     // physically cannot show depth (it only marks existing surfels, and the
@@ -45,6 +55,8 @@ private:
     glm::vec4 m_depthFar { 0.f };
     glm::vec4 m_depthNear { 0.f };
     glm::vec4 m_depthTint { 0.f };
+    glm::vec4 m_boxLo { 0.f }; // bounding-box selection (lattice cells)
+    glm::vec4 m_boxHi { 0.f };
 };
 
 } // namespace vf
