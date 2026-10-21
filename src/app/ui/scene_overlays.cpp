@@ -119,10 +119,18 @@ void App::drawSceneOverlays()
         const char* label = m_selectedLayer.empty()
                                 ? "Selected voxel"
                                 : "Selected";
+        ImFont* font = io.FontDefault ? io.FontDefault
+                                      : (io.Fonts->Fonts.Size > 0
+                                             ? io.Fonts->Fonts[0]
+                                             : nullptr);
+        const float labelW = font
+            ? font->CalcTextSizeA(font->FontSize, FLT_MAX, 0.0f, label).x
+            : 50.0f;
         dl->AddText(ImVec2(centre.x - 33.0f, centre.y + 20.0f),
                     IM_COL32(160, 245, 210, 245), label);
         if (!m_selectedLayer.empty())
-            dl->AddText(ImVec2(centre.x - 33.0f + 62.0f, centre.y + 20.0f),
+            dl->AddText(ImVec2(centre.x - 33.0f + labelW + 6.0f,
+                                centre.y + 20.0f),
                         IM_COL32(160, 245, 210, 245), m_selectedLayer.c_str());
     }
 
