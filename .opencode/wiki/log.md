@@ -5947,3 +5947,46 @@ revision, the gate's own classifier, both ends verified first, and exit 125
 for a broken revision - is in [[concepts/splat-canopy-parity]].
 
 See [[concepts/splat-canopy-parity]].
+
+## 2026-10-21 ingest | The sidebar's UI vocabulary
+
+Reworked the editor's only ImGui window (`Voxelforge##Sidebar`) from a flat
+list into a structured, modern editor skin. The change is a **design system**,
+not a restyle: tokens in `src/app/ui/ui_types.hpp`, widgets in
+`src/app/ui/ui_primitives.{hpp,cpp}`, palette in `src/app/ui/theme.cpp`, and
+all six sections rebuilt from that vocabulary.
+
+What it fixes (measured on a 1280x720 `VF_HUD_SHOT` capture of the before
+state):
+
+- The **section title was the loudest element** (accent, all caps) while
+  controls and prose shared one text level. Now: the accent means STATE only,
+  and there are three text levels plus four surface levels.
+- Two lines were **clipped at the pane's right edge** — the section
+  description (`TextDisabled` does not wrap; it is now `sectionHeader` ->
+  `TextWrapped`) and the layer count row (now a three-column stat row).
+- **Every labelled full-width widget had its label pushed off the pane**:
+  ImGui draws a widget's label to the widget's RIGHT, so `SetNextItemWidth(-1)`
+  + a visible label meant "Depth / height" was cut in half. 13 sites now use
+  `controlRow(label, fn)` (label left, control right).
+- The **rail was a code to decode** (`ED / WL / RN / TX / IM / AI`). It is now
+  six vector icons drawn with `ImDrawList` (chisel / layers / sun / swatch /
+  cube / bubble) — the default ImGui font has no icon glyphs, which is why the
+  codes existed in the first place.
+- The **footer was a run-on line**; it is now two aligned columns (state on
+  the left, timings on the right).
+- The **pane could not be scrolled with the wheel**: it carried
+  `NoScrollWithMouse`, which was protecting a camera wheel binding that does
+  not exist anywhere in the codebase (`io.MouseWheel` is read by nothing).
+  The flag is gone from the pane, so long sections scroll.
+
+Also: `VF_TEST_PANEL=edit|world|render|textures|mesh|ai` opens a section at
+startup, which implements the actionable fix in
+[[concepts/interactive-ui-coverage-gap]] and makes every panel capturable with
+`VF_HUD_SHOT`.
+
+And a real bug the rework exposed: `kMatNames` had 21 entries while
+`kPaletteN` is 22, so material 21 (`fleece`) was unreachable from every
+combo. Fixed in `ui_types.hpp` and in the three loops that used 21.
+
+See [[concepts/sidebar-ui-vocabulary]] and [[entities/hud-sidebar]].

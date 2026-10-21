@@ -17,10 +17,9 @@ namespace app {
 
 void App::drawPanelTextures()
 {
-    sectionHeader("MATERIAL TEXTURES", "Drop files into assets/textures/");
-    ImGui::TextWrapped("Changes save to world.json and hot-reload.");
+    sectionHeader("Drop files into assets/textures/  ·  changes save to world.json");
     bool textureChanged = false;
-    for (int material = 0; material < 21; ++material) {
+    for (int material = 0; material < 22; ++material) {
         if (material >= 10 && material <= 15)
             continue;
         auto binding = std::find_if(
@@ -34,8 +33,17 @@ void App::drawPanelTextures()
             std::find(m_texFiles.begin(), m_texFiles.end(), current) ==
                 m_texFiles.end();
 
-        ImGui::PushID(material);
-        ImGui::SeparatorText(kMatNames[material]);
+        // One row per material, collapsed by default: the badge keeps the
+        // current binding visible, so a closed row still says which material
+        // is textured and with what.
+        char id[32];
+        snprintf(id, sizeof(id), "tex.%d", material);
+        const char* badge = current.empty() ? "(palette)" : current.c_str();
+        if (!groupHeader(id, kMatNames[material], false, badge)) {
+            if (missing)
+                ImGui::TextColored(kWarn, "File is not in the scanned folder");
+            continue;
+        }
         ImGui::SetNextItemWidth(-1.0f);
         std::string label = current.empty() ? "(palette)" : current;
         if (missing)
@@ -75,14 +83,14 @@ void App::drawPanelTextures()
         }
         if (missing)
             ImGui::TextColored(kWarn, "File is not in the scanned folder");
-        ImGui::PopID();
+        groupEnd();
     }
     if (textureChanged)
         m_texApplyPending = true;
     ImGui::Separator();
-    if (ImGui::Button("Rescan folder##rescanTextures", ImVec2(-1.0f, 28.0f)))
+    if (ImGui::Button("Rescan folder##rescanTextures", ImVec2(-1.0f, kUiRowH - 2.0f)))
         rescanTextureFiles();
-    if (ImGui::Button("Reload manifest##reloadTextures", ImVec2(-1.0f, 28.0f))) {
+    if (ImGui::Button("Reload manifest##reloadTextures", ImVec2(-1.0f, kUiRowH - 2.0f))) {
         m_texBindings.clear();
         vf::voxel::worldfile::loadTextureManifest(m_manifestPath, m_texBindings);
         rescanTextureFiles();

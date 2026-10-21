@@ -1,8 +1,8 @@
 ---
 title: HUD sidebar (the single editor panel)
 tags: [ui, imgui, hud, sidebar, ux]
-sourceRefs: [src/app/main.cpp, src/app/chat_ui.cpp, src/app/chat_ui.hpp, AGENTS.md, docs/rendering.md]
-lastReviewed: 2026-09-25
+sourceRefs: [src/app/app.hpp, src/app/ui/sidebar.cpp, src/app/ui/ui_primitives.cpp, src/app/ui/ui_types.hpp, src/app/chat_ui.cpp, src/app/chat_ui.hpp, AGENTS.md, docs/rendering.md, docs/tooling.md]
+lastReviewed: 2026-10-21
 ---
 
 # HUD sidebar — the single editor panel
@@ -13,12 +13,12 @@ Toolbox, Materials, Import STL/OBJ) plus the bottom-right AI Assistant.
 
 ```
 ┌──┬────────────────────┐
-│ED│  one section only, │   ← rail 46 px, content pane ≈300 px
-│WL│  scrolls           │
-│RN│                    │
-│TX│                    │
-│IM│                    │
-│AI│                    │
+│✎ │  one section only, │   ← rail 46 px (vector icons), content pane ≈300 px
+│▤ │  scrolls           │
+│☀ │                    │
+│▦ │                    │
+│◇ │                    │
+│▢ │                    │
 │  ├────────────────────┤
 │  │ status footer 52px │
 └──┴────────────────────┘
@@ -28,14 +28,22 @@ Toolbox, Materials, Import STL/OBJ) plus the bottom-right AI Assistant.
 
 `drawHud()` is now a two-liner: `drawSidebar()` + `drawSceneOverlays()`.
 
-- **Rail** — six 2-letter buttons. The default ImGui font (ProggyClean) has no
-  icon glyphs, so glyph-based icons would render as `?`; 2-letter ASCII labels
-  are the deliberate choice. `Ctrl+1..6` are the matching shortcuts.
-- **Content pane** — exactly one `Panel` section, chosen by the rail.
+- **Rail** — six **vector icons** drawn with `ImDrawList` (chisel / layers /
+  sun / swatch / cube / bubble). The default ImGui font (ProggyClean) has no
+  icon glyphs, which is why this rail used to show two-letter codes (`ED`,
+  `WL`, …) — a code to decode. The active section is a filled pill + accent
+  glyph + accent underline; the armed brush is a separate dot on the Edit
+  glyph. `Ctrl+1..6` are the matching shortcuts.
+- **Content pane** — exactly one `Panel` section, chosen by the rail, under a
+  `paneBand` header (section name, accent tab, `Ctrl+N` chip). The sections
+  are built from the shared vocabulary in
+  [[concepts/sidebar-ui-vocabulary]].
 - **Footer** — fixed 52 px, two status rows, so switching sections never
-  reflows it. A staged rotation/move takes over the whole footer from *any*
-  section: it is a pending `world.json` write, and burying the Apply button
-  inside the Edit section made it easy to lose.
+  reflows it. It is two aligned columns: WHAT the editor is doing on the
+  left (a mode chip + the brush state), HOW FAST on the right. A staged
+  rotation/move takes over the whole footer from *any* section: it is a
+  pending `world.json` write, and burying the Apply button inside the Edit
+  section made it easy to lose.
 - **Collapsed** — `Ctrl+B` shrinks the sidebar to the rail alone. (It was `Tab`
   until the edit-mode shortcuts landed; `Tab` now switches View/Edit mode.)
   The footer degrades to a single frame-time figure because there are only

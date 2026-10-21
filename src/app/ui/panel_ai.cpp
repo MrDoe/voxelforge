@@ -17,7 +17,7 @@ namespace app {
 
 void App::drawPanelAI()
 {
-    sectionHeader("AI ASSISTANT", "object authoring via tools");
+    sectionHeader("Object authoring via tools");
     auto reloadFn = [this] { requestWorldReload(); };
     m_chatUi.drawPanel(m_editable, m_layers, m_hoverHit.hit ? &m_hoverHit : nullptr,
                        m_hasSelection ? &m_selectedHit : nullptr, m_hasSelection,

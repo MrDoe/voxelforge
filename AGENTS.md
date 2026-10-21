@@ -363,9 +363,13 @@ one costs a whole turn, because the bad call is rejected before any work runs.
   creates a single `Voxelforge##Sidebar` window (`NoMove|NoResize|NoCollapse|
   NoSavedSettings`; native resize is disabled because position/size are forced
   with `ImGuiCond_Always`, so a stale `imgui.ini` cannot displace it) holding
-  three parts: a 46 px **icon rail** (`ED WL RN TX IM AI` — 2-letter labels
-  because the default ImGui font has no icon glyphs), a content pane showing
-  one `Panel` section at a time, and a fixed 52 px **status footer**. The idle
+  three parts: a 46 px **icon rail** (six **vector icons drawn with
+  `ImDrawList`** — chisel / layers / sun / swatch / cube / bubble — because
+  the default ImGui font has no icon glyphs, and a 2-letter code like "ED" had
+  to be decoded; the active section is a filled pill + accent glyph + accent
+  underline, and the armed brush is a separate dot on the Edit glyph), a
+  content pane showing one `Panel` section at a time, and a fixed 52 px
+  **status footer**. The idle
   window is fully opaque; square, borderless child surfaces match the dock
   background, so no scene bleed or top/bottom inset bands remain. A custom
   8 px right-edge grip resizes it horizontally; double-click restores the
@@ -374,6 +378,14 @@ one costs a whole turn, because the bad call is rejected before any work runs.
   *overlay*: the render stays full-window and picking still runs camera→cursor,
   so the sidebar only costs screen area. Sections:
   `drawPanelEdit/World/Render/Textures/Mesh/AI`.
+  **The sidebar's visual language lives in `ui/ui_types.hpp` (tokens) and
+  `ui/ui_primitives.{hpp,cpp}` (widgets) — build new UI out of those, not
+  ad-hoc ImGui calls.** The vocabulary: a `paneBand` header naming the
+  section + its shortcut; `groupHeader(id, title, defaultOpen, badge)`
+  collapsible groups (the badge keeps a closed group informative); `keyValue`
+  for readouts (label left, value right); `hintLine` for the one line that
+  says what a control does; `statusPill` for state words. The accent is
+  reserved for STATE — active, armed, on — and never used for a label.
   `Ctrl+B` collapses it to the rail alone (`Tab` used to, and now toggles the
   edit mode instead); `Ctrl+1..6` jump to a section (bare
   `1..5` remain the render-flag toggles, and the `edge()` latch gives the

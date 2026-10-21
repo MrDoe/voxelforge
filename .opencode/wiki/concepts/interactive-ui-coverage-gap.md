@@ -1,8 +1,8 @@
 ---
 title: Interactive UI has no automated coverage
 tags: [ui, testing, coverage-gap, hud, sidebar, imgui, voxelforge]
-sourceRefs: [src/app/ui/sidebar.cpp, src/app/frame/record_interactive.cpp, tests/visual_check.py]
-lastReviewed: 2026-10-03
+sourceRefs: [src/app/ui/sidebar.cpp, src/app/frame/record_interactive.cpp, src/app/frame/run_startup.cpp, tests/visual_check.py, docs/tooling.md]
+lastReviewed: 2026-10-21
 ---
 
 `App::drawHud()` (`drawSidebar()` + `drawSceneOverlays()`) is called **only**
@@ -35,12 +35,31 @@ Consequences:
   hallucinated confidently; counting text clusters, key-label pixel colours and
   active-chip pixels was reliable.
 
-## The actionable fix (not implemented)
+## The actionable fix — IMPLEMENTED 2026-10-21
 
-A `VF_TEST_PANEL=edit` hook that sets `m_panel` and lets the shot path call
-`drawHud()` **once**. That would make ImGui's own assertions fire headlessly and
-turn a coverage gap into a test — the sidebar already runs `BeginTable()` /
-`BeginChild()` returns that are individually guarded, so the machinery is
-there. Recorded with the hook name so it is a task rather than a regret.
+`VF_TEST_PANEL=edit|world|render|textures|mesh|ai` sets `m_panel` at startup
+(`App::applyStartupEnvOverrides`, `src/app/frame/run_startup.cpp`), so a
+script can reach a section that is not the default. It is a **hook, not a
+gate**: it makes the section reachable and capturable, it does not assert
+anything.
 
-Related: [[entities/hud-sidebar]], [[concepts/edit-mode-hotkeys]].
+Pair it with the existing `VF_HUD_SHOT=FRAMES:PATH` to capture a panel:
+
+```sh
+VF_TEST_PANEL=render VF_HUD_SHOT=12:/tmp/render.ppm ./build/voxelforge
+```
+
+The capture needs a display (`xvfb-run -a -s "-screen 0 1400x900x24"` works),
+and the PPM's **red and blue channels are swapped** — the swapchain is
+`B8G8R8A8` and the offscreen is `R8G8B8A8`, and the copy does not swizzle —
+so a cyan accent reads as yellow. Undo it before judging colour:
+`convert in.ppm -separate -swap 0,2 -combine out.ppm`.
+
+What is still missing: an **assertion**. A gate that renders each section and
+checks, say, that the pane's content fits or that no widget is clipped, would
+need a numeric mask (the vision captions are too coarse to judge a 0.1 %
+artifact — see the measurement discipline in
+[[concepts/measurement-discipline]]).
+
+Related: [[entities/hud-sidebar]], [[concepts/edit-mode-hotkeys]],
+[[concepts/sidebar-ui-vocabulary]].
