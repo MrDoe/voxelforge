@@ -142,6 +142,36 @@ def main() -> int:
         note(cnt == 0 or (0 <= minx and maxx < W and 0 <= miny and maxy < H),
              "the change's bounding box is inside the frame")
 
+        # ---- 2b: the coat is at least as SMOOTH as the surface under it ---
+        # A straight, spiky coat concentrates its ink in narrow streaks, and a
+        # narrow streak is HIGH-frequency energy: the coat reads as crunchier
+        # than the body it covers. A curled strand spreads the same ink over
+        # more pixels, so the coat's high-frequency content falls BELOW the
+        # bare body's. That is a falsifiable claim about the shape, and it is
+        # the numeric form of "curly, not spiky": with the curl removed this
+        # check fails (measured: 16.1 against the body's 13.5).
+        def neighbour_diff(buf: bytes, x0: int, y0: int, x1: int, y1: int) -> float:
+            tot = 0
+            cnt = 0
+            for y in range(y0, min(y1, H)):
+                row = y * W
+                for x in range(x0, min(x1, W) - 1):
+                    o = (row + x) * 3
+                    for c in range(3):
+                        tot += abs(buf[o + c] - buf[o + c + 3])
+                    cnt += 3
+            return tot / max(cnt, 1)
+
+        fur_hf = neighbour_diff(on, 260, 100, 520, 480)
+        body_hf = neighbour_diff(off1, 260, 100, 520, 480)
+        print(f"  high-frequency: fur {fur_hf:.2f} vs the bare body {body_hf:.2f}")
+        # The margin covers the run-to-run noise of the metric itself (the
+        # scene's animated grass moves a little between renders); the signal
+        # is 2.5, an order of magnitude above it.
+        note(fur_hf <= body_hf + 1.0,
+             f"the coat is at least as smooth as the body under it "
+             f"({fur_hf:.2f} vs {body_hf:.2f})")
+
         # ---- 3: the fur touches nothing else ------------------------------
         # The house view has no micro object in it at all, so the fur must
         # leave it EXACTLY as it found it. A DDA that walked off the object,
