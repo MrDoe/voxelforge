@@ -74,7 +74,10 @@ one costs a whole turn, because the bad call is rejected before any work runs.
   describe what is in it. Measured 2026-10-21: three wiki pages from two
   other sessions landed in a commit titled "micro: a micro object is
   selectable". Name every path explicitly, and `git status` before you
-  commit.
+  commit. **`git add -p` is not the fix** when two sessions edit the SAME
+  page (one wiki page had three authors in a day): the file is shared, so
+  the other session's hunks are in it too. Stage the exact path and check
+  `git diff --cached --stat` names only what you wrote about.
 - **Never `rm` with a glob near a file you depend on.** A tidy-up like
   `rm /tmp/x/*.vxw` will eat a backup you forgot was there, and an *unlabelled*
   backup cannot be told apart from a peer session's identically-named file —
