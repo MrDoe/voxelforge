@@ -150,8 +150,12 @@ struct MicroPick {
 // The march is the same sphere-trace the shader runs, and it steps at a QUARTER
 // of the object's own voxel: the field's distance is exact, but a step of the
 // full distance can overshoot a one-cell-thick shell.
+//
+// `tMax` is generous on purpose: the world is 102.4 m across, so a camera in
+// one corner and an object in the opposite one are ~145 m apart, and a
+// micro object must still be selectable from there.
 MicroPick pickMicroField(const MicroField& field, glm::vec3 worldOffset,
-                         glm::vec3 ro, glm::vec3 rd, float tMax = 90.f,
+                         glm::vec3 ro, glm::vec3 rd, float tMax = 200.f,
                          int maxSteps = 512);
 
 // Rotate a micro layer's records about the object's BOTTOM-CENTRE pivot, the

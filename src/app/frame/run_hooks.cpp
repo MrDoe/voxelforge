@@ -284,6 +284,48 @@ void App::runPostInputTestHooks(const char* testRotateLive)
             }
         }
     }
+
+    // VF_TEST_MICRO_PICK: exercise the app's OWN micro pick path - the same
+    // pickMicroObjects() the pointer uses - from the camera toward every
+    // micro object, and report what it found.
+    //
+    // A micro object is NOT in the world's store (it is a separate SVO world
+    // on its own fine lattice), so this is the only way to verify that one is
+    // SELECTABLE without a mouse. It is worth a hook because the bug it pins
+    // is invisible in a screenshot: the field's CPU sampler returned 0
+    // outside the field's grid, so the pick's sphere-trace crawled at its
+    // minimum step and never reached an object 15 m away - the alpaca
+    // rendered perfectly and could not be clicked.
+    if (const char* testMicroPick = getenv("VF_TEST_MICRO_PICK");
+        testMicroPick && *testMicroPick) {
+        static bool logged = false;
+        if (!logged) {
+            logged = true;
+            int aimed = 0, hit = 0;
+            for (const auto& o : m_microOccluders) {
+                if (!o.field)
+                    continue;
+                ++aimed;
+                // Aim at the object's own box centre, from the camera.
+                const glm::vec3 centre = 0.5f * (o.aabbMin + o.aabbMax);
+                const glm::vec3 toCentre = centre - m_camera.pos;
+                if (glm::length(toCentre) < 1e-4f)
+                    continue;
+                const glm::vec3 rd = glm::normalize(toCentre);
+                const MicroObjectPick mp = pickMicroObjects(m_microOccluders,
+                                                            m_camera.pos, rd);
+                const bool own = mp.hit && mp.file == o.layerFile;
+                if (own)
+                    ++hit;
+                spdlog::info("VF_TEST_MICRO_PICK '{}' -> {}", o.layerFile,
+                             mp.hit ? ("hit '" + mp.file + "' at " +
+                                       std::to_string(mp.dist) + " m")
+                                    : std::string("NO HIT"));
+            }
+            spdlog::info("VF_TEST_MICRO_PICK: {}/{} micro objects selectable",
+                         hit, aimed);
+        }
+    }
 }
 
 } // namespace app

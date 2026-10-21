@@ -828,10 +828,28 @@ one costs a whole turn, because the bad call is rejected before any work runs.
     voxels), not the maximum: the stencil reaches one cell past the sample
     point and a maximum-distance filler next to a real edge cell would
     explode the interpolated field into a tunnelling step.
+  - **OUTSIDE the grid the field must return the TRUE distance to the grid
+    box** (the shader's `microMapWorld` does exactly this, and the CPU's
+    `MicroField::sampleSdf` must mirror it): a trilinear sampler that finds
+    no cell in range returns **0**, and a sphere tracer that reads 0 **steps
+    0**, so the march collapses to its minimum step and never arrives. That
+    is not a hypothetical — it is why a micro object rendered perfectly and
+    could not be clicked (measured 2026-10-21: 0 of 81 rays hit the alpaca
+    from 15 m, while the AABB test passed on every one). The box *contains*
+    the object, so the box distance is a lower bound on the object distance
+    and `0.85 ×` it is a safe step.
   With the field right, the material lookup is a plain cell lookup: the cell
   **containing** the hit (`floor((p-mn)/cellSz)`), *not* the
   `trunc((p-mn)/cellSz - 0.5)` cell-**centre** convention the field stencil
   uses (at a face that lands on the air side — black albedo, grass material).
+- **A micro object is SELECTABLE** (`pickMicroField` + `App::pickMicroObjects`):
+  it is outside the world's store, so the pointer needs a pick of its own. It
+  is named by its manifest file (`PickHit::microFile`), never by a world owner
+  id. `m_hoverHit.voxel` must stay a **world-lattice** cell (the brush, the
+  box selection and `describeSurfelsAt` index the world with it) — a micro
+  cell index sends all of them to the wrong chunk. Headless check:
+  `VF_TEST_MICRO_PICK=1` runs the app's own pick path toward every micro
+  object and reports "N/N micro objects selectable" (no mouse involved).
 - **Shadows are two-way and COARSE on both halves.** Micro objects self-shadow
   and shadow each other exactly, and they exchange shadows with the world
   through the coarse representations, never through each other's lattices:

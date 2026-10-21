@@ -265,6 +265,43 @@ chunk*. The pick now stores the world cell under the hit
 (`worldToVoxel(mp.pos)`) and names the object by its manifest file
 (`PickHit::microFile`), since a micro object has no world owner id.
 
+### The pick still missed: the CPU sampler had no out-of-grid fallback
+
+With the wiring right, the pick *still* never hit anything — and this is the
+part worth remembering, because **every layer of it looked correct** and a
+screenshot could never show it.
+
+`MicroField::sampleSdf` is a trilinear sample of the dense field. Outside the
+field's grid there is no cell in range, the accumulator stays at **0**, and the
+sampler returns 0. A sphere tracer that reads 0 **steps 0**: the pick march
+collapsed to its minimum step (a quarter of the object's own voxel) and
+covered about **0.6 m** in its entire 512-step budget. The camera is 15 m from
+the shore, so the ray never arrived. Measured: **0 of 81 rays** hit the real
+alpaca — while the AABB test passed on every one of them, because the *box*
+was found and the *field* was not.
+
+The GPU never had this bug: `microMapWorld` in `shaders/micro_overlay.comp`
+falls back to **the true distance to the world's box** outside it, precisely
+because a flat constant is fatal for a sphere tracer (the shader says so in a
+comment). The CPU sampler had no such branch. The fix mirrors the shader
+exactly — outside the grid, return the distance to the grid box, with a floor
+so the step stays positive on the face. The box *contains* the object, so the
+box distance is a lower bound on the object distance and `0.85 ×` it is a safe
+step.
+
+**Why the unit test did not catch it**: the pick test cast its ray from
+**0.30 m** away. The crawl reaches 0.6 m, so it *arrived* and the test passed.
+The app's camera is 15 m away, so it did not. The regression test now casts
+from **15 m** — the real distance — and pins the out-of-grid distance as
+positive and growing.
+
+**How it is verified without a mouse**: `VF_TEST_MICRO_PICK=1` makes the app
+run *its own* `pickMicroObjects` from the camera toward every micro object and
+report the result (`3/3 micro objects selectable`). It is a headless hook, so
+the check needs no pointer and cannot disturb a user's cursor — and it
+exercises the real path (the occluder list, the AABB, the field), not a
+re-implementation. `tests/micro_check.py` asserts it.
+
 ## Live movement: a micro layer can be moved and turned
 
 A micro layer's `pos` is the world position of the object's **min corner** (a
@@ -313,8 +350,9 @@ halves of the contract.
 
 | check | result |
 |---|---|
-| `test_micro.cpp` (10 cases) | pass — incl. a negative control for the continuity check and the cast-shadow verdict |
-| `micro_check.py` (11 checks) | pass — visibility, material, silhouette, micro-to-micro shadow, RECEIVE, CAST, alpaca visible, fleece texture, world untouched, SVO backend |
+| `test_micro.cpp` (13 cases) | pass — incl. a negative control for the continuity check, the cast-shadow verdict, and the **15 m pick** that the 0.30 m one missed |
+| `micro_check.py` (14 checks) | pass — visibility, material, silhouette, micro-to-micro shadow, RECEIVE, CAST, alpaca visible, fleece texture, **selectable**, world untouched, SVO backend |
+| `VF_TEST_MICRO_PICK=1` (headless) | **3/3** micro objects selectable through the app's own `pickMicroObjects` |
 | `test-unit` group | 8/8 pass |
 | `visual_check.py` | only the pre-existing `house: sky probe not blue-dominant` failure; every other metric is **bit-identical** to before the micro layers existed (coverage 70.8 / 94.6 / 96.2 %), because the objects are not in those views |
 | `live_edit_check.py` | exactly the documented pre-existing baseline: 3× `object_smooth` + 1× `object undo`, same 11002/11008 numbers — no regression |

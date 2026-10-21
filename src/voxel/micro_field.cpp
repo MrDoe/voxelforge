@@ -35,6 +35,29 @@ float MicroField::sdfAtWorld(glm::vec3 p) const
 
 float MicroField::sampleSdf(glm::vec3 p) const
 {
+    // OUTSIDE THE GRID there is no field at all: the trilinear stencil below
+    // would find no cell in range and return 0 - and a tracer that reads 0
+    // steps 0. The pick march then crawls at the minimum step (a quarter of
+    // the object's own voxel) and covers about a metre in its whole step
+    // budget, so a ray from the camera NEVER reaches an object a few metres
+    // away. Measured: 0 of 81 rays hit the real alpaca, while the AABB test
+    // passed on every one of them - the box was found, the field was not.
+    //
+    // So outside the grid this returns the TRUE distance to the grid box,
+    // exactly as the shader's microMapWorld does (the two must agree: the
+    // CPU pick and the GPU render read the same field). The box CONTAINS the
+    // object, so the distance to the box is a lower bound on the distance to
+    // the object and 0.85 * it is a safe sphere-trace step. The floor keeps
+    // the step positive on the box face itself.
+    const glm::vec3 lo = origin;
+    const glm::vec3 hi = origin + extent();
+    if (p.x < lo.x || p.y < lo.y || p.z < lo.z ||
+        p.x >= hi.x || p.y >= hi.y || p.z >= hi.z) {
+        const glm::vec3 q = glm::max(lo - p, p - hi);
+        const float d = glm::length(glm::max(q, glm::vec3(0.0f))) +
+                        std::min(std::max(q.x, std::max(q.y, q.z)), 0.0f);
+        return std::max(d, 1e-4f);
+    }
     // Trilinear over cell centres, clamped at the border so an outside query
     // degrades to the edge value rather than reading garbage. The SVO tracer
     // walks a SDF to sphere-step, so a smooth field matters more than speed.

@@ -534,6 +534,58 @@ TEST_CASE("micro world: a micro object is PICKABLE")
     CHECK(!miss.hit);
 }
 
+TEST_CASE("micro world: the field is CONSERVATIVE outside its grid")
+{
+    // The regression that made a micro object unselectable in the app.
+    //
+    // Outside the field's grid there is no field at all, and a trilinear
+    // sampler that finds no cell in range returns 0. A sphere tracer that
+    // reads 0 steps 0, so the pick march crawled at its minimum step
+    // (a quarter of the object's own voxel) and covered ~0.6 m in its whole
+    // 512-step budget. The unit test above picks from 0.30 m, so it ARRIVED
+    // and passed; the app's camera is 15 m away, so the ray never reached the
+    // object and the alpaca could not be selected (measured: 0 of 81 rays
+    // hit, while the AABB test passed on every one of them).
+    //
+    // The shader already handles this (microMapWorld returns the TRUE
+    // distance to the world box outside it), so the CPU sampler must return
+    // the same thing: a positive, conservative distance.
+    const float vox = 0.005f;
+    WorldFileData d = cubeLayer(3, vox);
+    MicroField f;
+    std::string err;
+    REQUIRE(buildMicroField(d.voxels, d.meta, f, &err));
+
+    // Far outside the grid: a positive distance, and it GROWS with the
+    // distance from the box (that is what makes it a usable step).
+    const float far = 3.0f;
+    const float d1 = f.sampleSdf(f.aabbMax() + glm::vec3(far, 0.f, 0.f));
+    const float d2 = f.sampleSdf(f.aabbMax() + glm::vec3(2.f * far, 0.f, 0.f));
+    CHECK(d1 > 0.0f);
+    CHECK(d2 > d1);
+    // The distance is at least the distance to the grid (the box contains the
+    // object, so the box distance is a lower bound on the object distance and
+    // 0.85 * it is a safe sphere-trace step).
+    CHECK(d1 >= far - 1e-3f);
+
+    // A pick from a REALISTIC distance - the app's camera is ~15 m from the
+    // objects on the shore - must hit. This is the case the old sampler
+    // failed: the march never arrived.
+    const glm::vec3 offset(10.0f, 2.0f, 10.0f);
+    const int objCells = 7;
+    const glm::vec3 centre =
+        offset + glm::vec3(float(objCells - 1) * 0.5f * vox);
+    const glm::vec3 ro = centre + glm::vec3(15.0f, 0.0f, 0.0f);
+    const glm::vec3 rd = glm::normalize(centre - ro);
+    const MicroPick hit = pickMicroField(f, offset, ro, rd);
+    REQUIRE(hit.hit);
+    CHECK(std::abs(hit.dist - 15.0f) < 0.05f);
+    // And a ray that passes by the object still misses.
+    const MicroPick miss = pickMicroField(
+        f, offset, ro, glm::normalize(glm::vec3(centre.x - ro.x, 0.5f, 0.4f)));
+    CHECK(!miss.hit);
+}
+
 TEST_CASE("micro world: a micro object CASTS a shadow onto the world")
 {
     // The world's sun shadow is BAKED per surfel, so the "cast" half of the

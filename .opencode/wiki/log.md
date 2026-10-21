@@ -5545,3 +5545,28 @@ artifact view still changes **3.02 %** of pixels and a cabin-wall close-up
 being restored rather than dark disks added, but not zero. The geometry-level
 record count is the claim that survives; the old pixel numbers should not be
 quoted.
+
+## [2026-10-21] fix | A micro object renders but cannot be clicked
+
+The user reported that micro objects were still not selectable. The wiring was
+in place and the CPU pick unit test passed — and the pick still never hit
+anything. Root cause: `MicroField::sampleSdf` returned **0** outside the
+field's grid (the trilinear stencil finds no cell in range, so the accumulator
+never moves), and a sphere tracer that reads 0 **steps 0**. The pick march
+collapsed to its minimum step and covered ~0.6 m in its whole 512-step budget;
+the camera is 15 m from the shore, so the ray never arrived. Measured 0 of 81
+rays hitting the real alpaca, while the AABB test passed on every one — the
+box was found, the field was not.
+
+The GPU never had the bug: `microMapWorld` falls back to the true distance to
+the world's box outside it. The CPU sampler now mirrors the shader exactly.
+
+The unit test missed it because it cast its ray from **0.30 m** — inside the
+crawl's reach. The regression test now casts from **15 m**, the real distance,
+and pins the out-of-grid distance as positive and growing.
+
+Verified headlessly (no mouse, no synthetic input): `VF_TEST_MICRO_PICK=1`
+runs the app's own `pickMicroObjects` toward every micro object and reports
+**3/3 selectable**; `tests/micro_check.py` asserts it as a new check.
+
+See [[concepts/micro-voxel-svo-overlay]].

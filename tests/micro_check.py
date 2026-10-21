@@ -29,6 +29,11 @@ are reproducible rather than remembered:
   5. NO WORLD REGRESSION - the house view must be pixel-identical with the
      micro layers on and off. The overlay must not be able to touch the 0.1 m
      path.
+  6. SELECTABLE - a micro object lives outside the world's store, so the
+     pointer needs a pick of its own. The app's own pick path is exercised
+     headlessly (VF_TEST_MICRO_PICK), because a pick that silently misses is
+     invisible in a screenshot: the object renders perfectly and cannot be
+     clicked.
 
 SCOPE: this gate covers the VISIBLE outcome. It does NOT cover the SDF's
 quantisation - measured: with the whole-voxel encoding restored, this gate
@@ -45,6 +50,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import statistics
 import subprocess
 import sys
@@ -293,8 +299,6 @@ def main() -> int:
             cwd=ROOT, env=os.environ.copy(), capture_output=True, text=True,
             check=True,
         )
-        import re
-
         m = re.search(r"micro cast shadow darkened (\d+) surfel", proc.stdout + proc.stderr)
         note(
             m is not None and int(m.group(1)) >= 5,
@@ -396,7 +400,38 @@ def main() -> int:
                 % (s0[3], s90[3]),
             )
 
-        # 5. NO WORLD REGRESSION: the house view is untouched.
+        # 5. SELECTABLE. A micro object is NOT in the world's store - it is a
+        #    separate SVO world on its own fine lattice - so the pointer needs
+        #    a pick of its own, and that pick is invisible in a screenshot.
+        #    The bug this pins: the field's CPU sampler returned 0 outside
+        #    the field's grid, so the pick's sphere-trace stepped 0 and
+        #    crawled at its minimum step - it covered ~0.6 m in its whole
+        #    budget and never reached an object 15 m away. The alpaca
+        #    rendered perfectly and could not be clicked.
+        #    The app's OWN pick path (pickMicroObjects) is exercised
+        #    headlessly by VF_TEST_MICRO_PICK - no mouse, no synthetic
+        #    input, the same call the pointer makes.
+        print("[micro] checking that the micro objects are selectable ...")
+        set_micro({"micro/vase.vxw": True, "micro/urn.vxw": True,
+                   "micro/alpaca.vxw": True})
+        pick_env = os.environ.copy()
+        pick_env["VF_TEST_MICRO_PICK"] = "1"
+        pick_env["VF_OVERLAY_PATH"] = os.path.join(tmpdir, "overlay.vxw")
+        proc = subprocess.run(
+            [APP, "--shot", os.path.join(tmpdir, "pick.ppm"), "--cam", MICRO_CAM,
+             "--width", "320", "--height", "200"],
+            cwd=ROOT, env=pick_env, capture_output=True, text=True, check=True,
+        )
+        m = re.search(r"VF_TEST_MICRO_PICK: (\d+)/(\d+) micro objects selectable",
+                      proc.stdout + proc.stderr)
+        note(
+            m is not None and int(m.group(2)) >= 1
+            and int(m.group(1)) == int(m.group(2)),
+            "the micro objects are selectable (%s)"
+            % (m.group(0) if m else "no report at all"),
+        )
+
+        # 6. NO WORLD REGRESSION: the house view is untouched.
         print("[micro] rendering the house view (no micro object in it) ...")
         house_on = os.path.join(tmpdir, "house_on.ppm")
         house_off = os.path.join(tmpdir, "house_off.ppm")
