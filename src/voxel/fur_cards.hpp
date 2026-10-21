@@ -84,9 +84,11 @@ struct FurParams {
     // The card length (m). Alpaca fleece clumps are a few centimetres.
     float length = 0.030f;
     // The card width (m). A clump is a sliver, not a disk.
-    float width = 0.0022f;
-    // The cards per surface cell.
-    int perCell = 2;
+    float width = 0.0025f;
+    // The cards per surface cell. Four is the measured sweet spot: two left
+    // gaps (the coat was sparse at close range), and the extra cards bought
+    // very little beyond that.
+    int perCell = 4;
     // A card's peak alpha.
     float alpha = 0.34f;
     // The grid's cell size (m). Bigger than the card length, so a card

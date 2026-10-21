@@ -74,8 +74,7 @@ glm::vec3 fieldNormal(const MicroField& f, glm::vec3 pLocal)
 
 // A cheap ambient occlusion at the root: how much of the neighbourhood
 // around it is solid. Four taps in the tangent plane, one cell out.
-float bakedAo(const MicroField& f, glm::vec3 root, glm::vec3 n, glm::vec3 t1,
-              glm::vec3 t2)
+float bakedAo(const MicroField& f, glm::vec3 root, glm::vec3 t1, glm::vec3 t2)
 {
     const float r = 1.5f * f.voxel;
     int hits = 0;
@@ -221,7 +220,7 @@ bool buildFurCards(const MicroField& field, const FurParams& params, FurObject& 
         // The strand leaves the surface at an angle: a card that lies IN the
         // tangent plane would be invisible from the front, so the direction
         // is tilted out of the surface by 25..60 degrees.
-        const float ao = bakedAo(field, r.p, r.n, r.t1, r.t2);
+        const float ao = bakedAo(field, r.p, r.t1, r.t2);
         const float sh = bakedSunShadow(field, r.p, r.n, sun, maxShadowDist);
         for (int k = 0; k < params.perCell; ++k) {
             const int slot = k * 7;

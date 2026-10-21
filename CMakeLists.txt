@@ -339,6 +339,16 @@ add_test(NAME micro_check
     COMMAND ${Python3_EXECUTABLE} ${GROUP_GATE} visual,micro
             ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/tests/micro_check.py
             $<TARGET_FILE:voxelforge>)
+# The FUR cards: a translucent hair-card layer over the micro objects. The
+# gate measures the noise floor first, then the signal (the alpaca's pixels
+# must change), the confinement (the change must be a compact blob and the
+# house view must be untouched), the backend-independence (the SVO
+# reference must show it too) and the escape hatch (VF_FUR=0 must load no
+# fur object and render the same frame).
+add_test(NAME fur_check
+    COMMAND ${Python3_EXECUTABLE} ${GROUP_GATE} visual,micro,fur
+            ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/tests/fur_check.py
+            $<TARGET_FILE:voxelforge>)
 add_test(NAME ssao_check
     COMMAND ${Python3_EXECUTABLE} ${GROUP_GATE} effects
             ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/tests/ssao_check.py
@@ -413,6 +423,8 @@ set_tests_properties(box_select_check
     PROPERTIES LABELS "live-edit;preview;box-select" SKIP_RETURN_CODE 77)
 set_tests_properties(micro_check
     PROPERTIES LABELS "visual;micro" SKIP_RETURN_CODE 77)
+set_tests_properties(fur_check
+    PROPERTIES LABELS "visual;micro;fur" SKIP_RETURN_CODE 77)
 set_tests_properties(ssao_check
     PROPERTIES LABELS "effects;ssao" SKIP_RETURN_CODE 77)
 set_tests_properties(texture_check
@@ -498,6 +510,8 @@ vf_add_test_group(live-edit vf_tests voxelforge)
 # Brush preview only (no unit binary needed - it is all rendered frames).
 vf_add_test_group(preview voxelforge)
 vf_add_test_group(visual voxelforge)
+# The fur cards over the micro objects.
+vf_add_test_group(fur voxelforge)
 vf_add_test_group(effects voxelforge)
 vf_add_test_group(textures voxelforge)
 vf_add_test_group(fog voxelforge)

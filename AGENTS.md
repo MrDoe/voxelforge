@@ -972,6 +972,73 @@ one costs a whole turn, because the bad call is rejected before any work runs.
   check can detect the brick-clamped field. See
   `.opencode/wiki/concepts/micro-voxel-svo-overlay.md`.
 
+## Fur cards — a translucent layer over the micro objects
+- **A micro object is a SPHERE-TRACED SOLID: exact, opaque, hard-edged.** That
+  is right for a vase and wrong for an animal, whose coat is fuzz and whose
+  SILHOUETTE is the thing that says so. The fur is a separate, TRANSLUCENT
+  layer of **hair cards** — flat ribbons standing OUT of the surface, each
+  with a soft alpha profile across its width and a taper along its length.
+  One card stands for a clump of strands, so the cost scales with clumps.
+- **Why NOT the world's splats.** A surfel is a disk lying IN the tangent
+  plane, and the opaque base seal (the nearest fragment written at alpha 1)
+  is exactly what turns a lone silhouette splat into a hard-edged blob — the
+  documented fix is a coverage count in the unused D24_S8 stencil, not kernel
+  tuning. The fur sidesteps the whole question: it composites over an
+  already-opaque body, so transparency is correct by construction and the sky
+  only shows where a card reaches past the silhouette.
+- **The cards are generated on the CPU** (`src/voxel/fur_cards.{hpp,cpp}`) from
+  the field's SURFACE cells (a solid cell with a non-solid neighbour) whose
+  material grows fur — **21 `fleece`**; the vase and the urn (20 plaster) grow
+  nothing. Four cards per surface cell, 3 cm long, 2.5 mm wide, tilted 25–60°
+  out of the surface, groomed down it. The alpaca: **81 848 cards, 7.9 MB**,
+  **177 ms** at load. The cards live in the field's LOCAL frame, so the
+  layer's placement and the live rotation preview are applied by the shader
+  exactly as the micro overlay applies them to the field.
+- **The pass is a COMPUTE pass** (`shaders/fur_overlay.comp`,
+  `src/render/fur_pass.*`) that runs right after the micro overlay and
+  composites into the SAME HDR image. The G-buffer's world position is the
+  depth reference (a card behind the body or behind the world is dropped), so
+  it needs no depth attachment and touches no opaque pass. It is INERT when
+  no object carries fur: the dispatch is skipped and the frame is
+  byte-identical. `VF_FUR=0` is the escape hatch.
+- **Three things decide whether the coat reads at all**, and all three are
+  measured, not argued:
+  1. **The ribbon must be BILLBOARDED about the strand** (its width axis
+     perpendicular to the strand AND to the camera). A width axis taken from
+     the surface puts the ribbon in the tangent plane, so at the silhouette —
+     where the fuzz is most wanted — it is edge-on and vanishes. The
+     billboard left the changed-pixel count at 16 % of the near frame but
+     took its MEAN |diff| from 32 to 53, and the high-frequency noise from
+     18.4 to 15.4 (the bare body is 12.8).
+  2. **A card must never be thinner than ~1.5 px.** A sub-pixel card either
+     misses the pixel grid or lands on it whole, and the coat turns to
+     speckle; the card is widened to 1.5 px and its alpha scaled by the same
+     factor, so the ink is conserved. This alone took the high-frequency
+     noise from 20.9 to 19.0.
+  3. **The cards must be DENSE.** Two per cell left gaps (the coat was
+     sparse at close range); four is the measured sweet spot. More cards
+     beyond that buy very little.
+- **The alpha is a Gaussian across the width** — the same kernel shape the
+  splat backend uses, but on a sliver instead of a disk, so the edges are
+  transparent rather than a hard rim. The accumulation is the standard
+  many-layer approximation `1 - exp(-Σα)`, which is exact for the small
+  alphas a coat is made of, and the coverage composites the fur OVER the
+  body.
+- **The texture is sampled PER CARD**, not once per pixel: the fleece's
+  clumps are centimetres across, and one flat colour for the whole pixel
+  reads as washed-out plastic. The sky ambient is evaluated ONCE per pixel
+  (the sun term is the cards' average) — evaluating the sky per card costs a
+  sky evaluation per card hit, and a pixel through the coat hits a dozen.
+- Gate: `tests/fur_check.py` (the `fur` group) measures the noise floor
+  first, then the signal (the alpaca's pixels must change), the confinement
+  (the change must be a compact blob, and the house view must be untouched),
+  the backend-independence (the SVO reference must show it too) and the
+  escape hatch (`VF_FUR=0` must load no fur object and render the same
+  frame). `tests/test_micro.cpp` gains four cases: only a fur material grows
+  a coat, the roots sit ON the surface while the strands point OUT of it,
+  two builds of the same field yield the same cards, and every card is
+  filed in a cell that holds it.
+
 ## Shaders — data-only rule
 - `shaders/svo_raymarch.comp` is the SVO reference shader (+`taa_resolve.comp`,
   `post.comp`); `shaders/splat.{vert,frag}` are the primary

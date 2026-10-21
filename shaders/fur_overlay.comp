@@ -83,6 +83,9 @@ const float kWaterLevel = -0.9;
 
 const int MAX_FUR_WORLDS = 16;
 
+// A card is never drawn thinner than this many pixels.
+const float kMinCardPx = 1.5;
+
 // The rotation matrix (row-major in the table, read as columns here - the
 // same convention the micro overlay uses, so the two agree exactly).
 mat3 furRot(int w)
@@ -144,7 +147,7 @@ int cellIndex(ivec3 c, ivec3 dim)
 // accumulates the lighting terms.
 float cardHit(int w, uint ci, vec3 roL, vec3 rdL, float tMax, vec3 rd,
               inout vec3 sumSun, inout vec3 sumPos, inout vec3 sumNrm,
-              inout vec3 sumRec, inout float sumAo)
+              inout vec3 sumAlb, inout float sumAo)
 {
     const vec4 rootLen = fCard[ci * 5u + 0u];
     const vec4 dirWidth = fCard[ci * 5u + 1u];
@@ -158,13 +161,42 @@ float cardHit(int w, uint ci, vec3 roL, vec3 rdL, float tMax, vec3 rd,
     const float wid = max(dirWidth.w, 1e-4);
     const vec3 n = nrmAlpha.xyz;
 
-    // The card's width axis: perpendicular to both the strand and the
-    // surface normal, then TWISTED about the strand by the card's own
-    // angle, so the coat is not a set of identically oriented slivers.
-    vec3 side = cross(dir, n);
-    const float sl = length(side);
-    if (sl < 1e-5)
+    // The card's WIDTH AXIS, and this is the one decision that decides
+    // whether the coat reads at all.
+    //
+    // A card is a flat ribbon, and a flat ribbon has no area when it is seen
+    // edge-on. The width axis derived from the surface (perpendicular to the
+    // strand and to the surface normal) puts the ribbon IN the tangent
+    // plane, so at the SILHOUETTE - where the surface is edge-on to the
+    // camera, and where the fuzz is most wanted - the ribbon is edge-on too
+    // and vanishes. The silhouette would stay razor sharp and the coat would
+    // be a faint wash in the interior.
+    //
+    // So the ribbon is BILLBOARDED about the strand: its width axis is
+    // perpendicular to the strand AND to the direction to the camera, which
+    // makes the card always present its full width to the viewer. The strand
+    // direction still comes from the surface (the groom), and the surface
+    // normal is still the SHADING normal, so the coat is lit like the body.
+    //
+    // The card's own twist (tint.w) is applied about the strand, and the
+    // ribbon's PLANE is built from the twisted axis, so the plane the ray is
+    // intersected against and the axis the alpha is measured along are the
+    // same frame - no drift between the geometry and the shading.
+    vec3 toCam = roL - root;
+    const float tc = length(toCam);
+    if (tc < 1e-5)
         return 0.0;
+    toCam /= tc;
+    vec3 side = cross(dir, toCam);
+    float sl = length(side);
+    if (sl < 1e-4) {
+        // The strand points at the camera: the width axis is undefined, so
+        // fall back to the surface frame (the card is edge-on anyway).
+        side = cross(dir, n);
+        sl = length(side);
+        if (sl < 1e-5)
+            return 0.0;
+    }
     side /= sl;
     const float tw = tint.w;
     if (abs(tw) > 1e-4) {
@@ -174,7 +206,8 @@ float cardHit(int w, uint ci, vec3 roL, vec3 rdL, float tMax, vec3 rd,
     }
     const vec3 planeN = normalize(cross(dir, side));
 
-    // The ray/plane intersection.
+    // The ray/plane intersection. The ribbon's plane contains the strand and
+    // the direction to the camera, so its normal is perpendicular to both.
     const float denom = dot(rdL, planeN);
     if (abs(denom) < 1e-6)
         return 0.0;
@@ -188,7 +221,20 @@ float cardHit(int w, uint ci, vec3 roL, vec3 rdL, float tMax, vec3 rd,
     const float sAlong = dot(hit - root, dir) / len;
     if (sAlong < 0.0 || sAlong > 1.0)
         return 0.0;
-    const float u = dot(hit - root, side) / wid;
+
+    // The MINIMUM SCREEN-SPACE WIDTH. A card that is thinner than a pixel
+    // cannot be drawn: it either misses the pixel grid or lands on it whole,
+    // and the coat turns into speckle. So a card narrower than kMinCardPx is
+    // widened to that many pixels and its alpha scaled down by the same
+    // factor - the ink is conserved, the silhouette is not.
+    //
+    // The metres per pixel at the hit: the frame's height covers
+    // 2*tanHalfFov*t metres over pc.a.w pixels.
+    const float mpp = 2.0 * pc.a.x * tp / max(pc.a.w, 1.0);
+    const float minW = kMinCardPx * mpp;
+    const float wEff = max(wid, minW);
+    const float energy = wid / wEff; // the peak alpha follows the width
+    const float u = dot(hit - root, side) / wEff;
     if (abs(u) > 0.5)
         return 0.0;
 
@@ -199,10 +245,10 @@ float cardHit(int w, uint ci, vec3 roL, vec3 rdL, float tMax, vec3 rd,
     // wisp.
     const float x = u * 2.0;
     const float across = exp(-2.6 * x * x);
-    const float along = pow(max(1.0 - sAlong, 0.0), 0.6) *
+    const float along = sqrt(max(1.0 - sAlong, 0.0)) *
                         smoothstep(0.0, 0.06, sAlong) *
                         smoothstep(1.0, 0.82, sAlong);
-    const float a = nrmAlpha.w * across * along;
+    const float a = nrmAlpha.w * across * along * energy;
     if (a < 0.004)
         return 0.0;
 
@@ -222,8 +268,22 @@ float cardHit(int w, uint ci, vec3 roL, vec3 rdL, float tMax, vec3 rd,
     sumSun += vec3(a * ndl * shadow);
     sumPos += a * pWorld;
     sumNrm += a * nWorld;
-    // The record's own colour, for a material with no texture bound.
-    sumRec += a * tint.rgb;
+    // The card's OWN albedo, sampled at the card's position. Evaluating the
+    // texture once per pixel (at the average position) instead would give the
+    // whole coat one flat colour - the fleece's clumps are centimetres
+    // across, so the per-card sample is what keeps the variation.
+    //
+    // A TEXTURED material takes its colour from the atlas and IGNORES the
+    // record's colour (the same rule the world follows); an untextured one
+    // keeps the record's colour.
+    const uint mId = uint(shade.z + 0.5);
+    vec3 alb = kPalette[clamp(mId, 0u, 21u)];
+    const vec3 tex = sampleTex(pWorld, nWorld, mId);
+    if (tex.r >= 0.0)
+        alb = tex;
+    else
+        alb = tint.rgb;
+    sumAlb += a * alb;
     sumAo += a * shade.x;
     return a;
 }
@@ -231,7 +291,7 @@ float cardHit(int w, uint ci, vec3 roL, vec3 rdL, float tMax, vec3 rd,
 // The DDA over one object's card grid.
 void accumulateWorld(int w, vec3 ro, vec3 rd, float sceneT, inout float sumA,
                      inout vec3 sumSun, inout vec3 sumPos, inout vec3 sumNrm,
-                     inout vec3 sumRec, inout float sumAo, inout uint matId)
+                     inout vec3 sumAlb, inout float sumAo, inout uint matId)
 {
     const FurWorld W = ft.uWorlds[w];
     if (W.cards.y <= 0.0)
@@ -339,11 +399,12 @@ void accumulateWorld(int w, vec3 ro, vec3 rd, float sceneT, inout float sumA,
         const uint c1 = fCellStart[startBase + uint(li) + 1u];
         for (uint k = c0; k < c1; ++k) {
             const uint ci = fCellItems[itemBase + k];
-            const float a = cardHit(w, W.cards.x + ci, roL, rdL, tExit, rd, sumSun,
-                                    sumPos, sumNrm, sumRec, sumAo);
+            const uint card = uint(W.cards.x) + ci;
+            const float a = cardHit(w, card, roL, rdL, tExit, rd, sumSun, sumPos,
+                                    sumNrm, sumAlb, sumAo);
             if (a > 0.0) {
                 sumA += a;
-                matId = uint(fCard[(W.cards.x + ci) * 5u + 4u].z + 0.5);
+                matId = uint(fCard[card * 5u + 4u].z + 0.5);
             }
         }
         // Advance to the next cell.
@@ -388,12 +449,12 @@ void main()
     vec3 sumSun = vec3(0.0);
     vec3 sumPos = vec3(0.0);
     vec3 sumNrm = vec3(0.0);
-    vec3 sumRec = vec3(0.0);
+    vec3 sumAlb = vec3(0.0);
     float sumAo = 0.0;
     uint matId = 0u;
 
     for (int w = 0; w < int(ft.uInfo.x) && w < MAX_FUR_WORLDS; ++w) {
-        accumulateWorld(w, ro, rd, sceneT, sumA, sumSun, sumPos, sumNrm, sumRec,
+        accumulateWorld(w, ro, rd, sceneT, sumA, sumSun, sumPos, sumNrm, sumAlb,
                         sumAo, matId);
     }
     if (sumA < 0.003)
@@ -410,13 +471,21 @@ void main()
     vec3 light = sunCol() * (sumSun / sumA);
     light += skyIrradiance(nAvg) * (0.28 + 0.30 * aoAvg);
 
-    // The albedo. A TEXTURED material takes its colour from the atlas and
-    // IGNORES the record's own colour (the same rule the world follows); an
-    // untextured one keeps the record's colour.
-    vec3 base = kPalette[clamp(matId, 0u, 21u)];
-    if (uTex.matTex[matId].x < 0.0)
-        base = sumRec / sumA;
-    const vec3 alb = detailAlbedo(base, pAvg, nAvg, matId);
+    // The albedo: the alpha-weighted average of the CARDS' own colours, so
+    // the coat keeps the fleece's variation instead of one flat tone.
+    vec3 alb = sumAlb / sumA;
+    if (uTex.matTex[matId].x >= 0.0) {
+        // A TEXTURED material: the universal mottling and grain only (the
+        // photo carries its own accents). This is detailAlbedo's textured
+        // path, spelled out because the texture itself was already sampled
+        // per card.
+        alb *= 0.86 + 0.28 * fbm(pAvg.xz * 1.7 + pAvg.y * 1.3);
+        alb *= 0.93 + 0.10 * vnoise(pAvg.xz * 23.0 + pAvg.y * 17.0);
+    } else {
+        // An untextured material keeps its record's colour and gets the
+        // per-material accents.
+        alb = detailAlbedo(alb, pAvg, nAvg, matId);
+    }
 
     // The coverage. The cards are composited back-to-front in the ideal
     // case; here the accumulated alpha is the standard many-layer

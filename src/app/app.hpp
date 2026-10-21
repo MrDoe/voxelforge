@@ -250,6 +250,11 @@ private:
     // objects' world AABBs (the cards are generated in the field's local
     // frame, so the world min is what turns that frame into the world one).
     std::vector<vf::voxel::FurObject> m_furObjects;
+    // The fur index of each MICRO world (-1 when that object carries no
+    // fur), so the live preview can be mirrored onto the fur. The two lists
+    // are indexed differently on purpose: the fur pass has its own table, and
+    // a micro object without fur simply has no entry in it.
+    std::vector<int> m_furIndexOfMicro;
     // Sun: m_sunDir is the single source of truth for where the sun is (it
     // rides the per-frame push constant), so every control that moves the sun
     // funnels through setSunAngles and nothing keeps parallel angle floats.
