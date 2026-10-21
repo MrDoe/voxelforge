@@ -60,6 +60,12 @@ struct MicroBehaviour {
     float stateT = 0.f;       // the seconds in the current state
     float gait = 0.f;         // the gait phase (radians)
     float heading = 0.f;      // the wander heading (radians)
+    // A heading the animal is TURNING TOWARD, at a limited rate. The
+    // collision response sets it (a direction the animal must try) instead
+    // of jumping the heading: a jump is applied EVERY frame while the
+    // obstacle is still there, and the animal spins in place.
+    float headingTarget = 0.f;
+    bool hasHeadingTarget = false;
     float wander = 0.f;       // the wander phase (drives the heading)
     float seed = 0.f;         // the per-object phase offset
     glm::vec3 anchor { 0.f }; // the home position (the placed position)

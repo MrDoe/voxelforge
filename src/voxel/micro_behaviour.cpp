@@ -8,6 +8,11 @@ namespace vf::voxel {
 
 namespace {
 
+// How long the graze takes to lean down and to straighten up (seconds), and
+// how long it stays down before it wanders off again.
+constexpr float kGrazeEase = 2.5f;
+constexpr float kGrazeHold = 3.0f;
+
 // A deterministic 0..1 value from a seed, so a behaviour is reproducible:
 // the same animal grazes at the same moments on every run (a gate that
 // measures the motion needs that).
@@ -105,7 +110,23 @@ void MicroBehaviour::update(float dt)
         while (d < -3.14159265f) d += 6.28318531f;
         pull = std::clamp(d, -1.2f, 1.2f);
     }
-    heading += (0.45f * std::sin(wander * 0.6f + seed) + 1.1f * pull) * dt;
+    // A pending target (the collision response) wins over the wander, and
+    // the turn is RATE LIMITED: the animal swings its body round instead of
+    // snapping, and the wander resumes when it has arrived.
+    if (hasHeadingTarget) {
+        float d = headingTarget - heading;
+        while (d > 3.14159265f) d -= 6.28318531f;
+        while (d < -3.14159265f) d += 6.28318531f;
+        const float maxTurn = 1.1f * dt;   // rad/s
+        if (std::abs(d) <= maxTurn) {
+            heading = headingTarget;
+            hasHeadingTarget = false;
+        } else {
+            heading += (d > 0.f ? maxTurn : -maxTurn);
+        }
+    } else {
+        heading += (0.45f * std::sin(wander * 0.6f + seed) + 1.1f * pull) * dt;
+    }
     if (heading > 3.14159265f) heading -= 6.28318531f;
     if (heading < -3.14159265f) heading += 6.28318531f;
 
@@ -123,11 +144,14 @@ void MicroBehaviour::update(float dt)
     // The graze: a bow that eases in over the first second and out over the
     // last. The blend is the smoothstep, so the animal leans down and
     // straightens up rather than jerking.
+    // The graze eases IN and OUT over a couple of seconds each: an animal
+    // that snaps its head down reads as a glitch, one that leans down
+    // slowly reads as an animal deciding to eat.
     float graze = 0.f;
     if (state == State::Graze) {
-        const float inT = smoothstep01(stateT / 1.0f);
-        const float outT = smoothstep01((3.0f + 5.0f * hash01(seed + 2.0f) -
-                                         stateT) / 1.0f);
+        const float inT = smoothstep01(stateT / kGrazeEase);
+        const float outT = smoothstep01((kGrazeHold + 5.0f * hash01(seed + 2.0f) -
+                                         stateT) / kGrazeEase);
         graze = std::min(inT, outT);
     }
 
@@ -187,6 +211,13 @@ void MicroBehaviour::animateBones()
     });
 
     const float stride = gait;
+    // How far down the animal is leaning (0 = standing, 1 = fully bowed).
+    const float grazeBlend = (state == State::Graze)
+                                 ? std::min(smoothstep01(stateT / kGrazeEase),
+                                            smoothstep01((kGrazeHold +
+                                                          5.0f * hash01(seed + 2.0f) -
+                                                          stateT) / kGrazeEase))
+                                 : 0.f;
     for (size_t i = 0; i < n; ++i) {
         const MicroBone& b = rig.bones[i];
         float angle = 0.f;
@@ -206,11 +237,20 @@ void MicroBehaviour::animateBones()
             angle = std::sin(stride + ph) * 0.32f;
             break;
         }
+        case BoneRole::Spine: {
+            // The BOW. The spine's segment starts at the body's BACK, so a
+            // pitch about it drops the FRONT - the animal leans over its
+            // front legs to reach the grass, the way a grazing quadruped
+            // does. Without it the head can only dip by the length of its
+            // neck (0.32 m on the alpaca), which is nowhere near the ground.
+            angle = grazeBlend * 0.62f;
+            axis = side;
+            break;
+        }
         case BoneRole::Head: {
-            // A nod with the stride, and the graze dip on top of it.
-            const float graze = (state == State::Graze) ? 1.f : 0.f;
-            angle = 0.06f * std::sin(stride * 2.f) + graze * 0.55f;
-            axis = fwd;
+            // The head and neck reach down and forward, on top of the bow.
+            angle = 0.06f * std::sin(stride * 2.f) + grazeBlend * 0.50f;
+            axis = side;
             break;
         }
         case BoneRole::Tail: {
@@ -218,7 +258,6 @@ void MicroBehaviour::animateBones()
             axis = up;
             break;
         }
-        case BoneRole::Spine:
         default:
             angle = 0.f;
             break;

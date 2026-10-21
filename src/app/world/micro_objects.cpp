@@ -428,26 +428,44 @@ void App::updateMicroBehaviours(float dt)
         // the only state that cannot walk into the obstacle next frame.
         if (i < m_microFields.size() &&
             microFootprintBlocked(int(i), b.offset)) {
-            const float step = b.speed * std::min(dt, 0.1f);
+            // The animal is touching something. It must TURN AWAY, and the
+            // turn must be a TARGET, not a jump: a jump is applied on every
+            // frame while the obstacle is still there, so the heading
+            // advanced +1.2 rad EVERY FRAME and the animal span in place -
+            // which is what the flickering and the "moving too fast" turned
+            // out to be. With a target the animal swings round at a limited
+            // rate and walks off once it faces clear ground.
+            //
+            // The step here is the animal's own FOOTPRINT, not the frame's:
+            // the frame's step is a fraction of a millimetre in a headless
+            // run, so a candidate a hair away is still inside the obstacle
+            // and no turn ever looks clear.
+            const float step = std::max(b.speed * std::min(dt, 0.1f), 0.55f);
             static const float kTurns[] = { 1.2f, -1.2f, 2.2f, -2.2f,
                                             3.0f, -3.0f };
-            bool routed = false;
-            for (float turn : kTurns) {
-                glm::vec3 cand = prevOffset;
-                cand.x += std::sin(prevHeading + turn) * step;
-                cand.z += std::cos(prevHeading + turn) * step;
-                if (!microFootprintBlocked(int(i), cand)) {
-                    b.heading = prevHeading + turn;
-                    routed = true;
-                    break;
+            if (!b.hasHeadingTarget) {
+                for (float turn : kTurns) {
+                    glm::vec3 cand = prevOffset;
+                    cand.x += std::sin(prevHeading + turn) * step;
+                    cand.z += std::cos(prevHeading + turn) * step;
+                    if (!microFootprintBlocked(int(i), cand)) {
+                        b.headingTarget = prevHeading + turn;
+                        b.hasHeadingTarget = true;
+                        break;
+                    }
                 }
             }
             b.offset = prevOffset;
             b.gait = prevGait;
-            if (!routed) {
+            if (!b.hasHeadingTarget) {
+                // Every direction is blocked: the animal is inside
+                // something. It stops and grazes, and the walk resumes when
+                // the obstacle is gone.
                 b.state = vf::voxel::MicroBehaviour::State::Graze;
                 b.stateT = 0.0f;
             }
+        } else {
+            b.hasHeadingTarget = false;
         }
 
         // GROUND CLAMP. A walking animal must not sink into the terrain: lift
@@ -481,6 +499,12 @@ void App::updateMicroBehaviours(float dt)
                 }
             }
         }
+        if (getenv("VF_TRACE_BEHAVIOUR"))
+            spdlog::info("behaviour {} frame {} offset=({:+.4f},{:+.4f},{:+.4f}) "
+                         "heading={:+.2f} gait={:+.2f} state {}",
+                         i, m_frameIdx, double(b.offset.x), double(b.offset.y),
+                         double(b.offset.z), double(b.heading), double(b.gait),
+                         int(b.state));
         m_microSvoPass.setWorldAnimation(i, b.offset, b.rot, b.pivot, true);
         // The SKELETON's bones: the gait drives them, and the pass rewrites
         // their rotations (the segments and the joints stay as they were
