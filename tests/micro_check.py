@@ -97,14 +97,23 @@ def render(out: str, cam: str, w: int = W, h: int = H, mode: str = "",
         env["VF_RENDER_FLAGS"] = flags
     if extra_env:
         env.update(extra_env)
-    subprocess.run(
+    # The output is CAPTURED, not discarded: a render that fails must say
+    # why (a gate that fails with "returned non-zero exit status 1" and no
+    # output is a gate that cannot be diagnosed).
+    proc = subprocess.run(
         cmd,
-        check=True,
+        check=False,
         cwd=ROOT,
         env=env,
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
     )
+    if proc.returncode != 0:
+        print("FAIL: the render failed (%d):" % proc.returncode)
+        for line in (proc.stdout or "").splitlines()[-12:]:
+            print("    " + line)
+        raise SystemExit(proc.returncode)
 
 
 def read_ppm(path: str) -> tuple[int, int, bytes]:
