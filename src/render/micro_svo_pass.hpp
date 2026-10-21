@@ -57,6 +57,11 @@ public:
     void setWorldAnimation(size_t worldIndex, glm::vec3 offset, glm::mat3 R,
                            glm::vec3 pivot, bool active);
 
+    // Rewrite the SKELETON's bone rotations of one micro world. The gait
+    // drives them every frame; the segments and the joints stay as they were
+    // uploaded.
+    void setBoneRotations(size_t worldIndex, const std::vector<glm::mat3>& rot);
+
     bool empty() const { return m_worldCount == 0; }
     size_t worldCount() const { return m_worldCount; }
     size_t gpuBytes() const;

@@ -30,7 +30,8 @@ struct NormalizedCall {
 
 inline const char* kValidTools =
     "create_box, create_cylinder, create_ellipsoid, create_stamp, create_voxels, "
-    "write_object, read_object, delete_object, import_mesh, list_world, probe";
+    "write_object, read_object, delete_object, import_mesh, list_world, probe, "
+    "set_behaviour";
 
 // lowercase alnum key with verb prefixes and trailing instance counters stripped:
 // "Add_Rock_2" -> "rock", "create-box" -> "box", "LIST_WORLD" -> "listworld"
@@ -78,6 +79,10 @@ inline std::string canonicalToolName(const std::string& key)
         return "list_world";
     if (key == "probe")
         return "probe";
+    // telling an animal what to do ("let the alpaca run")
+    if (has("behaviour") || has("behavior") || has("run") || has("graze") ||
+        has("walk") || has("animate") || has("command"))
+        return "set_behaviour";
     // object-layer file ops (read/modify/write/delete standalone .vxw layers)
     if (has("import") || has("stl") || has("objfile") || has("convert"))
         return "import_mesh";
@@ -224,6 +229,29 @@ inline bool parseStampCells(const std::string& json, std::vector<StampCellLite>&
 // --- tiny find-by-key JSON argument extractors ------------------------------
 // Shared by the in-game ChatUi tool dispatcher and the MCP server. They are
 // deliberately forgiving: whitespace-tolerant, silent on type mismatches.
+inline bool jsonGetString(const std::string& json, const char* key, std::string& out)
+{
+    // A JSON string value: the key, a colon, and a quoted string. The
+    // arguments are tiny hand-written JSON, so this is a scan, not a parser.
+    const std::string pat = std::string("\"") + key + "\"";
+    size_t p = json.find(pat);
+    if (p == std::string::npos)
+        return false;
+    size_t c = json.find(':', p + pat.size());
+    if (c == std::string::npos)
+        return false;
+    size_t s = c + 1;
+    while (s < json.size() && std::isspace((unsigned char)json[s]))
+        ++s;
+    if (s >= json.size() || json[s] != '"')
+        return false;
+    const size_t e = json.find('"', s + 1);
+    if (e == std::string::npos)
+        return false;
+    out = json.substr(s + 1, e - s - 1);
+    return true;
+}
+
 inline bool jsonGetInt(const std::string& json, const char* key, int& out)
 {
     std::string pat = std::string("\"") + key + "\"";

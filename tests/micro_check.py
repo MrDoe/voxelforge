@@ -205,6 +205,19 @@ def restore_micro() -> None:
           "check `git diff assets/world.json`")
 
 
+def micro_pos(name: str) -> tuple[float, float, float]:
+    """The world position of a micro layer, from the manifest. The gate has
+    to follow it: the alpaca is moved around by hand (and by the behaviour),
+    and a hardcoded camera would measure empty ground."""
+    with open(MANIFEST) as f:
+        doc = json.load(f)
+    for layer in doc.get("layers", []):
+        if layer.get("role") == "micro" and layer.get("name") == name:
+            p = layer["pos"]
+            return float(p[0]), float(p[1]), float(p[2])
+    return (0.0, 0.0, 0.0)
+
+
 def differing(a: bytes, b: bytes, thr: int = 16) -> list[int]:
     return [
         i
@@ -525,6 +538,37 @@ def main() -> int:
              "the Ctrl+LMB pick selects a micro object (%d picks)" % picked)
         note(activated > 0,
              "a plain click activates a micro object (%d activations)" % activated)
+
+        # 5e. THE AUTONOMOUS BEHAVIOUR. The animal walks on its own, and
+        #     the AI can tell it what to do ("let the alpaca run").
+        print("[micro] checking the autonomous behaviour ...")
+        ap = micro_pos("alpaca")
+        bcam = "%.2f,%.2f,%.2f,%.2f,%.2f,%.2f" % (
+            ap[0] - 0.6, ap[1] + 1.2, ap[2] - 1.1,
+            ap[0], ap[1] + 0.45, ap[2])
+        walk0 = os.path.join(tmpdir, "walk0.ppm")
+        walk1 = os.path.join(tmpdir, "walk1.ppm")
+        render(walk0, bcam, 600, 500,
+               extra_env={"VF_TEST_MICRO_BEHAVIOUR": "0"})
+        render(walk1, bcam, 600, 500,
+               extra_env={"VF_TEST_MICRO_BEHAVIOUR": "1.2"})
+        _, _, wa = read_ppm(walk0)
+        _, _, wb = read_ppm(walk1)
+        wpx = differing(wa, wb)
+        note(len(wpx) > 500,
+             "the animal moves on its own (%d px changed)" % len(wpx))
+        # The AI's command: the same path the chat's "set_behaviour" tool
+        # takes, driven headlessly.
+        cmd_env = os.environ.copy()
+        cmd_env["VF_TEST_BEHAVIOUR_CMD"] = "alpaca:run:0.6"
+        cmd_env["VF_OVERLAY_PATH"] = os.path.join(tmpdir, "overlay.vxw")
+        proc = subprocess.run(
+            [APP, "--smoke", "60", "--width", "480", "--height", "320"],
+            cwd=ROOT, env=cmd_env, capture_output=True, text=True, check=True)
+        out = proc.stdout + proc.stderr
+        note("-> run" in out,
+             "the AI can tell the animal what to do (%s)"
+             % ("ok" if "-> run" in out else "no command in the log"))
 
         # 6. NO WORLD REGRESSION: the house view is untouched.
         print("[micro] rendering the house view (no micro object in it) ...")

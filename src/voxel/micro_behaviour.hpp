@@ -20,7 +20,11 @@
 // user's, not the animal's.
 #pragma once
 
+#include "voxel/micro_rig.hpp"
+
 #include <glm/glm.hpp>
+
+#include <vector>
 
 namespace vf::voxel {
 
@@ -29,6 +33,18 @@ struct MicroBehaviour {
         Walk,   // it wanders, with a gait
         Graze,  // it has stopped and is grazing
     };
+
+    // What the behaviour is TOLD to do. Auto is the animal's own choice (it
+    // walks and grazes as it pleases); the others are an instruction - from
+    // the user or from the AI ("let the alpaca run") - and it holds until it
+    // is changed.
+    enum class Command {
+        Auto,   // the animal decides
+        Walk,   // keep walking
+        Graze,  // stop and graze
+        Stop,   // stand still
+    };
+    Command command = Command::Auto;
 
     // The configuration. The defaults suit a 1.3 m animal; a manifest can
     // override them through the layer's "behaviour" block.
@@ -52,6 +68,16 @@ struct MicroBehaviour {
     glm::vec3 pivot { 0.f };  // the rotation pivot (the bottom-centre)
     bool active = false;      // the layer asked for a behaviour
 
+    // The SKELETON. The rig is DERIVED from the object's own voxels (so a
+    // newly imported model animates too) and the gait below drives it by
+    // ROLE, not by a hand-written bone list.
+    MicroRig rig;
+    // The per-bone rotation and the joint it turns about, filled by
+    // animateBones(). A bone's joint is the end of its segment that touches
+    // the core, so a leg turns at the hip.
+    std::vector<glm::mat3> boneRot;
+    std::vector<glm::vec3> boneJoint;
+
     // Set the behaviour up for an object placed at `pos`. `seed` makes two
     // animals of the same kind behave differently (they do not graze in
     // lockstep and they do not turn the same way).
@@ -59,6 +85,11 @@ struct MicroBehaviour {
 
     // Advance by dt seconds and recompute the transform.
     void update(float dt);
+
+    // The GAIT: the legs swing in diagonal pairs, the head nods, the tail
+    // sways. It is driven by the rig's roles, so it works on any rig - an
+    // imported cat animates the same way an imported horse does.
+    void animateBones();
 
     // The INVERSE of the animated transform: a world point (or a direction)
     // into the object's own frame. The pick needs it - a moving object is

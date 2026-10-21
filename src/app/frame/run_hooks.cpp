@@ -25,6 +25,73 @@ namespace app {
 // highlight outline.
 void App::runPreInputTestHooks()
 {
+    // VF_TEST_BEHAVIOUR_CMD="name:command[:speed]": tell a micro object what
+    // to do, the way the AI tool does ("let the alpaca run"). It runs in the
+    // PRE-input hook so the command is in force for the frame.
+    if (const char* testCmd = getenv("VF_TEST_BEHAVIOUR_CMD");
+        testCmd && *testCmd) {
+        static bool done = false;
+        if (!done) {
+            done = true;
+            std::string spec(testCmd);
+            std::string who = spec, cmd, speedStr;
+            const size_t c1 = spec.find(':');
+            if (c1 != std::string::npos) {
+                who = spec.substr(0, c1);
+                const size_t c2 = spec.find(':', c1 + 1);
+                if (c2 != std::string::npos) {
+                    cmd = spec.substr(c1 + 1, c2 - c1 - 1);
+                    speedStr = spec.substr(c2 + 1);
+                } else {
+                    cmd = spec.substr(c1 + 1);
+                }
+            }
+            const float speed = speedStr.empty() ? 0.f : float(atof(speedStr.c_str()));
+            const bool ok = setMicroBehaviour(who, cmd, speed);
+            spdlog::info("VF_TEST_BEHAVIOUR_CMD: '{}' -> '{}' ({})", who, cmd,
+                         ok ? "ok" : "NO SUCH ANIMAL");
+        }
+    }
+
+    // VF_TEST_MICRO_BEHAVIOUR="seconds": fast-forward the autonomous
+    // behaviours, so a headless render shows the animal at that point in its
+    // walk. The behaviour is advanced in the same 0.1 s steps the frame loop
+    // uses (the step is clamped there, so a long frame cannot teleport it).
+    //
+    // It runs HERE, in the PRE-input hook, and not after: the behaviour is
+    // advanced (and pushed to the micro pass) during the frame, so a
+    // fast-forward that lands after the frame would only show up in the
+    // NEXT one - and a one-frame shot would never see it at all.
+    if (const char* testBehaviour = getenv("VF_TEST_MICRO_BEHAVIOUR");
+        testBehaviour && *testBehaviour) {
+        static bool done = false;
+        if (!done) {
+            done = true;
+            const float seconds = float(atof(testBehaviour));
+            const int steps = int(seconds / 0.1f);
+            for (auto& b : m_microBehaviours) {
+                if (!b.active)
+                    continue;
+                for (int i = 0; i < steps; ++i) {
+                    b.update(0.1f);
+                    // Every tenth step, so a gate can measure how FAR the
+                    // animal moves per step: a teleport would be metres, a
+                    // walk is centimetres.
+                    if (i % 10 == 9)
+                        spdlog::info("VF_TEST_MICRO_BEHAVIOUR: t={:.1f} "
+                                     "offset=({:+.3f},{:+.3f},{:+.3f}) state={}",
+                                     double(i + 1) * 0.1, double(b.offset.x),
+                                     double(b.offset.y), double(b.offset.z),
+                                     int(b.state));
+                }
+                spdlog::info("VF_TEST_MICRO_BEHAVIOUR: fast-forwarded {:.1f} s "
+                             "-> offset ({:+.3f},{:+.3f},{:+.3f}) state {}",
+                             seconds, double(b.offset.x), double(b.offset.y),
+                             double(b.offset.z), int(b.state));
+            }
+        }
+    }
+
     // GUI test hook: toggle one layer exactly like the checkbox does
     static const char* guiTestName = getenv("VF_GUI_TEST");
     if (guiTestName && *guiTestName && m_frameIdx == 20 && !m_worldLayers.empty()) {
@@ -291,30 +358,6 @@ void App::runPostInputTestHooks(const char* testRotateLive)
                     pivot, glm::mat3(1.f), m_moveDelta, true,
                     m_layers.layerId(m_moveLayer));
                 refreshPreviewLights(); // carried lamps + derived clusters ride the synthetic pose
-            }
-        }
-    }
-
-    // VF_TEST_MICRO_BEHAVIOUR="seconds": fast-forward the autonomous
-    // behaviours, so a headless render shows the animal at that point in its
-    // walk. The behaviour is advanced in the same 0.1 s steps the frame loop
-    // uses (the step is clamped there, so a long frame cannot teleport it).
-    if (const char* testBehaviour = getenv("VF_TEST_MICRO_BEHAVIOUR");
-        testBehaviour && *testBehaviour) {
-        static bool done = false;
-        if (!done) {
-            done = true;
-            const float seconds = float(atof(testBehaviour));
-            const int steps = int(seconds / 0.1f);
-            for (auto& b : m_microBehaviours) {
-                if (!b.active)
-                    continue;
-                for (int i = 0; i < steps; ++i)
-                    b.update(0.1f);
-                spdlog::info("VF_TEST_MICRO_BEHAVIOUR: fast-forwarded {:.1f} s "
-                             "-> offset ({:+.3f},{:+.3f},{:+.3f}) state {}",
-                             seconds, double(b.offset.x), double(b.offset.y),
-                             double(b.offset.z), int(b.state));
             }
         }
     }

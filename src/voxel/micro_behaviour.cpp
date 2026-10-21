@@ -69,8 +69,17 @@ void MicroBehaviour::update(float dt)
     wander += dt;
 
     // The state machine. The durations come from the seed, so two alpacas
-    // do not graze in lockstep.
-    if (state == State::Walk) {
+    // do not graze in lockstep. A COMMAND overrides it: the animal keeps
+    // walking when it is told to, and keeps grazing when it is told to
+    // (the AI can say "let the alpaca run" and it runs).
+    if (command == Command::Walk) {
+        state = State::Walk;
+    } else if (command == Command::Graze) {
+        state = State::Graze;
+    } else if (command == Command::Stop) {
+        state = State::Graze;
+        stateT = 0.f;
+    } else if (state == State::Walk) {
         if (stateT > 5.0f + 6.0f * hash01(seed + 1.0f)) {
             state = State::Graze;
             stateT = 0.f;
@@ -102,8 +111,9 @@ void MicroBehaviour::update(float dt)
 
     // The walk: the offset advances along the heading. The gait phase is
     // driven by the DISTANCE travelled, not by the time, so the feet keep
-    // their rhythm when the animal turns or slows.
-    if (walking) {
+    // their rhythm when the animal turns or slows. A STOP freezes it (the
+    // animal stands, it does not skate).
+    if (walking && command != Command::Stop) {
         const float step = speed * dt;
         offset.x += std::sin(heading) * step;
         offset.z += std::cos(heading) * step;
@@ -133,6 +143,89 @@ void MicroBehaviour::update(float dt)
     const glm::mat3 tilt = axisRotation(glm::vec3(1, 0, 0), pitch);
     rot = yaw * roll * tilt;
     offset.y = bob;
+}
+
+void MicroBehaviour::animateBones()
+{
+    // The GAIT, driven by the rig's roles.
+    //
+    // The legs swing about their joints, in DIAGONAL pairs (a walk, not a
+    // trot): the pairs come from the rig's own leg order, which the
+    // derivation sorted along the spine, so the front-left swings with the
+    // back-right. The head nods with the stride and dips further when the
+    // animal grazes; the tail sways.
+    if (rig.bones.empty())
+        return;
+    const size_t n = rig.bones.size();
+    if (boneRot.size() != n) {
+        boneRot.assign(n, glm::mat3(1.f));
+        boneJoint.resize(n);
+        for (size_t i = 0; i < n; ++i)
+            boneJoint[i] = rig.bones[i].a;
+    }
+    // The frame: up and forward come from the derivation, and the side axis
+    // (across the body) is their cross product.
+    const glm::vec3 up = rig.up;
+    glm::vec3 fwd = rig.forward;
+    glm::vec3 side = glm::cross(up, fwd);
+    if (glm::length(side) < 1e-5f)
+        side = glm::vec3(1.f, 0.f, 0.f);
+    side = glm::normalize(side);
+    fwd = glm::normalize(glm::cross(side, up));
+
+    // The legs, sorted along the spine, so the pairs are diagonal.
+    std::vector<size_t> legs;
+    for (size_t i = 0; i < n; ++i)
+        if (rig.bones[i].role == BoneRole::Leg)
+            legs.push_back(i);
+    std::sort(legs.begin(), legs.end(), [&](size_t a, size_t b) {
+        const float fa = glm::dot(rig.bones[a].a, fwd);
+        const float fb = glm::dot(rig.bones[b].a, fwd);
+        if (std::abs(fa - fb) > 1e-3f)
+            return fa > fb; // the front legs first
+        return glm::dot(rig.bones[a].a, side) > glm::dot(rig.bones[b].a, side);
+    });
+
+    const float stride = gait;
+    for (size_t i = 0; i < n; ++i) {
+        const MicroBone& b = rig.bones[i];
+        float angle = 0.f;
+        glm::vec3 axis = side;
+        switch (b.role) {
+        case BoneRole::Leg: {
+            // The diagonal pairs: the first and the last of the sorted legs
+            // swing together, the middle two together.
+            size_t rank = 0;
+            for (size_t k = 0; k < legs.size(); ++k)
+                if (legs[k] == i)
+                    rank = k;
+            const bool phase0 = (rank == 0) || (rank + 1 == legs.size());
+            const float ph = phase0 ? 0.f : 3.14159265f;
+            // The swing is about the leg's own axis across the body, and it
+            // is larger for the leg that is BEHIND (it has to catch up).
+            angle = std::sin(stride + ph) * 0.32f;
+            break;
+        }
+        case BoneRole::Head: {
+            // A nod with the stride, and the graze dip on top of it.
+            const float graze = (state == State::Graze) ? 1.f : 0.f;
+            angle = 0.06f * std::sin(stride * 2.f) + graze * 0.55f;
+            axis = fwd;
+            break;
+        }
+        case BoneRole::Tail: {
+            angle = 0.22f * std::sin(stride + 1.1f);
+            axis = up;
+            break;
+        }
+        case BoneRole::Spine:
+        default:
+            angle = 0.f;
+            break;
+        }
+        boneJoint[i] = b.a;
+        boneRot[i] = axisRotation(axis, angle);
+    }
 }
 
 glm::vec3 MicroBehaviour::toLocal(glm::vec3 p) const

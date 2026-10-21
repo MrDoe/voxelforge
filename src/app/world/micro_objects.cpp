@@ -22,6 +22,35 @@
 namespace vf {
 namespace app {
 
+namespace {
+
+// The rig's cache path: the layer's file with its extension replaced
+// ("micro/alpaca.vxw" -> "micro/alpaca.rig").
+std::string rigCachePath(const std::string& dir, const std::string& file)
+{
+    std::string stem = file;
+    const size_t slash = stem.find_last_of('/');
+    const std::string name = slash == std::string::npos ? stem : stem.substr(slash + 1);
+    const size_t dot = name.find_last_of('.');
+    if (dot != std::string::npos)
+        stem = stem.substr(0, stem.size() - (name.size() - dot));
+    return dir + "/" + stem + ".rig";
+}
+
+// A file's modification time as a number, so the rig cache can tell whether
+// the layer it was derived from has changed.
+uint64_t fileStamp(const std::string& path)
+{
+    std::error_code ec;
+    const auto t = std::filesystem::last_write_time(path, ec);
+    if (ec)
+        return 0;
+    return uint64_t(t.time_since_epoch().count());
+}
+
+} // namespace
+
+
 // Load every enabled micro layer and hand the resulting worlds to the GPU pass.
 // Called at startup and on every world reload (a manifest edit can add, remove
 // or reposition one). Cheap: a micro layer is a few thousand cells, so this is
@@ -42,6 +71,7 @@ void App::loadMicroObjects()
     std::vector<glm::vec3> occluderOffsets;
     std::vector<std::string> occluderFiles;
     std::vector<std::string> behaviourFiles;
+    std::vector<vf::voxel::MicroRig> microRigs;
     std::vector<vf::voxel::MicroWorld> worlds;
     m_microFields.clear();
     m_microOccluders.clear();
@@ -113,6 +143,40 @@ void App::loadMicroObjects()
         }
         vf::voxel::MicroWorld world;
         vf::voxel::synthesizeMicroSvo(field, offset, world);
+        // The SKELETON. It is DERIVED from the object's own voxels, so a
+        // newly imported model animates too - nothing here knows what an
+        // alpaca is. Deriving it is a pass over the voxels, so the result is
+        // CACHED next to the layer and read back on every later load; the
+        // cache carries the layer's signature, so an edited or re-imported
+        // layer invalidates it.
+        {
+            vf::voxel::MicroRig rig;
+            const std::string rigPath = rigCachePath(dir, l.file);
+            std::error_code ec;
+            const uint64_t lsize = std::filesystem::file_size(path, ec);
+            const uint64_t lmtime = fileStamp(path);
+            if (!vf::voxel::readMicroRigCache(rigPath, rig, lsize, lmtime)) {
+                if (vf::voxel::deriveMicroRig(field, rig)) {
+                    vf::voxel::writeMicroRigCache(rigPath, rig, lsize, lmtime);
+                    spdlog::info("micro: derived a rig for '{}' ({} bones, "
+                                 "{} legs) and cached it at {}",
+                                 l.file, rig.bones.size(), rig.legCount,
+                                 rigPath);
+                }
+            }
+            // The rig's points come from the FIELD's frame (the cells the
+            // object is made of), but the shader looks the bones up in the
+            // object's ANCHORED frame - the field's frame plus the
+            // placement. Shifting them here keeps the two in step; the cache
+            // keeps the field-frame rig, so the shift is applied after it is
+            // read either way.
+            for (auto& b : rig.bones) {
+                b.a += offset;
+                b.b += offset;
+            }
+            world.rig = rig;
+            microRigs.push_back(rig);
+        }
         // Keep the field so the world's BAKED surfel shadow can cast onto the
         // world from it (see MicroOccluder). The AABB is the field's own
         // extent, which already includes the air margin - a ray that misses it
@@ -149,6 +213,10 @@ void App::loadMicroObjects()
             b.reset(oc.aabbMin, float(i) * 7.31f + 1.7f);
             b.pivot = layerPivotWorld(oc.layerFile, b.pivot) ? b.pivot
                                                              : oc.aabbMin;
+            // The rig the gait drives: the world that was just built carries
+            // it (derived from the object's own voxels).
+            if (i < microRigs.size())
+                b.rig = microRigs[i];
         }
         m_microBehaviours.push_back(b);
     }
@@ -284,6 +352,45 @@ void App::clearMicroRotatePreview()
                                          false);
 }
 
+bool App::setMicroBehaviour(const std::string& file, const std::string& command,
+                             float speed)
+{
+    // Tell a micro object what to do: "run", "walk", "graze", "stop". It is
+    // how the AI drives the animal ("let the alpaca run") and how a user
+    // would do it from a panel.
+    //
+    // The file may be a manifest file ("micro/alpaca.vxw") or a layer NAME
+    // ("alpaca") - the assistant knows the name, the app knows the file.
+    for (size_t i = 0; i < m_microBehaviours.size(); ++i) {
+        const std::string& layerFile = m_microOccluders[i].layerFile;
+        const std::string stem = layerFile.substr(layerFile.find_last_of('/') + 1);
+        const std::string name = stem.substr(0, stem.find_last_of('.'));
+        if (layerFile != file && name != file)
+            continue;
+        vf::voxel::MicroBehaviour& b = m_microBehaviours[i];
+        if (command == "run") {
+            b.command = vf::voxel::MicroBehaviour::Command::Walk;
+            b.speed = std::max(0.05f, speed > 0.f ? speed : b.speed * 2.5f);
+        } else if (command == "walk") {
+            b.command = vf::voxel::MicroBehaviour::Command::Walk;
+            if (speed > 0.f)
+                b.speed = speed;
+        } else if (command == "graze" || command == "eat" || command == "grass") {
+            b.command = vf::voxel::MicroBehaviour::Command::Graze;
+        } else if (command == "stop" || command == "stand" || command == "halt") {
+            b.command = vf::voxel::MicroBehaviour::Command::Stop;
+        } else if (command == "auto" || command.empty()) {
+            b.command = vf::voxel::MicroBehaviour::Command::Auto;
+        } else {
+            return false;
+        }
+        spdlog::info("micro: '{}' -> {} (speed {:.2f} m/s)", layerFile, command,
+                     double(b.speed));
+        return true;
+    }
+    return false;
+}
+
 void App::updateMicroBehaviours(float dt)
 {
     // The autonomous behaviours, once per frame. Each one produces a
@@ -304,8 +411,82 @@ void App::updateMicroBehaviours(float dt)
                                              b.pivot, false);
             continue;
         }
+
+        // Snapshot the pose before update(): the state machine advances
+        // regardless, but a REFUSED step must not move the animal (and must
+        // not advance the gait, or the feet skate in place against a wall).
+        const glm::vec3 prevOffset = b.offset;
+        const float prevHeading = b.heading;
+        const float prevGait = b.gait;
         b.update(dt);
+
+        // OBSTACLE RESPONSE. The behaviour itself has no notion of geometry
+        // (it is a pure transform), so the collision lives here: a candidate
+        // step that overlaps a world object or another micro object is
+        // withdrawn, and the heading is turned toward the first free retry.
+        // If every retry is blocked the animal stops to graze, which is also
+        // the only state that cannot walk into the obstacle next frame.
+        if (i < m_microFields.size() &&
+            microFootprintBlocked(int(i), b.offset)) {
+            const float step = b.speed * std::min(dt, 0.1f);
+            static const float kTurns[] = { 1.2f, -1.2f, 2.2f, -2.2f,
+                                            3.0f, -3.0f };
+            bool routed = false;
+            for (float turn : kTurns) {
+                glm::vec3 cand = prevOffset;
+                cand.x += std::sin(prevHeading + turn) * step;
+                cand.z += std::cos(prevHeading + turn) * step;
+                if (!microFootprintBlocked(int(i), cand)) {
+                    b.heading = prevHeading + turn;
+                    routed = true;
+                    break;
+                }
+            }
+            b.offset = prevOffset;
+            b.gait = prevGait;
+            if (!routed) {
+                b.state = vf::voxel::MicroBehaviour::State::Graze;
+                b.stateT = 0.0f;
+            }
+        }
+
+        // GROUND CLAMP. A walking animal must not sink into the terrain: lift
+        // the body until its lowest SOLID cell clears the highest ground under
+        // the footprint (the max at the four corners is what stops a slope
+        // swallowing the downhill edge). Lift-only on purpose: a dip is not a
+        // hole to fall into, and an object authored on a platform keeps the
+        // height the author gave it.
+        if (i < m_microFields.size() && i < m_microOccluders.size()) {
+            const vf::voxel::MicroField& f = m_microFields[i];
+            const vf::voxel::MicroOccluder& o = m_microOccluders[i];
+            if (f.size3() > 0 && f.solidMax.x >= f.solidMin.x) {
+                // solidMin/Max EXCLUDE the grid's air margin; adding origin +
+                // worldOffset turns them into metres in the world.
+                const glm::vec3 grid = o.worldOffset + f.origin;
+                const glm::vec3 lo = grid + glm::vec3(f.solidMin) * f.voxel;
+                const glm::vec3 hi =
+                    grid + glm::vec3(f.solidMax + 1) * f.voxel;
+                float ground =
+                    terrainTopAt(0.5f * (lo.x + hi.x) + b.offset.x,
+                                    0.5f * (lo.z + hi.z) + b.offset.z);
+                const float xs[2] = { lo.x + b.offset.x, hi.x + b.offset.x };
+                const float zs[2] = { lo.z + b.offset.z, hi.z + b.offset.z };
+                for (float x : xs)
+                    for (float z : zs)
+                        ground = std::max(ground, terrainTopAt(x, z));
+                if (ground > -1e8f) {
+                    const float bottom = lo.y + b.offset.y;
+                    if (ground > bottom)
+                        b.offset.y += ground - bottom + 0.002f;
+                }
+            }
+        }
         m_microSvoPass.setWorldAnimation(i, b.offset, b.rot, b.pivot, true);
+        // The SKELETON's bones: the gait drives them, and the pass rewrites
+        // their rotations (the segments and the joints stay as they were
+        // uploaded).
+        b.animateBones();
+        m_microSvoPass.setBoneRotations(i, b.boneRot);
     }
 }
 

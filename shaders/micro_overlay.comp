@@ -59,6 +59,17 @@ layout(std430, set = 0, binding = 10) readonly buffer MField { uint uMField[]; }
 //          lo.w = this world's offset into uMField, in cells
 // The node/child/brick bases are NOT here: they are folded into each world's
 // chunkInfo entries at upload time, so one flat index serves every world.
+// One bone: the segment it occupies (a start and an end), the joint it
+// turns about, and the animated rotation matrix (row-major). A bone is a
+// rigid rotation about its joint, so the field can be sampled through it.
+struct MicroBone {
+    vec4 a;
+    vec4 b;
+    vec4 joint;
+    vec4 r0;
+    vec4 r1;
+    vec4 r2;
+};
 struct MicroWorld {
     vec4 geo;
     uvec4 base;
@@ -89,6 +100,11 @@ struct MicroWorld {
     vec4 arot1;
     vec4 arot2;
     vec4 apivot;
+    // The SKELETON: x = the bone count. The bones themselves follow, in the
+    // world table - their segments and joints never change, and the gait
+    // rewrites only their rotations.
+    vec4 bones;
+    MicroBone bone[8];
 };
 layout(std140, set = 0, binding = 7) readonly uniform WorldTable {
     MicroWorld uWorlds[16];
@@ -243,8 +259,8 @@ vec3 microAnimate(int w, vec3 p)
         return p;
     const mat3 R = mat3(wt.uWorlds[w].arot0.xyz, wt.uWorlds[w].arot1.xyz,
                         wt.uWorlds[w].arot2.xyz);
-    p -= wt.uWorlds[w].anim.xyz;
-    return wt.uWorlds[w].apivot.xyz + R * (p - wt.uWorlds[w].apivot.xyz);
+    p = wt.uWorlds[w].apivot.xyz + R * (p - wt.uWorlds[w].apivot.xyz);
+    return p + wt.uWorlds[w].anim.xyz;
 }
 
 // The inverse: a world point back into the object's baked frame.
@@ -254,7 +270,7 @@ vec3 microUnanimate(int w, vec3 p)
         return p;
     const mat3 R = mat3(wt.uWorlds[w].arot0.xyz, wt.uWorlds[w].arot1.xyz,
                         wt.uWorlds[w].arot2.xyz);
-    p += wt.uWorlds[w].anim.xyz;
+    p -= wt.uWorlds[w].anim.xyz;
     return wt.uWorlds[w].apivot.xyz + transpose(R) * (p - wt.uWorlds[w].apivot.xyz);
 }
 
@@ -265,6 +281,58 @@ vec3 microDirUnanimate(int w, vec3 d)
         return d;
     return transpose(mat3(wt.uWorlds[w].arot0.xyz, wt.uWorlds[w].arot1.xyz,
                            wt.uWorlds[w].arot2.xyz)) * d;
+}
+
+// The SKELETON. A bone is a SEGMENT in the object's own frame (the rig is
+// DERIVED from the object's voxels, so a newly imported model has one too),
+// and a point belongs to the nearest segment. The seams fall where two
+// bones meet INSIDE the body, so they never show on the silhouette.
+//
+// A bone is a rigid rotation about its joint, and the field is the REST
+// POSE - so the animated surface is found by sampling the field through the
+// bone's INVERSE rotation.
+int microBoneAt(int w, vec3 p)
+{
+    const int count = int(wt.uWorlds[w].bones.x);
+    if (count <= 0)
+        return -1;
+    int best = -1;
+    float bestD = 1e30;
+    for (int i = 0; i < count; ++i) {
+        const MicroBone mb = wt.uWorlds[w].bone[i];
+        const vec3 a = mb.a.xyz;
+        const vec3 b = mb.b.xyz;
+        const vec3 ab = b - a;
+        const float t = clamp(dot(p - a, ab) / max(dot(ab, ab), 1e-12), 0.0, 1.0);
+        const float d = length(p - (a + ab * t));
+        if (d < bestD) {
+            bestD = d;
+            best = i;
+        }
+    }
+    return best;
+}
+
+// The bone's INVERSE rotation, applied to a point: the point in the rest
+// pose that the animated bone brought here.
+vec3 microUnbone(int w, vec3 p, int bone)
+{
+    if (bone < 0)
+        return p;
+    const MicroBone mb = wt.uWorlds[w].bone[bone];
+    const mat3 R = mat3(mb.r0.xyz, mb.r1.xyz, mb.r2.xyz);
+    return mb.joint.xyz + transpose(R) * (p - mb.joint.xyz);
+}
+
+// The bone's rotation, applied to a point: the animated position of a rest
+// pose point.
+vec3 microRebone(int w, vec3 p, int bone)
+{
+    if (bone < 0)
+        return p;
+    const MicroBone mb = wt.uWorlds[w].bone[bone];
+    const mat3 R = mat3(mb.r0.xyz, mb.r1.xyz, mb.r2.xyz);
+    return mb.joint.xyz + R * (p - mb.joint.xyz);
 }
 
 // A WORLD point -> the object's BAKED frame (the field's frame). The
@@ -279,6 +347,17 @@ vec3 microToBaked(int w, vec3 p)
     return wt.uWorlds[w].pivot.xyz +
            transpose(microRot(w)) * (p - wt.uWorlds[w].pivot.xyz);
 }
+
+// The point in the object's OWN frame (the rest pose). It is where the
+// object's TEXTURE lives: a world-space sample slides over the animal as it
+// walks and as its bones swing, because the texture is bound to the surface,
+// not to the world.
+vec3 microRestPoint(int w, vec3 p)
+{
+    const vec3 rest = microToBaked(w, p);
+    return microUnbone(w, rest, microBoneAt(w, rest));
+}
+
 
 // A direction (no translation) into the baked frame.
 vec3 microDirToBaked(int w, vec3 d)
@@ -325,6 +404,10 @@ float microMapWorld(int w, vec3 p, float voxel, int gridN, uint gridBase)
     // world point into it first (see microToBaked). The distance that comes
     // back is a distance in the world frame - a rotation preserves them.
     p = microToBaked(w, p);
+    // The SKELETON: the field is the REST POSE, so the animated surface is
+    // found by sampling through the bone's INVERSE rotation. The bone of a
+    // point is the bone whose segment is nearest it.
+    p = microUnbone(w, p, microBoneAt(w, p));
     vec3 wmin = wt.uWorlds[w].lo.xyz;
     vec3 wsize = wt.uWorlds[w].hi.xyz - wmin;
     vec3 rp = p - wmin;
@@ -422,8 +505,12 @@ bool microSurface(vec3 p, vec3 rd, out vec3 albedo, out vec2 rr, out uint matId)
         vec3 wsize = wt.uWorlds[w].hi.xyz - wmin;
         float voxel = wt.uWorlds[w].geo.x;
         // A hair inside the solid, along the ray - in the BAKED frame, where
-        // the ray direction is the world one turned by the rotation.
-        vec3 q = microToBaked(w, p) + microDirToBaked(w, rd) * (0.15 * voxel);
+        // the ray direction is the world one turned by the rotation. The
+        // bone matters here too: the material lookup is a lookup in the
+        // REST POSE's grid, so the point has to be unboned as well.
+        vec3 rest = microToBaked(w, p);
+        rest = microUnbone(w, rest, microBoneAt(w, rest));
+        vec3 q = rest + microDirToBaked(w, rd) * (0.15 * voxel);
         // Clamp the query INTO the box rather than rejecting points outside it.
         // The traced hit lies exactly ON the object's boundary by construction
         // (the trace stops where the field crosses zero, and the field is zero
@@ -712,7 +799,7 @@ void microAO(vec3 p, vec3 n, out float ao, out vec3 bent)
 
 // Lit colour for a micro surface, using the SAME shared lighting terms the other
 // backends use (so a vase is not secretly lit by a private model).
-vec3 shadeMicro(vec3 p, vec3 rd)
+vec3 shadeMicro(vec3 p, vec3 rd, int w)
 {
     vec3 alb;
     vec2 rr;
@@ -720,8 +807,14 @@ vec3 shadeMicro(vec3 p, vec3 rd)
     if (!microSurface(p, rd, alb, rr, mId))
         return vec3(0.0);
     vec3 n = microNormal(p, 1.0 * microVoxelSize());
-    alb = detailAlbedo(alb, p, n, mId);
-    n = detailNormal(n, p, mId);
+    // The TEXTURE is sampled in the object's own frame (the rest pose), NOT
+    // in the world: a world-space sample slides over the animal as it walks
+    // and as its bones swing, because the texture is bound to the surface and
+    // not to the world. The rest-pose point is the very point the field is
+    // sampled at, so the texture sticks to the surface it belongs to.
+    const vec3 rest = microRestPoint(w, p);
+    alb = detailAlbedo(alb, rest, n, mId);
+    n = detailNormal(n, rest, mId);
     // The sun is occluded by BOTH worlds: the micro worlds (self-shadow and
     // micro-to-micro) and the main world's coarse heightfield + object volume.
     // Two binary contributions multiplied is the same verdict the splat
@@ -830,7 +923,7 @@ void main()
         if (pv.w > 0.5)
             p += pv.xyz;
     }
-    vec3 col = shadeMicro(p, rd);
+    vec3 col = shadeMicro(p, rd, microTraceWorld);
     if (any(isnan(col)) || any(isinf(col)))
         return;
 

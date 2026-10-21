@@ -9,6 +9,7 @@
 #define VOXELFORGE_MICRO_SVO_HPP
 
 #include "voxel/micro_field.hpp"
+#include "voxel/micro_rig.hpp"
 #include "voxel/world.hpp"
 #include <cstdint>
 #include <glm/glm.hpp>
@@ -52,6 +53,11 @@ struct MicroWorld {
     float chunkM = 0.0f;    // chunk edge in metres (= voxel * 16)
     glm::vec3 worldMin { 0.f }; // world position of cell (0,0,0)'s corner
     glm::vec3 worldMax { 0.f }; // exclusive far corner
+
+    // The SKELETON: the bones, DERIVED from the object's own voxels (so a
+    // newly imported model has one too). The segments are in the object's own
+    // frame; the pass uploads them and the gait rewrites the rotations.
+    MicroRig rig;
 
     size_t brickCount() const { return bricks.size() / BRICK_WORDS; }
     size_t bytes() const

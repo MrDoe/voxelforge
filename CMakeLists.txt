@@ -90,11 +90,12 @@ target_link_libraries(vf_platform PUBLIC glfw Vulkan::Vulkan vf_glm spdlog::spdl
 add_library(vf_core STATIC src/core/camera.cpp
                           src/voxel/layered_world.cpp src/voxel/voxel_field.cpp
                           src/voxel/chunk_store.cpp
+                          src/voxel/collision.cpp
                           src/voxel/irradiance_volume.cpp
                           src/voxel/live_editor.cpp
                           src/voxel/surfelize.cpp
                           src/voxel/micro_field.cpp src/voxel/micro_svo.cpp
-                          src/voxel/micro_behaviour.cpp
+                          src/voxel/micro_behaviour.cpp src/voxel/micro_rig.cpp
                           src/voxel/heightmap.cpp src/voxel/worldfile.cpp
                           src/voxel/picking.cpp src/voxel/editable_world.cpp
                           src/ai/ollama_client.cpp)
@@ -215,6 +216,7 @@ add_executable(voxelforge
     src/app/rhi/present_probe.cpp
     src/app/world/world_layers.cpp
     src/app/world/world_textures.cpp
+    src/app/world/collision.cpp
     src/app/world/store_overlay.cpp
     src/app/world/surfel_stream.cpp
     src/app/world/micro_objects.cpp
@@ -261,6 +263,7 @@ add_executable(vf_tests tests/main.cpp tests/test_camera.cpp
                         tests/test_surfelize.cpp tests/test_store.cpp
                         tests/test_app_gizmo.cpp tests/test_app_cli_ui.cpp
                         tests/test_box_select.cpp tests/test_micro.cpp
+                        tests/test_collision.cpp
                         # The app's pure leaf logic, compiled in directly: before
                         # the src/app split these lived in the same translation
                         # unit as main() and could not be reached from a test.
