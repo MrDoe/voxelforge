@@ -95,6 +95,7 @@ add_library(vf_core STATIC src/core/camera.cpp
                           src/voxel/surfelize.cpp
                           src/voxel/micro_field.cpp src/voxel/micro_svo.cpp
                           src/voxel/micro_behaviour.cpp
+                          src/voxel/fur_cards.cpp
                           src/voxel/heightmap.cpp src/voxel/worldfile.cpp
                           src/voxel/picking.cpp src/voxel/editable_world.cpp
                           src/ai/ollama_client.cpp)
@@ -160,6 +161,7 @@ target_link_libraries(vf_rhi PUBLIC vf_platform vf_vma spdlog::spdlog)
 
 add_library(vf_render STATIC src/render/svo_pass.cpp src/render/taa_pass.cpp src/render/post_pass.cpp src/render/splat_pass.cpp
     src/render/micro_svo_pass.cpp
+    src/render/fur_pass.cpp
     src/render/ssr_pass.cpp src/render/ssao_pass.cpp src/render/volumetric_fog_pass.cpp
     src/render/motion_blur_pass.cpp src/render/dof_pass.cpp src/render/environment_pass.cpp
     src/render/texture_atlas.cpp)
@@ -180,6 +182,7 @@ set(VF_SHADER_SRCS ${CMAKE_CURRENT_SOURCE_DIR}/shaders/svo_raymarch.comp
     ${CMAKE_CURRENT_SOURCE_DIR}/shaders/splat.vert
     ${CMAKE_CURRENT_SOURCE_DIR}/shaders/splat.frag
     ${CMAKE_CURRENT_SOURCE_DIR}/shaders/micro_overlay.comp
+    ${CMAKE_CURRENT_SOURCE_DIR}/shaders/fur_overlay.comp
     ${CMAKE_CURRENT_SOURCE_DIR}/shaders/splat_cull.comp
     ${CMAKE_CURRENT_SOURCE_DIR}/shaders/splat_hiz.comp
     ${CMAKE_CURRENT_SOURCE_DIR}/shaders/splat_tile_bin.comp
