@@ -155,11 +155,13 @@ That reframes every shading hypothesis above as a **consequence**:
 - the mask luma barely moves while the count falls (19.9 -> 20.7): the
   survivors are the spilled disks with the most extreme shading.
 
-**So the one fix that makes those pixels RIGHT is to stop the spill: clip
-each disk to its own voxel face.** The enclosure proxy, the binary baked
-shadow and the bent normal are each worth fixing on their own merits - the
-canopy really is being lit as a sealed room - but none of them is the
-artifact.
+**So the one fix that would make those pixels RIGHT is to stop the spill -
+and the clip, measured below, is not it.** The enclosure proxy, the binary
+baked shadow and the bent normal are each worth fixing on their own merits -
+the canopy really is being lit as a sealed room - but none of them is the
+artifact either. What the measurements do support is narrower: the *shading*
+of the disk that wins the pixel is ~half the gap, and the composite (which
+disk wins) is the other half. No single lever closes both.
 
 ### The face clip, measured: a net loss, and why (the over-coverage is load-bearing)
 
@@ -184,28 +186,49 @@ after):
 It removes 6 % of the artifact and pays for it with more black inside the
 silhouette everywhere and more sky (the new holes let the sky through).
 
-**Why: the over-coverage is load-bearing.** A face's square is 0.1 m and its
-corners are 0.0707 m from the centre; a 0.0707 m disk would reach a corner
-with a Gaussian alpha of ~0.37, and four of them sum to 0.84 - the corners
-would be a 16 %-transparent pinhole grid. The radius is 1.4 cells precisely
-so the corners close (alpha ~0.6 each, sum ~0.97), and that same generosity
-is what spills ~9 cm onto the neighbours' faces. **A disk is a circle: it
-cannot cover its own corner without also covering the neighbour's face.**
-"Clip the disk to its face" and "no pinholes at the corners" are mutually
-exclusive.
+**Why: the over-coverage is load-bearing, and it is the EDGE, not the
+corner.** The kernel is `alpha = 0.9 * exp(-0.5 * d2 / sigma2)` in
+radius-normalised units, with `baseRadius = 1.4 * VOXEL = 0.14 m` and
+`sigma2 = 0.5` (`surfelize.hpp:63`, `uSplat.y`). At a cell boundary the
+pixel centre is 0.05 m from each face centre (`u = 0.357`), so each of the
+two neighbouring disks contributes **alpha 0.79** there and the pair
+composites to **0.957** - a ~4 % background bleed. That is today's seam.
+Clip the squares and the same pixel belongs to exactly ONE square (they
+tile, they do not overlap), so it is single-covered at **0.79** - a ~21 %
+bleed along every 0.1 m cell boundary, on every surface, in every
+direction. The corner is worse still (0.0707 m out, alpha 0.70), but the
+corner is a point while the edge is a line: **the seam is the whole edge**.
+So corner caps - the existing default-off emitter - cannot fix it; they
+would cover the four-way junctions and leave every cell-to-cell edge open.
 
-**The way out already exists in the tree: the corner caps** ("fill corners
-the parent disk does not reach with small caps", default OFF, and only ~557
-caps among ~3.4 M surfels on the hamlet - the emitter is there, the geometry
-almost never triggers it). Clip the face **and** emit a small, *unflagged*
-cap at every corner the square cannot cover: the coverage stays exact and the
-spill is gone.
+**What the clip does prove** is the shape of the real fix: a kernel that is
+~0.95-1.0 *at the square boundary* tiles with no seam and no spill, because
+a single square is then opaque on its own. That is a **kernel change** (a
+flat-top / soft-square falloff, with all the softness inside the square),
+not a clip, and it is the honest reading of the user's "better
+interpolation": the Gaussian's overlap is what makes the surface solid, so
+removing the overlap must be paid for with a flatter profile, not a smaller
+radius. Its cost is that silhouettes become voxel-square at 0.1 m - which is
+exactly what the SVO reference shows, but not what the splat path currently
+looks like. It needs its own A/B and has not been built.
 
-Side reading: the ~9 % figure is the **existing** state, not a risk of the
-clip - the 1.4-cell radius already leaves ~9 % of each face boundary
-transparent at the shared edge, and the base seal covers it only where the
-depths are equal (coplanar). A crease is therefore already slightly open,
-which is why clipping makes the silhouette worse rather than better.
+**Measurement trap, worth knowing before re-running this.** The clip was
+reverted (both call sites are comments, the helper is gone,
+`git diff shaders/` is empty) and rebuilt at 11:35:33. A headless render
+loads `build/shaders/*.spv` at pass init, so a "clip" run started after that
+rebuild measures the *reverted* build and reports a no-op: my own 1280x800
+run differed from the pre-clip baseline by **16 px** (mean |d| 0.005) and I
+first read it as "the clip is inert". The confirmation that Ada's pair is
+clean is that the reverted build reproduces her `before/tree.ppm`
+**bit-for-bit** (0 px changed > 2) while differing from her `after` by
+52.6 % (mean 9.8, signed +1.56). Check the `.spv` mtime against the process
+start before attributing a pixel diff to a shader change.
+
+**What remains in the tree:** the bake flag stays (97,258 / 343,196 object
+surfels, inert - no shader reads `fract()`), because a flat-top kernel
+experiment needs exactly that per-disk face datum. The flag's other half,
+the normal snap, is neutral on its own (see above) and is what keeps the
+face squares well defined.
 
 
 The ambient's direction was tried with the **geometric** normal instead of

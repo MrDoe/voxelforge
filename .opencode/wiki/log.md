@@ -5818,3 +5818,38 @@ Move button, the trackball drag), which cannot be driven without taking the
 user's mouse. The honest status is *not reproduced*.
 
 See [[concepts/micro-voxel-svo-overlay]].
+
+## [2026-10-21] correction | The clip's seam is the EDGE, not the corner
+
+The clip A/B above is sound (the reverted build reproduces the `before`
+frame bit-for-bit: 0 px changed by >2, so the 52.6% delta is the clip
+alone), but its stated mechanism is off, and that changes the way out.
+
+Clipped squares **tile**: a pixel on a cell boundary lies inside exactly
+one square, so there is no four-way sum at all. With
+`baseRadius = 1.4*VOXEL = 0.14 m` and `sigma2 = 0.5`, a boundary pixel is
+`u = 0.357` from each face centre, so
+
+- today, TWO unclipped disks cover it at alpha 0.79 each -> **0.957** (a
+  ~4% background bleed, not 9%);
+- clipped, ONE square covers it at **0.79** -> a ~21% bleed along EVERY
+  0.1 m cell boundary, on every surface.
+
+The corner is worse (0.0707 m out, alpha 0.70) but it is a *point*; the
+edge is a *line*. So corner caps cannot fix this - they would cover the
+junctions and leave every cell-to-cell seam open. What the clip proves is
+the shape of the real fix: a kernel that is ~0.95-1.0 **at the square
+boundary** tiles opaque with no seam and no spill, because a single square
+is then enough. That is a flat-top / soft-square kernel (all the softness
+inside the square), not a clip and not a smaller radius. Its cost is
+voxel-square silhouettes at 0.1 m - what the SVO shows, not what the splat
+path currently looks like. Not built.
+
+Measurement trap from the same hour: a headless run loads
+`build/shaders/*.spv` at pass init, and a peer's rebuild landed between my
+process start and pass init. My 1280x800 "clip" run differed from the
+pre-clip baseline by 16 px (mean 0.005) and read as "the clip is inert";
+it had in fact loaded the reverted build. Check the `.spv` mtime against
+the process start before attributing a pixel diff to a shader change.
+
+See [[concepts/splat-canopy-parity]].
