@@ -127,6 +127,7 @@ void App::uploadIrradianceVolume(const vf::voxel::worldfile::LightUBO& lights)
         m_splatPass.setIrrVolView(m_irrImg.view);
         m_svoPass.setIrrVolView(m_irrImg.view);
         m_microSvoPass.setIrrVolView(m_irrImg.view);
+        m_furPass.setIrrVolView(m_irrImg.view);
     }
 
     vf::voxel::IrradianceBakeStats st;

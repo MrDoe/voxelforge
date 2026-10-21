@@ -651,3 +651,76 @@ surfel count and the depth test rejects the dry cells before shading.
   highlight is screenshot-testable (`tests/live_edit_check.py`). The SVO
   backend has no equivalent per-surfel tint; the tile path (`VF_TILE=1`)
   does not implement it yet.
+
+## Fur cards over the micro objects (`fur_overlay.comp`)
+
+A micro object is a sphere-traced solid: exact, opaque, hard-edged. That is
+right for a ceramic vase and wrong for an animal, whose coat is fuzz and
+whose **silhouette** is the thing that says so. The fur is a separate
+**translucent** layer of hair cards - flat ribbons standing out of the
+surface, each with a soft alpha profile across its width and a taper along
+its length. One card stands for a clump of strands.
+
+**Why this is not a splat feature.** A surfel is a disk lying *in* the
+tangent plane, and the opaque base seal (the nearest fragment written at
+alpha 1) is exactly what turns a lone silhouette splat into a hard-edged
+blob; the documented fix for that is a coverage count in the unused
+`D24_S8` stencil, not kernel tuning. The fur sidesteps the question: it
+composites over an already-opaque body, so transparency is correct by
+construction and the sky only shows where a card reaches past the
+silhouette.
+
+**The pipeline**
+
+| stage | where | what |
+|---|---|---|
+| generate | `src/voxel/fur_cards.cpp` (CPU, at load) | one card per surface cell per slot, for the materials that grow fur (21 `fleece`) |
+| upload | `src/render/fur_pass.cpp` | the cards, the bucket grid and the per-object table |
+| draw | `shaders/fur_overlay.comp` (compute) | a DDA through the bucket grid, composited into the HDR the micro overlay wrote |
+
+The pass runs **after** the micro overlay (it reads the G-buffer the overlay
+wrote) and **before** the post pass. The G-buffer's world position is the
+depth reference, so a card behind the body or behind the world is dropped
+without a depth attachment and without touching any opaque pass. With no
+object carrying fur the dispatch is skipped and the frame is byte-identical
+(`VF_FUR=0` is the escape hatch).
+
+**The three decisions that decide whether the coat reads**
+
+1. **The ribbon is billboarded about the strand**: its width axis is
+   perpendicular to the strand *and* to the camera. A width axis taken from
+   the surface puts the ribbon in the tangent plane, so at the silhouette it
+   is edge-on and vanishes - the coat would be a faint wash in the interior
+   and the outline would stay razor sharp. The strand direction still comes
+   from the surface (the groom), and the surface normal is still the
+   *shading* normal, so the coat is lit like the body.
+2. **A card is never thinner than ~1.5 px.** A sub-pixel card either misses
+   the pixel grid or lands on it whole, and the coat turns to speckle. The
+   card is widened to 1.5 px and its alpha scaled by the same factor, so the
+   ink is conserved.
+3. **The cards must be dense** - four per surface cell. Two left gaps at
+   close range; more buys very little.
+
+**The alpha** is a Gaussian across the width (the splat backend's kernel
+shape, on a sliver instead of a disk, so the edges are transparent rather
+than a hard rim) times a taper along the strand. The accumulation is the
+standard many-layer approximation `1 - exp(-Σα)`, and the coverage
+composites the fur over the body. The **texture is sampled per card**: the
+fleece's clumps are centimetres across, and one flat colour per pixel reads
+as washed-out plastic. The sky ambient is evaluated once per pixel (the sun
+term is the cards' average).
+
+**Descriptor bindings** (set 0, the fur pass): 0/1/2 the cards and the two
+bucket arrays (storage buffers), 8/9 the terrain height texture and the
+coarse object volume, 11/12 the black environment cubemap and the BRDF LUT
+(the IBL is black in this renderer; they exist so the descriptor set is
+complete), 13/14 the HDR and the G-buffer, 22/23 the texture atlas and its
+table, 25 the point lights, 26 the irradiance volume, 30 the per-object
+table.
+
+**The cards live in the field's LOCAL frame**, so the layer's world
+placement and the live rotation preview are applied by the shader exactly as
+the micro overlay applies them to the field - the fur and the body can never
+drift apart. The preview is mirrored onto the fur through an index map
+(`m_furIndexOfMicro`), because a micro object without fur has no entry in
+the fur pass's table.

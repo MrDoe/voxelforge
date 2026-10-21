@@ -177,6 +177,23 @@ int App::recordInteractiveFrame(FrameSync& fr, const FrameInputs& fx)
         di2.pMemoryBarriers = &mb2;
         vkCmdPipelineBarrier2(fr.cmd, &di2);
     }
+    // The FUR cards: the translucent hair-card layer over the micro
+    // objects. It reads the G-buffer the micro overlay just wrote (the
+    // depth reference) and composites into the same HDR image, so it
+    // runs after the overlay and before the post pass. A no-op when
+    // no object carries fur.
+    if (!m_furPass.empty()) {
+        m_furPass.record(fr.cmd, push);
+        VkMemoryBarrier2 mb3 { VK_STRUCTURE_TYPE_MEMORY_BARRIER_2 };
+        mb3.srcStageMask = VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT;
+        mb3.srcAccessMask = VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT;
+        mb3.dstStageMask = VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT;
+        mb3.dstAccessMask = VK_ACCESS_2_SHADER_STORAGE_READ_BIT;
+        VkDependencyInfo di3 { VK_STRUCTURE_TYPE_DEPENDENCY_INFO };
+        di3.memoryBarrierCount = 1;
+        di3.pMemoryBarriers = &mb3;
+        vkCmdPipelineBarrier2(fr.cmd, &di3);
+    }
     // post pass reads HDR/G-buffer, writes LDR offscreen ---------------
     vf::transitionImage(fr.cmd, m_offscreen.img, VK_IMAGE_ASPECT_COLOR_BIT,
                         VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_GENERAL,

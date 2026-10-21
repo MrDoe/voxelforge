@@ -15,7 +15,9 @@
 #include "app/app.hpp"
 
 #include <algorithm>
+#include <chrono>
 #include <cmath>
+#include <cstdlib>
 #include <cstring>
 #include <spdlog/spdlog.h>
 
@@ -35,6 +37,9 @@ void App::loadMicroObjects()
         m_microSvoPass.setMicroWorlds({});
         m_microFields.clear();
         m_microOccluders.clear();
+        m_furObjects.clear();
+        m_furIndexOfMicro.clear();
+        m_furPass.setObjects({});
         return;
     }
     const std::string dir = std::filesystem::path(m_manifestPath).parent_path().string();
@@ -42,8 +47,15 @@ void App::loadMicroObjects()
     std::vector<glm::vec3> occluderOffsets;
     std::vector<std::string> occluderFiles;
     std::vector<vf::voxel::MicroWorld> worlds;
+    // VF_FUR=0 turns the fur off. It is the escape hatch: with the cards
+    // gone the pass never dispatches and the frame is byte-identical to the
+    // frame without the feature.
+    const bool furEnabled = getenv("VF_FUR") == nullptr || atoi(getenv("VF_FUR")) != 0;
+    int microWorldCount = 0;
     m_microFields.clear();
     m_microOccluders.clear();
+    m_furObjects.clear();
+    m_furIndexOfMicro.clear();
     // RESERVE before anything points into this vector. A push_back that
     // reallocates moves the fields, and every MicroOccluder::field pointer
     // would dangle - measured: the surfel bake's micro march read a garbage
@@ -119,11 +131,50 @@ void App::loadMicroObjects()
         m_microFields.push_back(field);
         occluderOffsets.push_back(offset);
         occluderFiles.push_back(l.file);
+        // The FUR CARDS. A micro object whose material grows fur (21,
+        // `fleece`) gets a coat of hair cards; the vase and the urn do not,
+        // and the fur pass stays empty for them.
+        //
+        // The cards are generated in the field's LOCAL frame, so the layer's
+        // world placement and the live rotation preview are applied by the
+        // shader exactly as the micro overlay applies them to the field -
+        // the fur and the body can never drift apart.
+        int furIndex = -1;
+        if (furEnabled && !world.chunkGrid.empty()) {
+            vf::voxel::FurParams fp;
+            fp.sunDir = glm::vec3(m_sunDir);
+            if (const char* e = getenv("VF_FUR_PER_CELL"))
+                fp.perCell = std::max(1, atoi(e));
+            if (const char* e = getenv("VF_FUR_LEN"))
+                fp.length = float(atof(e));
+            if (const char* e = getenv("VF_FUR_WID"))
+                fp.width = float(atof(e));
+            vf::voxel::FurObject fo;
+            std::string ferr;
+            const auto t0 = std::chrono::steady_clock::now();
+            if (vf::voxel::buildFurCards(field, fp, fo, &ferr)) {
+                fo.worldMin = field.origin + offset;
+                furIndex = int(m_furObjects.size());
+                const size_t nCards = fo.cards.size();
+                m_furObjects.push_back(std::move(fo));
+                const double ms = std::chrono::duration<double, std::milli>(
+                                      std::chrono::steady_clock::now() - t0)
+                                      .count();
+                spdlog::info("fur: '{}' -> {} cards ({:.1f} ms)", l.file, nCards, ms);
+            }
+        }
         spdlog::info("micro: '{}' -> {} voxels on a {:.3f} m lattice ({}x{}x{} cells), "
                      "gridN {}, {} bricks, {:.1f} KB",
                      l.file, data.voxels.size(), field.voxel, field.dim.x, field.dim.y,
                      field.dim.z, world.gridN, world.brickCount(),
                      double(world.bytes()) / 1024.0);
+        // The micro pass indexes the worlds it accepted (a world with an
+        // empty chunk grid is skipped), so the fur index mapping has to use
+        // the SAME count or the preview would land on the wrong object.
+        if (!world.chunkGrid.empty()) {
+            m_furIndexOfMicro.push_back(furIndex);
+            ++microWorldCount;
+        }
         worlds.push_back(std::move(world));
     }
     // Second pass: NOW that no more fields can move, point the occluders at
@@ -138,6 +189,9 @@ void App::loadMicroObjects()
         m_microOccluders.push_back(oc);
     }
     m_microSvoPass.setMicroWorlds(worlds);
+    // The fur cards go up last: the pass needs the objects, and the preview
+    // mirroring needs the index mapping that was just built.
+    m_furPass.setObjects(m_furObjects);
 }
 
 App::MicroObjectPick
@@ -235,9 +289,17 @@ void App::updateMicroMovePreview()
     if (idx < 0) {
         for (size_t i = 0; i < m_microOccluders.size(); ++i)
             m_microSvoPass.setWorldPreview(i, glm::vec3(0.f), false);
+        for (size_t i = 0; i < m_furObjects.size(); ++i)
+            m_furPass.setWorldPreview(i, glm::vec3(0.f), false);
         return;
     }
     m_microSvoPass.setWorldPreview(size_t(idx), m_moveDelta, true);
+    // The fur follows the body it belongs to.
+    if (idx < int(m_furIndexOfMicro.size())) {
+        const int fi = m_furIndexOfMicro[size_t(idx)];
+        if (fi >= 0)
+            m_furPass.setWorldPreview(size_t(fi), m_moveDelta, true);
+    }
 }
 
 void App::clearMicroRotatePreview()
@@ -249,6 +311,8 @@ void App::clearMicroRotatePreview()
     for (size_t i = 0; i < m_microOccluders.size(); ++i)
         m_microSvoPass.setWorldRotation(i, glm::mat3(1.0f), glm::vec3(0.0f),
                                          false);
+    for (size_t i = 0; i < m_furObjects.size(); ++i)
+        m_furPass.setWorldRotation(i, glm::mat3(1.0f), glm::vec3(0.0f), false);
 }
 
 } // namespace app

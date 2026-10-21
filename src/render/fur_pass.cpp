@@ -339,7 +339,7 @@ bool FurPass::init(const Context& ctx)
     pli.setLayoutCount = 1;
     pli.pSetLayouts = &m_setLayout;
     pli.pushConstantRangeCount = 1;
-    pli.pushConstantRanges = &pc;
+    pli.pPushConstantRanges = &pc;
     if (vkCreatePipelineLayout(dev, &pli, nullptr, &m_layout) != VK_SUCCESS)
         return false;
 
