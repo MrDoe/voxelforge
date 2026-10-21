@@ -101,4 +101,17 @@ Together: `VF_TEST_PANEL=render VF_HUD_SHOT=12:/tmp/render.ppm ./build/voxelforg
 a cyan UI reads as yellow in the capture. Undo it before judging colour:
 `convert in.ppm -separate -swap 0,2 -combine out.ppm`.
 
+### The loop that found the defects
+
+Capture each section, crop the pane, and **read the pixels** — a caption is
+too coarse to see a label that is cut in half. The first pass found, in this
+order: the clipped section description, the clipped layer-count row, the
+clipped widget labels (13 of them), the badge colliding with its title, the
+chat's status line running past the pane, the chat's button row behind the
+status bar, and the Mesh transform labels clipped by the label column.
+
+Check **960×540** as well: the pane is ~256 px of content there, so the
+label column is ~102 px, and that is the resolution where the old clipped
+`BrushModes` table segfaulted. Both sections run clean at that size.
+
 See [[entities/hud-sidebar]] for the sidebar's structure and invariants.

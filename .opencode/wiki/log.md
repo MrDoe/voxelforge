@@ -5990,3 +5990,25 @@ And a real bug the rework exposed: `kMatNames` had 21 entries while
 combo. Fixed in `ui_types.hpp` and in the three loops that used 21.
 
 See [[concepts/sidebar-ui-vocabulary]] and [[entities/hud-sidebar]].
+
+## 2026-10-21 ingest | The clipped labels and the colliding badges
+
+A second pass over the reworked sidebar, this time reading the pixels of
+each captured section rather than the code. Four defects, all of the same
+family - text that did not fit:
+
+- a group header's **badge collided with its title** when the value was long
+  (the Textures panel's file paths ran back into the material names). The
+  badge is elided to the space the title leaves, with 22 px of slack, and the
+  Textures badge shows the file NAME, not its path.
+- **controlRow's label cell clipped** a label wider than 40% of the row; it
+  wraps now, and the Mesh transform labels fit on one line.
+- the **chat's status** (model + URL) ran past the pane: it wraps now.
+- the **chat's composer reserve** (-70 px) was 8 px short of the input plus
+  the button row, so that row fell behind the sidebar's status bar.
+
+Checked at 960x540 as well (the pane is ~256 px of content there): both
+sections run clean, no ImGui assertion.
+
+Committed as 8f45e63 on top of 2f03aba. See
+[[concepts/sidebar-ui-vocabulary]].
