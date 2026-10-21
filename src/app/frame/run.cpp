@@ -148,6 +148,25 @@ int App::run(const Args& args)
     if (const char* pv = getenv("VF_SMOOTH_PRESERVE_VOLUME")) {
         m_smoothPreserveVolume = finiteEnv(pv, 0.0f) != 0.0f;
     }
+    // The FUR COAT's initial look. The env sets the INITIAL state and the
+    // sidebar's sliders own it from then on, so the two never fight: the env
+    // is for a headless A/B, the GUI is for the person. VF_FUR=0 is the
+    // escape hatch - no cards, the pass never dispatches, the frame is
+    // byte-identical.
+    if (const char* e = getenv("VF_FUR"))
+        m_furEnabled = finiteEnv(e, 1.0f) != 0.0f;
+    if (const char* e = getenv("VF_FUR_PER_CELL"))
+        m_furPerCell = std::clamp(int(finiteEnv(e, float(m_furPerCell))), 1, 24);
+    if (const char* e = getenv("VF_FUR_LEN"))
+        m_furLength = std::clamp(finiteEnv(e, m_furLength), 0.002f, 0.2f);
+    if (const char* e = getenv("VF_FUR_WID"))
+        m_furWidth = std::clamp(finiteEnv(e, m_furWidth), 0.0005f, 0.05f);
+    if (const char* e = getenv("VF_FUR_CURL"))
+        m_furCurl = std::clamp(finiteEnv(e, m_furCurl), 0.0f, 1.5f);
+    if (const char* e = getenv("VF_FUR_CYCLES"))
+        m_furCycles = std::clamp(finiteEnv(e, m_furCycles), 0.0f, 6.0f);
+    if (const char* e = getenv("VF_FUR_TILT"))
+        m_furTilt = std::clamp(finiteEnv(e, m_furTilt), 0.0f, 89.0f);
     if (args.probeSet)
         return runProbe() ? 1 : 0;
 
