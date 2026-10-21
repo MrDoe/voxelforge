@@ -84,6 +84,51 @@ bool surfelBelongsToLayer(float packedAo, uint layerId)
     return layerId > 0u && surfelLayerId(packedAo) == layerId;
 }
 
+// ---- single-face disk clip ------------------------------------------------
+// A disk that stands for EXACTLY ONE exposed voxel face is flagged by the
+// bake as mat_ao.x = material + 0.25, and for such a disk the bake
+// guarantees that the normal IS the exact lattice axis (+-X/Y/Z) and that the
+// position is that face's centre. Such a disk must not claim pixels outside
+// the face's square: the radius is 1.4 cells against a 0.1 m face, so the
+// disk spills ~4 cm past the face, and at a canopy's density those spills
+// fill the gaps between the leaves - the splat path then paints a shadowed
+// neighbour where the SVO reference marches the ray BETWEEN the leaves onto
+// the lit ground behind (measured: the splat-only near-black pixels carry a
+// warm bark/wood albedo where the SVO carries a neutral grey one).
+//
+// The clip must DISCARD in EVERY pass, including the depth-only prepass. If
+// the spilled part still wrote a depth, the true surface behind it would be
+// rejected by the band and the base seal would still write the spilled
+// colour at alpha 1 - the clip would be a no-op.
+bool surfelIsSingleFace(float packedMat)
+{
+    // The material is an integer, so the fraction is 0 for a plain material
+    // and 0.25 for a flagged one. The existing readers (uint(vMat.x + 0.5)
+//    and the abs(vMat.x - 8.0) < 0.5 material tests) are unaffected.
+    return fract(packedMat) > 0.1;
+}
+
+// The face's square: the two lattice axes perpendicular to the face's axis,
+// half a voxel either side of the face's centre.
+bool surfelInsideFace(vec3 q, vec3 centre, vec3 n, float voxel)
+{
+    vec3 an = abs(normalize(n));
+    vec3 t1, t2;
+    if (an.x > 0.5) {
+        t1 = vec3(0.0, 1.0, 0.0);
+        t2 = vec3(0.0, 0.0, 1.0);
+    } else if (an.y > 0.5) {
+        t1 = vec3(1.0, 0.0, 0.0);
+        t2 = vec3(0.0, 0.0, 1.0);
+    } else {
+        t1 = vec3(1.0, 0.0, 0.0);
+        t2 = vec3(0.0, 1.0, 0.0);
+    }
+    vec3 d = q - centre;
+    float h = 0.5 * voxel;
+    return abs(dot(d, t1)) <= h && abs(dot(d, t2)) <= h;
+}
+
 // ---- Brush hover preview volume (shared by both backends) ----------------
 // The app fills a std140 BrushUBO (binding 13 in BOTH the splat fragment
 // pipeline and the SVO compute pipeline) with the active edit-brush volume so

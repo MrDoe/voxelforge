@@ -207,6 +207,13 @@ void main()
         const vec4 vMat = s.mat_ao;
         const bool isWater = surfelIsWater(vMat.w);
 
+        // Single-face clip (NOT APPLIED - measured net loss, see splat.frag for
+        // the numbers): the tile path must clip the same disks the forward
+        // path clips, or it would keep the artifact the forward path loses.
+        //   if (surfelIsSingleFace(vMat.x) &&
+        //       !surfelInsideFace(q, s.pos_rU.xyz, h.n, pc.b.y))
+        //       continue;
+
         // pure Gaussian alpha (mirrors splat.frag PASS_MODE 1) times the
         // ellipse-normalised edge window, which rolls alpha to exactly zero at
         // the clip radius so a silhouette splat fades out instead of ending in

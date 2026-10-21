@@ -5761,3 +5761,32 @@ and the **geometric normal in the ambient** barely moves it (21,784 ->
 is not the surviving dark term either.
 
 See [[concepts/splat-canopy-parity]].
+
+## [2026-10-21] correction | The face clip is a net loss: the over-coverage is load-bearing
+
+The bake flagged the single-face disks (`mat_ao.x = material + 0.25`, 97,258
+of 343,196 object surfels) and the shader clip is two lines - but the A/B
+says do not ship it: it removes only 6% of the tree artifact (21,856 ->
+20,476 px) and costs MORE black inside the silhouette on every shot (the wall
+close-up 30.30 -> 31.74%, the house 7.41 -> 8.72%, the water 3.76 -> 4.13%),
+0.38% more sky and 18-30% of every frame moved.
+
+The reason is the useful part: **the over-coverage is load-bearing**. A
+face's corners are 0.0707 m from its centre and a 0.0707 m disk would reach
+them with a Gaussian alpha of ~0.37, so four of them sum to 0.84 - the
+corners would be a 16%-transparent pinhole grid. The radius is 1.4 cells
+precisely so the corners close, and that same generosity is what spills ~9 cm
+onto the neighbours' faces. **A disk is a circle: it cannot cover its own
+corner without also covering the neighbour's face.**
+
+So "clip the disk to its face" and "no pinholes at the corners" are mutually
+exclusive - unless the corner is covered by something else, and that thing
+already exists: the **corner caps** (default OFF, only ~557 among ~3.4M
+surfels on the hamlet). The design that follows is clip + a small unflagged
+cap at every corner the square cannot cover.
+
+The clip is reverted in the tree (the helper and the measurement stay in the
+shader as a comment), and the reverted tree measures bit-for-bit the
+baseline again (21,856 px, luma 19.6 at the mask, frame 93.3).
+
+See [[concepts/splat-canopy-parity]].

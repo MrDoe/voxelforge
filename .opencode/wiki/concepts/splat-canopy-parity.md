@@ -161,7 +161,52 @@ shadow and the bent normal are each worth fixing on their own merits - the
 canopy really is being lit as a sealed room - but none of them is the
 artifact.
 
-### The bent normal is not it either (measured)
+### The face clip, measured: a net loss, and why (the over-coverage is load-bearing)
+
+The bake flags a disk that stands for exactly ONE exposed voxel face
+(`mat_ao.x = material + 0.25`; 97,258 of 343,196 object surfels on the
+hamlet) and guarantees the exact axis normal and the face-centre position.
+The clip is then two lines in the fragment shader, and it must `discard` in
+**every** pass, the depth-only prepass included - otherwise the prepass still
+writes the spilled depth and the base seal still writes the spilled colour
+at alpha 1, and the clip is a no-op.
+
+Measured (tree at 640x400, the wall/house/water shots at 1280x720, before vs
+after):
+
+| shot | mask px | black-in-silhouette | sky % | px moved >12 |
+|---|---|---|---|---|
+| tree 640x400 | 21,856 -> 20,476 (-6 %) | - | 0.76 -> 1.14 | 18-30 % |
+| cabin close-up | - | 30.30 -> **31.74** % | - | 18.0 % |
+| house | - | 7.41 -> **8.72** % | - | 29.8 % |
+| water | - | 3.76 -> **4.13** % | - | 21.6 % |
+
+It removes 6 % of the artifact and pays for it with more black inside the
+silhouette everywhere and more sky (the new holes let the sky through).
+
+**Why: the over-coverage is load-bearing.** A face's square is 0.1 m and its
+corners are 0.0707 m from the centre; a 0.0707 m disk would reach a corner
+with a Gaussian alpha of ~0.37, and four of them sum to 0.84 - the corners
+would be a 16 %-transparent pinhole grid. The radius is 1.4 cells precisely
+so the corners close (alpha ~0.6 each, sum ~0.97), and that same generosity
+is what spills ~9 cm onto the neighbours' faces. **A disk is a circle: it
+cannot cover its own corner without also covering the neighbour's face.**
+"Clip the disk to its face" and "no pinholes at the corners" are mutually
+exclusive.
+
+**The way out already exists in the tree: the corner caps** ("fill corners
+the parent disk does not reach with small caps", default OFF, and only ~557
+caps among ~3.4 M surfels on the hamlet - the emitter is there, the geometry
+almost never triggers it). Clip the face **and** emit a small, *unflagged*
+cap at every corner the square cannot cover: the coverage stays exact and the
+spill is gone.
+
+Side reading: the ~9 % figure is the **existing** state, not a risk of the
+clip - the 1.4-cell radius already leaves ~9 % of each face boundary
+transparent at the shared edge, and the base seal covers it only where the
+depths are equal (coplanar). A crease is therefore already slightly open,
+which is why clipping makes the silhouette worse rather than better.
+
 
 The ambient's direction was tried with the **geometric** normal instead of
 the baked bent one (a foliage cell is one voxel thick, so the CPU
