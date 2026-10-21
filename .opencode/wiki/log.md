@@ -5621,3 +5621,105 @@ the last stroke. The shipped binary has no DWARF, so the backtrace stops at
 the layered-world rebuild thread, the member destruction order) are ruled out.
 
 See [[concepts/app-shutdown-segfault]].
+
+## [2026-10-21] correction | The canopy artifact is the base seal, not the footprint
+
+The first ranking was wrong. Re-measured with the ownership mask
+(`VF_SPLAT_DEBUG=16`): **91% of the splat-only near-black pixels are OBJECT
+pixels** - the tree - where the SVO reference shows lit geometry of the same
+tree. The splat path was painting the canopy's inner, shadowed leaves over the
+lit front leaves.
+
+The mechanism: the base seal writes the **nearest fragment's** colour at
+alpha 1, and "nearest" is the depth prepass's **disk plane** depth. A flat
+disk of radius 1.4 cells over-covers its neighbours, so a dark inner leaf's
+plane can be nearer than the lit front leaf's plane over the pixels the lit
+leaf should own - and the seal hands the whole pixel to the dark one. The
+band pass cannot repair it; the seal already wrote alpha 1.
+
+`VF_SPLAT_SEAL_ALPHA` is a monotone dial over that, and it moves the frame
+*towards* the reference: mask 21,703 -> 5,316 px (8.48% -> 2.08%) and the
+silhouette IoU against the SVO 0.8955 -> 0.9626, at the cost of a frame 13%
+brighter than the reference. The proper fix is the one
+[[concepts/splat-base-seal]] already names - a coverage count in the
+allocated-but-unused D24_S8 stencil, so the seal can pick the *dominant*
+surface instead of the *nearest plane*.
+
+What the ranking got wrong, and how it was caught:
+
+- The **footprint** is the right lever but the wrong selection: the
+  shading-variance radius rule at FULL strength (`VF_CHAOS_SHRINK=1.0`) moves
+  the mask 21,785 -> 21,764 (0.1%). A global shrink moves it a lot and
+  breaks the silhouette (IoU 0.4497 at radius 0.5 vs 0.4800).
+- The **shading** terms (the coarse-object-volume enclosure test, the binary
+  baked shadow vs the SVO's 16-tap PCF) are real bugs worth ~6 luma and the
+  rest, but with both off half the masked pixels are still near-black.
+
+See [[concepts/splat-canopy-parity]] and [[concepts/splat-base-seal]].
+
+## [2026-10-21] fix | A micro object is manipulable with the mouse
+
+The pick was fixed (the previous entry) and a plain click on the alpaca still
+selected **nothing**, and the Move and Rotate gizmos never appeared. Three
+gates refused it, all for the same reason: **a micro object has no world
+owner id** (it is a separate SVO world), and the world's code asks for that
+id to decide whether a layer is real — the plain click that activates an
+object, the Move axis handles, and the Rotate trackball (which asked the
+WORLD's box, `m_layers.layerBox()`, which is empty for a micro layer). Each
+now also accepts a micro layer, and the trackball's box comes from
+`layerBounds()`, which is micro-aware. The rotation's pivot comes from the
+new `App::layerPivotWorld` — the bottom-centre of the object's RECORDS, the
+same convention as the world.
+
+**The live rotation preview lives in the micro pass.** The splat pass's
+rotate preview is keyed by the world owner id (`surfelBelongsToLayer` refuses
+id 0), so it showed nothing for a micro object: the ring turned and the
+object sat still. The micro pass's world table now carries its own rotation
+matrix and pivot, and the shader applies it **in the field's frame** — the
+one place the field is sampled maps the world point into the baked frame, and
+because a rotation preserves distances the value needs no correction and the
+trace's step stays conservative. Everything downstream (the union field, the
+gradient and so the normal, the AO, the self-shadow) then works in the world
+frame and needed no change; only the material lookup had to be told, because
+the octree descent and the cell that owns the surface live in the baked
+frame.
+
+A micro rotation COMMIT also re-bakes only the micro objects now
+(milliseconds) instead of triggering a 20 s world reload, like the Move
+commit already did.
+
+See [[concepts/micro-voxel-svo-overlay]].
+
+## [2026-10-21] experiment | Band depth tolerance is a cheaper lever than unsealing
+
+The canopy mask is **not** a seal-ranking problem: after per-face expansion
+and flat-centre depth both failed, the surviving hypothesis was the band's
+depth tolerance (`VF_SPLAT_DEPTH_TOL`, 0.002 NDC ~ 10 cm). The dark nearest
+fragment wins the prepass, and the lit layer behind it is rejected by the band
+before it can blend over. Swept at 1280x800 (plane depth, `VF_NO_OVERLAY=1`,
+SVO frame mean 90.89, baseline mask 94,116 / frame 89.66 / sky-IoU 0.4800):
+
+| setting | mask px | frame mean | sky-IoU | new sky |
+|---|---|---|---|---|
+| baseline | 94,116 | 89.66 | 0.4800 | 0 |
+| tol 0.02 | 74,761 (-20.6%) | 91.92 | 0.4828 | +1,862 |
+| tol 0.04 | 69,125 (-26.6%) | 92.30 | 0.4831 | +1,887 |
+| tol 0.02 + seal 0.5 | 55,871 (-40.6%) | 95.15 | 0.4854 | +5,384 |
+| tol 0.02 + seal 0.75 | 43,300 (-54.0%) | 96.66 | 0.4858 | +6,900 |
+
+The knee is 0.02: 4x more tolerance buys only 5.6k more px while the ghosting
+window grows with distance (0.02 NDC is ~1.3 m at 14 m, ~2.7 m at 50 m). The
+combination beats a pure unseal at the same mask level on BOTH the frame
+(unseal reached 35,198 px only at 101.25) and the silhouette (IoU 0.4858 vs
+0.4782). It is a trade, not a fix: at 0.02 the mask is still 74,761 px.
+Ada's independent 640x400 sweep agrees in shape (mask 21,784 -> 16,324,
+frame 93.2 -> 95.8).
+
+Mechanism note: the effect saturates because the band accumulates *Gaussian*
+alpha, so a lit surfel contributes only when its disk CENTRE is within ~0.2 m
+of the pixel; the tolerance decides which in-range fragments pass, but it
+cannot pull in a lit layer that is laterally far. That is why the residue is
+best explained by disk spill filling the gaps between leaves (the SVO's exact
+ray finds the lit ground through a gap the 1.4-cell disk covers). Next test:
+whether the residue is instead the enclosure/ shadow SHADING terms
+(`VF_RENDER_FLAGS=255/509/253` A/B).

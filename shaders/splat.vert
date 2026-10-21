@@ -156,6 +156,18 @@ void main()
     float vy = dot(rel, pc.camUp.xyz);
     float w = vz;
     vec2 ndc = vec2(vx / (w * pc.a.x * pc.a.y), -vy / (w * pc.a.x));
+    // DEAD END, measured 2026-10-21: the depth was tried FLAT at the surfel's
+    // centre (z/w = depC at every corner, so the winner would be the surfel
+    // whose CENTRE is nearest - Voronoi ownership). It does not help: the
+    // near-black mask at the tree view went 21,703 -> 22,526 px at 640x400
+    // and 94,116 -> 97,090 px at 1280x800, i.e. slightly WORSE, with 8,179
+    // new sky pixels. The ranking metric is therefore not what makes the
+    // canopy dark, and the plane depth stays.
+    //
+    // A flat per-quad depth is also systematically NEARER than the true
+    // surface depth for a tilted disk (by up to rMax*sin(tilt)), which would
+    // have pulled the water plane toward the camera and let it occlude the
+    // shore it should be behind. The plane depth is the water's true depth.
     float dep = 1.0 - exp(-max(vz, 0.0) * 0.02);
     gl_Position = vec4(ndc * w, dep * w, w);
 }

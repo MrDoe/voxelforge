@@ -30,6 +30,30 @@ SHOTS = [
 W, H = 480, 270
 FAST = os.environ.get("VF_FAST_TESTS") == "1"
 
+# --- canopy parity (the "slots in the tree" artifact) ----------------------
+# The splat backend must not paint the tree canopy BLACK where the SVO
+# reference lights it. The camera is the one the user reported the artifact
+# from (reconstructed from the HUD line "Pos -4.2, 0.9, 14.6 / Head 187 deg
+# S" plus the horizon height in the frame), and the SVO backend is the
+# reference: it marches the exact geometry, the splat backend rasterises
+# baked surfels.
+#
+# The metric is the near-black mask: pixels that are below luma 30 in the
+# splat frame and at or above luma 30 in the SVO frame. A count alone is
+# brittle (one dark blob moves the number), so the mean luma at the mask is
+# reported next to it: 19.9 vs the reference's 60.7 on 2026-10-21.
+#
+# BASELINE, not a target: 21,785 px (8.51% of the frame) on 2026-10-21,
+# before the footprint/shading work on the artifact. The bound is 15% above
+# it, which absorbs the per-run noise (two identical renders differ by at
+# most 5/255 on ~1.3% of the pixels - the lighting is not bit-exact).
+# Tighten it when the artifact is fixed; never loosen it silently.
+CANOPY_CAM = ["-4.2", "0.9", "14.6", "-5.404", "-0.488", "4.792"]
+CANOPY_W, CANOPY_H = 640, 400
+CANOPY_MASK_BASELINE = 21785
+CANOPY_MASK_MAX = 24000
+CANOPY_LUMA_MIN = 15.0
+
 
 def read_ppm(path):
     with open(path, "rb") as f:
@@ -162,6 +186,74 @@ def expected_trackball(match, width, height):
         radius = max(radius, math.hypot(px - cx, py - cy))
     radius = min(max(radius, 24.0), 0.46 * min(width, height))
     return cx, cy, radius
+
+
+def near_black_mask(splat_path, svo_path):
+    """Pixels that are near-black in the splat frame but lit in the SVO frame.
+
+    Returns (count, mean splat luma at those pixels, mean SVO luma there).
+    """
+    w, h, a = read_ppm(splat_path)
+    w2, h2, b = read_ppm(svo_path)
+    if (w, h) != (w2, h2):
+        raise RuntimeError("canopy: frame size mismatch")
+    count = 0
+    luma_sum = 0.0
+    svo_sum = 0.0
+    for i in range(w * h):
+        j = 3 * i
+        ls = 0.299 * a[j] + 0.587 * a[j + 1] + 0.114 * a[j + 2]
+        lv = 0.299 * b[j] + 0.587 * b[j + 1] + 0.114 * b[j + 2]
+        if ls < 30.0 and lv >= 30.0:
+            count += 1
+            luma_sum += ls
+            svo_sum += lv
+    if count:
+        return count, luma_sum / count, svo_sum / count
+    return 0, 0.0, 0.0
+
+
+def check_canopy_parity(binary, tmp, env, failures):
+    """The splat backend must not go black where the SVO reference is lit.
+
+    This is the guard for the "slots/slits in the tree" artifact: the splat
+    backend rasterises baked surfels and a dark inner layer could win the
+    depth prepass over the lit front surface, painting a black disk where
+    the SVO reference shows the real surface.
+    """
+    splat = os.path.join(tmp, "canopy-splat.ppm")
+    svo = os.path.join(tmp, "canopy-svo.ppm")
+    for out, extra in ((splat, []), (svo, ["--mode", "svo"])):
+        cmd = [binary, "--shot", out, "--cam", *CANOPY_CAM,
+               "--width", str(CANOPY_W), "--height", str(CANOPY_H), *extra]
+        r = subprocess.run(cmd, capture_output=True, text=True, timeout=900,
+                           env=env)
+        if r.returncode != 0 or not os.path.exists(out):
+            failures.append(f"canopy: render failed ({os.path.basename(out)})")
+            return
+    try:
+        count, mean_luma, svo_luma = near_black_mask(splat, svo)
+    except RuntimeError as exc:
+        failures.append(f"canopy: {exc}")
+        return
+    print(
+        f"[canopy] splat-only near-black {count} px "
+        f"({count*100.0/(CANOPY_W*CANOPY_H):.2f}% of frame), "
+        f"luma there {mean_luma:.1f} vs SVO {svo_luma:.1f} "
+        f"(baseline {CANOPY_MASK_BASELINE})"
+    )
+    if count > CANOPY_MASK_MAX:
+        failures.append(
+            f"canopy: splat-only near-black {count} px > {CANOPY_MASK_MAX} "
+            f"(baseline {CANOPY_MASK_BASELINE}) - the splat backend is "
+            f"painting the canopy black again"
+        )
+    elif count > 0 and mean_luma < CANOPY_LUMA_MIN:
+        failures.append(
+            f"canopy: mean luma at the near-black mask {mean_luma:.1f} "
+            f"< {CANOPY_LUMA_MIN} - the masked pixels are darker than the "
+            f"baseline frame"
+        )
 
 
 def ownership_layer(manifest_path, failures):
@@ -480,6 +572,11 @@ def main():
                     )
                 else:
                     print("[move probe] X/Y/Z handles independently selectable")
+        # Canopy parity: the splat backend must not paint the tree black where
+        # the SVO reference lights it. Two extra renders (one per backend) at
+        # the user's own camera; the env above sets VF_NO_OVERLAY, so a
+        # session's live edits cannot pollute the reference frame.
+        check_canopy_parity(binary, tmp, env, failures)
         if not FAST:
             check_present_probe(binary, tmp, env, failures)
         if manifest_before is not None:

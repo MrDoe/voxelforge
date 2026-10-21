@@ -49,9 +49,42 @@ app.hpp:396, so the writer stops before the store dies).
 ## How to investigate further
 
 The shipped binary has **no DWARF** (`readelf -S build/voxelforge | grep -c
-debug` = 0), so gdb stops at `free()` and cannot name the member. The next
-step is a build with debug info (or a dump of the members' owning pointers
-before destruction) to find which member's pointer points into the stack.
+debug` = 0), so gdb stops at `free()` and cannot name the member. What the
+disassembly does give: the destructor frees the pointer at `this + 0x2ae0`,
+a `std::vector`'s `_M_start`, and that pointer is a **stack** address - so
+the vector's header was overwritten (heap corruption), not merely dangling.
+The next step is a build with debug info (or an ASan build) to find the
+writer.
+
+## A reproduction that touches neither the mouse nor the focus
+
+The crash needs the *interactive* path (the headless `--shot` / `--smoke` /
+`--selftest` paths all exit 0), and the interactive app grabs the cursor.
+Run it on a virtual display with a window manager, and close the window
+programmatically:
+
+```bash
+Xvfb :78 -screen 0 1600x900x24 &
+DISPLAY=:78 metacity --replace &
+DISPLAY=:78 ./build/voxelforge > /tmp/crash.log 2>&1 &
+sleep 30                       # the world load is ~20 s
+DISPLAY=:78 wmctrl -c "Voxelforge"   # the title is set in rhi/surface.cpp
+wait $!; echo "exit=$?"        # 134 (SIGABRT) with "free(): invalid size"
+```
+
+`wmctrl -l` needs a window manager (metacity) on the display, otherwise it
+reports "Cannot get client list properties". The core lands in the system
+coredump store: `coredumpctl dump <pid> --output=/tmp/core`.
+
+## A latent use-after-free found on the way
+
+`LayeredWorld::reloadIfChanged()` called `parseAndComputeDirty()`, which
+**clears and refills** the shared record arrays (`m_records`, `m_colTop`,
+`m_objCells`, ...) that the async rebuild thread from `kick()` is *reading*
+inside `buildInto()`. The `m_rebuildRunning` guard lived in `kick()` - i.e.
+*after* the arrays had already been swapped under the running thread's feet.
+`requestReload()` had the guard in the right place; `reloadIfChanged()` did
+not. Fixed by moving the guard to the top of `reloadIfChanged()` (2026-10-21).
 
 ## See also
 

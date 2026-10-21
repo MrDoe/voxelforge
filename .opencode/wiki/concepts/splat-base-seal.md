@@ -11,8 +11,10 @@ stands for:
 
 1. `PASS_MODE 3` prepass — seeds the nearest **full-disk plane** depth (no
    alpha gate), which feeds the Hi-Z pyramid, the water test, and the resolve.
-2. `PASS_MODE 4` base seal — `EQUAL` against that depth, writes `vec4(col, 1)`
-   with an **opaque replace, no blend**.
+2. `PASS_MODE 4` base seal — `EQUAL` against that depth, contributes the
+   nearest fragment's colour at its **own kernel alpha** (source-over), gated
+   by `VF_SPLAT_SEAL_ALPHA` (0 = seal everything, 1 = never seal). It is not
+   the alpha-1 opaque replace this page used to describe.
 3. `PASS_MODE 1` band — `LESS` with a rasterizer depth bias of
    `-VF_SPLAT_DEPTH_TOL` (~10 cm), blends the front surface's Gaussian
    coverage.
@@ -69,15 +71,42 @@ any per-fragment threshold is a guess:
   foliage grains are **not** the cause — they were the obvious suspect and they
   are innocent (doubly so now: the grains no longer exist).
 
-### What would actually fix it
+### The coverage count cannot be the fix (2026-10-21)
 
-A real coverage count. The `D24_UNORM_S8_UINT` stencil is **already allocated,
-bound as `pStencilAttachment`, and cleared** in both render scopes, and
-`recreateDepth`'s own comment names this exact use: *"stencil to tell interior
-// rims apart from silhouette rims"*. Counting overlapping disks there would
-let the seal be "declined only where nothing else covers this pixel" — the real
-discriminator. That is a structural change to the prepass and is **not**
-implemented; the knobs are staged for it.
+The `D24_UNORM_S8_UINT` stencil is still allocated, bound and cleared, and
+`recreateDepth`'s comment still names "stencil to tell interior rims apart from
+silhouette rims". But a coverage count **cannot discriminate** here: the disk
+radius is 1.4 cells *by design*, so a surface's own neighbouring disks overlap
+everywhere - every terrain pixel is multiply covered - and "decline the seal
+where the count > 1" would unseal the whole world. It is also not readable:
+Vulkan exposes no stencil read in a fragment shader, so a count could only be a
+pipeline-level stencil test, which would reject the base pass on every terrain
+pixel. The measured frontier, the metric disagreement, and the live alternative
+(rank the seal by the surfel **centre** depth instead of the tilted plane) are
+in [[concepts/splat-canopy-parity]].
+
+### The trade is scene-specific (2026-10-21)
+
+The table above measures one view (a silhouette test). At the **tree view**
+where the user reported "slots in the tree", relaxing the seal moves the
+frame *towards* the SVO reference, not away from it:
+
+| `VF_SPLAT_SEAL_ALPHA` | splat-only near-black px | mean luma | IoU vs the SVO silhouette |
+|---|---|---|---|
+| 0 (seal everything, default) | 21,703 | 93.4 | 0.8955 |
+| 0.5 | 13,320 | 100.1 | 0.9298 |
+| 0.75 | 7,922 | 103.2 | 0.9519 |
+| 1.0 (never seal) | 5,316 | 104.0 | 0.9626 |
+| SVO reference | - | 92.1 | (reference) |
+
+The sky-blue fraction goes *down* as the seal is relaxed (0.76% -> 0.67%, the
+SVO's 1.59%), so the "57% blue-dominant" sky leak measured on the silhouette
+view does not appear here; the cost is instead a frame ~13% brighter than the
+reference. The mechanism is in [[concepts/splat-canopy-parity]]: the seal
+gives the whole pixel to the *nearest plane*, and a flat disk over-covers
+its neighbours, so a dark inner surface can claim a pixel that the lit front
+surface owns.
 
 See also [[concepts/splat-edge-fade-measurement]] for the metrics and the
-noise floor, and [[concepts/detail-pipeline]] for the surfel layout.
+noise floor, [[concepts/detail-pipeline]] for the surfel layout, and
+[[concepts/splat-canopy-parity]] for the artifact this explains.
