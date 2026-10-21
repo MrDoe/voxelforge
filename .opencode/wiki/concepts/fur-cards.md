@@ -64,16 +64,26 @@ card reaches past the silhouette.
 3. **The cards must be dense** — four per surface cell. Two left gaps at
    close range; more buys very little (measured: the neighbour-difference
    metric 19.0 at two cards, 18.2 at four, 16.8 at six).
-4. **The strands must be CURLY, and the amplitude must be a LARGE fraction
-   of the length.** The centre line wanders across the ribbon's plane in a
-   wave that is zero at the root (where the strand is anchored) and grows
-   toward the tip. The ribbon's *plane* is unchanged, so the ray/plane
-   intersection stays exact and the curl costs one sine. At an amplitude of
-   0.16 the wave is a couple of pixels across on a fifteen-pixel strand and
-   the coat still read as **spikes**; at 0.45 it reads as wool — the
-   measured high-frequency noise fell 16.1 → **12.7**, below the bare body's
-   13.5, because a curled strand spreads its ink instead of concentrating it
-   in a needle.
+4. **The strands must be CURLY, and the amplitude is measured against the
+   clump's WIDTH, not its length.** The centre line wanders across the
+   ribbon's plane in a wave that is zero at the root (where the strand is
+   anchored) and grows toward the tip. The ribbon's *plane* is unchanged, so
+   the ray/plane intersection stays exact and the curl costs one sine.
+
+   **The first attempt got the attribution wrong, and the negative control
+   caught it.** A sweep that varied the curl, the width, the density and the
+   length *together* appeared to show the curl taking the coat's
+   high-frequency metric from 16.1 to 12.7 — but re-rendering with **only**
+   the curl removed moved it by **0.03**. The win belonged to the density
+   and the width, and the direction was backwards: a big curl (0.45) makes
+   the coat **blurrier**, not softer — a wave that wanders many clump-widths
+   sideways smears the strand's ink over a band, and the metric fell to
+   12.70, *below* the bare body's 13.48, so the coat read as a haze.
+
+   The measured default is an amplitude of **0.20** (about two clump
+   widths): the coat's detail is **14.76** against the body's 13.48 — the
+   strands are readable — and its luma spread **36.98** against the body's
+   28.82, so the fleece's texture still shows.
 
 ## The bug the curl exposed — and it WAS the spikes
 
@@ -113,12 +123,13 @@ changing something else. A visual complaint is a measurement request.
 
 | quantity | value |
 |---|---|
-| the alpaca's cards | **122 772** (6 per surface cell) |
-| the card buffer | 15.7 MB on the GPU (96 B per card) |
+| the alpaca's cards | **102 310** (5 per surface cell) |
+| the card buffer | 11.8 MB on the GPU (96 B per card) |
 | the generation | ~200 ms at load |
 | the frame cost | 0–1 ms at 900×600 (within the run-to-run noise) |
 | the near view's changed pixels | 16 % of the frame, mean \|diff\| 56 |
-| the coat's high-frequency noise | **12.70**, BELOW the bare body's 13.48 |
+| the coat's fine detail | **14.76** against the bare body's 13.48 (readable strands) |
+| the coat's luma spread | **36.98** against the bare body's 28.82 (the texture survives) |
 | the fur's effect at 8 m | the alpaca's pixels change; the house view does not |
 
 ## The traps
@@ -154,11 +165,10 @@ changing something else. A visual complaint is a measurement request.
   (two identical renders; 0 pixels above 6/255), then the signal (the
   alpaca's pixels must change), the **confinement** (the change must be a
   compact blob, and the house view must be untouched), the **shape** (the
-  coat must be at least as *smooth* as the body under it — the numeric form
-  of "curly, not spiky": a straight coat concentrates its ink in narrow
-  streaks, and a narrow streak IS high-frequency energy, so it reads as
-  crunchier than the body it covers; a curled one spreads the same ink and
-  falls *below* the body's. With the curl removed the check fails), the
+  coat must be at least as *detailed* as the body under it — a coat whose
+  strands are smeared into a haze has less fine detail than the body it
+  covers, and the measured blur fell exactly there — and it must keep at
+  least the body's *luma spread*, so the fleece's texture survives), the
   **backend-independence** (the SVO reference must show it too — the fur is
   its own pass, not a splat-backend feature) and the **escape hatch**
   (`VF_FUR=0` must load no fur object and render the same frame).

@@ -5988,12 +5988,28 @@ one for every spin.
 **The curl.** The centre line now wanders across the ribbon's plane in a
 wave that is zero at the root (where the strand is anchored) and grows
 toward the tip; the ribbon's PLANE is unchanged, so the ray/plane
-intersection stays exact and the curl costs one sine. The amplitude has to
-be a LARGE fraction of the length to read at all: at 0.16 the wave is a
-couple of pixels across on a fifteen-pixel strand and the coat still read
-as spikes; at 0.45 it reads as wool. The measured high-frequency noise
-fell 16.1 -> **12.7**, BELOW the bare body's 13.5, because a curled strand
-spreads its ink instead of concentrating it in a needle.
+intersection stays exact and the curl costs one sine.
+
+**And then the attribution was WRONG, and the negative control caught it.**
+A sweep that varied the curl, the width, the density and the length
+*together* appeared to show the curl taking the coat's high-frequency
+metric from 16.1 to 12.7 - but re-rendering with **only** the curl removed
+moved it by **0.03**. The win belonged to the density and the width. And
+the direction was backwards: a big curl (0.45) makes the coat **BLURRIER**,
+not softer, because a wave that wanders many clump-widths sideways smears
+the strand's ink over a band - the metric fell to 12.70, *below* the bare
+body's 13.48, and the coat read as a haze. (The user said so: "now fur
+looks too blurry.")
+
+The measured default is an amplitude of **0.20** - about two clump widths -
+so the wave is visible but the strand stays readable: the coat's detail is
+**14.76** against the body's 13.48, and its luma spread **36.98** against
+the body's 28.82, so the fleece's texture still shows.
+
+Two lessons worth more than the feature: **a confounded sweep produces a
+false attribution** (vary one thing, or run the negative control), and
+**"softer" is not the same axis as "curlier"** - a bigger wave is a bigger
+smear.
 
 **The coat is now configurable in the GUI.** The Rendering section carries
 its SHAPE (density, strand length, clump width, curl amplitude and cycles,
