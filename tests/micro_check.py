@@ -142,12 +142,17 @@ def set_micro(enabled: dict[str, bool], rot: dict[str, float] | None = None) -> 
 # back EXACTLY. A restore that only re-enables the layers leaves a rotation
 # behind (measured: the gate turned the shipped alpaca 90 degrees and left it
 # that way).
-_MICRO_SAVED: list[tuple[str, bool, float]] = []
+_MICRO_SAVED: list[tuple[str, bool, float, str]] = []
 
 
 def save_micro() -> None:
     """Snapshot the micro entries' VALUES (not their dicts: the manifest is
-    re-read on every write, so a saved dict reference would be stale)."""
+    re-read on every write, so a saved dict reference would be stale).
+
+    The BEHAVIOUR is part of it: the alpaca's walk is switched on by
+    "behaviour": "grazer" in the manifest, and a writer that drops the field
+    silently stops the animal walking (measured: one app run rewrote
+    world.json without it and the alpaca froze)."""
     with open(MANIFEST) as f:
         doc = json.load(f)
     _MICRO_SAVED.clear()
@@ -155,7 +160,7 @@ def save_micro() -> None:
         if layer.get("role") == "micro":
             _MICRO_SAVED.append(
                 (layer.get("file", ""), layer.get("enabled", True),
-                 float(layer.get("rot", 0.0)))
+                 float(layer.get("rot", 0.0)), layer.get("behaviour", ""))
             )
 
 
@@ -175,7 +180,7 @@ def restore_micro() -> None:
     for attempt in range(4):
         with open(MANIFEST) as f:
             doc = json.load(f)
-        saved = {name: (enabled, rot) for name, enabled, rot in _MICRO_SAVED}
+        saved = {name: (en, rot, beh) for name, en, rot, beh in _MICRO_SAVED}
         for layer in doc["layers"]:
             if layer.get("role") != "micro":
                 continue
@@ -183,6 +188,10 @@ def restore_micro() -> None:
             if entry:
                 layer["enabled"] = entry[0]
                 layer["rot"] = entry[1]
+                if entry[2]:
+                    layer["behaviour"] = entry[2]
+                else:
+                    layer.pop("behaviour", None)
             # A key the gate may have introduced (an older run wrote "rotDeg")
             # would otherwise survive into the shipped manifest.
             layer.pop("rotDeg", None)
@@ -196,7 +205,8 @@ def restore_micro() -> None:
                 continue
             entry = saved.get(layer.get("file", ""))
             if entry and (layer.get("enabled", True) != entry[0]
-                          or float(layer.get("rot", 0.0)) != entry[1]):
+                          or float(layer.get("rot", 0.0)) != entry[1]
+                          or layer.get("behaviour", "") != entry[2]):
                 ok = False
         if ok:
             return

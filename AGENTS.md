@@ -990,6 +990,53 @@ one costs a whole turn, because the bad call is rejected before any work runs.
   matrix is the app's own: the old pose to the new pose, about the same
   pivot. Headless check: `VF_TEST_ROTATE_LIVE="90,0,0"` with
   `VF_ROTATE_LAYER=micro/alpaca.vxw`.
+- **A micro object can MOVE ITSELF, and its skeleton is DERIVED, not
+  authored.** A micro layer with `"behaviour": "grazer"` in the manifest walks
+  around on its own and stops to graze. Nothing in the code knows what an
+  alpaca is: `src/voxel/micro_rig.cpp` finds the bones in the object's own
+  voxels, so a **newly imported model animates the moment it is loaded** — no
+  per-object code, no per-object asset. Two rules that cost a session each:
+  - the **spine** is the longer of the two *horizontal* axes, NOT the longest
+    axis: an animal is usually TALLER than it is long (the alpaca is 1.3 m
+    tall and 1.1 m long), so the longest axis is the vertical one and the
+    derivation finds **no legs at all** (measured: 3 bones, 0 legs);
+  - the **belly** is a *percentile* of the spine band's cell heights, not the
+    band's minimum: a quadruped's front legs stand INSIDE that band, so the
+    minimum is the hooves, nothing is "below the core", and the legs become
+    part of the body.
+  A bone is a **segment** plus a role, and the gait is driven by the ROLES
+  (the legs swing in diagonal pairs, the head nods, the tail sways), so a cat
+  animates the way a horse does. The rig is **calculated once and saved** — a
+  cache next to the layer (`micro/alpaca.rig`) carrying the layer's signature,
+  so an edited layer invalidates it and a missing one just means the rig is
+  derived in memory. The cache is derived, so it is gitignored.
+  - A bone is a rigid rotation about its joint and the field is the REST
+    POSE, so the animated surface is found by sampling the field through the
+    bone's **inverse** rotation; the shader applies the inverse where the
+    field is sampled and the forward where the material is looked up, so the
+    union field, the gradient (and so the normal), the AO and the self-shadow
+    keep working in the world frame untouched.
+  - **The rig's points are in the FIELD's frame but the shader looks them up
+    in the object's ANCHORED frame** (the field's frame plus the placement).
+    Out of step, the nearest bone is garbage, the field is sampled through a
+    wrong rotation, and **the animal does not move at all** — with every
+    number in the log correct. The rig is shifted into the anchored frame
+    when it is handed to the GPU.
+- **The fur must not SLIDE.** The texture is bound to the SURFACE, not to
+  the world, so the micro shader samples the atlas at the point's REST-POSE
+  position — the very point the field is sampled at. A world-space sample
+  slides over the animal as it walks and as its bones swing.
+- **The AI can tell an animal what to do.** `set_behaviour` is a chat tool:
+  "let the alpaca run" becomes `{"name":"alpaca","command":"run"}` and
+  `App::setMicroBehaviour` puts the animal into that command. The commands
+  (run, walk, graze, stop, auto) are the same set the behaviour's own state
+  machine uses, so an instruction and the animal's choice are one mechanism.
+  The behaviour is a pure transform, so the instruction is just a field on it;
+  the collision response stays in the app.
+  - **A manifest field the app's writer does not emit is a silent trap**:
+    `writeManifest` dropped `behaviour` until it was fixed, so one app run
+    rewrote world.json without it and the alpaca stopped walking. A field
+    added to `WorldLayer` must be added to the writer too.
 - Coverage: `tests/test_micro.cpp` (9 cases) pins the SDF's sign convention and
   half-cell offset, the eighth-voxel quantisation, the margin, the dense field
   against the CPU field, the brick packing, a CPU replica of the shader's
