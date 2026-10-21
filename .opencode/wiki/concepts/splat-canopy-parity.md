@@ -476,6 +476,94 @@ clip has not been measured at all:
    spans several cells, so the clip must apply only to the isotropic
    face-sized disks, or it would destroy the thin footprints.
 
+### The exact-sky bake + the never-darker union (2026-10-21): a measured partial win
+
+`bent_sh.w` now packs two baked fields, `w = shadow + 2*sky`, where `sky` is
+the **exact per-surfel open-sky verdict** the CPU bake resolves against the
+records field (the SVO's own sky ray, not the coarse object volume). Object
+surfels carry the bit; terrain and water keep `w = shadow` (< 1.5), so the
+shader must branch on `surfelIsObject(packedAo)` - a bare `step(1.5, w)`
+would read every terrain surfel as enclosed. The packing happens *after* the
+shadow smoothing (averaging the packed word over face neighbours would mix
+two unrelated quantities), and the live-store path packs the same way, or a
+live-rebuilt disk would decode differently from its neighbours and the brush
+would draw a hard shading seam.
+
+**The verdict alone is not landable; the union is.** Measured on the same
+build (640x400, `VF_NO_OVERLAY=1`, mask = splat<30 & SVO>=30):
+
+| variant | mask px | mask % | luma@mask | frame luma |
+|---|---|---|---|---|
+| baseline (coarse volume) | 25,680 | 10.03 % | 18.91 | 89.11 |
+| exact verdict only | 24,163 | 9.44 % | 20.32 | 89.46 |
+| **union (shipped)** | **23,493** | **9.18 %** | 19.27 | 89.58 |
+| SVO reference | - | - | - | 90.04 |
+
+On the second rig the same three read 21,784 / 20,421 / **19,750** px
+(-9.3 % against the baseline), frame 93.2 / 93.6 / 93.8 (SVO 92.1). The
+union beats the exact verdict because it keeps the volume's "open" verdicts
+on the sheltered spots while the exact test rescues the 44 % of object disks
+the volume wrongly sealed. The bake costs +0.38 s (shade+bucket 2677 ->
+3026 ms) and the log line is
+`surfel exact sky: 151012 of 343196 object disks see open sky (44.0 %)`.
+
+**It is a correctness fix, not the artifact fix** - and the reason is now
+measured: on the exact-only build, clearing bit 8 still removed 25 % of the
+mask (24,163 -> 18,215), so most of what remains is not enclosure at all.
+The survivors are dark because the winning disk is a deep-interior leaf
+(shadow 0) and the SVO shows a *different, lit* surface there - the spill.
+
+**A bigger divergence the same measurement exposed**: at a cabin close-up the
+splat path paints **33.6 % near-black where the SVO reference has 6.6 %**
+(a 5x gap; 30.3 % *before* the bake, so the exact verdict made it slightly
+worse). The house shot shows the same shape (7.6 % vs 0.5 %).
+
+That gap is **not** the sky ray's direction. A three-variant bake A/B
+(shading bent / geometric normal / the SVO's own 3-ring `sdfAO` bent) gives
+44.0 / 43.3 / 44.1 % open disks and a house that does not recover under any
+of them - the verdict is direction-insensitive. The premise that the SVO's
+bent points out of the surface while the bake's points in is also **false**:
+`sdfAO` builds its bent with the SAME AO-weighted accumulation the CPU
+`aoBake` uses (`bd = n*0.5; bd += dir*w*(1-fall)`), only with a third 1.25 m
+ring - it is not an SDF gradient.
+
+**The "4.91 % house baseline" is stale - do not quote it against this
+change.** On the current tree, the same binary with the bake's sky bit
+disabled (`VF_SKY_OFF` probe, since removed) renders the house shot at
+**5.52 %** black-in-silhouette; the union renders it at **5.42 %** and the
+exact verdict at 5.66 %. So the union *improves* the house by 0.10 points
+and the 5 % bound was already red on this tree before the pair. Something
+else landed between the 4.91 % measurement and now; the micro cast shadow
+was checked and excluded (102 darkened surfels, the alpaca sits below the
+house view's right edge). Recovering that delta needs its own bisect from
+HEAD without these two files.
+
+The two real causes, in order of size:
+
+1. **The exact verdict ENCLOSES disks the 0.4 m volume called open** (56 %
+   of object disks are enclosed by the cell-exact test) - the sheltered spots
+   (eaves, porches, the cabin's shaded side). That is why the exact verdict
+   alone raised the house shot above the exact-only build's baseline. The
+   **"never darker" union** fixes it: a disk counts as open when EITHER test
+   sees sky, so the bake can only brighten the baseline and can never push a
+   surface further into enclosure than the volume did. The cost is that the
+   per-fragment march stays for object disks (the perf win of skipping it is
+   given up).
+2. **The splat's baked sun shadow is binary, the SVO's is a 16-tap PCF** -
+   that is most of the cabin's pre-existing 30.3 % vs 6.6 %, and the union
+   deliberately does not address it. It is the largest remaining
+   baked-versus-per-pixel gap in the renderer, and it is a separate piece of
+   work (a per-surfel soft shadow, or a per-fragment sun march in the splat
+   path).
+
+**A measurement trap that cost a round trip**: a pasted shader change can
+carry a one-character case typo, and glslangValidator then blames the wrong
+symbol - it reported `'skyVisibilitySPlat' : no matching overloaded function
+found` on a line whose *first* branch was spelled correctly, so the error
+reads as if the whole call were wrong. Validate a pasted snippet with
+`glslangValidator` before calling it written (two seconds); the build
+target `vf_shaders` compiles the shaders alone.
+
 ### Why the "coverage count in the stencil" does not work
 
 The wiki's older idea - count the overlapping disks in the allocated D24_S8

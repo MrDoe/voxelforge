@@ -494,14 +494,21 @@ ThinFootprint thinFootprintAt(SolidAt solidAt, glm::vec3 cellCentre, glm::vec3 n
     return fp;
 }
 
-// Binary sun-occlusion march over field.sample: exact Amanatides DDA over
-// lattice cells for the first 3 m (visits every cell like the SVO
-
-// reference, so thin eaves/logs are never tunnelled), then sphere-tracing
-// with tight clamps to 60 m. 0 = occluded, 1 = clear. Templated on the query
-// so it serves both the base VoxelField and the runtime ChunkStore.
+// Binary occlusion march over field.sample: exact Amanatides DDA over lattice
+// cells for the first 3 m (visits every cell like the SVO reference, so thin
+// eaves/logs are never tunnelled), then sphere-tracing with tight clamps to
+// `maxDist`. 0 = occluded, 1 = clear. Templated on the query so it serves both
+// the base VoxelField and the runtime ChunkStore.
+//
+// `solidEps` is the cell-solid threshold. The SUN march keeps the original
+// -0.02 so a surfel's own quantised cell cannot self-shadow. The SKY march
+// passes a small POSITIVE epsilon instead: skyVisibilitySvo's brickDDAB treats
+// `sdf <= 0` as solid, the field stores the same int8 (VoxelField::sample), so
+// a 0-quantised leaf cell MUST count as an occluder or the bake disagrees with
+// the reference it is replacing.
 template <typename FieldT>
-float shadowMarch(const FieldT& f, glm::vec3 ro, glm::vec3 rd)
+float shadowMarch(const FieldT& f, glm::vec3 ro, glm::vec3 rd,
+                  float maxDist = 60.0f, float solidEps = -0.02f)
 {
     // Phase 1: cell-exact DDA to 3 m. sampleWorld floors to the cell, so
     // testing every visited cell matches the voxel truth (SVO parity).
@@ -516,7 +523,7 @@ float shadowMarch(const FieldT& f, glm::vec3 ro, glm::vec3 rd)
         float t = 0.05f;
         for (int i = 0; i < 64; ++i) {
             const glm::vec3 sp = ro + rd * t;
-            if (f.sampleWorld(sp).d < -0.02f)
+            if (f.sampleWorld(sp).d < solidEps)
                 return 0.0f;
             // advance to next cell boundary (NaN-safe: rdi inf -> huge tMax)
             float tn = tMax.x;
@@ -529,25 +536,62 @@ float shadowMarch(const FieldT& f, glm::vec3 ro, glm::vec3 rd)
             if (ax == 0) { cell.x += stp.x; tMax.x += tDelta.x; }
             else if (ax == 1) { cell.y += stp.y; tMax.y += tDelta.y; }
             else { cell.z += stp.z; tMax.z += tDelta.z; }
-            if (t > 3.0f)
+            if (t > std::min(3.0f, maxDist))
                 break;
         }
     }
-    // Phase 2: sphere-tracing to 60 m for hills/treelines.
+    // Phase 2: sphere-tracing to `maxDist` for hills/treelines.
     {
-        float t = 3.0f;
+        float t = std::min(3.0f, maxDist);
         for (int i = 0; i < 80; ++i) {
             const glm::vec3 sp = ro + rd * t;
             const float d = f.sampleWorld(sp).d;
-            if (d < -0.02f)
+            if (d < solidEps)
                 return 0.0f;
             t += glm::clamp(std::fabs(d) * 0.7f, 0.04f, 1.0f);
-            if (t > 60.0f)
+            if (t > maxDist)
                 break;
         }
     }
     return 1.0f;
 }
+
+// Exact sky visibility for one surfel - the bake-side twin of
+// skyVisibilitySvo (shaders/common_svo.glsl), which is the reference the splat
+// backend has to match: same direction mix(bent, +Y, 0.65), same 0.25 m origin
+// offset, same 24 m reach, same `sdf <= 0` cell-solid test (solidEps above).
+//
+// The splat fragment used to answer this from the 0.4 m object volume
+// (skyVisibilitySPlat): its texels smear a sparse canopy into a solid roof, so
+// a leaf disk with open sky between the leaves read as a sealed room and its
+// sky ambient collapsed to 16% of the analytic value. The SVO's cell-exact
+// march along the same direction sees the gaps. One binary verdict per surfel,
+// like every other baked occlusion term in the project.
+// Returns 1 = open sky, 0 = enclosed.
+template <typename FieldT>
+float skyMarch(const FieldT& f, glm::vec3 p, glm::vec3 bent)
+{
+    const glm::vec3 dir =
+        safeNormalize(glm::mix(bent, glm::vec3(0.0f, 1.0f, 0.0f), 0.65f));
+    return shadowMarch(f, p + dir * 0.25f, dir, 24.0f, 1e-4f);
+}
+
+// Which direction should the sky ray use? Measured, do not re-litigate:
+//
+//   direction                  open disks       tree mask (640)  house black
+//   shading bent (2-ring)      151,012 (44.0%)    24,163 px         5.66%
+//   geometric normal           148,623 (43.3%)    24,344 px         5.72%
+//   sdfAO's 3-ring (0.14/0.45/1.25) 151,355 (44.1%) 24,035 px       5.67%
+//
+// The verdict is direction-insensitive and the house does not recover under any
+// of them, so the bake ships the historical 2-ring shading bent (which is also
+// what the fragment's `bent` is, so bake and shader agree). The theory that the
+// SVO's bent points OUT because it is an SDF gradient is also false: sdfAO
+// (common_svo.glsl:522) builds its bent with the SAME AO-weighted accumulation
+// used here, only with a third ring. The house's extra black is not the ray
+// direction - it is that the exact verdict ENCLOSES disks the 0.4 m volume
+// called open (sheltered spots), which is why the shader takes the union
+// max(bakedSky, coarse volume) instead of the baked verdict alone.
 
 // Few-tap bent-normal AO over the exact oracle (mirrors splatAO's rings).
 template <typename FieldT>
@@ -1431,6 +1475,64 @@ SurfelSet buildSurfels(const VoxelField& field, const SurfelParams& params) {
     for (int i = 0; i < n; ++i)
         if (isObj[order[i]])
             set.objectChunks[chunkOf[order[i]]] = 1;
+
+    // ---- exact sky visibility (enclosure) per OBJECT surfel -----------------
+    // Resolves the SVO's own sky ray once per disk against the records-derived
+    // field, and packs the binary verdict into bent_sh.w (see skyMarch).
+    //
+    // Placed here, deliberately:
+    //   * AFTER the AO/shadow smoothing, which averages bent_sh.w over face
+    //     neighbours and would otherwise average the bit into a fraction;
+    //   * BEFORE the bridge/cap emission and the micro-detail children, which
+    //     copy the parent's w and must inherit the verdict;
+    //   * BEFORE the LOD merge, which keeps object surfels unmerged (a copy)
+    //     and only averages w over terrain members (no sky bit on those).
+    // Terrain keeps its plain shadow (w < 1.5) and the fragment's GPU test: a
+    // terrain point under a canopy genuinely IS occluded, and the coarse
+    // volume answers that case the way the SVO does. It is the canopy OBJECT
+    // disks that it turns into a roof.
+    //
+    // Packing contract (shared with shaders/common_surfel.glsl):
+    //   w = shadow + 2*sky,  shadow in [0,1],  sky in {0,1}.
+    {
+        std::atomic<int> open{ 0 }, tested{ 0 };
+        std::atomic<int> next{ 0 };
+        unsigned hc = std::max(1u, std::thread::hardware_concurrency());
+        std::vector<std::thread> threads;
+        constexpr int kSkyBatch = 256;
+        for (unsigned t = 0; t < hc; ++t)
+            threads.emplace_back([&] {
+                int lo = 0, lt = 0;
+                for (;;) {
+                    const int begin = next.fetch_add(kSkyBatch);
+                    if (begin >= n)
+                        break;
+                    const int end = std::min(begin + kSkyBatch, n);
+                    for (int i = begin; i < end; ++i) {
+                        // Same object test as set.objectChunks: the surfel array
+                        // is chunk-sorted, so index the flags through `order`.
+                        if (!isObj[order[i]])
+                            continue;
+                        ++lt;
+                        const float sky = skyMarch(
+                            field, glm::vec3(surfels[i].pos_rU),
+                            glm::vec3(surfels[i].bent_sh));
+                        if (sky > 0.5f) {
+                            surfels[i].bent_sh.w += 2.0f;
+                            ++lo;
+                        }
+                    }
+                }
+                open.fetch_add(lo);
+                tested.fetch_add(lt);
+            });
+        for (auto& th : threads)
+            th.join();
+        spdlog::info(
+            "surfel exact sky: {} of {} object disks see open sky ({:.1f}%)",
+            open.load(), tested.load(),
+            100.0f * float(open.load()) / float(std::max(tested.load(), 1)));
+    }
 
     // ---- hard-edge bridges -------------------------------------------------
     // One small, tangent-aligned splat per exposed face pair. They inherit the
@@ -2362,6 +2464,11 @@ void shadeCandidates(const ChunkStore& store, const std::vector<SurfelCand>& can
         float ao = 1.0f;
         glm::vec3 bent = cd.n;
         aoBake(store, pos + cd.n * 0.02f, cd.n, ao, bent);
+        // Exact sky verdict: the SAME ray and the SAME packing as the bake
+        // (bent_sh.w = shadow + 2*sky), so a live-rebuilt disk keeps the
+        // canopy ambient its neighbours have. Terrain cells pack 0 and keep
+        // the fragment's GPU test, same split as the bake.
+        const float sky = cd.cell.obj ? skyMarch(store, pos, bent) : 0.0f;
 
         const uint8_t mat = cd.cell.mat;
         const float refl = kMaterialReflection[std::min(int(mat), kPaletteN - 1)].x;
@@ -2396,7 +2503,7 @@ void shadeCandidates(const ChunkStore& store, const std::vector<SurfelCand>& can
         Surfel sl;
         sl.pos_rU = glm::vec4(pos, rU);
         sl.normal_rV = glm::vec4(cd.n, rV);
-        sl.bent_sh = glm::vec4(bent, shadow);
+        sl.bent_sh = glm::vec4(bent, shadow + 2.0f * sky);
         // mat_ao.x fraction +0.25 = single-face disk (shader face clip); every
         // existing reader rounds or tests abs(x-8)<0.5, so the material is
         // unchanged. Mirror of the bake's pack.

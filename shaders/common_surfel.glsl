@@ -61,6 +61,14 @@ bool surfelIsObject(float packedAo)
     return packedAo >= 7.5;
 }
 
+// bent_sh.w packs TWO baked fields: the smoothed sun shadow (0..1) and the
+// exact per-surfel sky verdict (0/1) as  w = shadow + 2*sky. OBJECT surfels
+// carry the sky bit (the CPU bake resolves the SVO's own sky ray against the
+// records field); terrain and water leave it 0 and keep the fragment test.
+// ALWAYS decode before reading a shadow - the packed value reaches 3.
+float surfelBakedShadow(float packedSh) { return packedSh - 2.0 * step(1.5, packedSh); }
+float surfelBakedSky(float packedSh) { return step(1.5, packedSh); }
+
 uint surfelLayerId(float packedAo)
 {
     if (!surfelIsObject(packedAo))

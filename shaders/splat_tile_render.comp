@@ -261,7 +261,7 @@ void main()
             const vec3 alb = kPalette[clamp(mId, 0u, 16u)];
             const vec2 rr = vec2(vMat.y, vMat.z) / 255.0;
             const float shB = ((gRenderFlags & 2) != 0 && dot(n, kSunDir) > 0.02)
-                                  ? s.bent_sh.w
+                                  ? surfelBakedShadow(s.bent_sh.w)
                                   : 1.0;
             const float aoB = ((gRenderFlags & 1) != 0) ? clamp(aoBaked, 0.0, 1.0) : 1.0;
             vec3 bent = s.bent_sh.xyz;
@@ -272,7 +272,7 @@ void main()
             }
             const vec3 bentB = normalize(bent);
             col = shadeSurfel(q, rd, alb, rr, ro, n, bentB, shB, aoB, mId,
-                              s.bent_sh.w);
+                              s.bent_sh.w, s.mat_ao.w);
             const float fog = 1.0 - exp(-t * 0.0016);
             vec3 fc = fogColor(rd, q);
             const float mist = mistFactor(ro, q, t);

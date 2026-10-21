@@ -43,15 +43,18 @@ FAST = os.environ.get("VF_FAST_TESTS") == "1"
 # brittle (one dark blob moves the number), so the mean luma at the mask is
 # reported next to it: 19.9 vs the reference's 60.7 on 2026-10-21.
 #
-# BASELINE, not a target: 21,785 px (8.51% of the frame) on 2026-10-21,
-# before the footprint/shading work on the artifact. The bound is 15% above
-# it, which absorbs the per-run noise (two identical renders differ by at
-# most 5/255 on ~1.3% of the pixels - the lighting is not bit-exact).
-# Tighten it when the artifact is fixed; never loosen it silently.
+# BASELINE, not a target: 19,750 px (7.71% of the frame) on 2026-10-21, with
+# the exact-sky bake and its "never darker" union in place (the splat
+# backend's enclosure now resolves the SVO's own sky ray against the records
+# field, unioned with the coarse volume's verdict so it can only brighten).
+# The bound is 15% above it, which absorbs the per-run noise (two identical
+# renders differ by at most 5/255 on ~1.3% of the pixels - the lighting is not
+# bit-exact). Tighten it when the artifact is fixed; never loosen it
+# silently.
 CANOPY_CAM = ["-4.2", "0.9", "14.6", "-5.404", "-0.488", "4.792"]
 CANOPY_W, CANOPY_H = 640, 400
-CANOPY_MASK_BASELINE = 21785
-CANOPY_MASK_MAX = 24000
+CANOPY_MASK_BASELINE = 19750
+CANOPY_MASK_MAX = 22700
 CANOPY_LUMA_MIN = 15.0
 
 

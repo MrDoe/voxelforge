@@ -292,7 +292,7 @@ void main()
             alpha = 1.0;
         } else if (dbg > 7.5) {
             // baked shadow factor as grey
-            col = vec3(clamp(vShade.w, 0.0, 1.0));
+            col = vec3(clamp(surfelBakedShadow(vShade.w), 0.0, 1.0));
             alpha = 1.0;
         } else if (dbg > 6.5) {
             // roughness as grey
@@ -381,10 +381,10 @@ void main()
         // The shadow GATE stays on the surfel's own normal: the shadow was
         // baked with it, and re-evaluating the gate per fragment would tear
         // the terminator along the surfel boundaries.
-        float shB = ((gRenderFlags & 2) != 0 && dot(n, kSunDir) > 0.02) ? vShade.w : 1.0;
+        float shB = ((gRenderFlags & 2) != 0 && dot(n, kSunDir) > 0.02) ? surfelBakedShadow(vShade.w) : 1.0;
         float aoB = ((gRenderFlags & 1) != 0) ? clamp(aoBaked, 0.0, 1.0) : 1.0;
         vec3 bentB = normalize(vShade.xyz);
-        col = shadeSurfel(q, rd, alb, rr, ro, nShade, bentB, shB, aoB, mId, vShade.w);
+        col = shadeSurfel(q, rd, alb, rr, ro, nShade, bentB, shB, aoB, mId, vShade.w, vMat.w);
         float fog = 1.0 - exp(-t * 0.0016);
         vec3 fc = fogColor(rd, q);
         // valley mist over the stream + damp hollows (reference river mood)

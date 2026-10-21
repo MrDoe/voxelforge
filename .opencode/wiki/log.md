@@ -5853,3 +5853,65 @@ it had in fact loaded the reverted build. Check the `.spv` mtime against
 the process start before attributing a pixel diff to a shader change.
 
 See [[concepts/splat-canopy-parity]].
+
+## [2026-10-21] measure | Exact sky verdicts: the union is a -9% win, and the house baseline was stale
+
+Landed the pair (bake `src/voxel/surfelize.cpp` + decode/union in the four
+splat shaders): object surfels now pack `bent_sh.w = shadow + 2*exactSky`,
+the fragment takes `max(bakedSky, skyVisibilitySPlat)` so the bake can only
+brighten the coarse volume's verdict. Three measurements produced the shape:
+
+1. **The exact verdict alone is not landable.** It fixes the tree
+   (25,680 -> 24,163 px mask, -6%) but a house A/B on the same binary gave
+   5.52% (pre-bake path, `VF_SKY_OFF` probe) -> 5.66% (exact only). The
+   mechanism: 56% of object disks are enclosed by the cell-exact test, and
+   it encloses sheltered spots the 0.4 m volume called open.
+2. **The union is strictly better than both**: 23,493 px (-8.5%; -9.3% on
+   the second rig), house 5.42%, hero 0.31%, water 3.19%. Measured by
+   re-rendering the pre-bake path on the identical binary.
+3. **The "4.91% house baseline" is stale.** On the current tree the pre-bake
+   path renders the house at 5.52%, so the 5% bound is red *before* this
+   change and the union improves it by 0.10 points. The micro cast shadow
+   was excluded (102 surfels; the alpaca sits below that view's right edge).
+   Recovering the 4.91 -> 5.52 delta needs a HEAD-without-the-pair bisect.
+
+Falsified on the way (do not repeat): the sky ray's direction (shading bent
+/ geometric normal / `sdfAO`'s 3-ring all give 44.0/43.3/44.1% open and a
+house that does not recover), and the premise that `sdfAO`'s bent is an SDF
+gradient (it is the same AO-weighted accumulation, only a third ring).
+The remaining canopy darkness is the disk spill and the binary-vs-PCF sun
+shadow, not enclosure. See [[concepts/splat-canopy-parity]].
+
+
+The app WAS selecting: the pick fired and the activation fired. Three things
+were missing, all of them the part a user looks at:
+
+- the Move axis handles were **never drawn** for a micro object (the overlay
+  asked the WORLD's layer box, which is empty for a layer that is not in the
+  merged world) — the object could be grabbed by the maths and showed nothing
+  to grab;
+- the selection outline was fed the **world cell** under the hit, which for a
+  5 mm object can be a metre from the surface — the outline floated in the
+  air next to the object, which reads as "nothing was selected";
+- the label said "Selected voxel" — a micro object is not a voxel. It now
+  names the selected layer.
+
+**The real lesson is the instrument**: every earlier hook proved that
+`pickMicroObjects()` finds an object IN ISOLATION. The screen→ray
+conversion, the store-vs-micro competition and the gates around the
+selection were never measured, so a selection that failed in the app could
+still pass the gate. So: the pick is now ONE method (`App::pickAtWindowPos`)
+that `processInput` uses and a test can call; `App::m_testPointer` injects a
+window position and a button state into `processInput`, so the REAL path can
+be driven headlessly (the user's rule: a test must not take the pointer);
+and `VF_TEST_CLICK_SCAN` clicks the pixels where a micro object wins the
+real pick, through both gestures. Measured 12/12 picks and 12/12
+activations, every gate clear.
+
+And the thing the user was fighting: from the app's DEFAULT view the alpaca
+is a ~28x10 px sliver 15 m away (three hits on a 12 px scan grid) — a
+one-pixel miss picks the ground, which is a different layer, so the
+selection "does nothing". Up close it is 580 px. A micro object is
+selectable; it is small.
+
+See [[concepts/micro-voxel-svo-overlay]].
