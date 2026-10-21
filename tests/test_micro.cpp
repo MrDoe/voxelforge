@@ -757,11 +757,61 @@ TEST_CASE("fur cards: the roots sit ON the surface, and the cards stand off it")
         // The strand points OUT of the surface, not along it: a card lying in
         // the tangent plane is invisible from the front.
         const float ndl = glm::dot(vec3(c.nrmAlpha), vec3(c.dirWidth));
-        CHECK(ndl > 0.15f);
+        CHECK_MESSAGE(ndl > 0.15f, "ndl=", ndl, " len=", c.rootLen.w);
         // The card is a sliver, not a disk.
         CHECK(c.dirWidth.w < c.rootLen.w);
+        // The strand is CURLY, not a straight needle: the centre line's
+        // amplitude is a real fraction of the strand's length, and it makes
+        // at least one cycle.
+        CHECK(c.curl.x > 0.05f * c.rootLen.w);
+        CHECK(c.curl.x < 0.60f * c.rootLen.w);
+        CHECK(c.curl.y >= 0.5f);
     }
     CHECK(onSurface == int(o.cards.size()));
+}
+
+TEST_CASE("fur cards: the bucket grid covers the CURL")
+{
+    // The centre line wanders off the straight root-to-tip line, so a card
+    // filed in the cells of that line alone would be a card the DDA walks
+    // past. The bucket range must cover the curl's amplitude.
+    const float vox = 0.005f;
+    FurParams p;
+    p.materials = { 21 };
+    WorldFileData d = cubeLayer(3, vox, 21);
+    MicroField f;
+    std::string err;
+    REQUIRE(buildMicroField(d.voxels, d.meta, f, &err));
+    FurObject o;
+    std::string ferr;
+    REQUIRE(buildFurCards(f, p, o, &ferr));
+    REQUIRE(!o.cards.empty());
+
+    // Every card appears in at least one cell, and every card's cells are
+    // inside the grid.
+    const int cells = o.grid.dim.x * o.grid.dim.y * o.grid.dim.z;
+    CHECK(cells > 0);
+    std::vector<int> seen(o.cards.size(), 0);
+    for (uint32_t idx : o.cellItems) {
+        REQUIRE(idx < o.cards.size());
+        ++seen[idx];
+    }
+    for (size_t i = 0; i < seen.size(); ++i)
+        CHECK(seen[i] >= 1);
+    // The grid's extent covers every card's root and its tip.
+    for (const FurCard& c : o.cards) {
+        const vec3 root = vec3(c.rootLen);
+        const vec3 tip = root + vec3(c.dirWidth) * c.rootLen.w;
+        for (const vec3& p2 : { root, tip }) {
+            const vec3 rel = p2 - o.grid.origin;
+            CHECK(rel.x >= -o.grid.cell.x);
+            CHECK(rel.y >= -o.grid.cell.y);
+            CHECK(rel.z >= -o.grid.cell.z);
+            CHECK(rel.x <= float(o.grid.dim.x) * o.grid.cell.x + o.grid.cell.x);
+            CHECK(rel.y <= float(o.grid.dim.y) * o.grid.cell.y + o.grid.cell.y);
+            CHECK(rel.z <= float(o.grid.dim.z) * o.grid.cell.z + o.grid.cell.z);
+        }
+    }
 }
 
 TEST_CASE("fur cards: the same field yields the same cards twice")
