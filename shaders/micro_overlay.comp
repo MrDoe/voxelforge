@@ -65,6 +65,8 @@ layout(std430, set = 0, binding = 10) readonly buffer MField { uint uMField[]; }
 struct MicroBone {
     vec4 a;
     vec4 b;
+    // The CHAINED transform's translation (xyz) - the bone's rigid transform
+    // is R*p + t, and the inverse is R^T*(p - t).
     vec4 joint;
     vec4 r0;
     vec4 r1;
@@ -313,18 +315,24 @@ int microBoneAt(int w, vec3 p)
     return best;
 }
 
-// The bone's INVERSE rotation, applied to a point: the point in the rest
-// pose that the animated bone brought here.
+// A bone's transform is a RIGID one (R*p + t), CHAINED: it is the parent's
+// composed with the bone's own rotation. The inverse is R^T*(p - t).
+//
+// It has to be a general rigid transform and not a rotation about a pivot:
+// the composition of two pivot-rotations is not a pivot-rotation, and a child
+// that turns about a REST joint while the parent moves tears at the seam -
+// which is exactly what the neck did (the user saw a broken neck when the
+// animal bowed).
 vec3 microUnbone(int w, vec3 p, int bone)
 {
     if (bone < 0)
         return p;
     const MicroBone mb = wt.uWorlds[w].bone[bone];
     const mat3 R = mat3(mb.r0.xyz, mb.r1.xyz, mb.r2.xyz);
-    return mb.joint.xyz + transpose(R) * (p - mb.joint.xyz);
+    return transpose(R) * (p - mb.joint.xyz);
 }
 
-// The bone's rotation, applied to a point: the animated position of a rest
+// The bone's transform, applied to a point: the animated position of a rest
 // pose point.
 vec3 microRebone(int w, vec3 p, int bone)
 {
@@ -332,7 +340,7 @@ vec3 microRebone(int w, vec3 p, int bone)
         return p;
     const MicroBone mb = wt.uWorlds[w].bone[bone];
     const mat3 R = mat3(mb.r0.xyz, mb.r1.xyz, mb.r2.xyz);
-    return mb.joint.xyz + R * (p - mb.joint.xyz);
+    return R * p + mb.joint.xyz;
 }
 
 // A WORLD point -> the object's BAKED frame (the field's frame). The
