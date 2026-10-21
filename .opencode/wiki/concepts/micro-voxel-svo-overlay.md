@@ -491,6 +491,44 @@ is sampled (and the forward where the material is looked up), so the union
 field, the gradient (and so the normal), the AO and the self-shadow all keep
 working in the world frame untouched.
 
+### The animal span in place, and the graze is a BOW
+
+The user saw the alpaca "wildly flickering", "moving way too fast" and "stuck
+behind a stone". All three were **one** bug, in the collision response, and
+the measurement that found it was a per-frame trace of the behaviour's state
+(`VF_TRACE_BEHAVIOUR=1`): **the heading advanced +1.2 rad every frame**.
+
+Two causes, both in the retry:
+
+- `b.heading = prevHeading + turn` was applied on **every** frame while the
+  obstacle was still there, so the turns **compounded** — the animal span in
+  place, which is the flicker and the "too fast";
+- the retry step was the **frame's** step (a fraction of a millimetre in a
+  headless run), so a candidate a hair away was still inside the obstacle and
+  **no turn ever looked clear**.
+
+The response now sets a heading **target**, which the behaviour turns toward
+at a limited rate (1.1 rad/s) and the wander resumes on arrival — the animal
+swings round and walks off instead of snapping. The retry step is the animal's
+own footprint, so a candidate really *leaves* the blocked spot.
+
+**The graze is a BOW, not a head dip.** A head on a 0.32 m neck can only dip
+0.3 m, and the alpaca's muzzle is 1.3 m up — nowhere near the ground. So the
+graze pitches the **spine** about the body's **back** (the front drops, the
+front legs stay put) and the head and neck reach down and forward on top of
+it. The ease is 2.5 s in and 2.5 s out: an animal that snaps its head down
+reads as a glitch, one that leans down slowly reads as an animal deciding to
+eat.
+
+Verified headlessly: head **up** at t=0, a quarter of the way down at
+t=1.2 s, muzzle in the grass at t=3 s.
+
+**A gate has to pin the scene it measures.** The walking animal broke three
+of the micro gate's own checks — the footprint of a 90° yaw, the pick's reach,
+the house view — because each of them measures a *still* scene. The gate now
+turns the behaviour **off** by default and the behaviour check turns it on
+for itself.
+
 ### The fur must not slide
 
 The texture is bound to the **surface**, not to the world. A world-space

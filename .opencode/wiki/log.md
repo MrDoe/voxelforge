@@ -6120,3 +6120,54 @@ becomes `{"name":"alpaca","command":"run"}` and the app's
 machine uses, so an instruction and the animal's choice are one mechanism.
 
 See [[concepts/micro-voxel-svo-overlay]].
+
+## 2026-10-21 ingest | The scene overlays join the same palette
+
+The sidebar was reworked, but the app's OTHER UI surface was still on the
+old palette: teal gizmo rings, an amber "dragging" state, mint selection
+markers, a near-black hotkey bar with light-blue key text. Two products in
+one app.
+
+The overlays now speak the same language: the gizmo is the accent at three
+strengths (the thickness carries idle/hover/dragging), the selected move
+axis is the accent, the selection marker is the accent, the hotkey bar's
+plate is the window surface with a hairline border, and a key is drawn as a
+KEYCAP (a raised control) with its action in secondary text beside it. The
+armed mode chip is the accent fill + accent text, exactly like the sidebar's
+active button.
+
+The deliberate exception: the move axis colours stay red/green/blue. They
+are a CONVENTION that says which axis is which, not a state, so they do not
+belong to the app's palette.
+
+See [[concepts/sidebar-ui-vocabulary]].
+
+## [2026-10-21] fix | The animal span in place, and the graze is a bow
+
+The user saw the alpaca "wildly flickering", "moving way too fast" and
+"stuck behind a stone" — all three were ONE bug, in the collision response.
+A per-frame trace of the behaviour's state (`VF_TRACE_BEHAVIOUR=1`) found it:
+**the heading advanced +1.2 rad every frame**.
+
+Two causes: `b.heading = prevHeading + turn` was applied on every frame
+while the obstacle was still there, so the turns COMPOUNDED (the animal span
+in place — the flicker and the "too fast"); and the retry step was the
+FRAME's step (a fraction of a millimetre in a headless run), so a candidate a
+hair away was still inside the obstacle and no turn ever looked clear.
+
+The response now sets a heading TARGET, which the behaviour turns toward at
+a limited rate (1.1 rad/s) and the wander resumes on arrival, and the retry
+step is the animal's own footprint so a candidate really leaves the blocked
+spot.
+
+**The graze is a BOW.** A head on a 0.32 m neck can only dip 0.3 m and the
+muzzle is 1.3 m up, so the graze pitches the spine about the body's BACK
+(the front drops, the front legs stay) and the head and neck reach down on
+top of it, eased over 2.5 s each way.
+
+**A gate has to pin the scene it measures**: the walking animal broke three
+of the micro gate's own checks (the 90° yaw's footprint, the pick's reach,
+the house view) because each measures a still scene. The behaviour is now
+off by default in the gate, and the behaviour check turns it on for itself.
+
+See [[concepts/micro-voxel-svo-overlay]].

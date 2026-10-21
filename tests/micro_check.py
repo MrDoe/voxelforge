@@ -125,8 +125,17 @@ def _write_manifest(doc: dict) -> None:
     os.replace(tmp, MANIFEST)
 
 
-def set_micro(enabled: dict[str, bool], rot: dict[str, float] | None = None) -> None:
-    """Toggle the micro layers in the manifest (and optionally set a rotation)."""
+def set_micro(enabled: dict[str, bool], rot: dict[str, float] | None = None,
+              behaviour: dict[str, str] | None = None) -> None:
+    """Toggle the micro layers in the manifest (and optionally set a rotation
+    or a behaviour).
+
+    The BEHAVIOUR is off unless a check asks for it: a layer with
+    "behaviour": "grazer" WALKS, and every check that measures a still scene
+    (the footprint of a 90 degree yaw, the pick's reach, the house view) then
+    measures an animal that has moved since the last frame. The behaviour
+    check turns it on for itself.
+    """
     with open(MANIFEST) as f:
         doc = json.load(f)
     for layer in doc["layers"]:
@@ -135,6 +144,11 @@ def set_micro(enabled: dict[str, bool], rot: dict[str, float] | None = None) -> 
             layer["enabled"] = bool(enabled.get(name, True))
             if rot is not None and name in rot:
                 layer["rot"] = rot[name]
+            want = (behaviour or {}).get(name, "")
+            if want:
+                layer["behaviour"] = want
+            else:
+                layer.pop("behaviour", None)
     _write_manifest(doc)
 
 
@@ -552,6 +566,9 @@ def main() -> int:
         # 5e. THE AUTONOMOUS BEHAVIOUR. The animal walks on its own, and
         #     the AI can tell it what to do ("let the alpaca run").
         print("[micro] checking the autonomous behaviour ...")
+        set_micro({"micro/vase.vxw": True, "micro/urn.vxw": True,
+                   "micro/alpaca.vxw": True},
+                  behaviour={"micro/alpaca.vxw": "grazer"})
         ap = micro_pos("alpaca")
         bcam = "%.2f,%.2f,%.2f,%.2f,%.2f,%.2f" % (
             ap[0] - 0.6, ap[1] + 1.2, ap[2] - 1.1,
