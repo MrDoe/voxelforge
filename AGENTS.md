@@ -109,6 +109,15 @@ one costs a whole turn, because the bad call is rejected before any work runs.
   The only ignored file is `assets/runtime_edits.vxw` — the live-edit session
   overlay the app rewrites on every brush stroke (state, not content; the app
   loads it explicitly, it is never a `world.json` layer).
+- **The app REWRITES `assets/world.json` from its own layer list.** Every
+  app run rewrites the manifest, so a run that started with a toggled layer
+  writes that toggle back — and a write can land AFTER a test restored the
+  file. Measured 2026-10-21: `tests/micro_check.py` left all three micro
+  layers disabled and `git diff assets/` was not empty, because the app's
+  write beat the gate's restore. Two rules follow: a test that toggles
+  manifest layers must **verify** the restore (re-read the file, retry, and
+  say so loudly if it cannot), and `git diff assets/` is the check that the
+  shipped scene survived.
 - **Five ways to destroy data here, and every one of them is silent.** The
   overlay is gitignored and the manifests are tracked, so damage is invisible
   in `git status`; check there before blaming a build.
