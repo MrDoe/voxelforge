@@ -135,7 +135,7 @@ void App::loadMicroObjects()
         occluderOffsets.push_back(offset);
         occluderFiles.push_back(l.file);
         behaviourFiles.push_back(l.behaviour);
-        // The FUR CARDS. A micro object whose material grows fur (21,
+// The FUR CARDS. A micro object whose material grows fur (21,
         // `fleece`) gets a coat of hair cards; the vase and the urn do not,
         // and the fur pass stays empty for them.
         //
