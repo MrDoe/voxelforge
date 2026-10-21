@@ -39,12 +39,14 @@
 #include "render/ssao_pass.hpp"
 #include "render/svo_pass.hpp"
 #include "render/micro_svo_pass.hpp"
+#include "render/fur_pass.hpp"
 #include "render/taa_pass.hpp"
 #include "render/texture_atlas.hpp"
 #include "render/volumetric_fog_pass.hpp"
 #include "voxel/chunk_index.hpp"
 #include "voxel/box_select.hpp"
 #include "voxel/editable_world.hpp"
+#include "voxel/fur_cards.hpp"
 #include "voxel/layered_world.hpp"
 #include "voxel/live_editor.hpp"
 #include "voxel/mesh_import.hpp"
@@ -236,6 +238,10 @@ private:
     std::vector<vf::voxel::MicroOccluder> m_microOccluders;
     // The fields the occluders point at; owning storage for the pointers.
     std::vector<vf::voxel::MicroField> m_microFields;
+    // The fur cards of the micro objects that carry a fur material, and the
+    // objects' world AABBs (the cards are generated in the field's local
+    // frame, so the world min is what turns that frame into the world one).
+    std::vector<vf::voxel::FurObject> m_furObjects;
     // Sun: m_sunDir is the single source of truth for where the sun is (it
     // rides the per-frame push constant), so every control that moves the sun
     // funnels through setSunAngles and nothing keeps parallel angle floats.
@@ -362,6 +368,11 @@ private:
     // to the splat or water pass. Empty = the feature is off and record() is a
     // single branch.
     vf::MicroSvoPass m_microSvoPass;
+    // The translucent hair-card layer over the micro objects. It follows the
+    // micro overlay and composites into the same HDR image, so the fur can be
+    // transparent without touching the opaque pipeline. Empty = the feature
+    // is off and record() is a single branch.
+    vf::FurPass m_furPass;
     vf::SplatPass m_splatPass;
     vf::TaaPass m_taaPass;
     vf::PostPass m_postPass;
