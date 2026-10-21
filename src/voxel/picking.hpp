@@ -3,6 +3,7 @@
 #include "voxel/voxel_field.hpp"
 #include <glm/glm.hpp>
 #include <cstdint>
+#include <string>
 
 namespace vf::voxel {
 
@@ -16,6 +17,10 @@ struct PickHit {
     float dist = 0.f;         // t along ray
     glm::ivec3 voxel {0};     // quantized lattice coord
     float terrainHeight = 0.f;
+    // A MICRO object (a separate SVO world on its own fine lattice) is not in
+    // the world's store, so it has no owner id: it is named by its manifest
+    // file instead. Empty for every world hit.
+    std::string microFile;
 };
 
 // Ray march against the records-derived VoxelField. ro = camera pos,
