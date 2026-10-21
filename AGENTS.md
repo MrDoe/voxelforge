@@ -1044,6 +1044,16 @@ one costs a whole turn, because the bad call is rejected before any work runs.
   the world, so the micro shader samples the atlas at the point's REST-POSE
   position — the very point the field is sampled at. A world-space sample
   slides over the animal as it walks and as its bones swing.
+  **The NORMAL has to travel with the skin too**: `detailAlbedo`/`detailNormal`
+  pick their triplanar axes from the normal they are handed, so passing the
+  ANIMATED normal makes the fur pattern crawl over the body on every bone
+  rotation (the graze bows the spine 35°). The shader un-bones the normal into
+  the rest frame, samples there, and re-bones the bumped normal for shading
+  (`microDirUnbone`/`microDirRebone`/`microDirFromBaked`). **The staged Move
+  preview is a DISPLAY offset**: `main()` shifts the hit point so the object
+  appears dragged, so every SURFACE lookup (texture, material cell, normal,
+  AO) must take it back out (`microShadeToBaked`, `microMapShade`) — the field
+  *trace* must NOT, or the object stops following the pointer.
 - **The AI can tell an animal what to do.** `set_behaviour` is a chat tool:
   "let the alpaca run" becomes `{"name":"alpaca","command":"run"}` and
   `App::setMicroBehaviour` puts the animal into that command. The commands

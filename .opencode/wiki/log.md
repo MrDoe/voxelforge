@@ -6217,3 +6217,37 @@ AGENTS.md as a third rule beside "verify the restore" and "check
 `git diff assets/`".
 
 See [[concepts/micro-voxel-svo-overlay]].
+
+## [2026-10-21] fix | The fur lives in the rest frame — normal and preview included
+
+The user reported that "the fur moves with the alpaca". Two mechanisms, both
+frame errors in `shaders/micro_overlay.comp`:
+
+1. **The projection normal.** `detailAlbedo`/`detailNormal` choose the
+   triplanar axes from the normal argument, and the shader was handing them
+   the ANIMATED normal while sampling the POSITION in the rest pose. Every
+   bone rotation therefore turned the fur projection — the graze bows the
+   spine 35°, so the pattern crawled over the flanks. The normal is now
+   un-boned into the rest frame (`microDirUnbone`), the albedo and the bump
+   are sampled there, and the bumped normal is re-boned for shading
+   (`microDirRebone` → `microDirFromBaked`).
+2. **The staged Move preview.** `main()` adds `preview.xyz` to the hit point
+   so the object appears dragged, but `microToBaked` never subtracted it, so
+   the texture rest point (and the material cell) were sampled a drag-delta
+   away from the surface. `microShadeToBaked` removes the offset for every
+   SURFACE lookup, and `microMapShade` gives the normal and the AO the same
+   frame. The field **trace** keeps `microToBaked` — subtracting there would
+   make the object stop following the pointer.
+
+Verification: the vase (no skeleton) is a max-3/255 float-noise change, so the
+static path is untouched; the grazing alpaca renders with continuous fleece,
+an attached neck and no holes.
+
+**Measurement gotcha, recorded because it invalidated the first A/B:** a
+headless `--shot` of the ALPACA is not deterministic. The behaviour advances
+during the frames before the shot (`run.cpp` clamps the step to 0.1 s), so two
+identical runs differ by ~34 k px — the animal's fur is a sensitive probe of
+its own pose. Shader A/Bs on an animated micro object are pose noise; use a
+skeleton-free object.
+
+See [[concepts/micro-voxel-svo-overlay]].

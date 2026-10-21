@@ -356,14 +356,63 @@ vec3 microToBaked(int w, vec3 p)
            transpose(microRot(w)) * (p - wt.uWorlds[w].pivot.xyz);
 }
 
+// The RENDERED point -> the BAKED frame, for SHADING and for every lookup.
+//
+// It differs from microToBaked() by the staged Move preview: main() shifts the
+// hit point by that delta so the object appears dragged, and the field is
+// traced in the baked frame - but the texture, the material and the octree are
+// all baked-frame data, so shading must take the delta back out. Without this
+// a drag slides the fur across the animal (and samples the wrong material
+// cell), which is exactly what the user saw.
+vec3 microShadeToBaked(int w, vec3 p)
+{
+    const vec4 pv = wt.uWorlds[w].preview;
+    if (pv.w > 0.5)
+        p -= pv.xyz;
+    return microToBaked(w, p);
+}
+
 // The point in the object's OWN frame (the rest pose). It is where the
 // object's TEXTURE lives: a world-space sample slides over the animal as it
 // walks and as its bones swing, because the texture is bound to the surface,
 // not to the world.
 vec3 microRestPoint(int w, vec3 p)
 {
-    const vec3 rest = microToBaked(w, p);
+    const vec3 rest = microShadeToBaked(w, p);
     return microUnbone(w, rest, microBoneAt(w, rest));
+}
+
+// A DIRECTION through a bone's transform (rotations only; a direction has no
+// translation). The fur's projection axes have to travel with the skin, so the
+// texture is sampled in the REST frame with the REST normal - projecting with
+// the ANIMATED normal makes the pattern crawl over the body whenever a bone
+// turns (the graze bows the spine 35 degrees, which is plainly visible).
+vec3 microDirUnbone(int w, vec3 d, int bone)
+{
+    if (bone < 0)
+        return d;
+    const MicroBone mb = wt.uWorlds[w].bone[bone];
+    return transpose(mat3(mb.r0.xyz, mb.r1.xyz, mb.r2.xyz)) * d;
+}
+
+vec3 microDirRebone(int w, vec3 d, int bone)
+{
+    if (bone < 0)
+        return d;
+    const MicroBone mb = wt.uWorlds[w].bone[bone];
+    return mat3(mb.r0.xyz, mb.r1.xyz, mb.r2.xyz) * d;
+}
+
+// A direction from the baked frame back into the world: the inverse of
+// microDirToBaked (the preview's rotation, then the behaviour's).
+vec3 microDirFromBaked(int w, vec3 d)
+{
+    if (microRotOn(w))
+        d = microRot(w) * d;
+    if (wt.uWorlds[w].anim.w >= 0.5)
+        d = mat3(wt.uWorlds[w].arot0.xyz, wt.uWorlds[w].arot1.xyz,
+                 wt.uWorlds[w].arot2.xyz) * d;
+    return d;
 }
 
 
@@ -470,6 +519,27 @@ float microMap(vec3 p)
     return d;
 }
 
+// The union field as SHADING sees it.
+//
+// The staged Move preview is a DISPLAY offset: main() shifts the hit point so
+// the object appears dragged, while the trace runs in the baked frame. Every
+// lookup that describes the SURFACE - the texture, the material cell, the
+// normal, the AO - must take that offset back out, or it samples the field
+// BESIDE the object: the normal collapses to the bounding box's and the animal
+// shades like cardboard exactly while it is being dragged.
+float microMapShade(vec3 p)
+{
+    float d = 1e30;
+    for (int w = 0; w < wt.uWorldInfo.x && w < MAX_MICRO_WORLDS; ++w) {
+        const vec4 pv = wt.uWorlds[w].preview;
+        const vec3 q = pv.w > 0.5 ? p - pv.xyz : p;
+        d = min(d, microMapWorld(w, q, wt.uWorlds[w].geo.x,
+                                 int(wt.uWorlds[w].geo.y),
+                                 wt.uWorlds[w].base.x));
+    }
+    return d;
+}
+
 // Material + surface response of the micro cell that owns the surface hit.
 //
 // WHICH CELL owns the hit is the whole difficulty, and it is decided by the
@@ -516,7 +586,7 @@ bool microSurface(vec3 p, vec3 rd, out vec3 albedo, out vec2 rr, out uint matId)
         // the ray direction is the world one turned by the rotation. The
         // bone matters here too: the material lookup is a lookup in the
         // REST POSE's grid, so the point has to be unboned as well.
-        vec3 rest = microToBaked(w, p);
+        vec3 rest = microShadeToBaked(w, p);
         rest = microUnbone(w, rest, microBoneAt(w, rest));
         vec3 q = rest + microDirToBaked(w, rd) * (0.15 * voxel);
         // Clamp the query INTO the box rather than rejecting points outside it.
@@ -766,9 +836,9 @@ float skyVisibilitySvo(vec3 p, vec3 bent)
 
 vec3 microNormal(vec3 p, float e)
 {
-    vec3 g = vec3(microMap(p + vec3(e, 0, 0)) - microMap(p - vec3(e, 0, 0)),
-                  microMap(p + vec3(0, e, 0)) - microMap(p - vec3(0, e, 0)),
-                  microMap(p + vec3(0, 0, e)) - microMap(p - vec3(0, 0, e)));
+    vec3 g = vec3(microMapShade(p + vec3(e, 0, 0)) - microMapShade(p - vec3(e, 0, 0)),
+                  microMapShade(p + vec3(0, e, 0)) - microMapShade(p - vec3(0, e, 0)),
+                  microMapShade(p + vec3(0, 0, e)) - microMapShade(p - vec3(0, 0, e)));
     float gl = length(g);
     if (gl < 1e-9)
         return vec3(0.0, 1.0, 0.0);
@@ -792,7 +862,7 @@ void microAO(vec3 p, vec3 n, out float ao, out vec3 bent)
         for (int a = 0; a < 4; ++a) {
             float ang = float(a) * 1.5708 + float(ring) * 0.785;
             vec3 dir = normalize(n * 0.85 + (cos(ang) * tang + sin(ang) * bitan) * 0.7);
-            float s = microMap(p + dir * r);
+            float s = microMapShade(p + dir * r);
             float fall = clamp(1.0 - s / r, 0.0, 1.0);
             fall = fall * fall * (3.0 - 2.0 * fall);
             float w = 1.0 / (1.0 + fall * fall * 4.0);
@@ -820,9 +890,18 @@ vec3 shadeMicro(vec3 p, vec3 rd, int w)
     // and as its bones swing, because the texture is bound to the surface and
     // not to the world. The rest-pose point is the very point the field is
     // sampled at, so the texture sticks to the surface it belongs to.
-    const vec3 rest = microRestPoint(w, p);
-    alb = detailAlbedo(alb, rest, n, mId);
-    n = detailNormal(n, rest, mId);
+    //
+    // The NORMAL has to be taken into the rest frame as well. detailAlbedo
+    // and detailNormal choose the triplanar projection axes from it, so
+    // handing them the ANIMATED normal turns the fur with every bone rotation
+    // - the pattern crawls over the skin while the animal moves. The bumped
+    // normal is brought back out again for shading.
+    const vec3 baked = microShadeToBaked(w, p);
+    const int rbone = microBoneAt(w, baked);
+    const vec3 rest = microUnbone(w, baked, rbone);
+    const vec3 restN = microDirUnbone(w, microDirToBaked(w, n), rbone);
+    alb = detailAlbedo(alb, rest, restN, mId);
+    n = microDirFromBaked(w, microDirRebone(w, detailNormal(restN, rest, mId), rbone));
     // The sun is occluded by BOTH worlds: the micro worlds (self-shadow and
     // micro-to-micro) and the main world's coarse heightfield + object volume.
     // Two binary contributions multiplied is the same verdict the splat

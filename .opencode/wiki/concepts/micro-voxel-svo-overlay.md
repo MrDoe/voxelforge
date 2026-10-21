@@ -573,6 +573,36 @@ shader samples the atlas at the point's **rest-pose** position — the very
 point the field is sampled at. The texture then sticks to the surface it
 belongs to, and follows its bone.
 
+Two details are load-bearing, and both were reported as "the fur moves with
+the alpaca":
+
+- **The normal must be taken into the rest frame as well.** `detailAlbedo`
+  and `detailNormal` (in `common_base.glsl`) choose their triplanar
+  projection axes from the normal argument (`pow(abs(n), 8)`), so sampling
+  the *position* in the rest frame while passing the *animated* normal makes
+  the pattern crawl over the skin whenever a bone turns — a 35° spine bow in
+  the graze is plainly visible. The shader un-bones the normal
+  (`microDirUnbone`), samples albedo and bump there, and re-bones the bumped
+  normal for shading (`microDirRebone` → `microDirFromBaked`). At a rest pose
+  the round trip is an exact identity: the vase (no skeleton) differs from
+  the pre-fix shader by max 3/255, i.e. float noise.
+- **The staged Move preview is a DISPLAY offset, not a world position.**
+  `main()` shifts the hit point by `preview.xyz` so the object appears
+  dragged, while `microMapWorld` traces in the baked frame. Every lookup that
+  describes the *surface* must subtract the offset again
+  (`microShadeToBaked`, `microMapShade` for the normal and the AO) or it
+  samples the field *beside* the object: the material cell falls back to the
+  filler, the normal collapses to the bounding box's, and the animal shades
+  like cardboard while it is being dragged. The field **trace** must keep
+  using `microToBaked` — subtracting the offset there would make the object
+  stop following the pointer.
+
+Verification gotcha: a headless `--shot` of an **animated** micro object is
+not deterministic — the behaviour advances during the frames before the shot
+(`run.cpp` clamps the step to 0.1 s), so two identical runs of the alpaca
+differ by ~34 k px. Any shader A/B on the animal is therefore pose noise;
+A/B on a skeleton-free object (the vase) instead.
+
 ### The AI can tell an animal what to do
 
 `set_behaviour` is a chat tool: *"let the alpaca run"* becomes
