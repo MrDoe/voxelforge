@@ -109,7 +109,8 @@ OBJ** in the same panel; the current `hamlet_cabin` is reimported from
 |---|---|
 | `WASD` / `Q` `E` | move down/up |
 | `RMB` + mouse | look |
-| wheel | movement speed (Shift/Ctrl boost/slow) |
+| wheel | scroll the sidebar |
+| `Shift` / `Ctrl` | fly 3.5x faster / 4x slower (base speed: Render panel -> View -> Speed) |
 | `Ctrl+LMB` | pick a voxel → becomes the bottom-center anchor for AI builds |
 | `C` → Rotate | select the rotation tool |
 | plain LMB in Rotate | activate the exact object under the cursor |

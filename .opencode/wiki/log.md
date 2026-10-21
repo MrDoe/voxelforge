@@ -5978,6 +5978,13 @@ state):
 - The **pane could not be scrolled with the wheel**: it carried
   `NoScrollWithMouse`, which was protecting a camera wheel binding that does
   not exist anywhere in the codebase (`io.MouseWheel` is read by nothing).
+  **CORRECTION (later the same day):** the second half of that was WRONG.
+  ImGui's GLFW backend *chains* the app's scroll callback, and the app's own
+  callback fed `Camera::speed` (`speed *= exp(-scroll * 0.15)`) - so the
+  wheel DID scale the movement speed, invisibly, from anywhere including over
+  the sidebar. The `io.MouseWheel` grep missed it because the app used the
+  platform window's own scroll accumulator, not ImGui's. The binding is gone
+  now; the speed is the Render panel's VIEW slider.
   The flag is gone from the pane, so long sections scroll.
 
 Also: `VF_TEST_PANEL=edit|world|render|textures|mesh|ai` opens a section at

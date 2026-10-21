@@ -244,7 +244,9 @@ one costs a whole turn, because the bad call is rejected before any work runs.
 
 ## Run
 - `./build/voxelforge` — reference cam `1.0,2.0,1.5 → 5.3,1.0,11.3` (house.jpeg view), sun `34°/238°`.
-- Keys: `WASD/QE` move, `RMB+mouse` look, wheel speed, `Ctrl+LMB` pick anchor,
+- Keys: `WASD/QE` move, `RMB+mouse` look, `Ctrl+LMB` pick anchor,
+  `Shift`/`Ctrl` fly 3.5x faster / 4x slower (the base speed is the Render
+  panel's **Speed** slider - the wheel does NOT change it),
   `F` toggles splats/SVO renderer, `N` toggles TAA (off by default; headless
   never ran it), `[`/`]` shrink/grow splat disks. The window close button quits; `Esc` is reserved and does not exit.
   `B` toggles texture detail normals (render-flag bit 7, default on), `G`/`H` toggle SSR/SSAO,

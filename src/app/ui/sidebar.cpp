@@ -165,11 +165,12 @@ void App::drawSidebar()
         if (!m_sidebarCollapsed) {
             ImGui::SameLine();
             // The pane SCROLLS with the wheel. It used to carry
-            // NoScrollWithMouse, which was protecting a camera wheel binding
-            // that does not exist anywhere in the codebase (io.MouseWheel is
-            // read by nothing) - so a long section was reachable only by
-            // dragging its scrollbar. The parent window keeps the flag, so the
-            // rail does not scroll anything.
+            // NoScrollWithMouse, which was protecting the camera's wheel
+            // binding - a scroll over the sidebar scaled the movement speed
+            // with nothing on screen saying so. That binding is gone (the
+            // speed is the Render panel's VIEW slider now), so the wheel can
+            // do the obvious thing here. The parent window keeps the flag,
+            // so the rail does not scroll anything.
             if (ImGui::BeginChild("pane", ImVec2(0.0f, topH), ImGuiChildFlags_None)) {
                 // The band names the section: switching panels is a jump to a
                 // different place, and the place has to say what it is.
