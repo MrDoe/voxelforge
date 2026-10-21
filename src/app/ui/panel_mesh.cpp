@@ -90,15 +90,22 @@ void App::drawPanelMesh()
 
     if (groupHeader("mesh.transform", "TRANSFORM")) {
         ImGui::BeginDisabled(!m_meshUseFit);
-        ImGui::InputFloat("Fit longest side (m)##meshFit", &m_meshFitMeters, 0.1f,
-                          0.1f, "%.2f");
+        controlRow("Fit longest (m)", [&] {
+            ImGui::SetNextItemWidth(-1.0f);
+            ImGui::InputFloat("##meshFit", &m_meshFitMeters, 0.1f, 0.1f, "%.2f");
+        });
         ImGui::EndDisabled();
         ImGui::BeginDisabled(m_meshUseFit);
-        ImGui::InputFloat("Scale (m per unit)##meshScale", &m_meshScale, 0.001f,
-                          0.0001f, "%.4f");
+        controlRow("Scale (m/unit)", [&] {
+            ImGui::SetNextItemWidth(-1.0f);
+            ImGui::InputFloat("##meshScale", &m_meshScale, 0.001f, 0.0001f,
+                              "%.4f");
+        });
         ImGui::EndDisabled();
-        ImGui::InputFloat("Mesh-local yaw (deg)##meshRotY", &m_meshRotY, 1.0f, 0.1f,
-                          "%.1f");
+        controlRow("Yaw (deg)", [&] {
+            ImGui::SetNextItemWidth(-1.0f);
+            ImGui::InputFloat("##meshRotY", &m_meshRotY, 1.0f, 0.1f, "%.1f");
+        });
         const char* materialName = kMatNames[std::clamp(m_meshMaterial, 0, 21)];
         ImGui::SetNextItemWidth(-1.0f);
         if (ImGui::BeginCombo("Material##meshMaterial", materialName)) {

@@ -35,11 +35,15 @@ void App::drawPanelTextures()
 
         // One row per material, collapsed by default: the badge keeps the
         // current binding visible, so a closed row still says which material
-        // is textured and with what.
+        // is textured and with what. The badge is the FILE NAME, not its
+        // path - every binding comes from the same folder, and the path
+        // would eat the width the material name needs.
         char id[32];
         snprintf(id, sizeof(id), "tex.%d", material);
-        const char* badge = current.empty() ? "(palette)" : current.c_str();
-        if (!groupHeader(id, kMatNames[material], false, badge)) {
+        std::string badge = current.empty() ? "(palette)"
+                                            : current.substr(current.find_last_of('/') + 1);
+        const char* badgeText = badge.c_str();
+        if (!groupHeader(id, kMatNames[material], false, badgeText)) {
             if (missing)
                 ImGui::TextColored(kWarn, "File is not in the scanned folder");
             continue;

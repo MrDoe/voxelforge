@@ -224,14 +224,16 @@ void ChatUi::drawPanel(vf::voxel::EditableWorld& editable, vf::voxel::LayeredWor
 
     // The status is a state, so it wears the state's colour. (The chat lives
     // in the AI layer, so it does not use the app's UI vocabulary - but it
-    // follows the same rule the rest of the sidebar does.)
+    // follows the same rule the rest of the sidebar does.) It WRAPS: the
+    // status carries the model and the URL, which is wider than the pane.
     {
         const ImVec4 statusColor =
             m_status == "error" ? ImVec4(0.965f, 0.376f, 0.439f, 1.0f)
             : m_sending ? ImVec4(0.204f, 0.804f, 0.925f, 1.0f)
             : ImVec4(0.427f, 0.478f, 0.541f, 1.0f);
-        ImGui::TextColored(statusColor, "%s",
-                           m_sending ? "thinking..." : m_status.c_str());
+        ImGui::PushStyleColor(ImGuiCol_Text, statusColor);
+        ImGui::TextWrapped("%s", m_sending ? "thinking..." : m_status.c_str());
+        ImGui::PopStyleColor();
     }
 
     if(hasSelection){
@@ -262,7 +264,10 @@ void ChatUi::drawPanel(vf::voxel::EditableWorld& editable, vf::voxel::LayeredWor
     }
 
     ImGui::Separator();
-    ImGui::BeginChild("history", ImVec2(0, -70), true);
+    // The history takes whatever is left, minus the composer (48 px) and the
+    // button row under it (~30 px). The old -70 reserve was 8 px short, so
+    // the row under the input fell behind the sidebar's status bar.
+    ImGui::BeginChild("history", ImVec2(0, -88), true);
     for(auto &e: m_history){
         if(e.role=="user"){
             ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.6f,0.85f,1.f,1));

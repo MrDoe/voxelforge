@@ -95,7 +95,9 @@ void controlRow(const char* label, Fn&& control)
         ImGui::TableNextRow();
         ImGui::TableSetColumnIndex(0);
         ImGui::PushStyleColor(ImGuiCol_Text, kTextSecondary);
-        ImGui::TextUnformatted(label);
+        // WRAPPED: a label longer than the label column must wrap, not be
+        // clipped by the cell (TextUnformatted would run into the control).
+        ImGui::TextWrapped("%s", label);
         ImGui::PopStyleColor();
         ImGui::TableSetColumnIndex(1);
         control();

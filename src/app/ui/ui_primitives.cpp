@@ -203,7 +203,9 @@ bool groupHeader(const char* id, const char* title, bool defaultOpen,
     // not run back into the name it belongs to.
     if (badge && *badge) {
         const float titleW = ImGui::CalcTextSize(title).x;
-        const float badgeMax = w - (26.0f + titleW + 14.0f);
+        // 22 px of slack: the badge is right-aligned, the title is not, and
+        // the two must not touch.
+        const float badgeMax = w - (26.0f + titleW + 22.0f);
         const std::string shown = elideToWidth(badge, badgeMax);
         if (!shown.empty()) {
             const ImVec2 bs = ImGui::CalcTextSize(shown.c_str());
