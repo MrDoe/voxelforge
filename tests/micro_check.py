@@ -48,6 +48,7 @@ Usage:  python3 tests/micro_check.py [path/to/voxelforge]
 """
 from __future__ import annotations
 
+import copy
 import json
 import os
 import re
@@ -159,11 +160,19 @@ def set_micro(enabled: dict[str, bool], rot: dict[str, float] | None = None,
             layer["enabled"] = bool(enabled.get(name, True))
             if rot is not None and name in rot:
                 layer["rot"] = rot[name]
-            want = (behaviour or {}).get(name, "")
-            if want:
-                layer["behaviour"] = want
-            else:
-                layer.pop("behaviour", None)
+            # A still-scene check needs the animal to hold still, but the
+            # field is never REMOVED. The manifest is tracked, and a removed
+            # key is restored only if the snapshot still had it - so one run
+            # that took its snapshot after an earlier run (or an app write)
+            # had already dropped the field loses the grazer for good.
+            # Measured 2026-10-21: `set_micro` popped "behaviour" on its
+            # FIRST call, a crashed run snapshotted the popped state, and the
+            # shipped scene came back without it - the alpaca never walked
+            # again. "stop" is a real command, so a leftover is harmless.
+            if behaviour is not None and name in behaviour:
+                layer["behaviour"] = behaviour[name]
+            elif layer.get("behaviour"):
+                layer["behaviour"] = "stop"
     _write_manifest(doc)
 
 
@@ -171,26 +180,37 @@ def set_micro(enabled: dict[str, bool], rot: dict[str, float] | None = None,
 # back EXACTLY. A restore that only re-enables the layers leaves a rotation
 # behind (measured: the gate turned the shipped alpaca 90 degrees and left it
 # that way).
-_MICRO_SAVED: list[tuple[str, bool, float, str]] = []
+_MICRO_SAVED: list[dict] = []
 
 
 def save_micro() -> None:
-    """Snapshot the micro entries' VALUES (not their dicts: the manifest is
-    re-read on every write, so a saved dict reference would be stale).
+    """Snapshot the micro entries WHOLE (deep copies: the manifest is
+    re-read and rewritten on every toggle, so a saved reference would be
+    stale or already mutated).
 
-    The BEHAVIOUR is part of it: the alpaca's walk is switched on by
-    "behaviour": "grazer" in the manifest, and a writer that drops the field
-    silently stops the animal walking (measured: one app run rewrote
-    world.json without it and the alpaca froze)."""
+    A whole entry, not a few fields: the gate toggles layers and rotates the
+    alpaca, and a restore that only knows about `enabled`/`rot` leaves
+    anything else a check touches behind. The BEHAVIOUR is part of it - the
+    alpaca walks because the manifest says "grazer", and a manifest without
+    that field is an alpaca that never moves again (measured: one app run
+    rewrote world.json without it and the alpaca froze).
+
+    The snapshot is PRINTED, because it also answers a different question: if
+    it is already missing a behaviour, the manifest was damaged BEFORE this
+    run, and the restore will faithfully preserve the damage. Say so now
+    rather than discovering it in `git diff assets/` later."""
     with open(MANIFEST) as f:
         doc = json.load(f)
     _MICRO_SAVED.clear()
     for layer in doc["layers"]:
         if layer.get("role") == "micro":
-            _MICRO_SAVED.append(
-                (layer.get("file", ""), layer.get("enabled", True),
-                 float(layer.get("rot", 0.0)), layer.get("behaviour", ""))
-            )
+            _MICRO_SAVED.append(copy.deepcopy(layer))
+    if _MICRO_SAVED:
+        print("[micro] manifest snapshot: " + ", ".join(
+            "%s en=%d rot=%.1f behaviour=%s"
+            % (l.get("file", "?"), 1 if l.get("enabled", True) else 0,
+               float(l.get("rot", 0.0)), l.get("behaviour") or "-")
+            for l in _MICRO_SAVED))
 
 
 def restore_micro() -> None:
@@ -206,38 +226,28 @@ def restore_micro() -> None:
     """
     if not _MICRO_SAVED:
         return
+    saved = {l.get("file", ""): l for l in _MICRO_SAVED}
     for attempt in range(4):
         with open(MANIFEST) as f:
             doc = json.load(f)
-        saved = {name: (en, rot, beh) for name, en, rot, beh in _MICRO_SAVED}
-        for layer in doc["layers"]:
+        # Replace each micro entry WHOLE. Editing the fields by name is what
+        # let a damaged field survive: a restore that does not know about a
+        # key cannot put it back (an older run wrote "rotDeg", and a missing
+        # "behaviour" was silently restored as missing).
+        for i, layer in enumerate(doc["layers"]):
             if layer.get("role") != "micro":
                 continue
-            entry = saved.get(layer.get("file", ""))
-            if entry:
-                layer["enabled"] = entry[0]
-                layer["rot"] = entry[1]
-                if entry[2]:
-                    layer["behaviour"] = entry[2]
-                else:
-                    layer.pop("behaviour", None)
-            # A key the gate may have introduced (an older run wrote "rotDeg")
-            # would otherwise survive into the shipped manifest.
-            layer.pop("rotDeg", None)
+            want = saved.get(layer.get("file", ""))
+            if want is not None:
+                doc["layers"][i] = copy.deepcopy(want)
         _write_manifest(doc)
-        # Verify: re-read and compare the values we care about.
+        # Verify: every micro entry must equal the snapshot, WHOLE.
         with open(MANIFEST) as f:
             check = json.load(f)
-        ok = True
-        for layer in check["layers"]:
-            if layer.get("role") != "micro":
-                continue
-            entry = saved.get(layer.get("file", ""))
-            if entry and (layer.get("enabled", True) != entry[0]
-                          or float(layer.get("rot", 0.0)) != entry[1]
-                          or layer.get("behaviour", "") != entry[2]):
-                ok = False
-        if ok:
+        got = {l.get("file", ""): l for l in check["layers"]
+               if l.get("role") == "micro"}
+        if all(got.get(name) == want for name, want in saved.items()):
+            print("[micro] manifest restored (%d micro entries)" % len(saved))
             return
         time.sleep(0.4)
     print("FAIL: the manifest's micro layers could not be restored - "
@@ -269,6 +279,24 @@ def micro_cam(name: str, dx: float, dy: float, dz: float,
     x, y, z = micro_pos(name)
     return "%.2f,%.2f,%.2f,%.2f,%.2f,%.2f" % (x + dx, y + dy, z + dz,
                                               x + tx, y + ty, z + tz)
+
+
+def run_app(cmd: list[str], env: dict[str, str], what: str):
+    """Run the app and REQUIRE success, printing its own last lines if not.
+
+    "returned non-zero exit status 1" with no output is a failure that cannot
+    be diagnosed - and a LOST GPU DEVICE (vkCreateDevice: VkResult -4) looks
+    exactly like it. The render path already captures; these direct app runs
+    (the pick scan, the click scan, the drag, the behaviour command) must too.
+    """
+    proc = subprocess.run(cmd, cwd=ROOT, env=env,
+                          capture_output=True, text=True)
+    if proc.returncode != 0:
+        print("FAIL: %s failed (%d):" % (what, proc.returncode))
+        for line in (proc.stdout + proc.stderr).splitlines()[-12:]:
+            print("    " + line)
+        raise SystemExit(proc.returncode)
+    return proc
 
 
 def differing(a: bytes, b: bytes, thr: int = 16) -> list[int]:
@@ -388,12 +416,10 @@ def main() -> int:
         #    (b) CAST: the world bake must report surfels darkened by the
         #        micro fields. A "cast shadow" that darkens nothing is the
         #        failure mode to watch for, and it is silent.
-        proc = subprocess.run(
+        proc = run_app(
             [APP, "--shot", os.path.join(tmpdir, "bake.ppm"), "--cam", MICRO_CAM,
              "--width", "320", "--height", "200"],
-            cwd=ROOT, env=os.environ.copy(), capture_output=True, text=True,
-            check=True,
-        )
+            os.environ.copy(), "the cast-shadow bake")
         m = re.search(r"micro cast shadow darkened (\d+) surfel", proc.stdout + proc.stderr)
         note(
             m is not None and int(m.group(1)) >= 5,
@@ -516,11 +542,10 @@ def main() -> int:
         pick_env = os.environ.copy()
         pick_env["VF_TEST_MICRO_PICK"] = "1"
         pick_env["VF_OVERLAY_PATH"] = os.path.join(tmpdir, "overlay.vxw")
-        proc = subprocess.run(
+        proc = run_app(
             [APP, "--shot", os.path.join(tmpdir, "pick.ppm"), "--cam", MICRO_CAM,
              "--width", "320", "--height", "200"],
-            cwd=ROOT, env=pick_env, capture_output=True, text=True, check=True,
-        )
+            pick_env, "the pick scan")
         m = re.search(r"VF_TEST_MICRO_PICK: (\d+)/(\d+) micro objects selectable",
                       proc.stdout + proc.stderr)
         note(
@@ -584,10 +609,9 @@ def main() -> int:
         click_env = os.environ.copy()
         click_env["VF_TEST_CLICK_SCAN"] = "1"
         click_env["VF_OVERLAY_PATH"] = os.path.join(tmpdir, "overlay.vxw")
-        proc = subprocess.run(
+        proc = run_app(
             [APP, "--smoke", "240", "--width", "900", "--height", "600"],
-            cwd=ROOT, env=click_env, capture_output=True, text=True, check=True,
-        )
+            click_env, "the click scan")
         out = proc.stdout + proc.stderr
         picked = len(re.findall(r"pick selected .* layer micro/", out))
         activated = len(re.findall(r"rotate: activated micro/", out))
@@ -605,9 +629,9 @@ def main() -> int:
         drag_env = os.environ.copy()
         drag_env["VF_TEST_MOVE_DRAG"] = "1"
         drag_env["VF_OVERLAY_PATH"] = os.path.join(tmpdir, "overlay.vxw")
-        proc = subprocess.run(
+        proc = run_app(
             [APP, "--smoke", "200", "--width", "900", "--height", "600"],
-            cwd=ROOT, env=drag_env, capture_output=True, text=True, check=True)
+            drag_env, "the move drag")
         out = proc.stdout + proc.stderr
         grabbed = "move: grabbed micro/" in out
         m = re.search(r"the drag ended with delta \(([-+0-9.]+),([-+0-9.]+),"
@@ -643,9 +667,9 @@ def main() -> int:
         cmd_env = os.environ.copy()
         cmd_env["VF_TEST_BEHAVIOUR_CMD"] = "alpaca:run:0.6"
         cmd_env["VF_OVERLAY_PATH"] = os.path.join(tmpdir, "overlay.vxw")
-        proc = subprocess.run(
+        proc = run_app(
             [APP, "--smoke", "60", "--width", "480", "--height", "320"],
-            cwd=ROOT, env=cmd_env, capture_output=True, text=True, check=True)
+            cmd_env, "the behaviour command")
         out = proc.stdout + proc.stderr
         note("-> run" in out,
              "the AI can tell the animal what to do (%s)"

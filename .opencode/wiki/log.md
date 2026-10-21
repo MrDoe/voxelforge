@@ -6171,3 +6171,49 @@ the house view) because each measures a still scene. The behaviour is now
 off by default in the gate, and the behaviour check turns it on for itself.
 
 See [[concepts/micro-voxel-svo-overlay]].
+
+## [2026-10-21] fix | The bones are a CHAIN, so the neck stops breaking
+
+The user reported a **broken neck whenever the animal moved**. The rig was
+right and the gait was right: the bones were **independent**, each turning
+about its own joint in the rest frame, so when the spine bowed the head kept
+turning about a joint that had already moved with the body — and the neck
+tore away from the shoulders.
+
+The fix is the composition a skeleton always needed:
+
+- every bone has a **parent** (the legs, head and tail hang off the spine) —
+  still derived from the geometry, so the rig stays generic;
+- the behaviour composes `R_w = R_p·R_l`, `t_w = R_p·t_l + t_p`;
+- the bone row carries a **translation**, not a joint, and the shader
+  applies `R·p + t` (inverse `Rᵀ·(p−t)` where the field is sampled). The
+  composition of two pivot-rotations is not a pivot-rotation, so a pivot
+  cannot express the chain at all.
+
+**Two traps, both measured.** (1) The upload wrote the bone's *joint* into
+the translation slot, and a joint is a world position — every object was
+transported by metres: the vase and the urn vanished and the alpaca measured
+76 px instead of 81 000. A bone's transform starts as the **identity**.
+(2) The first version of the fix committed the app side while its shader
+edit silently failed an assertion (the file was never written), and the
+visual check passed anyway because the old pivot formula was close enough —
+a half-applied change that looks fixed. Verify the file, not just the
+picture.
+
+## [2026-10-21] fix | A gate must not destroy what it suppresses
+
+The micro gate came back green while leaving `assets/world.json` damaged:
+vase and urn disabled, alpaca rotated 90°, and `"behaviour": "grazer"`
+**gone**. The mechanism was in the gate itself: `set_micro` suppressed the
+walk by **deleting** the `behaviour` key, then `save_micro` snapshotted the
+manifest — so a run that started after an earlier run (or an app write) had
+already removed the key restored the removal, permanently.
+
+The gate now writes a real no-op command (`"behaviour": "stop"`), snapshots
+whole layer entries, **prints** the snapshot (a pre-existing loss is visible
+in the log), and replaces entries whole on restore, verifying by equality.
+The manifest was restored from HEAD and the gate re-run. Recorded in
+AGENTS.md as a third rule beside "verify the restore" and "check
+`git diff assets/`".
+
+See [[concepts/micro-voxel-svo-overlay]].

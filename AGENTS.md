@@ -114,10 +114,18 @@ one costs a whole turn, because the bad call is rejected before any work runs.
   writes that toggle back — and a write can land AFTER a test restored the
   file. Measured 2026-10-21: `tests/micro_check.py` left all three micro
   layers disabled and `git diff assets/` was not empty, because the app's
-  write beat the gate's restore. Two rules follow: a test that toggles
+  write beat the gate's restore. Three rules follow: a test that toggles
   manifest layers must **verify** the restore (re-read the file, retry, and
-  say so loudly if it cannot), and `git diff assets/` is the check that the
-  shipped scene survived.
+  say so loudly if it cannot); `git diff assets/` is the check that the
+  shipped scene survived; and a test must **never suppress a feature by
+  deleting its manifest key** — write a real no-op value instead (the gate
+  writes `"behaviour": "stop"`). A deleted key comes back only if the
+  snapshot still had it, so one run that snapshots after the deletion (or
+  after an app write) loses the field for good. Measured 2026-10-21: the gate
+  popped `behaviour` on its first toggle, a crashed run snapshotted that
+  state, and the shipped manifest came back without the grazer — the alpaca
+  never walked again. The gate now snapshots whole entries, prints the
+  snapshot, and replaces entries whole on restore.
 - **Five ways to destroy data here, and every one of them is silent.** The
   overlay is gitignored and the manifests are tracked, so damage is invisible
   in `git status`; check there before blaming a build.
@@ -1010,12 +1018,22 @@ one costs a whole turn, because the bad call is rejected before any work runs.
   cache next to the layer (`micro/alpaca.rig`) carrying the layer's signature,
   so an edited layer invalidates it and a missing one just means the rig is
   derived in memory. The cache is derived, so it is gitignored.
-  - A bone is a rigid rotation about its joint and the field is the REST
-    POSE, so the animated surface is found by sampling the field through the
-    bone's **inverse** rotation; the shader applies the inverse where the
-    field is sampled and the forward where the material is looked up, so the
+  - A skeleton is a **CHAIN**: a bone is a rigid transform (`R·p + t`), and
+    its transform is its **parent's composed with its own** (`R_w = R_p·R_l`,
+    `t_w = R_p·t_l + t_p`). The legs, head and tail hang off the spine. The
+    bones used to be independent — each turned about its own joint in the
+    REST frame — so when the spine bowed, the head kept turning about a joint
+    that had already moved with the body and **the neck tore away from the
+    shoulders** (what the user saw). It must be a general rigid transform,
+    not "a rotation about a pivot": the composition of two pivot-rotations is
+    not one. The field is the REST POSE, so the animated surface is found by
+    sampling the field through the bone's **inverse** transform (`Rᵀ·(p−t)`);
+    the shader applies the forward where the material is looked up, so the
     union field, the gradient (and so the normal), the AO and the self-shadow
-    keep working in the world frame untouched.
+    keep working in the world frame untouched. A bone's transform starts as
+    the **identity** — the upload once wrote the bone's *joint* into the
+    translation slot and transported every object by metres (the vase and urn
+    vanished).
   - **The rig's points are in the FIELD's frame but the shader looks them up
     in the object's ANCHORED frame** (the field's frame plus the placement).
     Out of step, the nearest bone is garbage, the field is sampled through a

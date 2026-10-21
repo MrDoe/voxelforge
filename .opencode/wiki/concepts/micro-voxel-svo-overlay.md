@@ -484,12 +484,35 @@ through a wrong rotation, and **the animal did not move at all** — the walk
 looked broken with every number in the log correct. The rig is now shifted
 into the anchored frame when it is handed to the GPU.
 
-**A bone is a rigid rotation about its joint**, and the field is the REST
-POSE, so the animated surface is found by sampling the field through the
-bone's **inverse** rotation. The shader applies the inverse where the field
-is sampled (and the forward where the material is looked up), so the union
-field, the gradient (and so the normal), the AO and the self-shadow all keep
-working in the world frame untouched.
+**A skeleton is a CHAIN, and a bone is a rigid transform `R·p + t`.** The
+bones are not independent: each one has a parent (the legs, head and tail hang
+off the spine), and the behaviour composes the child's transform with the
+parent's (`R_world = R_parent · R_local`, `t_world = R_parent · t_local +
+t_parent`). The user saw the failure this prevents: **a broken neck when the
+animal bowed** — every bone rotated about its own joint *in the rest frame*,
+so when the spine pitched, the head kept turning about a joint that had
+already moved with the body, and the neck tore away from the shoulders.
+
+The transform must be a general rigid one and **not** "a rotation about a
+pivot": the composition of two pivot-rotations is not a pivot-rotation. So the
+bone row carries a **translation** (not a joint), and the shader applies
+`R·p + t` — with its inverse `Rᵀ·(p − t)` where the field is sampled, and the
+forward where the material is looked up. The union field, the gradient (and so
+the normal), the AO and the self-shadow then keep working in the world frame
+untouched. The field is the REST POSE.
+
+**Two traps in that change, both measured:**
+- the upload used to write the bone's **joint** into what is now the
+  translation slot, and a joint is a world position — so every object was
+  translated by metres on the first frame: the vase and the urn vanished from
+  the scene and the alpaca measured 76 px instead of 81 000. A bone's
+  transform starts as the **identity**; the behaviour pushes the real one
+  every frame, and an object with no behaviour keeps the identity.
+- a half-applied edit still looks fixed. The first version of the chain fix
+  committed the app side, but its **shader** edit silently failed an assertion
+  (the file was never written), and the visual check passed anyway because the
+  old pivot formula was close enough for the composed matrix. Verify the file,
+  not just the picture.
 
 ### The animal span in place, and the graze is a BOW
 
@@ -528,6 +551,19 @@ of the micro gate's own checks — the footprint of a 90° yaw, the pick's reach
 the house view — because each of them measures a *still* scene. The gate now
 turns the behaviour **off** by default and the behaviour check turns it on
 for itself.
+
+**...and it must not destroy what it suppresses.** The gate turns the
+behaviour off by rewriting the manifest, and the first version did it by
+**deleting** the `behaviour` key. That is self-poisoning: the gate snapshots
+the micro entries at startup and restores them at the end, so a run that
+snapshots *after* an earlier run (or an app write) had already removed the key
+restores the removal — and the shipped scene loses the grazer permanently.
+Measured 2026-10-21: `set_micro` popped the key on its very first call, a
+crashed run took its snapshot in that state, and `assets/world.json` came back
+without it; the alpaca never walked again. The gate now writes a real no-op
+command (`"behaviour": "stop"`), snapshots whole layer entries, prints the
+snapshot (so a pre-existing loss is visible in the log), and replaces each
+entry whole on restore, verifying by equality.
 
 ### The fur must not slide
 
