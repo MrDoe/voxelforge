@@ -204,6 +204,23 @@ bool deriveMicroRig(const MicroField& field, MicroRig& out)
                               }),
                legs.end());
 
+    // ...and it REACHES THE GROUND. A drop test alone also accepts a fleece
+    // lock: the alpaca's coarse coat hangs below the belly, so two tufts were
+    // read as extra limbs and the rig came back with 9 bones / 6 legs instead
+    // of 7 / 4 - the phantom pair then swung about the belly on every step.
+    // The object's own bottom is the ground reference (the hooves sit on it),
+    // so the test stays generic: a model whose limbs do not touch its base
+    // simply has no legs to animate.
+    float groundY = 1e30f;
+    for (const glm::vec3& p : pts)
+        groundY = std::min(groundY, p[upAxis]);
+    const float legReach = groundY + std::max(2.0f * cell, 0.06f * extent[upAxis]);
+    legs.erase(std::remove_if(legs.begin(), legs.end(),
+                              [&](const Leg& l) {
+                                  return l.bottom[upAxis] > legReach;
+                              }),
+               legs.end());
+
     // --- the head and the tail: the mass beyond the core ----------------
     glm::vec3 headLo(1e30f), headHi(-1e30f), tailLo(1e30f), tailHi(-1e30f);
     int headCount = 0, tailCount = 0;

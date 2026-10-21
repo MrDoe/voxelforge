@@ -6251,3 +6251,43 @@ its own pose. Shader A/Bs on an animated micro object are pose noise; use a
 skeleton-free object.
 
 See [[concepts/micro-voxel-svo-overlay]].
+
+## [2026-10-21] fix | The fleece is a staple, and a leg must reach the ground
+
+The user's next report was *"there is no fur visible except for the texture"* —
+a different complaint from the sliding, and the render agreed: the alpaca was
+a smooth stepped body with a photo speckle on it.
+
+**Cause.** The only fur cues were the photo and a smooth 5 cm noise
+displacement in `tools/micro_voxel.cpp` (±1.5 cells of an 8 mm lattice). At
+that pitch a smooth wave is averaged into a wavy *body*: the silhouette stays
+stepped and nothing reads as hair.
+
+**Fix.** The fleece is now a per-region **staple** (`stapleNoise`): the noise
+is stretched along Y so the strands hang, its finest octave sits *at* the
+lattice pitch so the surface breaks into one-cell tufts, and each region
+carries its own length — back/neck 5 cm, head 4, legs 2.6–2.8, ears 0.8, with
+the muzzle, eyes and hooves excluded. 149 554 → 157 700 voxels. Renders:
+`tests/screenshots/alpaca_fur_staple_close.png` and `-view.png` show a ragged
+fleece edge while the animal stays a recognisable alpaca; the dark-pixel count
+in the body core is unchanged (141 → 123), so the tufts are not holes.
+
+**The fur broke the generic rig, and the rig was right to complain.** The new
+coat hangs below the belly, so the leg derivation read two fleece locks as
+limbs: **9 bones / 6 legs instead of 7 / 4**, with the phantom pair swinging
+about the belly on every step. A leg now has to *reach the ground* — its
+bottom within `max(2 cells, 6% of height)` of the object's own bottom — which
+is generic rather than alpaca-specific. Re-derived cache verified 7 / 4 with
+the chain intact.
+
+**Tooling gotcha, recorded because it nearly cost the asset:** `vf_microvox`
+ignores the working directory and writes to
+`VOXELFORGE_ASSET_DIR/assets/micro/<out>.vxw`. A "safe repro" from /tmp with
+`--out alpaca_repro` therefore created a stray file in the tracked tree, and
+`--out alpaca` overwrote the shipped alpaca. It came back byte-identical
+(`--alpaca --voxel 0.008 --out alpaca`), so the asset is fully reproducible.
+
+Screenshots now live in `tests/screenshots/` by user request; AGENTS.md holds
+the rule.
+
+See [[concepts/micro-voxel-svo-overlay]].

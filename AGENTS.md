@@ -1009,7 +1009,7 @@ one costs a whole turn, because the bad call is rejected before any work runs.
   around on its own and stops to graze. Nothing in the code knows what an
   alpaca is: `src/voxel/micro_rig.cpp` finds the bones in the object's own
   voxels, so a **newly imported model animates the moment it is loaded** — no
-  per-object code, no per-object asset. Two rules that cost a session each:
+  per-object code, no per-object asset. Three rules that cost a session each:
   - the **spine** is the longer of the two *horizontal* axes, NOT the longest
     axis: an animal is usually TALLER than it is long (the alpaca is 1.3 m
     tall and 1.1 m long), so the longest axis is the vertical one and the
@@ -1017,7 +1017,14 @@ one costs a whole turn, because the bad call is rejected before any work runs.
   - the **belly** is a *percentile* of the spine band's cell heights, not the
     band's minimum: a quadruped's front legs stand INSIDE that band, so the
     minimum is the hooves, nothing is "below the core", and the legs become
-    part of the body.
+    part of the body;
+  - a **leg reaches the ground**. The alpaca's coarse coat hangs BELOW the
+    belly, and the drop test alone read two fleece locks as limbs: the rig came
+    back with 9 bones / 6 legs instead of 7 / 4, and the phantom pair swung
+    about the belly on every step — with every number in the log plausible. A
+    cluster counts as a leg only if its bottom is within
+    `max(2 cells, 6% of height)` of the object's own bottom. That stays
+    generic: a model whose limbs never touch its base has no legs to animate.
   A bone is a **segment** plus a role, and the gait is driven by the ROLES
   (the legs swing in diagonal pairs, the head nods, the tail sways), so a cat
   animates the way a horse does. The rig is **calculated once and saved** — a
@@ -1060,6 +1067,15 @@ one costs a whole turn, because the bad call is rejected before any work runs.
   appears dragged, so every SURFACE lookup (texture, material cell, normal,
   AO) must take it back out (`microShadeToBaked`, `microMapShade`) — the field
   *trace* must NOT, or the object stops following the pointer.
+  **The fleece is GEOMETRY, not just the fur photo.** `tools/micro_voxel.cpp`
+  displaces the fleece surface by a per-region staple length (back/neck 5 cm,
+  head 4, legs 2.6–2.8, ears 0.8; the muzzle, eyes and hooves get none). A
+  smooth 5 cm wave at an 8 mm lattice is INVISIBLE — measured, the alpaca read
+  as "no fur visible except for the texture" — so the noise is stretched along
+  Y (the strands hang) and its finest octave sits AT the lattice pitch, which
+  breaks the silhouette into tufts. Regenerate with
+  `vf_microvox --alpaca --voxel 0.008 --out alpaca`; it writes into
+  `VOXELFORGE_ASSET_DIR/assets/micro/`, NOT the working directory.
 - **The AI can tell an animal what to do.** `set_behaviour` is a chat tool:
   "let the alpaca run" becomes `{"name":"alpaca","command":"run"}` and
   `App::setMicroBehaviour` puts the animal into that command. The commands

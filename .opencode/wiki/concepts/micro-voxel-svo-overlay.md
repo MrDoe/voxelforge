@@ -462,7 +462,14 @@ The derivation (`src/voxel/micro_rig.cpp`) is generic and geometric:
   minimum is the hooves and nothing is "below the core" (the legs would be
   part of the body);
 - the **legs** are the vertical clusters below the belly, merged by their
-  column size;
+  column size, **and they must reach the ground**: a cluster counts only if its
+  bottom is within `max(2 cells, 6% of height)` of the object's own bottom.
+  Without that test the alpaca's new coarse coat broke the rig — its fleece
+  locks hang below the belly, two were read as limbs, and the rig came back
+  with **9 bones / 6 legs instead of 7 / 4**, with the phantom pair swinging
+  about the belly on every step while every number in the log looked right.
+  The ground reference is the object's own bottom, so the rule stays generic:
+  a model whose limbs never touch its base has no legs to animate;
 - the **head** and the **tail** are the mass beyond the core's two ends.
 
 A bone is a **segment** plus its role, and the **gait is driven by the
@@ -572,6 +579,22 @@ sample slides over the animal as it walks and as its bones swing, so the micro
 shader samples the atlas at the point's **rest-pose** position — the very
 point the field is sampled at. The texture then sticks to the surface it
 belongs to, and follows its bone.
+
+**The fleece is GEOMETRY, not only the photo.** The first alpaca had a fur
+photo bound to material 21 and a smooth 5 cm noise displacement in
+`tools/micro_voxel.cpp` — and it read as *"there is no fur visible except for
+the texture"*: at an 8 mm lattice a smooth 5 cm wave is averaged into a wavy
+**body**, and the silhouette stays stepped. The fleece is now a per-region
+**staple**: the noise is stretched along Y (the strands hang), its finest
+octave sits *at* the lattice pitch so the surface breaks into one-cell tufts,
+and each region carries its own length — back/neck 5 cm, head 4, legs
+2.6–2.8, ears 0.8, with the muzzle, eyes and hooves excluded. Measured: the
+voxel count goes 149 554 → 157 700, the animal still reads as an alpaca with a
+ragged fleece edge, and the dark-pixel count in the body core is unchanged
+(141 → 123), i.e. the tufts are not holes. Regenerate with
+`vf_microvox --alpaca --voxel 0.008 --out alpaca` — note the tool writes into
+`VOXELFORGE_ASSET_DIR/assets/micro/`, **not** the working directory, so a
+throwaway `--out` name still lands in the tracked tree.
 
 Two details are load-bearing, and both were reported as "the fur moves with
 the alpaca":

@@ -164,6 +164,24 @@ float furNoise(glm::vec3 p)
            0.12f * vnoise3(p * 96.0f);
 }
 
+// The STAPLE: the fleece, as fur rather than as a lump.
+//
+// furNoise() alone is a smooth 5 cm wave, and at an 8 mm voxel that reads as a
+// wavy BODY - measured: the render showed a smooth stepped form with a photo
+// pattern on it, "no fur visible except for the texture". Two things make it
+// read as fleece:
+//  * the strands HANG, so the noise is stretched along Y (a 7 cm vertical
+//    period against a 3 cm horizontal one) - the tufts become vertical locks;
+//  * the finest octave is deliberately AT the lattice pitch, so the surface
+//    breaks into one-cell tufts and the silhouette goes ragged. Anything
+//    smoother than the voxel is averaged away by the voxelisation.
+float stapleNoise(glm::vec3 p)
+{
+    const glm::vec3 s(p.x, p.y * 0.42f, p.z);
+    return 0.46f * vnoise3(s * 30.0f) + 0.32f * vnoise3(s * 68.0f) +
+           0.22f * vnoise3(s * 140.0f);
+}
+
 float sdEllipsoid(glm::vec3 p, glm::vec3 r)
 {
     const float k0 = glm::length(p / r);
@@ -241,61 +259,72 @@ std::vector<VoxelRecord> makeAlpaca(const Options& o, int& nx, int& ny, int& nz)
                 glm::vec3 col = look.fleece;
                 uint8_t mat = look.fleeceMat;
                 bool fleece = true;
+                // Staple length per region: the back and neck carry the long
+                // fleece, the ears are too thin to grow 4 cm of fur without
+                // being swallowed by it, and the legs keep a short coat.
+                float furLen = 0.055f;
 
-                auto take = [&](float dd, glm::vec3 c, bool fur, uint8_t m) {
+                auto take = [&](float dd, glm::vec3 c, bool fur, uint8_t m,
+                                float len) {
                     if (dd < d) {
                         d = dd;
                         col = c;
                         mat = m;
                         fleece = fur;
+                        furLen = len;
                     }
                 };
 
                 take(sdTaperedCapsule(q, glm::vec3(0.0f, 0.70f, 0.26f),
                                       glm::vec3(0.0f, 1.02f, 0.34f), 0.105f, 0.075f),
-                     look.fleece, true, look.fleeceMat);
+                     look.fleece, true, look.fleeceMat, 0.050f);
                 take(sdEllipsoid(q - glm::vec3(0.0f, 1.09f, 0.38f),
                                  glm::vec3(0.078f, 0.090f, 0.125f)),
-                     look.fleece, true, look.fleeceMat);
+                     look.fleece, true, look.fleeceMat, 0.040f);
                 take(sdEllipsoid(q - glm::vec3(0.0f, 1.045f, 0.50f),
                                  glm::vec3(0.052f, 0.055f, 0.072f)),
-                     look.muzzle, false, look.muzzleMat);
+                     look.muzzle, false, look.muzzleMat, 0.0f);
                 take(sdTaperedCapsule(q, glm::vec3(0.0f, 0.70f, -0.32f),
                                       glm::vec3(0.0f, 0.82f, -0.40f), 0.050f, 0.032f),
-                     look.fleece, true, look.fleeceMat);
+                     look.fleece, true, look.fleeceMat, 0.045f);
                 for (int side = -1; side <= 1; side += 2) {
                     const float sx = float(side);
                     // Ears: tall and slightly splayed, the alpaca's signature.
                     take(sdTaperedCapsule(q, glm::vec3(0.045f * sx, 1.15f, 0.35f),
                                           glm::vec3(0.078f * sx, 1.30f, 0.32f), 0.030f,
                                           0.013f),
-                         look.fleece, true, look.fleeceMat);
+                         look.fleece, true, look.fleeceMat, 0.008f);
                     // Eyes.
                     take(glm::length(q - glm::vec3(0.062f * sx, 1.115f, 0.415f)) - 0.017f,
-                         look.eye, false, look.eyeMat);
+                         look.eye, false, look.eyeMat, 0.0f);
                     // Legs: front pair shorter than the back (they are), each
                     // with a hoof.
                     take(sdTaperedCapsule(q, glm::vec3(0.083f * sx, 0.50f, 0.235f),
                                           glm::vec3(0.092f * sx, 0.06f, 0.245f), 0.055f,
                                           0.030f),
-                         look.fleece, true, look.fleeceMat);
+                         look.fleece, true, look.fleeceMat, 0.026f);
                     take(sdTaperedCapsule(q, glm::vec3(0.090f * sx, 0.52f, -0.235f),
                                           glm::vec3(0.100f * sx, 0.06f, -0.250f), 0.065f,
                                           0.032f),
-                         look.fleece, true, look.fleeceMat);
+                         look.fleece, true, look.fleeceMat, 0.028f);
                     take(sdCylinderY(q, glm::vec3(0.092f * sx, 0.025f, 0.245f), 0.034f,
                                      0.028f),
-                         look.hoof, false, look.hoofMat);
+                         look.hoof, false, look.hoofMat, 0.0f);
                     take(sdCylinderY(q, glm::vec3(0.100f * sx, 0.025f, -0.250f), 0.036f,
                                      0.028f),
-                         look.hoof, false, look.hoofMat);
+                         look.hoof, false, look.hoofMat, 0.0f);
                 }
 
                 // --- the fleece -------------------------------------------
                 // Only near the surface, and only on the fleece regions: the
                 // eyes, muzzle and hooves stay crisp.
-                if (fleece && d < 0.05f)
-                    d -= (furNoise(q) - 0.45f) * 0.030f;
+                if (fleece && d < furLen + 0.015f) {
+                    // Clumps carry the silhouette, the staple gives it the
+                    // ragged edge; biased outward so the coat reads as grown
+                    // fleece rather than as a thinned body.
+                    const float n = 0.45f * furNoise(q) + 0.55f * stapleNoise(q);
+                    d -= (n - 0.40f) * furLen;
+                }
                 if (d > 0.0f)
                     continue;
 
