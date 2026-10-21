@@ -179,6 +179,29 @@ private:
     // hand them to the GPU overlay pass. They never enter the world record set,
     // the VoxelField, the ChunkStore or the live-edit overlay.
     void loadMicroObjects();
+    // Pick a MICRO object under a ray. The micro objects are separate SVO
+    // worlds, so the world's store march cannot see them; without this a
+    // micro object is invisible to the pointer and cannot be selected.
+    // Returns the file of the object hit, or an empty string.
+    struct MicroObjectPick {
+        bool hit = false;
+        float dist = 0.f;
+        glm::vec3 pos { 0.f };
+        glm::vec3 normal { 0.f, 1.f, 0.f };
+        glm::ivec3 cell { 0 };
+        std::string file;
+    };
+    MicroObjectPick pickMicroObjects(const std::vector<vf::voxel::MicroOccluder>& occ,
+                                     glm::vec3 ro, glm::vec3 rd) const;
+    // Is this manifest file a MICRO layer (a separate SVO world)?
+    static bool isMicroLayer(const std::string& file) { return file.rfind("micro/", 0) == 0; }
+    // The world-space AABB of a layer, for either kind: a world layer's box
+    // comes from the merged field, a micro layer's from its own fine lattice.
+    vf::voxel::WorldAABB layerBounds(const std::string& file) const;
+    // The index of a micro layer's world in the micro pass's table, or -1.
+    int microWorldIndex(const std::string& file) const;
+    // Push (or clear) the live preview offset of the selected micro object.
+    void updateMicroMovePreview();
     // The micro objects as SUN-SHADOW OCCLUDERS for the world's baked surfel
     // shadow. Filled by loadMicroObjects and consumed by rebuildSurfels, which
     // is why a world reload loads the micro objects FIRST.

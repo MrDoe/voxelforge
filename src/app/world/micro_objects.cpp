@@ -40,6 +40,7 @@ void App::loadMicroObjects()
     const std::string dir = std::filesystem::path(m_manifestPath).parent_path().string();
 
     std::vector<glm::vec3> occluderOffsets;
+    std::vector<std::string> occluderFiles;
     std::vector<vf::voxel::MicroWorld> worlds;
     m_microFields.clear();
     m_microOccluders.clear();
@@ -117,6 +118,7 @@ void App::loadMicroObjects()
         // cannot touch the object.
         m_microFields.push_back(field);
         occluderOffsets.push_back(offset);
+        occluderFiles.push_back(l.file);
         spdlog::info("micro: '{}' -> {} voxels on a {:.3f} m lattice ({}x{}x{} cells), "
                      "gridN {}, {} bricks, {:.1f} KB",
                      l.file, data.voxels.size(), field.voxel, field.dim.x, field.dim.y,
@@ -130,11 +132,86 @@ void App::loadMicroObjects()
         vf::voxel::MicroOccluder oc;
         oc.field = &m_microFields[i];
         oc.worldOffset = occluderOffsets[i];
+        oc.layerFile = occluderFiles[i];
         oc.aabbMin = m_microFields[i].origin + occluderOffsets[i];
         oc.aabbMax = oc.aabbMin + m_microFields[i].extent();
         m_microOccluders.push_back(oc);
     }
     m_microSvoPass.setMicroWorlds(worlds);
+}
+
+App::MicroObjectPick
+App::pickMicroObjects(const std::vector<vf::voxel::MicroOccluder>& occ, glm::vec3 ro,
+                      glm::vec3 rd) const
+{
+    MicroObjectPick best;
+    for (const vf::voxel::MicroOccluder& o : occ) {
+        if (!o.field)
+            continue;
+        // The AABB test first: a ray that misses the box never touches the
+        // field, so the cost is bounded by the objects near the pointer.
+        const glm::vec3 inv = glm::vec3(1.0f) / rd;
+        const glm::vec3 t0 = (o.aabbMin - ro) * inv;
+        const glm::vec3 t1 = (o.aabbMax - ro) * inv;
+        const glm::vec3 tlo = glm::min(t0, t1), thi = glm::max(t0, t1);
+        const float tEnter = glm::max(glm::max(tlo.x, tlo.y), tlo.z);
+        const float tExit = glm::min(glm::min(thi.x, thi.y), thi.z);
+        if (tExit <= glm::max(tEnter, 0.f))
+            continue;
+        const vf::voxel::MicroPick p =
+            vf::voxel::pickMicroField(*o.field, o.worldOffset, ro, rd);
+        if (!p.hit)
+            continue;
+        if (best.hit && p.dist >= best.dist)
+            continue;
+        best.hit = true;
+        best.dist = p.dist;
+        best.pos = p.pos;
+        best.normal = p.normal;
+        best.cell = p.cell;
+        best.file = o.layerFile;
+    }
+    return best;
+}
+
+vf::voxel::WorldAABB App::layerBounds(const std::string& file) const
+{
+    // A MICRO layer is not in the merged world, so its box comes from its own
+    // field: the object's cells on its fine lattice, placed in the world.
+    if (isMicroLayer(file)) {
+        for (const vf::voxel::MicroOccluder& o : m_microOccluders) {
+            if (o.layerFile != file || !o.field)
+                continue;
+            const glm::vec3 lo = o.field->origin + o.worldOffset;
+            const glm::vec3 hi = lo + o.field->extent();
+            return vf::voxel::WorldAABB { lo, hi };
+        }
+        return {};
+    }
+    return m_layers.layerBox(file);
+}
+
+int App::microWorldIndex(const std::string& file) const
+{
+    for (size_t i = 0; i < m_microOccluders.size(); ++i)
+        if (m_microOccluders[i].layerFile == file)
+            return int(i);
+    return -1;
+}
+
+void App::updateMicroMovePreview()
+{
+    // The preview offset belongs to the SELECTED micro object while it is
+    // being dragged. Anything else clears it.
+    const int idx = (m_moveLayer.empty() || !isMicroLayer(m_moveLayer))
+                         ? -1
+                         : microWorldIndex(m_moveLayer);
+    if (idx < 0) {
+        for (size_t i = 0; i < m_microOccluders.size(); ++i)
+            m_microSvoPass.setWorldPreview(i, glm::vec3(0.f), false);
+        return;
+    }
+    m_microSvoPass.setWorldPreview(size_t(idx), m_moveDelta, true);
 }
 
 } // namespace app

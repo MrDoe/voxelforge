@@ -255,6 +255,68 @@ bool buildMicroField(const std::vector<VoxelRecord>& records,
     return true;
 }
 
+MicroPick pickMicroField(const MicroField& field, glm::vec3 worldOffset,
+                         glm::vec3 ro, glm::vec3 rd, float tMax, int maxSteps)
+{
+    MicroPick out;
+    if (field.size3() == 0 || !(field.voxel > 0.0f))
+        return out;
+    // Into the object's own frame: the layer's world offset only. The field's
+    // own origin is applied INSIDE sampleSdf, so subtracting it here too would
+    // offset the sample twice - the ray then misses the object by the margin.
+    const glm::vec3 lo = ro - worldOffset;
+    const float minStep = 0.25f * field.voxel;
+    float t = 0.0f;
+    float prevT = 0.0f;
+    for (int i = 0; i < maxSteps; ++i) {
+        if (t > tMax)
+            break;
+        const glm::vec3 p = lo + rd * t;
+        const float d = field.sampleSdf(p);
+        if (d < 0.0f) {
+            // Inside the object. The hit point is on the surface, so bisect
+            // between the PREVIOUS sample (which was outside) and this one.
+            // The bracket must be the previous sample, not a fixed step back:
+            // the march can step 0.85*d, which is much further than the
+            // minimum step, and a bracket that does not contain the crossing
+            // makes the bisection converge to the bracket's edge - the hit
+            // lands cells inside the object.
+            float lo_t = prevT, hi_t = t;
+            for (int b = 0; b < 12; ++b) {
+                const float mid = 0.5f * (lo_t + hi_t);
+                if (field.sampleSdf(lo + rd * mid) > 0.0f)
+                    lo_t = mid;
+                else
+                    hi_t = mid;
+            }
+            const glm::vec3 hit = lo + rd * lo_t;
+            out.hit = true;
+            out.dist = t;
+            // The local point is already in the field's frame (sampleSdf
+            // applies the field's own origin), so the world position is the
+            // local point plus the layer's offset - the field's origin must
+            // NOT be added again.
+            out.pos = hit + worldOffset;
+            out.cell = field.cellOf(hit);
+            // The normal: the field's gradient at the hit (pointing OUT, so
+            // negate the inward gradient).
+            const float e = field.voxel;
+            glm::vec3 g(field.sampleSdf(hit + glm::vec3(e, 0, 0)) -
+                            field.sampleSdf(hit - glm::vec3(e, 0, 0)),
+                        field.sampleSdf(hit + glm::vec3(0, e, 0)) -
+                            field.sampleSdf(hit - glm::vec3(0, e, 0)),
+                        field.sampleSdf(hit + glm::vec3(0, 0, e)) -
+                            field.sampleSdf(hit - glm::vec3(0, 0, e)));
+            const float gl = glm::length(g);
+            out.normal = gl > 1e-9f ? -g / gl : glm::vec3(0.f, 1.f, 0.f);
+            return out;
+        }
+        prevT = t;
+        t += std::max(d * 0.85f, minStep);
+    }
+    return out;
+}
+
 bool rotateMicroRecords(const std::vector<VoxelRecord>& src,
                          const WorldFileMeta& meta, float yawDeg, float pitchDeg,
                          float rollDeg, std::vector<VoxelRecord>& out,

@@ -11,7 +11,13 @@ namespace app {
 
 std::string App::rotateTargetLayer(const vf::voxel::PickHit& hit) const
 {
-    if (!m_layers.loaded() || !hit.hit || !hit.object || hit.layer == 0)
+    if (!hit.hit || !hit.object)
+        return {};
+    // A MICRO object has no world owner id (it is a separate SVO world), so it
+    // is named by its manifest file instead.
+    if (!hit.microFile.empty())
+        return hit.microFile;
+    if (!m_layers.loaded() || hit.layer == 0)
         return {};
     return m_layers.layerFile(hit.layer);
 }
@@ -105,6 +111,19 @@ void App::commitMove()
     persistWorldLayers();
     spdlog::info("move: {} -> pos ({:+.2f}, {:+.2f}, {:+.2f})",
                  m_moveLayer, it->pos[0], it->pos[1], it->pos[2]);
+    if (isMicroLayer(m_moveLayer)) {
+        // A MICRO object is its own world: re-bake ONLY it (milliseconds)
+        // instead of the whole world (seconds), and clear the preview - the
+        // object is now where the manifest says it is.
+        updateMicroMovePreview();
+        loadMicroObjects();
+        m_moveStaged = false;
+        m_moving = false;
+        m_moveDelta = glm::vec3(0.f);
+        m_moveLastMouse = {};
+        m_taaFirstFrame = true;
+        return;
+    }
     m_pendingWorldReload = false;
     m_layers.requestReload(m_camera.pos, false);
     // Same reload-window cover as commitRotation: final overlay first (the
@@ -126,6 +145,10 @@ void App::cancelMove()
     m_moveStaged = false;
     m_moveDelta = glm::vec3(0.f);
     m_moveLastMouse = {};
+    // A micro object's preview lives in the micro pass's own table, and it
+    // must be cleared AFTER the delta is zeroed - the preview IS the delta.
+    if (!m_moveLayer.empty() && isMicroLayer(m_moveLayer))
+        updateMicroMovePreview();
     refreshPreviewLights(); // restores the base set to splat when one was shifted
 }
 

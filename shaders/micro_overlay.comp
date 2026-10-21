@@ -64,6 +64,10 @@ struct MicroWorld {
     uvec4 base;
     vec4 lo;
     vec4 hi;
+    // Live preview offset (xyz) + an active flag (w). The staged Move delta
+    // for a selected micro object: the field stays where it was baked and the
+    // RENDERED position is offset, so a drag is instant and costs no re-bake.
+    vec4 preview;
 };
 layout(std140, set = 0, binding = 7) readonly uniform WorldTable {
     MicroWorld uWorlds[16];
@@ -394,48 +398,66 @@ bool microSurface(vec3 p, vec3 rd, out vec3 albedo, out vec2 rr, out uint matId)
 // Step sizing is bounded on BOTH sides. The 0.85 factor keeps a quantised field
 // from overshooting, and the clamp stops one huge distance (a ray starting far
 // from a small object) from consuming the whole trace in a single stride.
-bool microTrace(vec3 ro, vec3 rd, float tMax, out float tHit)
+bool microTrace(vec3 ro, vec3 rd, float tMax, out float tHit, out int outWorld)
 {
     tHit = 0.0;
-    if (microMap(ro) < 0.0)
-        return false; // camera already inside a micro solid
-    const float kMaxStep = 0.25;
-    // The minimum step is a QUARTER OF A MICRO VOXEL, not a fixed epsilon. It
-    // has to be able to carry the ray ACROSS the surface: a sphere tracer
-    // steps by a fraction of the distance, so it approaches the surface
-    // geometrically and never actually reaches it - without a floor big
-    // enough to overshoot, the sample never lands inside the object and the
-    // hit is never detected.
-    const float minStep = 0.25 * microVoxelSize();
-    float t = 1e-5;
-    float prevT = t;
-    for (int i = 0; i < 512; ++i) {
-        if (t > tMax)
-            return false;
-        vec3 p = ro + rd * t;
-        float d = microMap(p);
-        // STRICTLY INSIDE, not "within eps of the surface". Outside the
-        // world's AABB the field falls back to the distance to the box, which
-        // is ZERO on the box face - so a "d < eps" test fires on the BOX, and
-        // the object renders as its own bounding box. The field is negative
-        // only inside the object, so "d < 0" is the hit.
-        if (d < 0.0) {
-            // bisect between the last outside sample and this inside one
-            float lo = prevT, hi = t;
-            for (int b = 0; b < 16; ++b) {
-                float mid = 0.5 * (lo + hi);
-                if (microMap(ro + rd * mid) > 0.0)
-                    lo = mid;
-                else
-                    hi = mid;
+    outWorld = -1;
+    // Each micro world is marched SEPARATELY, so the hit can name the world it
+    // belongs to. That matters for the live preview: a staged Move offset
+    // applies to ONE world, and the shader has to know which world the surface
+    // it is shading belongs to. (The union field is still what the SHADOW
+    // march uses - a shadow does not care which world it belongs to.)
+    float bestT = tMax;
+    int bestW = -1;
+    for (int w = 0; w < wt.uWorldInfo.x && w < MAX_MICRO_WORLDS; ++w) {
+        const float voxel = wt.uWorlds[w].geo.x;
+        const int gridN = int(wt.uWorlds[w].geo.y);
+        const uint gridBase = wt.uWorlds[w].base.x;
+        // The minimum step is a QUARTER OF A MICRO VOXEL, not a fixed epsilon.
+        // It has to be able to carry the ray ACROSS the surface: a sphere
+        // tracer steps by a fraction of the distance, so it approaches the
+        // surface geometrically and never actually reaches it - without a
+        // floor big enough to overshoot, the sample never lands inside the
+        // object and the hit is never detected.
+        const float minStep = 0.25 * voxel;
+        if (microMapWorld(w, ro, voxel, gridN, gridBase) < 0.0)
+            continue; // the camera is inside this world; it cannot be seen
+        float t = minStep;
+        float prevT = t;
+        for (int i = 0; i < 512; ++i) {
+            if (t > bestT)
+                break;
+            const float d = microMapWorld(w, ro + rd * t, voxel, gridN, gridBase);
+            // STRICTLY INSIDE, not "within eps of the surface". Outside the
+            // world's AABB the field falls back to the distance to the box,
+            // which is ZERO on the box face - so a "d < eps" test fires on the
+            // BOX, and the object renders as its own bounding box. The field is
+            // negative only inside the object, so "d < 0" is the hit.
+            if (d < 0.0) {
+                // bisect between the last outside sample and this inside one
+                float lo = prevT, hi = t;
+                for (int b = 0; b < 16; ++b) {
+                    const float mid = 0.5 * (lo + hi);
+                    if (microMapWorld(w, ro + rd * mid, voxel, gridN, gridBase) > 0.0)
+                        lo = mid;
+                    else
+                        hi = mid;
+                }
+                if (hi < bestT) {
+                    bestT = hi;
+                    bestW = w;
+                }
+                break;
             }
-            tHit = hi;
-            return true;
+            prevT = t;
+            t += clamp(d * 0.85, minStep, 0.25);
         }
-        prevT = t;
-        t += clamp(d * 0.85, minStep, kMaxStep);
     }
-    return false;
+    if (bestW < 0)
+        return false;
+    tHit = bestT;
+    outWorld = bestW;
+    return true;
 }
 
 // Shadow/light visibility across the micro worlds. NOTE the scope limit: these
@@ -676,12 +698,31 @@ void main()
     bool sceneHasGeometry = !(gp.xyz == vec3(0.0)) && sceneT > 0.0;
 
     float t;
-    if (!microTrace(ro, rd, sceneHasGeometry ? sceneT : 400.0, t))
+    int microTraceWorld = -1;
+    if (!microTrace(ro, rd, sceneHasGeometry ? sceneT : 400.0, t, microTraceWorld))
         return;
-    if (sceneHasGeometry && t >= sceneT)
+    // The depth comparison must use the PREVIEWED position: a previewed
+    // object can be nearer than (or behind) the world geometry it was baked
+    // against.
+    float tShown = t;
+    {
+        const vec4 pv = wt.uWorlds[microTraceWorld].preview;
+        if (pv.w > 0.5) {
+            const vec3 pp = ro + rd * t + pv.xyz;
+            tShown = dot(pp - ro, rd);
+        }
+    }
+    if (sceneHasGeometry && tShown >= sceneT)
         return; // the main backend already resolved this pixel nearer
 
     vec3 p = ro + rd * t;
+    // The live preview offset (a staged Move delta) shifts the RENDERED
+    // position; the field itself stays where it was baked.
+    {
+        const vec4 pv = wt.uWorlds[microTraceWorld].preview;
+        if (pv.w > 0.5)
+            p += pv.xyz;
+    }
     vec3 col = shadeMicro(p, rd);
     if (any(isnan(col)) || any(isinf(col)))
         return;

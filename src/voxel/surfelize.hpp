@@ -16,6 +16,7 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdint>
+#include <string>
 #include <vector>
 
 namespace vf::voxel {
@@ -35,6 +36,9 @@ struct MicroOccluder {
     const MicroField* field = nullptr;
     // Add this to a FIELD-LOCAL point to reach world space (the layer's `pos`).
     glm::vec3 worldOffset { 0.f };
+    // The manifest file this object came from ("micro/alpaca.vxw"), so the
+    // pick path can name the object the pointer is over.
+    std::string layerFile;
     // The object's world AABB. A ray that misses it never touches the field, so
     // the cost is bounded by the surfels near the object, not by the world.
     glm::vec3 aabbMin { 0.f };

@@ -50,7 +50,7 @@ void App::updateBrushPreview()
         if (m_editActive && m_editBrush == EditBrush::Move &&
             !m_moveLayer.empty()) {
             const uint8_t layerId = m_layers.layerId(m_moveLayer);
-            const vf::voxel::WorldAABB b = m_layers.layerBox(m_moveLayer);
+            const vf::voxel::WorldAABB b = layerBounds(m_moveLayer);
             if (b.valid() && layerId != 0) {
                 const glm::vec3 c = 0.5f * (b.lo + b.hi);
                 const glm::vec3 he = 0.5f * (b.hi - b.lo) + kBrushSkin;
@@ -220,6 +220,15 @@ void App::updateBrushPreview()
              m_editBrush == EditBrush::Delete || m_editBrush == EditBrush::Paint)
                 ? float(m_editFalloffCurve)
                 : 0.0f;
+        // Bounding-box selection feed (inclusive lattice cells, w = 1). The
+        // stamp is scoped to these cells on the CPU, so the tint must clip to
+        // the same set - otherwise the preview promises material the stamp
+        // never writes. Object transforms ignore the box entirely (they act
+        // on a layer owner, not on cells), so they feed the inactive zero.
+        glm::vec4 boxLo(0.f), boxHi(0.f);
+        if (boxSelectionActive() && m_editBrush != EditBrush::Rotate &&
+            m_editBrush != EditBrush::Move)
+            boxSelectionFeeds(boxLo, boxHi);
         m_splatPass.setBrush(
             vol, axis, tint,
             (m_editBrush == EditBrush::Rotate && !m_rotateLayer.empty())
@@ -227,7 +236,7 @@ void App::updateBrushPreview()
                 : ((m_editBrush == EditBrush::Move && !m_moveLayer.empty())
                        ? m_layers.layerId(m_moveLayer)
                        : uint8_t(0)),
-            brushFalloff);
+            brushFalloff, boxLo, boxHi);
         // The SVO reference backend gets the same volume. It used to have no
         // preview at all (setBrush fed only m_splatPass), so in --mode svo
         // every brush-size change was invisible. SVO shades a raymarch HIT
@@ -241,7 +250,7 @@ void App::updateBrushPreview()
                 : ((m_editBrush == EditBrush::Move && !m_moveLayer.empty())
                        ? m_layers.layerId(m_moveLayer)
                        : uint8_t(0)),
-            brushFalloff);
+            brushFalloff, boxLo, boxHi);
         volumeTint = tint;
     }
 
@@ -294,6 +303,14 @@ void App::updateBrushPreview()
             hovFeed = glm::vec4(vf::voxel::voxelCenter(previewHit.voxel), 1.f);
         m_postPass.setSelection(selFeed);
         m_postPass.setHover(hovFeed);
+        // Bounding-box wireframe: the same cells the stamp and the tint use,
+        // projected in the post shader (world corners derived from the push
+        // constants' worldSize/voxelSize there).
+        glm::vec4 boxLo(0.f), boxHi(0.f);
+        if (boxSelectionActive() && m_editBrush != EditBrush::Rotate &&
+            m_editBrush != EditBrush::Move)
+            boxSelectionFeeds(boxLo, boxHi);
+        m_postPass.setBox(boxLo, boxHi);
         m_postPass.setDepthMarker(m_depthMarker, m_depthFar, m_depthNear,
                                   m_depthTint);
     }

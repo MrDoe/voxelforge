@@ -130,6 +130,30 @@ bool buildMicroField(const std::vector<VoxelRecord>& records,
 void fillMicroBrick(const MicroField& f, uint32_t* data, int bx0, int by0,
                     int bz0);
 
+// A ray hit on a micro object.
+struct MicroPick {
+    bool hit = false;
+    float dist = 0.f;        // t along the ray
+    glm::vec3 pos {0.f};     // world hit point
+    glm::ivec3 cell {0};     // the field cell that was hit
+    glm::vec3 normal {0.f, 1.f, 0.f};
+};
+
+// Ray march a micro field, in WORLD space.
+//
+// The field's SDF is in the object's own frame, so the ray is transformed into
+// that frame first (the field's origin plus the layer's world offset) and the
+// hit point is transformed back. This is what makes a micro object SELECTABLE:
+// the app's pick path marches the world's store, which by design holds no
+// micro cells, so without this a micro object is invisible to the pointer.
+//
+// The march is the same sphere-trace the shader runs, and it steps at a QUARTER
+// of the object's own voxel: the field's distance is exact, but a step of the
+// full distance can overshoot a one-cell-thick shell.
+MicroPick pickMicroField(const MicroField& field, glm::vec3 worldOffset,
+                         glm::vec3 ro, glm::vec3 rd, float tMax = 90.f,
+                         int maxSteps = 512);
+
 // Rotate a micro layer's records about the object's BOTTOM-CENTRE pivot, the
 // same pivot the world uses for its own layers (so the two agree on what
 // "yaw about the base" means).

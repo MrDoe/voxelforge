@@ -491,6 +491,49 @@ TEST_CASE("micro world: a micro layer can be ROTATED about its base, in place")
     CHECK(glm::length(turnedPivot - plainPivot) < 0.001f);
 }
 
+TEST_CASE("micro world: a micro object is PICKABLE")
+{
+    // The app's pick path marches the WORLD's store, which by design holds no
+    // micro cells - so without a pick of its own a micro object is invisible to
+    // the pointer: clicking it selects nothing and it cannot be moved.
+    const float vox = 0.005f;
+    const int half = 3;
+    WorldFileData d = cubeLayer(half, vox);
+    MicroField f;
+    std::string err;
+    REQUIRE(buildMicroField(d.voxels, d.meta, f, &err));
+
+    const glm::vec3 offset(10.0f, 2.0f, 10.0f);
+    // The object's centre in world space (the field's cells are the object's
+    // cells, rebased by the margin).
+    // The object's cells are 0..2*half, so its centre cell is (2*half)/2.
+    const int objCells = 2 * half + 1;
+    const float centreCell = float(objCells - 1) * 0.5f;
+    const glm::vec3 centre = offset + glm::vec3(centreCell * vox);
+
+    // A ray from outside straight at the object's centre.
+    const glm::vec3 ro = centre + glm::vec3(0.30f, 0.0f, 0.0f);
+    const glm::vec3 rd = glm::normalize(centre - ro);
+    const MicroPick hit = pickMicroField(f, offset, ro, rd);
+    REQUIRE(hit.hit);
+    // The hit is on the object's near SURFACE (the ray comes from +x, so it
+    // meets the LAST cell's outer face), and the distance matches.
+    const float surfaceX = offset.x + (float(objCells) - 0.5f) * vox;
+    // Within a voxel: the field is sampled trilinearly and the ray runs
+    // along a cell BOUNDARY in y/z, so the crossing is a blend of four cells
+    // rather than exactly the face midpoint.
+    CHECK(std::abs(hit.pos.x - surfaceX) < vox);
+    CHECK(std::abs(hit.pos.y - centre.y) < vox);
+    CHECK(std::abs(hit.dist - (ro.x - surfaceX)) < vox);
+    // The normal points back at the camera (out of the near face).
+    CHECK(hit.normal.x < -0.5f);
+
+    // A ray that misses the object entirely.
+    const MicroPick miss = pickMicroField(f, offset, ro,
+                                          glm::normalize(glm::vec3(1.f, 0.f, 0.5f)));
+    CHECK(!miss.hit);
+}
+
 TEST_CASE("micro world: a micro object CASTS a shadow onto the world")
 {
     // The world's sun shadow is BAKED per surfel, so the "cast" half of the

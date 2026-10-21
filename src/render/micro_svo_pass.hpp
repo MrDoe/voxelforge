@@ -35,6 +35,11 @@ public:
     // Blocking (immediate submits), like SvoPass::setWorld.
     bool setMicroWorlds(const std::vector<voxel::MicroWorld>& worlds);
 
+    // Set the LIVE PREVIEW offset of one micro world (a staged Move delta).
+    // The field stays where it was baked; the shader offsets the RENDERED
+    // position, so a drag is instant and costs no re-bake. `active` clears it.
+    void setWorldPreview(size_t worldIndex, glm::vec3 offset, bool active);
+
     bool empty() const { return m_worldCount == 0; }
     size_t worldCount() const { return m_worldCount; }
     size_t gpuBytes() const;

@@ -130,6 +130,8 @@ void App::processInput(bool textCaptures, bool rotateLiveTest)
         bool wantMouse = pickIo.WantCaptureMouse ||
                         sidebarResizeCapturesMouse;
         bool lmb = glfwGetMouseButton(m_window.handle(), GLFW_MOUSE_BUTTON_LEFT)==GLFW_PRESS;
+        bool shift = glfwGetKey(m_window.handle(), GLFW_KEY_LEFT_SHIFT)==GLFW_PRESS ||
+                     glfwGetKey(m_window.handle(), GLFW_KEY_RIGHT_SHIFT)==GLFW_PRESS;
         // hover while Ctrl held (anchor pick) OR while the edit tool is active
         // (so an LMB click can stamp a carve/add at the pointed surface)
         bool computeHover = (ctrl || m_editActive) && !wantMouse && fb.x>0 && fb.y>0;
@@ -140,6 +142,24 @@ void App::processInput(bool textCaptures, bool rotateLiveTest)
                                                    m_camera.forward(), m_camera.right(), m_camera.up());
             m_hoverHit = vf::voxel::rayPickStore(m_layers.store(),
                                                  m_camera.pos, rd);
+            // A MICRO object is not in the world's store (it is a separate SVO
+            // world on its own fine lattice), so the store's march never sees
+            // it and the pointer would pass straight through a micro object.
+            // March the micro fields too and keep the nearer hit.
+            {
+                const MicroObjectPick mp =
+                    pickMicroObjects(m_microOccluders, m_camera.pos, rd);
+                if (mp.hit && (!m_hoverHit.hit || mp.dist < m_hoverHit.dist)) {
+                    m_hoverHit.hit = true;
+                    m_hoverHit.pos = mp.pos;
+                    m_hoverHit.normal = mp.normal;
+                    m_hoverHit.dist = mp.dist;
+                    m_hoverHit.object = true;
+                    m_hoverHit.layer = 0;      // no world owner id
+                    m_hoverHit.voxel = mp.cell; // the MICRO cell
+                    m_hoverHit.microFile = mp.file;
+                }
+            }
             // A real pick - hit OR miss - supersedes the latch: it is the
             // pointer's current opinion about the scene. m_latchedHover.hit is
             // the single source of truth for "is there a latched preview";
@@ -170,7 +190,12 @@ void App::processInput(bool textCaptures, bool rotateLiveTest)
             const std::string pickedLayer = rotateTargetLayer(m_selectedHit);
             if (!pickedLayer.empty())
                 m_selectedLayer = pickedLayer;
-            glm::vec3 w = vf::voxel::voxelCenter(m_selectedHit.voxel);
+            // A MICRO hit's voxel is on the object's OWN fine lattice, so the
+            // world position must come from the hit, not from voxelCenter()
+            // (which would place a 5 mm cell on the 10 cm world lattice).
+            const glm::vec3 w = m_selectedHit.microFile.empty()
+                                    ? vf::voxel::voxelCenter(m_selectedHit.voxel)
+                                    : m_selectedHit.pos;
             spdlog::info("pick selected {} {} {} world {:.2f} {:.2f} {:.2f} mat {} layer {}",
                 m_selectedHit.voxel.x, m_selectedHit.voxel.y, m_selectedHit.voxel.z,
                 w.x,w.y,w.z, int(m_selectedHit.mat),
@@ -180,11 +205,28 @@ void App::processInput(bool textCaptures, bool rotateLiveTest)
             // report prints its stable id so it can be named.
             describeSurfelsAt(m_selectedHit.voxel);
         }
+        // Bounding-box selection: Shift+LMB drag defines the box corner to
+        // corner as an inclusive lattice AABB - the pressed cell is the
+        // anchor, the cell under the cursor is the opposite corner. It uses
+        // the same hover pick the brush does, so the box lands on real cells
+        // with no plane maths. The stamp path below is Shift-gated, so one
+        // gesture can never both select and edit.
+        const bool boxGesture = (m_editActive || ctrl) && !wantMouse &&
+                                fb.x > 0 && fb.y > 0;
+        if (boxGesture && shift && lmbEdge && m_hoverHit.hit)
+            beginBoxSelection(m_hoverHit.voxel);
+        if (m_boxDragging) {
+            if (m_hoverHit.hit)
+                updateBoxSelection(m_hoverHit.voxel);
+            if (!lmb)
+                endBoxSelection(); // release commits + reports the contents
+        }
         // Edit tool: plain LMB stamps at the hover point. With "Live patch"
         // on, holding LMB keeps painting (stamp spacing = a quarter brush
         // diameter) so the result appears while drawing; the stroke is
-        // saved asynchronously on release.
-        const bool editLmb = lmb && !ctrl && !wantMouse && m_editActive &&
+        // saved asynchronously on release. Shift is the box-selection gesture
+        // above and never stamps.
+        const bool editLmb = lmb && !ctrl && !shift && !wantMouse && m_editActive &&
                              m_editBrush != EditBrush::Rotate &&
                              m_editBrush != EditBrush::Move;
         bool doStamp = lmbEdge && editLmb;
@@ -230,7 +272,7 @@ void App::processInput(bool textCaptures, bool rotateLiveTest)
         MoveAxis hoveredMoveAxis = MoveAxis::None;
         if (!sidebarResizeCapturesMouse && m_gizmoValid && m_editActive &&
             m_editBrush == EditBrush::Move && !m_moveLayer.empty()) {
-            const vf::voxel::WorldAABB moveBox = m_layers.layerBox(m_moveLayer);
+            const vf::voxel::WorldAABB moveBox = layerBounds(m_moveLayer);
             const ImVec2 display = ImGui::GetIO().DisplaySize;
             const glm::ivec2 fb(static_cast<int>(display.x),
                                 static_cast<int>(display.y));
@@ -398,7 +440,10 @@ void App::processInput(bool textCaptures, bool rotateLiveTest)
             (m_hoverHit.hit || overMoveHandle)) {
             const std::string picked = overMoveHandle
                 ? m_moveLayer : rotateTargetLayer(m_hoverHit);
-            if (!picked.empty() && m_layers.layerId(picked) != 0) {
+            // A MICRO object has no world owner id (it is a separate SVO
+            // world), so the id test would refuse it. The pick already says
+            // what was hit, so the gate is "is this a movable layer".
+            if (!picked.empty() && (m_layers.layerId(picked) != 0 || isMicroLayer(picked))) {
                 if (m_moveStaged && m_moveLayer != picked) {
                     spdlog::warn("move: apply or cancel the staged move before selecting another object");
                 } else {
@@ -434,12 +479,19 @@ void App::processInput(bool textCaptures, bool rotateLiveTest)
         }
         if (m_editBrush == EditBrush::Move && !m_moveLayer.empty() &&
             (m_moving || m_moveStaged)) {
-            glm::vec3 pivot;
-            if (m_layers.layerPivot(m_moveLayer, pivot)) {
-                m_splatPass.setRotatePreview(
-                    pivot, glm::mat3(1.f), m_moveDelta, true,
-                    m_layers.layerId(m_moveLayer));
-                refreshPreviewLights(); // carried lamps + derived clusters ride the drag
+            if (isMicroLayer(m_moveLayer)) {
+                // A MICRO object is not in the merged world, so it has no
+                // pivot, no owner id and no surfels to preview - the preview
+                // is the micro pass's own per-world offset.
+                updateMicroMovePreview();
+            } else {
+                glm::vec3 pivot;
+                if (m_layers.layerPivot(m_moveLayer, pivot)) {
+                    m_splatPass.setRotatePreview(
+                        pivot, glm::mat3(1.f), m_moveDelta, true,
+                        m_layers.layerId(m_moveLayer));
+                    refreshPreviewLights(); // carried lamps + derived clusters ride the drag
+                }
             }
         }
 
@@ -464,6 +516,11 @@ void App::processInput(bool textCaptures, bool rotateLiveTest)
                     m_moveStaged = true;
                     spdlog::info("move: staged {} (press Apply to persist)", m_moveLayer);
                 }
+                // The staged delta stays VISIBLE until Apply (or Cancel), so
+                // the micro preview keeps it - the object must not snap back
+                // when the button is released.
+                if (isMicroLayer(m_moveLayer))
+                    updateMicroMovePreview();
             }
             if (m_hasStamp && m_liveEditor.attached()) {
                 // one undo step per stroke (mouse down..up)

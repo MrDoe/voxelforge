@@ -41,12 +41,17 @@ struct alignas(16) MicroWorldRow {
     // brick but have no record behind them, and the shader must clamp its cell
     // index to the grid or it samples a filler cell - which reads as grass
     // material and turns a pale ceramic vase green.
+    // preview = the live preview offset (xyz) + an active flag (w): a staged
+    // Move delta for the selected micro object. The field stays where it was
+    // baked and the RENDERED position is offset, so a drag is instant and
+    // costs no re-bake.
     float geo[4];
     uint32_t base[4];
     float lo[4];
     float hi[4];
+    float preview[4];
 };
-static_assert(sizeof(MicroWorldRow) == 64, "std140 slot size");
+static_assert(sizeof(MicroWorldRow) == 80, "std140 slot size");
 
 } // namespace
 
@@ -158,6 +163,7 @@ bool MicroSvoPass::setMicroWorlds(const std::vector<voxel::MicroWorld>& worlds)
             row.lo[i] = s.worldMin[i];
             row.hi[i] = s.worldMax[i];
         }
+        row.preview[3] = 0.0f; // no live preview until one is set
 
         const uint32_t nodeOff = uint32_t(payload.size());
         const uint32_t handleOff = uint32_t(handles.size());
@@ -207,6 +213,19 @@ bool MicroSvoPass::setMicroWorlds(const std::vector<voxel::MicroWorld>& worlds)
                  rows.size(), totalBricks, grid.size(),
                  double(gpuBytes()) / 1024.0);
     return true;
+}
+
+void MicroSvoPass::setWorldPreview(size_t worldIndex, glm::vec3 offset, bool active)
+{
+    if (!m_worldTable.mapped || worldIndex >= size_t(m_worldCount))
+        return;
+    auto* rows = reinterpret_cast<MicroWorldRow*>(m_worldTable.mapped);
+    MicroWorldRow& row = rows[worldIndex];
+    row.preview[0] = offset.x;
+    row.preview[1] = offset.y;
+    row.preview[2] = offset.z;
+    row.preview[3] = active ? 1.0f : 0.0f;
+    vmaFlushAllocation(m_ctx->allocator(), m_worldTable.alloc, 0, VK_WHOLE_SIZE);
 }
 
 size_t MicroSvoPass::gpuBytes() const
