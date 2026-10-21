@@ -5916,6 +5916,81 @@ selectable; it is small.
 
 See [[concepts/micro-voxel-svo-overlay]].
 
+## [2026-10-21] fix | The house gate's 4.91 -> 5.52 delta is NAMED: the single-face flag's snap
+
+The house shot's black-in-silhouette reads 5.42-5.52% against the 5% bound,
+and the 4.91% that used to pass belongs to an older tree state. A bisect over
+the house shot (in a scratch WORKTREE, so the shared tree never moved and
+the other sessions' gates were never disturbed) names the first bad commit:
+**caf192c, "flag single-face disks for the shader face clip"**.
+
+The cause is confirmed causally, not just by the bisect: with only the snap
+condition disabled (`params.smoothNormals && faceEntry[i] == 0 && !faceClip`
+-> without the `&& !faceClip`), the house shot reads **4.91%** again, the
+pre-flag value exactly. The flag's quarter-step is invisible - every reader
+rounds it away - so the whole delta is the snap: the 97,258 single-face
+object disks (28.3%) get the EXACT axis normal instead of the smoothed one,
+the shading follows the normal, and more of the walls' pixels fall under
+luma 30. The snap's own A/B had measured the tree view (13.6% of the pixels
+moved by a mean of 0.96) and not the house's black-in-silhouette, which is
+where it shows.
+
+The snap exists so the shader can derive the face square for the face clip,
+and the clip was reverted (a net loss - the seam is the edge, not the
+corner). So while the clip is off, the snap has no consumer and costs the
+gate a pass; the flat-top kernel (which needs the exact axis normal) will
+reintroduce it, together with the same look change.
+
+The 5% bound is NOT loosened. The recipe for bisecting a gate regression
+without disturbing the other sessions - scratch worktree, one shot per
+revision, the gate's own classifier, both ends verified first, and exit 125
+for a broken revision - is in [[concepts/splat-canopy-parity]].
+
+See [[concepts/splat-canopy-parity]].
+
+## 2026-10-21 ingest | The sidebar's UI vocabulary
+
+Reworked the editor's only ImGui window (`Voxelforge##Sidebar`) from a flat
+list into a structured, modern editor skin. The change is a **design system**,
+not a restyle: tokens in `src/app/ui/ui_types.hpp`, widgets in
+`src/app/ui/ui_primitives.{hpp,cpp}`, palette in `src/app/ui/theme.cpp`, and
+all six sections rebuilt from that vocabulary.
+
+What it fixes (measured on a 1280x720 `VF_HUD_SHOT` capture of the before
+state):
+
+- The **section title was the loudest element** (accent, all caps) while
+  controls and prose shared one text level. Now: the accent means STATE only,
+  and there are three text levels plus four surface levels.
+- Two lines were **clipped at the pane's right edge** — the section
+  description (`TextDisabled` does not wrap; it is now `sectionHeader` ->
+  `TextWrapped`) and the layer count row (now a three-column stat row).
+- **Every labelled full-width widget had its label pushed off the pane**:
+  ImGui draws a widget's label to the widget's RIGHT, so `SetNextItemWidth(-1)`
+  + a visible label meant "Depth / height" was cut in half. 13 sites now use
+  `controlRow(label, fn)` (label left, control right).
+- The **rail was a code to decode** (`ED / WL / RN / TX / IM / AI`). It is now
+  six vector icons drawn with `ImDrawList` (chisel / layers / sun / swatch /
+  cube / bubble) — the default ImGui font has no icon glyphs, which is why the
+  codes existed in the first place.
+- The **footer was a run-on line**; it is now two aligned columns (state on
+  the left, timings on the right).
+- The **pane could not be scrolled with the wheel**: it carried
+  `NoScrollWithMouse`, which was protecting a camera wheel binding that does
+  not exist anywhere in the codebase (`io.MouseWheel` is read by nothing).
+  The flag is gone from the pane, so long sections scroll.
+
+Also: `VF_TEST_PANEL=edit|world|render|textures|mesh|ai` opens a section at
+startup, which implements the actionable fix in
+[[concepts/interactive-ui-coverage-gap]] and makes every panel capturable with
+`VF_HUD_SHOT`.
+
+And a real bug the rework exposed: `kMatNames` had 21 entries while
+`kPaletteN` is 22, so material 21 (`fleece`) was unreachable from every
+combo. Fixed in `ui_types.hpp` and in the three loops that used 21.
+
+See [[concepts/sidebar-ui-vocabulary]] and [[entities/hud-sidebar]].
+
 ## [2026-10-21] ingest | Fur cards over the micro objects (and the premise that was wrong)
 
 The question was "can we use real Gaussian splats instead of the filled

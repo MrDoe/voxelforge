@@ -110,36 +110,71 @@ void App::drawSidebar()
         const float topH = std::max(0.0f, height - kFooterH - 2.0f * ImGui::GetStyle().WindowPadding.y);
 
         // ---- icon rail -------------------------------------------------
+        // The rail is a column of vector icons, not of two-letter codes: the
+        // abbreviation ("ED", "WL") was a code to be decoded, and a drawing
+        // is read at a glance. The active entry is marked three ways - a
+        // filled pill, an accent-coloured glyph and an accent underline -
+        // because the rail is the one thing that must stay legible while the
+        // eye is on the scene.
         ImGui::BeginChild("rail", ImVec2(kRailW, topH), ImGuiChildFlags_None);
-        ImGui::Dummy(ImVec2(0.0f, 2.0f));
+        ImGui::Dummy(ImVec2(0.0f, 4.0f));
         for (int i = 0; i < kPanelCount; ++i) {
             const Panel p = Panel(i);
             const bool active = (m_panel == p);
-            if (actionButton(kPanels[i].label, active, ImVec2(-1.0f, 30.0f))) {
+            const float cw = ImGui::GetContentRegionAvail().x;
+            const ImVec2 pos = ImGui::GetCursorScreenPos();
+            const float bs = 36.0f;
+            ImGui::InvisibleButton(kPanels[i].label, ImVec2(cw, bs));
+            const bool hovered = ImGui::IsItemHovered();
+            if (ImGui::IsItemClicked()) {
                 if (p == Panel::Mesh)
                     prepareMeshImport();
                 m_panel = p;
             }
-            // Armed-tool marker as an accent bar on the button's right edge:
-            // the brush is armed independently of the section on screen, and a
-            // bar costs no vertical row the way a ">" text line did.
-            if (p == Panel::Edit && m_editActive) {
-                const ImVec2 a = ImGui::GetItemRectMin();
-                const ImVec2 b = ImGui::GetItemRectMax();
-                ImGui::GetForegroundDrawList()->AddRectFilled(
-                    ImVec2(b.x - 3.0f, a.y + 2.0f), ImVec2(b.x, b.y - 2.0f),
-                    IM_COL32(33, 212, 237, 255));
+            ImDrawList* dl = ImGui::GetWindowDrawList();
+            const ImVec2 r0(pos.x, pos.y);
+            const ImVec2 r1(pos.x + cw, pos.y + bs);
+            if (active) {
+                dl->AddRectFilled(r0, r1, ImGui::GetColorU32(kAccentSoft), kUiRadius);
+                dl->AddRectFilled(ImVec2(r0.x + 6.0f, r1.y - 2.0f),
+                                  ImVec2(r1.x - 6.0f, r1.y), ImGui::GetColorU32(kAccent),
+                                  2.0f);
+            } else if (hovered) {
+                dl->AddRectFilled(r0, r1,
+                                  ImGui::GetColorU32(ImGui::GetStyleColorVec4(
+                                      ImGuiCol_HeaderHovered)),
+                                  kUiRadius);
             }
-            if (ImGui::IsItemHovered())
-                ImGui::SetTooltip("%s", kPanels[i].full);
+            const ImU32 iconCol = ImGui::GetColorU32(
+                active ? kAccent : (hovered ? kTextPrimary : kTextSecondary));
+            drawPanelIcon(p, ImVec2(r0.x + cw * 0.5f, r0.y + bs * 0.5f), kUiIcon,
+                          iconCol);
+            // The armed brush is tool state, not section state: a dot on the
+            // Edit glyph says "the tool is live" without stealing the rail's
+            // active-section marker.
+            if (p == Panel::Edit && m_editActive)
+                dl->AddCircleFilled(ImVec2(r1.x - 6.0f, r0.y + 6.0f), 3.0f,
+                                    ImGui::GetColorU32(kAccent));
+            if (hovered)
+                ImGui::SetTooltip("%s  (%s)", kPanels[i].full, kPanels[i].key);
+            ImGui::Dummy(ImVec2(0.0f, 4.0f));
         }
         ImGui::EndChild();
 
         // ---- content pane ----------------------------------------------
         if (!m_sidebarCollapsed) {
             ImGui::SameLine();
-            if (ImGui::BeginChild("pane", ImVec2(0.0f, topH), ImGuiChildFlags_None,
-                                  ImGuiWindowFlags_NoScrollWithMouse)) {
+            // The pane SCROLLS with the wheel. It used to carry
+            // NoScrollWithMouse, which was protecting a camera wheel binding
+            // that does not exist anywhere in the codebase (io.MouseWheel is
+            // read by nothing) - so a long section was reachable only by
+            // dragging its scrollbar. The parent window keeps the flag, so the
+            // rail does not scroll anything.
+            if (ImGui::BeginChild("pane", ImVec2(0.0f, topH), ImGuiChildFlags_None)) {
+                // The band names the section: switching panels is a jump to a
+                // different place, and the place has to say what it is.
+                const int pi = int(m_panel);
+                paneBand(kPanels[pi].full, kPanels[pi].key);
                 switch (m_panel) {
                 case Panel::Edit:      drawPanelEdit(); break;
                 case Panel::World:     drawPanelWorld(); break;
@@ -185,20 +220,7 @@ void App::drawSidebarFooter()
 {
     ImGui::Separator();
     const float w = ImGui::GetContentRegionAvail().x;
-    const char* mode = m_renderMode == RenderMode::Splats ? "splat" : "SVO";
-
-    if (m_rotationStaged || m_moveStaged) {
-        if (w < 90.0f) {
-            ImGui::TextColored(kWarn, "EDIT");
-            return;
-        }
-        ImGui::TextColored(kWarn, "%s staged — not written",
-                           m_rotationStaged ? "Rotation" : "Move");
-        ImGui::TextDisabled("Ctrl+1 to %s",
-                            m_panel == Panel::Edit ? "apply or cancel"
-                                                  : "review (Edit section)");
-        return;
-    }
+    const char* mode = m_renderMode == RenderMode::Splats ? "SPLAT" : "SVO";
 
     if (w < 90.0f) {                       // rail-only sidebar
         ImGui::Text("%.0f", m_lastFrameMs);
@@ -207,44 +229,69 @@ void App::drawSidebarFooter()
                               m_avgMs, m_profAvg[0]);
         return;
     }
-    if (m_editActive)
-        ImGui::TextColored(kAccent, "%s  %.1f ms", mode, m_avgMs);
-    else
-        ImGui::Text("%s  %.1f ms", mode, m_avgMs);
-    if (m_editActive) {
-        if (m_editBrush == EditBrush::Smooth)
-            ImGui::TextColored(kAccent, "%.0f CPU | geo %.1f | smooth %dvox %.0f%% | "
-                                        "%d col, %d vox run, +%d up",
-                               m_lastFrameMs, m_profAvg[0], brushVoxels(),
-                               m_smoothStrength * 100.0f, m_smoothLastColumns,
-                               m_smoothLastMaxDelta, m_smoothLastRise);
-        else if (m_editBrush == EditBrush::Carve ||
-                 m_editBrush == EditBrush::Add)
-            ImGui::TextColored(kAccent, "%.0f CPU | geo %.1f | %s %dvox d%.1f "
-                                        "%s",
-                               m_lastFrameMs, m_profAvg[0], mode,
-                               brushVoxels(), m_editDepth,
-                               vf::voxel::EditableWorld::falloffCurveName(
-                                   m_editFalloffCurve));
-        else if (brushIsPerVoxel() &&
-                 (m_editBrush == EditBrush::Add || m_editBrush == EditBrush::Carve))
-            ImGui::TextColored(kAccent, "%.0f CPU | geo %.1f | %s 1 voxel",
-                               m_lastFrameMs, m_profAvg[0], brushName(m_editBrush));
-        else if (m_editBrush == EditBrush::Add || m_editBrush == EditBrush::Carve)
-            // Depth is spelled out here because the 3D depth indicator in the
-            // post pass CANNOT saturate-free: it is a screen-space line, so once
-            // the volume's far end leaves the viewport it pins to the frame edge
-            // and two very large depths look identical. This number is exact at
-            // every depth, so the footer is the channel that never lies.
-            ImGui::TextColored(kAccent, "%.0f CPU | geo %.1f | %s %dvox %.1fm",
-                               m_lastFrameMs, m_profAvg[0], brushName(m_editBrush),
-                               brushVoxels(), m_editDepth);
-        else
-            ImGui::TextColored(kAccent, "%.0f CPU | geo %.1f | %s %dvox",
-                               m_lastFrameMs, m_profAvg[0], brushName(m_editBrush),
-                               brushVoxels());
-    } else {
-        ImGui::TextDisabled("%.0f CPU  |  geo %.1f", m_lastFrameMs, m_profAvg[0]);
+
+    if (m_rotationStaged || m_moveStaged) {
+        // A staged transform is a PENDING WRITE. It is the one thing in the
+        // footer that must never be missed, so it takes the whole bar: an
+        // amber chip, then where the Apply button is.
+        statusPill(m_rotationStaged ? "ROTATION STAGED" : "MOVE STAGED", kWarn);
+        ImGui::TextDisabled("Not written yet — Ctrl+1 to %s",
+                            m_panel == Panel::Edit ? "apply or cancel"
+                                                  : "review (Edit section)");
+        return;
+    }
+
+    // Two aligned columns: WHAT the editor is doing on the left, HOW FAST it
+    // is on the right. The old footer was one run-on line that had to be
+    // parsed; a chip, a value and a right-aligned number can be read.
+    if (ImGui::BeginTable("footerStatus", 2, ImGuiTableFlags_SizingStretchProp)) {
+        ImGui::TableSetupColumn("state", ImGuiTableColumnFlags_WidthStretch, 0.58f);
+        ImGui::TableSetupColumn("timing", ImGuiTableColumnFlags_WidthStretch, 0.42f);
+        ImGui::TableNextRow();
+        ImGui::TableSetColumnIndex(0);
+        statusPill(mode, m_editActive ? kAccent : kTextSecondary);
+        if (m_editActive) {
+            ImGui::SameLine();
+            statusPill(brushName(m_editBrush), kAccent);
+        }
+        ImGui::TableSetColumnIndex(1);
+        ImGui::PushStyleColor(ImGuiCol_Text, kTextPrimary);
+        ImGui::Text("%.1f ms", m_avgMs);
+        ImGui::PopStyleColor();
+
+        ImGui::TableNextRow();
+        ImGui::TableSetColumnIndex(0);
+        if (m_editActive) {
+            ImGui::PushStyleColor(ImGuiCol_Text, kTextSecondary);
+            if (m_editBrush == EditBrush::Smooth)
+                ImGui::Text("%d vox · %.0f%% · %d col · +%d up", brushVoxels(),
+                            m_smoothStrength * 100.0f, m_smoothLastColumns,
+                            m_smoothLastRise);
+            else if (brushIsPerVoxel() &&
+                     (m_editBrush == EditBrush::Add || m_editBrush == EditBrush::Carve))
+                ImGui::Text("%s · 1 voxel", brushName(m_editBrush));
+            else if (m_editBrush == EditBrush::Add || m_editBrush == EditBrush::Carve)
+                // Depth is spelled out here because the 3D depth indicator in
+                // the post pass CANNOT saturate-free: it is a screen-space
+                // line, so once the volume's far end leaves the viewport it
+                // pins to the frame edge and two very large depths look
+                // identical. This number is exact at every depth, so the
+                // footer is the channel that never lies.
+                ImGui::Text("%d vox · %.1f m", brushVoxels(), m_editDepth);
+            else
+                ImGui::Text("%d vox", brushVoxels());
+            ImGui::PopStyleColor();
+        } else {
+            ImGui::PushStyleColor(ImGuiCol_Text, kTextTertiary);
+            ImGui::Text("%s", m_renderMode == RenderMode::Splats
+                                  ? "Gaussian surfels" : "SVO reference");
+            ImGui::PopStyleColor();
+        }
+        ImGui::TableSetColumnIndex(1);
+        ImGui::PushStyleColor(ImGuiCol_Text, kTextTertiary);
+        ImGui::Text("CPU %.0f · geo %.1f", m_lastFrameMs, m_profAvg[0]);
+        ImGui::PopStyleColor();
+        ImGui::EndTable();
     }
     if (ImGui::IsItemHovered())
         ImGui::SetTooltip("Ctrl+B collapses the sidebar; Ctrl+1..6 switch section\n"

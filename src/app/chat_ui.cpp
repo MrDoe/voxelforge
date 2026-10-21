@@ -222,27 +222,41 @@ void ChatUi::drawPanel(vf::voxel::EditableWorld& editable, vf::voxel::LayeredWor
     // above runs unconditionally, so a response that arrives while another
     // section is showing still lands in m_history.
 
-    ImGui::TextDisabled("%s", m_status.c_str());
-    if(m_sending) { ImGui::SameLine(); ImGui::Text("⋯"); }
+    // The status is a state, so it wears the state's colour. (The chat lives
+    // in the AI layer, so it does not use the app's UI vocabulary - but it
+    // follows the same rule the rest of the sidebar does.) It WRAPS: the
+    // status carries the model and the URL, which is wider than the pane.
+    {
+        const ImVec4 statusColor =
+            m_status == "error" ? ImVec4(0.965f, 0.376f, 0.439f, 1.0f)
+            : m_sending ? ImVec4(0.204f, 0.804f, 0.925f, 1.0f)
+            : ImVec4(0.427f, 0.478f, 0.541f, 1.0f);
+        ImGui::PushStyleColor(ImGuiCol_Text, statusColor);
+        ImGui::TextWrapped("%s", m_sending ? "thinking..." : m_status.c_str());
+        ImGui::PopStyleColor();
+    }
 
     if(hasSelection){
         glm::vec3 w = vf::voxel::voxelCenter(selection->voxel);
-        ImGui::PushStyleColor(ImGuiCol_ChildBg, ImVec4(0.18f,0.22f,0.12f,1));
-        ImGui::BeginChild("selBar", ImVec2(0, 38), true);
-        ImGui::Text("Selected %d %d %d  (%.1f, %.1f, %.1f) mat %d",
-                    selection->voxel.x, selection->voxel.y, selection->voxel.z,
-                    w.x, w.y, w.z, int(selection->mat));
+        ImGui::PushStyleColor(ImGuiCol_ChildBg, ImVec4(0.098f, 0.129f, 0.165f, 1.0f));
+        ImGui::PushStyleColor(ImGuiCol_Border, ImVec4(0.204f, 0.804f, 0.925f, 0.45f));
+        ImGui::BeginChild("selBar", ImVec2(0, 46), true);
+        ImGui::Text("Voxel  %d, %d, %d", selection->voxel.x, selection->voxel.y,
+                    selection->voxel.z);
+        ImGui::Text("World  %.1f, %.1f, %.1f", w.x, w.y, w.z);
         const std::string owner = selection->object
             ? world.layerFile(selection->layer) : std::string();
         if (!owner.empty())
-            ImGui::TextDisabled("Owner: %s", owner.c_str());
+            ImGui::TextColored(ImVec4(0.204f, 0.804f, 0.925f, 1.0f), "Owner: %s",
+                               owner.c_str());
         else
-            ImGui::TextDisabled("Terrain / unowned geometry • center-bottom anchor");
+            ImGui::TextDisabled("Terrain / unowned geometry · center-bottom anchor");
         ImGui::EndChild();
-        ImGui::PopStyleColor();
+        ImGui::PopStyleColor(2);
     } else {
-        ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.9f,0.6f,0.6f,1));
-        ImGui::TextWrapped("No voxel selected — Ctrl+LMB on terrain/house to pick.");
+        ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.60f, 0.65f, 0.71f, 1.0f));
+        ImGui::TextWrapped("No voxel selected — Ctrl+LMB on terrain/house to pick. "
+                           "The assistant places objects at the selected cell.");
         ImGui::PopStyleColor();
     }
     if(hover && hover->hit){
@@ -250,7 +264,10 @@ void ChatUi::drawPanel(vf::voxel::EditableWorld& editable, vf::voxel::LayeredWor
     }
 
     ImGui::Separator();
-    ImGui::BeginChild("history", ImVec2(0, -70), true);
+    // The history takes whatever is left, minus the composer (48 px) and the
+    // button row under it (~30 px). The old -70 reserve was 8 px short, so
+    // the row under the input fell behind the sidebar's status bar.
+    ImGui::BeginChild("history", ImVec2(0, -88), true);
     for(auto &e: m_history){
         if(e.role=="user"){
             ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.6f,0.85f,1.f,1));

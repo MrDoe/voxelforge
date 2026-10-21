@@ -29,6 +29,7 @@ Interactive defaults: reference camera `1.0,2.0,1.5 → 5.3,1.0,11.3` (house.jpe
 | `VF_PRESENT=immediate\|mailbox` | present mode. Default IMMEDIATE — MAILBOX deadlocks on NVIDIA+X11. |
 | `VF_TRACE=1` | per-frame submit/acquire traces + `layered_world` SVO buffer hash logs (determinism checks) |
 | `VF_HUD_SHOT=FRAMES:PATH` | after N *presented* frames, copy the composed swapchain frame (HUD included) to PATH and exit — interactive UI screenshots |
+| `VF_TEST_PANEL=edit\|world\|render\|textures\|mesh\|ai` | open the sidebar on that section at startup. The sidebar is drawn by the interactive path only, so this is the only way to reach a non-default section from a script — combine it with `VF_HUD_SHOT` to capture a panel. |
 | `VF_GUI_TEST=LAYERNAME` | test hook: toggle that layer like its checkbox at frame 20 |
 | `VF_TEST_SELECT=x,y,z` | deterministic anchor selection for highlight shots |
 | `VF_TEST_HOVER=x,y,z` | deterministic hover highlight |

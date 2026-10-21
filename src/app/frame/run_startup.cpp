@@ -364,6 +364,27 @@ void App::applyStartupEnvOverrides(FrameInputs& fx)
             fx.hudShotPath = endp + 1;
         }
     }
+    // VF_TEST_PANEL: open the sidebar on a given section at startup. The
+    // sidebar is only drawn by the INTERACTIVE path, so this is the only way
+    // to reach a non-default section from a script - and the only way to
+    // capture one (combine it with VF_HUD_SHOT). Without it, every panel
+    // except World is invisible to automated checks.
+    if (const char* panel = getenv("VF_TEST_PANEL")) {
+        static const char* kNames[] = { "edit", "world", "render", "textures",
+                                        "mesh", "ai" };
+        bool found = false;
+        for (int i = 0; i < kPanelCount; ++i) {
+            if (strcasecmp(panel, kNames[i]) == 0) {
+                m_panel = Panel(i);
+                found = true;
+                spdlog::info("VF_TEST_PANEL -> {}", kNames[i]);
+                break;
+            }
+        }
+        if (!found)
+            spdlog::warn("VF_TEST_PANEL '{}' ignored (edit|world|render|"
+                         "textures|mesh|ai)", panel);
+    }
     // debug/CI override for the render-flag bitmask (AO/shadow/flora/water/outline)
     if (const char* rf = getenv("VF_RENDER_FLAGS"))
         m_renderFlags = atoi(rf);

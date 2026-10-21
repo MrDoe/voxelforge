@@ -106,6 +106,11 @@ struct WorldLayer {
     // layer's bottom-center pivot together with the resample into the world
     // lattice. 1.0 = authored size.
     float scale = 1.0f;
+    // An AUTONOMOUS BEHAVIOUR for a MICRO layer (a separate SVO world that
+    // can move on its own): "" = static, "grazer" = it walks around and
+    // stops to graze. The behaviour drives a per-frame transform, so the
+    // object is not a static prop in the scene any more.
+    std::string behaviour;
 };
 
 bool loadManifest(const std::string& path, std::vector<WorldLayer>& out);

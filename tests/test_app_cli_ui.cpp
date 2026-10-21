@@ -12,6 +12,7 @@
 #include "app/ui/sun_time.hpp"
 #include "app/ui/ui_primitives.hpp"
 #include "app/ui/ui_types.hpp"
+#include "voxel/common.hpp"
 
 #include <doctest/doctest.h>
 
@@ -215,20 +216,40 @@ TEST_CASE("the rail table matches the panel enum")
     CHECK(kPanels[int(Panel::World)].label[0] == 'W');
     CHECK(kPanels[int(Panel::Render)].label[0] == 'R');
     CHECK(kPanels[int(Panel::Textures)].label[0] == 'T');
-    CHECK(kPanels[int(Panel::Mesh)].label[0] == 'I');
+    CHECK(kPanels[int(Panel::Mesh)].label[0] == 'M');
     CHECK(kPanels[int(Panel::AI)].label[0] == 'A');
-    // Every entry is a 2-letter label (the default ImGui font has no glyphs).
+    // The rail draws a VECTOR ICON per section (the default ImGui font has no
+    // icon glyphs, which is why the rail used to carry 2-letter codes), so the
+    // label is now the section's name and `key` is its shortcut.
+    for (int i = 0; i < kPanelCount; ++i) {
+        CHECK(std::strlen(kPanels[i].label) > 0);
+        CHECK(std::strlen(kPanels[i].full) > 0);    // the pane band's title
+        CHECK(std::strncmp(kPanels[i].key, "Ctrl+", 5) == 0);
+    }
+    // No two sections may share a name: the rail's tooltip and the pane band
+    // both read it.
     for (int i = 0; i < kPanelCount; ++i)
-        CHECK(std::strlen(kPanels[i].label) == 2);
+        for (int j = i + 1; j < kPanelCount; ++j)
+            CHECK(std::strcmp(kPanels[i].label, kPanels[j].label) != 0);
+    // The shortcut of the Nth section is Ctrl+N, so the band can state it.
+    for (int i = 0; i < kPanelCount; ++i) {
+        char want[16];
+        std::snprintf(want, sizeof(want), "Ctrl+%d", i + 1);
+        CHECK(std::strcmp(kPanels[i].key, want) == 0);
+    }
 }
 
 TEST_CASE("the material combo names cover the palette")
 {
     // kMatNames drives the Edit panel's material combo; index N must read as
-    // material N or Paint logs a different material than the user picked.
+    // material N or Paint logs a different material than the user picked. The
+    // array must cover EVERY palette entry: it stopped at 20 while the
+    // palette had 22, which left material 21 (fleece) unreachable from every
+    // combo in the app.
     CHECK(std::strlen(kMatNames[0]) > 0);
     CHECK(std::strlen(kMatNames[20]) > 0);
-    for (int i = 0; i < 21; ++i)
+    CHECK(std::strlen(kMatNames[21]) > 0);
+    for (int i = 0; i < vf::voxel::kPaletteN; ++i)
         CHECK(std::strncmp(kMatNames[i], std::to_string(i).c_str(), 1) == 0);
 }
 

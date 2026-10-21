@@ -17,12 +17,11 @@ namespace app {
 
 void App::drawPanelTextures()
 {
-    sectionHeader("MATERIAL TEXTURES", "Drop files into assets/textures/");
-    ImGui::TextWrapped("Changes save to world.json and hot-reload.");
+    sectionHeader("Drop files into assets/textures/  ·  changes save to world.json");
     bool textureChanged = false;
-    // The loop runs over the WHOLE palette now, not just 0..20: material 21
-    // is `fleece`, the one that ships with a fur coat, and a material the
-    // panel cannot show is a material the user cannot configure.
+    // The loop runs over the WHOLE palette: material 21 is `fleece`, the one
+    // that ships with a fur coat, and a material the panel cannot show is a
+    // material the user cannot configure.
     for (int material = 0; material < 22; ++material) {
         if (material >= 10 && material <= 15)
             continue;
@@ -37,8 +36,21 @@ void App::drawPanelTextures()
             std::find(m_texFiles.begin(), m_texFiles.end(), current) ==
                 m_texFiles.end();
 
-        ImGui::PushID(material);
-        ImGui::SeparatorText(kMatNames[material]);
+        // One row per material, collapsed by default: the badge keeps the
+        // current binding visible, so a closed row still says which material
+        // is textured and with what. The badge is the FILE NAME, not its
+        // path - every binding comes from the same folder, and the path
+        // would eat the width the material name needs.
+        char id[32];
+        snprintf(id, sizeof(id), "tex.%d", material);
+        std::string badge = current.empty() ? "(palette)"
+                                            : current.substr(current.find_last_of('/') + 1);
+        const char* badgeText = badge.c_str();
+        if (!groupHeader(id, kMatNames[material], false, badgeText)) {
+            if (missing)
+                ImGui::TextColored(kWarn, "File is not in the scanned folder");
+            continue;
+        }
         ImGui::SetNextItemWidth(-1.0f);
         std::string label = current.empty() ? "(palette)" : current;
         if (missing)
@@ -96,14 +108,14 @@ void App::drawPanelTextures()
         }
         if (missing)
             ImGui::TextColored(kWarn, "File is not in the scanned folder");
-        ImGui::PopID();
+        groupEnd();
     }
     if (textureChanged)
         m_texApplyPending = true;
     ImGui::Separator();
-    if (ImGui::Button("Rescan folder##rescanTextures", ImVec2(-1.0f, 28.0f)))
+    if (ImGui::Button("Rescan folder##rescanTextures", ImVec2(-1.0f, kUiRowH - 2.0f)))
         rescanTextureFiles();
-    if (ImGui::Button("Reload manifest##reloadTextures", ImVec2(-1.0f, 28.0f))) {
+    if (ImGui::Button("Reload manifest##reloadTextures", ImVec2(-1.0f, kUiRowH - 2.0f))) {
         m_texBindings.clear();
         vf::voxel::worldfile::loadTextureManifest(m_manifestPath, m_texBindings);
         rescanTextureFiles();

@@ -79,6 +79,16 @@ struct MicroWorld {
     vec4 rot1;
     vec4 rot2;
     vec4 pivot;
+    // The AUTONOMOUS BEHAVIOUR's transform: an offset (xyz) + an active
+    // flag (w), a rotation matrix (row-major) and its pivot (world m). It
+    // turns a static micro object into one that walks on its own, and it
+    // obeys the same rule as the rotation preview: the field stays in the
+    // BAKED frame and the transform is applied when the field is sampled.
+    vec4 anim;
+    vec4 arot0;
+    vec4 arot1;
+    vec4 arot2;
+    vec4 apivot;
 };
 layout(std140, set = 0, binding = 7) readonly uniform WorldTable {
     MicroWorld uWorlds[16];
@@ -221,10 +231,49 @@ mat3 microRot(int w)
                 wt.uWorlds[w].rot2.xyz);
 }
 
-// A WORLD point -> the object's BAKED frame (the field's frame). The rotation
-// is about a pivot, so the pivot is fixed and only the offset rotates.
+// The autonomous BEHAVIOUR's transform, applied to a world point: the
+// offset, then the rotation about the pivot. Its inverse undoes it.
+//
+// The order matters and it is the same order as the CPU's: the behaviour's
+// rotation is about the pivot in the ANIMATED frame, so the offset is
+// removed first and the rotation second.
+vec3 microAnimate(int w, vec3 p)
+{
+    if (wt.uWorlds[w].anim.w < 0.5)
+        return p;
+    const mat3 R = mat3(wt.uWorlds[w].arot0.xyz, wt.uWorlds[w].arot1.xyz,
+                        wt.uWorlds[w].arot2.xyz);
+    p -= wt.uWorlds[w].anim.xyz;
+    return wt.uWorlds[w].apivot.xyz + R * (p - wt.uWorlds[w].apivot.xyz);
+}
+
+// The inverse: a world point back into the object's baked frame.
+vec3 microUnanimate(int w, vec3 p)
+{
+    if (wt.uWorlds[w].anim.w < 0.5)
+        return p;
+    const mat3 R = mat3(wt.uWorlds[w].arot0.xyz, wt.uWorlds[w].arot1.xyz,
+                        wt.uWorlds[w].arot2.xyz);
+    p += wt.uWorlds[w].anim.xyz;
+    return wt.uWorlds[w].apivot.xyz + transpose(R) * (p - wt.uWorlds[w].apivot.xyz);
+}
+
+// A direction through the behaviour's rotation (no translation).
+vec3 microDirUnanimate(int w, vec3 d)
+{
+    if (wt.uWorlds[w].anim.w < 0.5)
+        return d;
+    return transpose(mat3(wt.uWorlds[w].arot0.xyz, wt.uWorlds[w].arot1.xyz,
+                           wt.uWorlds[w].arot2.xyz)) * d;
+}
+
+// A WORLD point -> the object's BAKED frame (the field's frame). The
+// behaviour's transform is undone first (it is the OUTERMOST transform:
+// the object walks, and the user's staged rotation rides on top of it), then
+// the rotation preview's.
 vec3 microToBaked(int w, vec3 p)
 {
+    p = microUnanimate(w, p);
     if (!microRotOn(w))
         return p;
     return wt.uWorlds[w].pivot.xyz +
@@ -234,6 +283,7 @@ vec3 microToBaked(int w, vec3 p)
 // A direction (no translation) into the baked frame.
 vec3 microDirToBaked(int w, vec3 d)
 {
+    d = microDirUnanimate(w, d);
     if (!microRotOn(w))
         return d;
     return transpose(microRot(w)) * d;

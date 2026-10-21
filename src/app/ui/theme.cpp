@@ -23,54 +23,66 @@ void App::initImGui()
     ImGuiIO& io = ImGui::GetIO();
     io.ConfigFlags |= ImGuiConfigFlags_NavEnableKeyboard;
     ImGui::StyleColorsDark();
-    // Dense professional editor theme: midnight surfaces, one cyan action
-    // colour, restrained borders. Tokens stay local to ImGui so rendering
-    // and world content are unaffected.
+    // A modern editor skin: one cool slate family, one cyan accent, and
+    // FOUR surface levels (window < raised < control < overlay) so a control
+    // can be told apart from the panel it sits in without a border doing all
+    // the work. The accent is reserved for STATE - what is active, what is
+    // armed, what is on - and is never used for a label, because a page where
+    // everything is highlighted highlights nothing.
+    //
+    // The tokens stay local to ImGui: the world and the renderers are
+    // unaffected by the editor skin.
     ImGuiStyle& style = ImGui::GetStyle();
     style.WindowPadding = ImVec2(12.0f, 10.0f);
     style.FramePadding = ImVec2(9.0f, 6.0f);
     style.CellPadding = ImVec2(7.0f, 5.0f);
-    style.ItemSpacing = ImVec2(8.0f, 7.0f);
-    style.ItemInnerSpacing = ImVec2(7.0f, 5.0f);
-    style.WindowRounding = 8.0f;
-    style.ChildRounding = 6.0f;
-    style.FrameRounding = 5.0f;
-    style.PopupRounding = 6.0f;
-    style.GrabRounding = 5.0f;
-    style.ScrollbarRounding = 6.0f;
-    style.TabRounding = 5.0f;
+    style.ItemSpacing = ImVec2(8.0f, 6.0f);
+    style.ItemInnerSpacing = ImVec2(6.0f, 4.0f);
+    style.WindowRounding = 10.0f;
+    style.ChildRounding = 8.0f;
+    style.FrameRounding = 7.0f;
+    style.PopupRounding = 10.0f;
+    style.GrabRounding = 6.0f;
+    style.ScrollbarRounding = 8.0f;
+    style.TabRounding = 6.0f;
     style.WindowBorderSize = 1.0f;
-    style.FrameBorderSize = 0.0f;
-    style.ScrollbarSize = 11.0f;
-    style.GrabMinSize = 10.0f;
+    style.FrameBorderSize = 1.0f;
+    style.ScrollbarSize = 10.0f;
+    style.GrabMinSize = 12.0f;
     ImVec4* colors = style.Colors;
-    colors[ImGuiCol_WindowBg] = ImVec4(0.035f, 0.055f, 0.090f, 0.96f);
-    colors[ImGuiCol_ChildBg] = ImVec4(0.045f, 0.070f, 0.110f, 0.96f);
-    colors[ImGuiCol_PopupBg] = ImVec4(0.045f, 0.070f, 0.110f, 0.99f);
-    colors[ImGuiCol_Border] = ImVec4(0.20f, 0.30f, 0.40f, 0.55f);
-    colors[ImGuiCol_Text] = ImVec4(0.90f, 0.94f, 0.98f, 1.0f);
-    colors[ImGuiCol_TextDisabled] = ImVec4(0.48f, 0.57f, 0.67f, 1.0f);
-    colors[ImGuiCol_FrameBg] = ImVec4(0.070f, 0.105f, 0.155f, 1.0f);
-    colors[ImGuiCol_FrameBgHovered] = ImVec4(0.085f, 0.190f, 0.245f, 1.0f);
-    colors[ImGuiCol_FrameBgActive] = ImVec4(0.075f, 0.310f, 0.385f, 1.0f);
-    colors[ImGuiCol_TitleBg] = ImVec4(0.035f, 0.055f, 0.090f, 1.0f);
-    colors[ImGuiCol_TitleBgActive] = ImVec4(0.055f, 0.145f, 0.205f, 1.0f);
-    colors[ImGuiCol_Header] = ImVec4(0.065f, 0.160f, 0.220f, 1.0f);
-    colors[ImGuiCol_HeaderHovered] = ImVec4(0.080f, 0.310f, 0.390f, 1.0f);
-    colors[ImGuiCol_HeaderActive] = ImVec4(0.090f, 0.390f, 0.480f, 1.0f);
-    colors[ImGuiCol_Button] = ImVec4(0.075f, 0.145f, 0.215f, 1.0f);
-    colors[ImGuiCol_ButtonHovered] = ImVec4(0.080f, 0.300f, 0.380f, 1.0f);
-    colors[ImGuiCol_ButtonActive] = ImVec4(0.090f, 0.420f, 0.510f, 1.0f);
-    colors[ImGuiCol_CheckMark] = ImVec4(0.13f, 0.83f, 0.93f, 1.0f);
-    colors[ImGuiCol_SliderGrab] = ImVec4(0.10f, 0.65f, 0.76f, 1.0f);
-    colors[ImGuiCol_SliderGrabActive] = ImVec4(0.18f, 0.88f, 0.96f, 1.0f);
-    colors[ImGuiCol_Separator] = ImVec4(0.20f, 0.30f, 0.40f, 0.65f);
-    colors[ImGuiCol_TableHeaderBg] = ImVec4(0.060f, 0.105f, 0.155f, 1.0f);
-    colors[ImGuiCol_TableBorderStrong] = ImVec4(0.16f, 0.25f, 0.34f, 0.75f);
-    colors[ImGuiCol_TableRowBg] = ImVec4(0.040f, 0.065f, 0.100f, 1.0f);
-    colors[ImGuiCol_TableRowBgAlt] = ImVec4(0.050f, 0.080f, 0.120f, 1.0f);
-    colors[ImGuiCol_TextSelectedBg] = ImVec4(0.08f, 0.36f, 0.45f, 0.55f);
-    colors[ImGuiCol_NavHighlight] = ImVec4(0.13f, 0.83f, 0.93f, 0.65f);
+    // surfaces: window < raised < control < overlay
+    colors[ImGuiCol_WindowBg] = ImVec4(0.055f, 0.067f, 0.086f, 1.00f);
+    colors[ImGuiCol_ChildBg] = ImVec4(0.071f, 0.086f, 0.110f, 1.00f);
+    colors[ImGuiCol_PopupBg] = ImVec4(0.086f, 0.102f, 0.129f, 1.00f);
+    colors[ImGuiCol_Border] = ImVec4(0.137f, 0.169f, 0.212f, 1.00f);
+    // text: primary / secondary / tertiary
+    colors[ImGuiCol_Text] = ImVec4(0.902f, 0.929f, 0.953f, 1.00f);
+    colors[ImGuiCol_TextDisabled] = ImVec4(0.427f, 0.478f, 0.541f, 1.00f);
+    // controls
+    colors[ImGuiCol_FrameBg] = ImVec4(0.090f, 0.106f, 0.133f, 1.00f);
+    colors[ImGuiCol_FrameBgHovered] = ImVec4(0.122f, 0.153f, 0.192f, 1.00f);
+    colors[ImGuiCol_FrameBgActive] = ImVec4(0.149f, 0.192f, 0.239f, 1.00f);
+    colors[ImGuiCol_TitleBg] = ImVec4(0.055f, 0.067f, 0.086f, 1.00f);
+    colors[ImGuiCol_TitleBgActive] = ImVec4(0.098f, 0.137f, 0.176f, 1.00f);
+    // the group band: a raised surface, one step above the panel
+    colors[ImGuiCol_Header] = ImVec4(0.102f, 0.129f, 0.165f, 1.00f);
+    colors[ImGuiCol_HeaderHovered] = ImVec4(0.133f, 0.176f, 0.220f, 1.00f);
+    colors[ImGuiCol_HeaderActive] = ImVec4(0.157f, 0.208f, 0.259f, 1.00f);
+    colors[ImGuiCol_Button] = ImVec4(0.110f, 0.137f, 0.173f, 1.00f);
+    colors[ImGuiCol_ButtonHovered] = ImVec4(0.122f, 0.294f, 0.353f, 1.00f);
+    colors[ImGuiCol_ButtonActive] = ImVec4(0.145f, 0.392f, 0.471f, 1.00f);
+    // accent: state only
+    colors[ImGuiCol_CheckMark] = ImVec4(0.204f, 0.804f, 0.925f, 1.00f);
+    colors[ImGuiCol_SliderGrab] = ImVec4(0.180f, 0.616f, 0.722f, 1.00f);
+    colors[ImGuiCol_SliderGrabActive] = ImVec4(0.204f, 0.804f, 0.925f, 1.00f);
+    colors[ImGuiCol_Separator] = ImVec4(0.129f, 0.157f, 0.196f, 1.00f);
+    colors[ImGuiCol_TableHeaderBg] = ImVec4(0.090f, 0.110f, 0.141f, 1.00f);
+    colors[ImGuiCol_TableBorderStrong] = ImVec4(0.137f, 0.169f, 0.212f, 1.00f);
+    colors[ImGuiCol_TableRowBg] = ImVec4(0.071f, 0.086f, 0.110f, 1.00f);
+    colors[ImGuiCol_TableRowBgAlt] = ImVec4(0.086f, 0.106f, 0.133f, 1.00f);
+    colors[ImGuiCol_TextSelectedBg] = ImVec4(0.122f, 0.294f, 0.353f, 0.65f);
+    colors[ImGuiCol_NavHighlight] = ImVec4(0.204f, 0.804f, 0.925f, 0.65f);
+    colors[ImGuiCol_PlotLines] = ImVec4(0.204f, 0.804f, 0.925f, 1.00f);
     ImGui_ImplGlfw_InitForVulkan(m_window.handle(), true);
 
     ImGui_ImplVulkan_InitInfo vi {};

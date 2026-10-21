@@ -47,6 +47,7 @@ void App::loadMicroObjects()
 
     std::vector<glm::vec3> occluderOffsets;
     std::vector<std::string> occluderFiles;
+    std::vector<std::string> behaviourFiles;
     std::vector<vf::voxel::MicroWorld> worlds;
     // VF_FUR=0 turns the fur off. It is the escape hatch: with the cards
     // gone the pass never dispatches and the frame is byte-identical to the
@@ -133,6 +134,7 @@ void App::loadMicroObjects()
         m_microFields.push_back(field);
         occluderOffsets.push_back(offset);
         occluderFiles.push_back(l.file);
+        behaviourFiles.push_back(l.behaviour);
         // The FUR CARDS. A micro object whose material grows fur (21,
         // `fleece`) gets a coat of hair cards; the vase and the urn do not,
         // and the fur pass stays empty for them.
@@ -170,6 +172,7 @@ void App::loadMicroObjects()
     }
     // Second pass: NOW that no more fields can move, point the occluders at
     // them. See the reserve above.
+    m_microBehaviours.clear();
     for (size_t i = 0; i < m_microFields.size(); ++i) {
         vf::voxel::MicroOccluder oc;
         oc.field = &m_microFields[i];
@@ -178,6 +181,18 @@ void App::loadMicroObjects()
         oc.aabbMin = m_microFields[i].origin + occluderOffsets[i];
         oc.aabbMax = oc.aabbMin + m_microFields[i].extent();
         m_microOccluders.push_back(oc);
+        // A layer can ask for an AUTONOMOUS BEHAVIOUR: it walks on its own
+        // and stops to graze. The behaviour is a transform, not a re-bake, so
+        // the object keeps its exact geometry while it moves.
+        vf::voxel::MicroBehaviour b;
+        const bool wants = behaviourFiles[i] == "grazer";
+        b.active = wants;
+        if (wants) {
+            b.reset(oc.aabbMin, float(i) * 7.31f + 1.7f);
+            b.pivot = layerPivotWorld(oc.layerFile, b.pivot) ? b.pivot
+                                                             : oc.aabbMin;
+        }
+        m_microBehaviours.push_back(b);
     }
     m_microSvoPass.setMicroWorlds(worlds);
     // The fur cards go up last: the pass needs the objects, and the preview
@@ -190,29 +205,47 @@ App::pickMicroObjects(const std::vector<vf::voxel::MicroOccluder>& occ, glm::vec
                       glm::vec3 rd) const
 {
     MicroObjectPick best;
-    for (const vf::voxel::MicroOccluder& o : occ) {
+    for (size_t i = 0; i < occ.size(); ++i) {
+        const vf::voxel::MicroOccluder& o = occ[i];
         if (!o.field)
             continue;
+        // A MOVING object is picked where it IS: the ray has to be
+        // transformed into the object's own frame first, or the pick hits
+        // where the object was baked (and, once it has walked, nowhere at
+        // all).
+        glm::vec3 lro = ro, lrd = rd;
+        if (i < m_microBehaviours.size() && m_microBehaviours[i].active) {
+            lro = m_microBehaviours[i].toLocal(ro);
+            lrd = m_microBehaviours[i].dirToLocal(rd);
+        }
         // The AABB test first: a ray that misses the box never touches the
         // field, so the cost is bounded by the objects near the pointer.
-        const glm::vec3 inv = glm::vec3(1.0f) / rd;
-        const glm::vec3 t0 = (o.aabbMin - ro) * inv;
-        const glm::vec3 t1 = (o.aabbMax - ro) * inv;
+        // The box is the object's BAKED box, so the test is done on the
+        // transformed ray.
+        const glm::vec3 inv = glm::vec3(1.0f) / lrd;
+        const glm::vec3 t0 = (o.aabbMin - lro) * inv;
+        const glm::vec3 t1 = (o.aabbMax - lro) * inv;
         const glm::vec3 tlo = glm::min(t0, t1), thi = glm::max(t0, t1);
         const float tEnter = glm::max(glm::max(tlo.x, tlo.y), tlo.z);
         const float tExit = glm::min(glm::min(thi.x, thi.y), thi.z);
         if (tExit <= glm::max(tEnter, 0.f))
             continue;
         const vf::voxel::MicroPick p =
-            vf::voxel::pickMicroField(*o.field, o.worldOffset, ro, rd);
+            vf::voxel::pickMicroField(*o.field, o.worldOffset, lro, lrd);
         if (!p.hit)
             continue;
         if (best.hit && p.dist >= best.dist)
             continue;
         best.hit = true;
         best.dist = p.dist;
-        best.pos = p.pos;
-        best.normal = p.normal;
+        // The hit is in the object's own frame; a moving object is at its
+        // ANIMATED place in the world.
+        best.pos = (i < m_microBehaviours.size() && m_microBehaviours[i].active)
+                       ? m_microBehaviours[i].toWorld(p.pos)
+                       : p.pos;
+        best.normal = (i < m_microBehaviours.size() && m_microBehaviours[i].active)
+                          ? m_microBehaviours[i].rot * p.normal
+                          : p.normal;
         best.cell = p.cell;
         best.file = o.layerFile;
     }
@@ -386,6 +419,31 @@ void App::clearMicroRotatePreview()
     for (size_t i = 0; i < m_furObjects.size(); ++i) {
         m_furPass.setWorldRotation(i, glm::mat3(1.0f), glm::vec3(0.0f), false);
         m_furObjects[i].rotActive = false;
+    }
+}
+
+void App::updateMicroBehaviours(float dt)
+{
+    // The autonomous behaviours, once per frame. Each one produces a
+    // transform (an offset and a rotation about the pivot) and the micro
+    // pass applies it when the field is sampled - so a walk costs no
+    // re-bake and the object keeps its exact geometry.
+    //
+    // A behaviour is SUSPENDED while the user manipulates that object (a
+    // staged move or a staged rotation): then the transform is the user's,
+    // not the animal's.
+    for (size_t i = 0; i < m_microBehaviours.size(); ++i) {
+        vf::voxel::MicroBehaviour& b = m_microBehaviours[i];
+        if (!b.active)
+            continue;
+        const bool held = m_moveStaged || m_rotationStaged;
+        if (held) {
+            m_microSvoPass.setWorldAnimation(i, glm::vec3(0.f), glm::mat3(1.f),
+                                             b.pivot, false);
+            continue;
+        }
+        b.update(dt);
+        m_microSvoPass.setWorldAnimation(i, b.offset, b.rot, b.pivot, true);
     }
 }
 
