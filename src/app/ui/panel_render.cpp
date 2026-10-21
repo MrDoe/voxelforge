@@ -58,6 +58,16 @@ void App::drawPanelRender()
         keyValue("Frame", "%.1f ms", m_avgMs);
         keyValue("GPU", "geo %.1f · post %.1f · fx %.1f · taa %.1f", m_profAvg[0],
                  m_profAvg[1], m_profAvg[2], m_profAvg[3]);
+        // The movement speed lives HERE, as an explicit setting with a
+        // readout. It used to be the mouse wheel, which changed it with no
+        // indication anywhere: a scroll over the sidebar silently made the
+        // camera faster or slower, and nothing on screen said which.
+        controlRow("Speed", [&] {
+            ImGui::SetNextItemWidth(-1.0f);
+            ImGui::SliderFloat("##camSpeed", &m_camera.speed, 0.5f, 40.0f,
+                               "%.1f m/s");
+        });
+        hintLine("Shift flies 3.5x faster, Ctrl 4x slower.");
         groupEnd();
     }
 
@@ -370,7 +380,8 @@ void App::drawPanelRender()
     // down the pane.
     if (groupHeader("render.keys", "KEYBOARD", false)) {
         ImGui::BulletText("WASD move; Q/E down/up");
-        ImGui::BulletText("RMB drag: look; wheel: speed");
+        ImGui::BulletText("RMB drag: look; wheel: scroll the sidebar");
+        ImGui::BulletText("Shift: 3.5x faster; Ctrl: 4x slower");
         ImGui::BulletText("Ctrl+LMB: pick exact voxel / layer");
         ImGui::BulletText("Tab: View/Edit; Ctrl+1..6: section");
         ImGui::BulletText("Rotate: click object, then drag a trackball ring");

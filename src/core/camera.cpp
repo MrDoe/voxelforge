@@ -80,7 +80,12 @@ void Camera::update(const Window& win, float dt)
                                  forward(), right());
     pos += move * s * dt;
 
-    speed *= expf(float(-win.scrollDelta()) * 0.15f);
+    // The wheel does NOT drive the speed. It used to: `speed *=
+    // exp(-scroll * 0.15)` made a stray scroll over the sidebar change how
+    // fast the camera flies, and the value was invisible - there was no
+    // readout anywhere, so the speed was a secret the user had to discover.
+    // The speed is now an explicit setting in the Render panel (VIEW group),
+    // and the wheel scrolls the sidebar instead.
 }
 
 } // namespace vf

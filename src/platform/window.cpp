@@ -25,10 +25,12 @@ bool Window::init(int width, int height, const std::string& title, bool visible)
     }
     glfwSetWindowUserPointer(m_window, this);
     glfwSetFramebufferSizeCallback(m_window, sFramebufferResizeCb);
-    glfwSetScrollCallback(m_window, [](GLFWwindow* w, double /*x*/, double y) {
-        auto* self = static_cast<Window*>(glfwGetWindowUserPointer(w));
-        self->m_scrollAccum += y;
-    });
+    // No scroll callback: the wheel belongs to the UI. ImGui installs its own
+    // scroll callback and CHAINS this one, so an app-level handler would still
+    // fire - the wheel used to scale the camera's movement speed from here,
+    // which is why a scroll over the sidebar changed how fast the camera flew
+    // and nothing on screen said so. The speed is an explicit setting now (the
+    // Render panel's VIEW group); the wheel scrolls the sidebar.
     return true;
 }
 
@@ -76,13 +78,6 @@ void Window::getMouseDelta(double& dx, double& dy) const
     dy = y - m_lastMouseY;
     m_lastMouseX = x;
     m_lastMouseY = y;
-}
-
-double Window::scrollDelta() const
-{
-    double d = m_scrollAccum;
-    m_scrollAccum = 0.0;
-    return d;
 }
 
 void Window::setMouseCaptured(bool captured)

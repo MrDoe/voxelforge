@@ -21,7 +21,6 @@ public:
     bool keyPressed(int key) const { return glfwGetKey(m_window, key) == GLFW_PRESS; }
     bool mouseDown(int button) const { return glfwGetMouseButton(m_window, button) == GLFW_PRESS; }
     void getMouseDelta(double& dx, double& dy) const;
-    double scrollDelta() const;
     glm::ivec2 framebufferSize() const;
 
     bool resized() const { return m_resized; }
@@ -39,7 +38,6 @@ private:
     bool m_resized = false;
     bool m_mouseCaptured = false;
     mutable double m_lastMouseX = 0.0, m_lastMouseY = 0.0;
-    mutable double m_scrollAccum = 0.0;
 };
 
 } // namespace vf
