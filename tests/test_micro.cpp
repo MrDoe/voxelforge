@@ -769,10 +769,11 @@ TEST_CASE("fur cards: the roots sit ON the surface, and the cards stand off it")
         CHECK(c.dirWidth.w < c.rootLen.w);
         // The strand is CURLY, not a straight needle: the centre line's
         // amplitude is a real fraction of the strand's length, and it makes
-        // at least one cycle. The bounds are the parameter's own (0.45 of the
-        // length) times the per-card jitter (0.55..1.45).
-        CHECK(c.curl.x > 0.20f * c.rootLen.w);
-        CHECK(c.curl.x < 0.70f * c.rootLen.w);
+        // at least one cycle. The bounds are the PARAMETER's own times the
+        // per-card jitter (0.55..1.45), so they follow a change of the
+        // parameter instead of going stale.
+        CHECK(c.curl.x > p.curlAmp * 0.45f * c.rootLen.w);
+        CHECK(c.curl.x < p.curlAmp * 1.55f * c.rootLen.w);
         CHECK(c.curl.y >= 0.5f);
     }
     CHECK(onSurface == int(o.cards.size()));
