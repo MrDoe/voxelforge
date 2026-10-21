@@ -92,6 +92,12 @@ one costs a whole turn, because the bad call is rejected before any work runs.
   conclusions this session came from images: a "hole" that was really the
   world-wide water plane showing through a 0.2 m grid, and a "bug" that was
   another session's render contending for the GPU.
+- **Screenshots go in `tests/screenshots/`** — the local gallery, next to the
+  tracked reference shots (`wip/` is for work in progress). Never write them
+  to `.opencode/tmp/`, `/tmp`, or the repo root: the gallery is where a human
+  looks for them, and a shot outside it is one nobody finds. Scratch renders
+  and PPM intermediates can stay in `/tmp/opencode`, but the PNG a person is
+  meant to look at belongs in the gallery.
 - **Measure, don't theorise.** A failing numeric/geometry assertion: print the
   values (throwaway `g++` binary, `--probe`, `vf_slice`) before proposing a
   cause. Two rounds of float-behaviour guessing on `makeDome` were both wrong;
