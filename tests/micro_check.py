@@ -67,7 +67,9 @@ APP = sys.argv[1] if len(sys.argv) > 1 else os.path.join(ROOT, "build", "voxelfo
 # 34 deg / 238 deg, so shadows are thrown toward (0.85, 0.53) in xz).
 MICRO_CAM = "11.45,0.30,11.45,12.22,-0.20,12.14"
 # A camera that fills the frame with the ALPACA (the third micro object).
-ALPACA_CAM = "10.95,0.85,11.45,11.75,0.52,12.55"
+# The alpaca's view is BUILT from the manifest (see micro_cam): the
+# animal is moved around by hand and by its own behaviour.
+ALPACA_CAM = micro_cam("alpaca", -0.60, 0.40, -0.55, 0.20, 0.07, 0.05)
 # A view with no micro object in it: the house.
 HOUSE_CAM = "2.5,1.3,6.0,6.8,1.0,12.2"
 W, H = 900, 600
@@ -240,6 +242,20 @@ def micro_pos(name: str) -> tuple[float, float, float]:
             p = layer["pos"]
             return float(p[0]), float(p[1]), float(p[2])
     return (0.0, 0.0, 0.0)
+
+
+def micro_cam(name: str, dx: float, dy: float, dz: float,
+              tx: float, ty: float, tz: float) -> str:
+    """A camera around a micro layer, built from where the layer IS.
+
+    The gate's cameras used to be hardcoded, and the alpaca is moved around by
+    hand (and by the behaviour), so a hardcoded camera slowly starts measuring
+    empty ground: the 90 degree yaw's footprint stopped changing because the
+    camera was no longer looking at the animal at all (1.27 -> 1.27).
+    """
+    x, y, z = micro_pos(name)
+    return "%.2f,%.2f,%.2f,%.2f,%.2f,%.2f" % (x + dx, y + dy, z + dz,
+                                              x + tx, y + ty, z + tz)
 
 
 def differing(a: bytes, b: bytes, thr: int = 16) -> list[int]:
@@ -416,7 +432,7 @@ def main() -> int:
         #    silhouette's base row IS the pivot's projection - that is the
         #    "did it stay put" measure. From directly above the base row would
         #    be a world x/z and would measure nothing.
-        top_cam = "11.72,1.85,12.32,11.78,-0.25,12.30"
+        top_cam = micro_cam("alpaca", 0.17, 2.10, 0.32, 0.23, 0.0, 0.40)
         side_cam = ALPACA_CAM
 
         def footprint(rot_deg: float, cam: str) -> tuple[int, int, int, int, int] | None:
