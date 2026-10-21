@@ -200,8 +200,17 @@ private:
     vf::voxel::WorldAABB layerBounds(const std::string& file) const;
     // The index of a micro layer's world in the micro pass's table, or -1.
     int microWorldIndex(const std::string& file) const;
+    // The rotation pivot of a layer: the bottom-centre of its placed bounds.
+    // A MICRO layer is not in the merged world, so its pivot comes from its
+    // own fine lattice - but it is the SAME convention (centre in x/z, base
+    // in y), so a micro object and a world object turn about the same point.
+    bool layerPivotWorld(const std::string& file, glm::vec3& pivot) const;
     // Push (or clear) the live preview offset of the selected micro object.
     void updateMicroMovePreview();
+    // Clear the live ROTATION preview of every micro world (the micro pass
+    // holds it: a micro object has no world owner id, so the splat pass's
+    // rotate preview cannot show it).
+    void clearMicroRotatePreview();
     // The micro objects as SUN-SHADOW OCCLUDERS for the world's baked surfel
     // shadow. Filled by loadMicroObjects and consumed by rebuildSurfels, which
     // is why a world reload loads the micro objects FIRST.

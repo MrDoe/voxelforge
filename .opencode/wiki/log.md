@@ -5570,3 +5570,54 @@ runs the app's own `pickMicroObjects` toward every micro object and reports
 **3/3 selectable**; `tests/micro_check.py` asserts it as a new check.
 
 See [[concepts/micro-voxel-svo-overlay]].
+
+## [2026-10-21] ingest | The "slots in the tree" artifact, measured and guarded
+
+The user's "slots/slits" in the hamlet tree are real and splat-only (the SVO
+reference is clean). The camera was reconstructed from the HUD line in the
+user's own screenshot and reproduces their frame at Pearson r = +0.74; the
+instrument is a **near-black mask** (splat below luma 30 where the SVO is at
+or above 30): 21,785 px at the test resolution, 76,268 px at 1280x800, with
+the mean luma at the mask 19.9 against the reference's 60.7.
+
+The decomposition is measured, not argued: the disk **reach** is the
+dominant term (`VF_SPLAT_RADIUS=0.5` swings the mask +31 luma while
+`VF_SPLAT_OPACITY` and `VF_SPLAT_SIGMA` are inert), the coarse-object-volume
+enclosure test is worth ~6, and the splat path's *binary* baked sun shadow
+against the SVO's 16-tap PCF accounts for the rest. Four theories were killed
+by measurement, not taste: a coverage hole at the chunk boundary (flat
+coverage debug: zero uncovered pixels), a stale height texture (the
+heightfield-residual debug is uniform over the seam), the micro overlay (the
+micro layers are ~80 degrees off-axis; there is no `VF_MICRO` switch in this
+tree), and nondeterminism (two identical renders differ by <=5/255,
+scattered).
+
+`tests/visual_check.py` now renders both backends at the user's camera and
+fails if the mask grows past its documented baseline, so the artifact cannot
+come back unnoticed. The fix itself is in flight with the peer session that
+owns the footprint rule.
+
+See [[concepts/splat-canopy-parity]].
+
+## [2026-10-21] ingest | Measuring without taking the user's mouse
+
+The user asked for it outright: "Don't grab the mouse when testing!". The
+interactive app grabs the cursor on right-mouse look, and a headless `--shot`
+still creates a GLFW window - on the user's display that is a focus steal and
+a stray right-click captures the pointer for good. The safe recipe is
+`xvfb-run -a` (the window lands on a virtual display) plus
+`VF_OVERLAY_PATH=<tmp>` for scratch renders, because a headless run is not
+read-only against the tracked overlay.
+
+See [[concepts/headless-render-mouse-safety]].
+
+## [2026-10-21] ingest | A shutdown SIGSEGV in App::~App()
+
+The app can die on the way out with SIGSEGV inside `App::~App()` - a `free()`
+of a stack address, with only the main thread alive. The overlay file
+survives it, but the crash can land before `OverlayWriter::flush()` persists
+the last stroke. The shipped binary has no DWARF, so the backtrace stops at
+`free()`; the obvious use-after-free candidates (the overlay writer thread,
+the layered-world rebuild thread, the member destruction order) are ruled out.
+
+See [[concepts/app-shutdown-segfault]].

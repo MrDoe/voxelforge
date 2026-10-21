@@ -199,6 +199,32 @@ int App::microWorldIndex(const std::string& file) const
     return -1;
 }
 
+bool App::layerPivotWorld(const std::string& file, glm::vec3& pivot) const
+{
+    // A MICRO layer has no entry in the merged world, so the world pivot
+    // lookup cannot know it. Its pivot is the BOTTOM-CENTRE of its own
+    // records - the same convention the manifest's rotation uses (the
+    // centre in x/z, the base in y), so "yaw about the base" means the same
+    // thing for a micro object as for a world object.
+    if (!isMicroLayer(file))
+        return m_layers.layerPivot(file, pivot);
+    for (const vf::voxel::MicroOccluder& o : m_microOccluders) {
+        if (o.layerFile != file || !o.field)
+            continue;
+        // The field's grid starts kMicroMarginCells BEFORE the object's first
+        // cell, so the records' min corner is the grid's origin plus the
+        // margin, and the records' extent is the grid's extent minus it.
+        const float M = float(vf::voxel::kMicroMarginCells);
+        const glm::vec3 minCorner =
+            o.field->origin + o.worldOffset + glm::vec3(M) * o.field->voxel;
+        const glm::vec3 objDim = glm::vec3(o.field->dim) - 2.0f * M;
+        pivot = minCorner + glm::vec3(0.5f * objDim.x * o.field->voxel, 0.0f,
+                                      0.5f * objDim.z * o.field->voxel);
+        return true;
+    }
+    return false;
+}
+
 void App::updateMicroMovePreview()
 {
     // The preview offset belongs to the SELECTED micro object while it is
@@ -212,6 +238,17 @@ void App::updateMicroMovePreview()
         return;
     }
     m_microSvoPass.setWorldPreview(size_t(idx), m_moveDelta, true);
+}
+
+void App::clearMicroRotatePreview()
+{
+    // The live rotation preview lives in the micro pass, because a micro
+    // object has no world owner id and the splat pass's rotate preview is
+    // keyed by exactly that. Clearing it is a no-op when no micro world is
+    // loaded.
+    for (size_t i = 0; i < m_microOccluders.size(); ++i)
+        m_microSvoPass.setWorldRotation(i, glm::mat3(1.0f), glm::vec3(0.0f),
+                                         false);
 }
 
 } // namespace app

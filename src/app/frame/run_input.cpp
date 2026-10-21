@@ -294,8 +294,10 @@ void App::processInput(bool textCaptures, bool rotateLiveTest)
                                 !m_rotationPreviewPending;
         const bool rotLmb = lmb && rotateMode;
         if (!rotLmb && !m_rotating && !m_rotationPreviewPending &&
-            !m_rotationStaged && !m_moveStaged && !m_moving)
+            !m_rotationStaged && !m_moveStaged && !m_moving) {
             m_splatPass.setRotatePreview({}, glm::mat3(1.f), false, 0);
+            clearMicroRotatePreview();
+        }
         // m_rotateLayer is activation state, not button state: keep it
         // while Rotate remains selected, including after mouse-up/reload.
         if (m_editBrush != EditBrush::Rotate &&
@@ -352,7 +354,13 @@ void App::processInput(bool textCaptures, bool rotateLiveTest)
         // separate, discoverable actions.
         if (rotLmb && lmbEdge && !m_rotating && m_hoverHit.hit) {
             const std::string picked = rotateTargetLayer(m_hoverHit);
-            if (!picked.empty() && m_layers.layerId(picked) != 0) {
+            // A MICRO object has no world owner id (it is a separate SVO
+            // world), so the id test would refuse it - and the pointer would
+            // then pass straight over the object with nothing selected. The
+            // pick already says what was hit, so the gate is "is this a
+            // layer the app can select".
+            if (!picked.empty() &&
+                (m_layers.layerId(picked) != 0 || isMicroLayer(picked))) {
                 if (m_rotationStaged && m_rotateLayer != picked) {
                     spdlog::warn("rotate: apply or cancel the staged pose before selecting another object");
                 } else {
@@ -409,7 +417,7 @@ void App::processInput(bool textCaptures, bool rotateLiveTest)
                     });
                 glm::vec3 pivot;
                 if (layer != m_worldLayers.end() &&
-                    m_layers.layerPivot(m_rotateLayer, pivot)) {
+                    layerPivotWorld(m_rotateLayer, pivot)) {
                     const glm::mat3 oldR =
                         vf::voxel::worldfile::placementRotation(
                             layer->rotDeg, layer->rotX, layer->rotZ);
@@ -429,6 +437,19 @@ void App::processInput(bool textCaptures, bool rotateLiveTest)
                     const glm::mat3 R = nextR * glm::transpose(oldR);
                     m_splatPass.setRotatePreview(
                         pivot, R, true, m_layers.layerId(m_rotateLayer));
+                    // A MICRO object has no world owner id (it is a separate
+                    // SVO world), and the splat pass keys its rotate preview
+                    // by exactly that id - so the preview matches nothing and
+                    // the object would not move. Its live rotation goes to
+                    // the MICRO pass instead, which rotates the rendered
+                    // position out of the baked frame. The matrix is the same
+                    // one: the OLD pose to the NEW pose, about the same pivot.
+                    if (isMicroLayer(m_rotateLayer)) {
+                        const int mi = microWorldIndex(m_rotateLayer);
+                        if (mi >= 0)
+                            m_microSvoPass.setWorldRotation(size_t(mi), R,
+                                                            pivot, true);
+                    }
                     refreshPreviewLights(); // carried lamps + derived clusters ride the drag
                 }
             }

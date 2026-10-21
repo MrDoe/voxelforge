@@ -81,13 +81,15 @@ def note(ok: bool, msg: str) -> None:
 
 
 def render(out: str, cam: str, w: int = W, h: int = H, mode: str = "",
-           flags: str = "") -> None:
+           flags: str = "", extra_env: dict | None = None) -> None:
     cmd = [APP, "--shot", out, "--cam", cam, "--width", str(w), "--height", str(h)]
     if mode:
         cmd += ["--mode", mode]
     env = os.environ.copy()
     if flags:
         env["VF_RENDER_FLAGS"] = flags
+    if extra_env:
+        env.update(extra_env)
     subprocess.run(
         cmd,
         check=True,
@@ -429,6 +431,43 @@ def main() -> int:
             and int(m.group(1)) == int(m.group(2)),
             "the micro objects are selectable (%s)"
             % (m.group(0) if m else "no report at all"),
+        )
+
+        # 5b. LIVE ROTATION. A micro object has no world owner id, so the
+        #     splat pass's rotate preview (which is keyed by exactly that id)
+        #     cannot show it - the micro pass holds its own live rotation, in
+        #     which the field stays in the baked frame and the RENDERED
+        #     position is rotated out of it. The preview must turn the object
+        #     on screen, and it must be a PREVIEW: the manifest is not
+        #     written (the gate restores it either way, but a preview that
+        #     committed would change the scene under the next check).
+        print("[micro] checking the live rotation preview ...")
+        rot_on = os.path.join(tmpdir, "rot_preview_on.ppm")
+        rot_off = os.path.join(tmpdir, "rot_preview_off.ppm")
+        rot_bg = os.path.join(tmpdir, "rot_preview_bg.ppm")
+        set_micro({"micro/vase.vxw": False, "micro/urn.vxw": False,
+                   "micro/alpaca.vxw": True})
+        render(rot_off, ALPACA_CAM, 600, 600)
+        render(rot_on, ALPACA_CAM, 600, 600,
+               extra_env={"VF_TEST_ROTATE_LIVE": "90,0,0",
+                          "VF_ROTATE_LAYER": "micro/alpaca.vxw"})
+        set_micro({"micro/vase.vxw": False, "micro/urn.vxw": False,
+                   "micro/alpaca.vxw": False})
+        render(rot_bg, ALPACA_CAM, 600, 600)
+        _, _, ra = read_ppm(rot_on)
+        _, _, rb = read_ppm(rot_off)
+        _, _, rbg = read_ppm(rot_bg)
+        rpx = differing(ra, rb, 14)
+        note(
+            len(rpx) > 500,
+            "the micro object turns in the live preview (%d px changed)" % len(rpx),
+        )
+        # The object must still be THERE: a preview that rotated the geometry
+        # out of the frame would also "change" many pixels.
+        still = differing(ra, rbg, 14)
+        note(
+            len(still) > 100,
+            "the alpaca is still on screen in the preview (%d px)" % len(still),
         )
 
         # 6. NO WORLD REGRESSION: the house view is untouched.

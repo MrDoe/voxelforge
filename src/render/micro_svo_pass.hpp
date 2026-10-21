@@ -40,6 +40,15 @@ public:
     // position, so a drag is instant and costs no re-bake. `active` clears it.
     void setWorldPreview(size_t worldIndex, glm::vec3 offset, bool active);
 
+    // Set the LIVE PREVIEW rotation of one micro world (a staged trackball
+    // rotation about `pivot`). Same contract as the Move offset: the field
+    // and the material lookup stay in the baked frame, and the RENDERED
+    // position is rotated out of it, so a drag costs no re-bake. A micro
+    // object has no world owner id, so the splat pass's rotate preview cannot
+    // show it - this is its only live rotation.
+    void setWorldRotation(size_t worldIndex, glm::mat3 R, glm::vec3 pivot,
+                          bool active);
+
     bool empty() const { return m_worldCount == 0; }
     size_t worldCount() const { return m_worldCount; }
     size_t gpuBytes() const;

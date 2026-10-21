@@ -199,7 +199,7 @@ void App::runPostInputTestHooks(const char* testRotateLive)
                             "preview not armed",
                             m_rotateLayer);
                     }
-                } else if (!m_layers.layerPivot(m_rotateLayer, pivot)) {
+                } else if (!layerPivotWorld(m_rotateLayer, pivot)) {
                     static bool loggedNoPivot = false;
                     if (!loggedNoPivot) {
                         loggedNoPivot = true;
@@ -218,6 +218,15 @@ void App::runPostInputTestHooks(const char* testRotateLive)
                             layer->rotZ + r);
                     m_splatPass.setRotatePreview(
                         pivot, R, true, m_layers.layerId(m_rotateLayer));
+                    // A MICRO object has no world owner id, so the splat
+                    // pass's preview cannot show it - the micro pass holds
+                    // its own live rotation.
+                    if (isMicroLayer(m_rotateLayer)) {
+                        const int mi = microWorldIndex(m_rotateLayer);
+                        if (mi >= 0)
+                            m_microSvoPass.setWorldRotation(size_t(mi), R,
+                                                            pivot, true);
+                    }
                     refreshPreviewLights(); // carried lamps + derived clusters ride the synthetic pose
                 }
             }

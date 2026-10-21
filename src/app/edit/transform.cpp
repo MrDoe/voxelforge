@@ -30,6 +30,7 @@ void App::commitRotation()
     if (std::abs(m_rotateDy) < 1e-4f && std::abs(m_rotateDx) < 1e-4f &&
         std::abs(m_rotateDz) < 1e-4f) {
         m_splatPass.setRotatePreview({}, glm::mat3(1.f), false, 0);
+        clearMicroRotatePreview();
         m_rotating = false;
         m_rotateHandle = TrackballHandle::None;
         m_rotateLastMouse = {};
@@ -57,6 +58,20 @@ void App::commitRotation()
     persistWorldLayers();
     spdlog::info("rotate: {} -> yaw {:+.1f} pitch {:+.1f} roll {:+.1f}",
                  m_rotateLayer, it->rotDeg, it->rotX, it->rotZ);
+    if (isMicroLayer(m_rotateLayer)) {
+        // A MICRO object is its own world: re-bake the micro objects
+        // (milliseconds) instead of the whole world (seconds). The rotation
+        // is applied to the RECORDS at load time, so the re-bake turns it -
+        // the same destination-driven map the panel's inspector uses, so the
+        // shape keeps its solidity.
+        loadMicroObjects();
+        m_rotationStaged = false;
+        m_rotating = false;
+        m_rotateHandle = TrackballHandle::None;
+        m_rotateDy = m_rotateDx = m_rotateDz = 0.f;
+        m_taaFirstFrame = true;
+        return;
+    }
     // Keep the final GPU preview active until the rebuilt world is swapped in;
     // disabling it here would flash the old pose during the async rebuild.
     m_pendingWorldReload = false;
@@ -77,6 +92,7 @@ void App::commitRotation()
 void App::cancelRotation()
 {
     m_splatPass.setRotatePreview({}, glm::mat3(1.f), false, 0);
+    clearMicroRotatePreview();
     m_rotating = false;
     m_rotationStaged = false;
     m_rotateHandle = TrackballHandle::None;

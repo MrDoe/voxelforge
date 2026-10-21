@@ -303,7 +303,6 @@ exercises the real path (the occluder list, the AABB, the field), not a
 re-implementation. `tests/micro_check.py` asserts it.
 
 ## Live movement: a micro layer can be moved and turned
-
 A micro layer's `pos` is the world position of the object's **min corner** (a
 world layer's `pos` is a lattice offset instead), and `rot`/`rotX`/`rotZ` spin
 the object about its **bottom-centre pivot** — the same pivot the world uses,
@@ -345,6 +344,60 @@ measure (the camera is diagonal, so a yaw can widen or narrow it: measured
 a world x/z, so it measures nothing at all. It takes two views — from above
 for the footprint's aspect, from the side for the base row — to measure both
 halves of the contract.
+
+### A micro object is manipulable with the MOUSE (three gates that refused it)
+
+The panel's inspector was not enough: the object had to be draggable and
+turnable with the pointer, like any other object in the scene. Three gates
+refused it, and all three refused it for the same reason — **a micro object
+has no world owner id**, and the world's code asks for that id to decide
+whether a layer is real:
+
+| gate | what it asked | the fix |
+|---|---|---|
+| the plain click that activates an object | `m_layers.layerId(picked) != 0` | also accept `isMicroLayer(picked)` |
+| the Move axis handles | `layerId != 0` | also accept a micro layer — the bounds already came from `layerBounds()`, which is micro-aware |
+| the Rotate trackball | `m_layers.layerBox()` (the *world* box — empty for a micro layer) **and** `layerId != 0` | use `layerBounds()` and accept a micro layer |
+
+The activation gate is the one the user notices: with it closed, a plain click
+on the alpaca selected **nothing at all** — no trackball, no owner, and the
+Move mode had no handles to grab.
+
+**The rotation's pivot** also had to become micro-aware (`App::layerPivotWorld`):
+the world's `layerPivot` cannot know a layer that is not in the merged world.
+The micro pivot is the bottom-centre of the object's **records** — the field's
+grid starts `kMicroMarginCells` before the first cell, so the records' min
+corner is the grid's origin plus the margin, and the records' extent is the
+grid's extent minus it. Same convention as the world (centre in x/z, base in
+y), so "yaw about the base" means the same thing for both.
+
+### The live rotation preview lives in the MICRO pass
+
+The splat pass's rotate preview is keyed by the world owner id
+(`surfelBelongsToLayer` refuses id 0), so it cannot show a micro object: a
+micro layer has no owner id, so the preview matched **nothing** and the object
+sat still while the ring turned.
+
+The micro pass therefore carries its own: the world table's row gains a
+rotation matrix and a pivot, and the shader applies it **in the field's
+frame**. The trick that keeps the change small: the rotation is applied at the
+**one place the field is sampled** — `microMapWorld` maps the world point
+into the object's baked frame, reads the field there, and returns a distance
+in the world frame (a rotation preserves distances, so the value needs no
+correction and the trace's step stays conservative). Everything downstream —
+the union field, the gradient (and so the normal), the AO, the self-shadow —
+then works in the world frame and needed **no change at all**. Only the
+material lookup had to be told, because the octree descent and the cell that
+owns the surface live in the baked frame.
+
+The matrix is the app's own: the **old pose to the new pose**, about the same
+pivot, exactly like the splat pass's preview. The shader applies its
+transpose to go the other way (world → baked).
+
+**Verified headlessly**: `VF_TEST_ROTATE_LIVE="90,0,0"` with
+`VF_ROTATE_LAYER=micro/alpaca.vxw` turns the alpaca on screen without
+writing the manifest, and `tests/micro_check.py` measures it (the preview
+changes the frame, and the object is still there).
 
 ## Verification
 

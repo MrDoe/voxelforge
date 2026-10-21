@@ -903,6 +903,35 @@ one costs a whole turn, because the bad call is rejected before any work runs.
   Gated by `tests/test_micro.cpp` (the pivot's world position is unchanged
   within 1 mm) and by `tests/micro_check.py` (the footprint's aspect flips and
   the base row does not move).
+- **A micro object is manipulable with the MOUSE, and the obstacle is the
+  owner id, not the geometry.** Three gates ask the world's code whether a
+  layer is real, and all three refused a micro object for the same reason —
+  it has no world owner id (it is a separate SVO world): the plain click
+  that activates an object (`m_layers.layerId(picked) != 0`), the Move axis
+  handles (`layerId != 0`) and the Rotate trackball (which asked
+  `m_layers.layerBox()` — the WORLD box, empty for a micro layer — and the id
+  again). Each of them must also accept `isMicroLayer(file)`, and the
+  trackball's box must come from `layerBounds()` (which is micro-aware).
+  The rotation's pivot comes from `App::layerPivotWorld` — the world's
+  `layerPivot` cannot know a layer that is not in the merged world; the
+  micro pivot is the bottom-centre of the object's RECORDS (the field's grid
+  starts `kMicroMarginCells` before the first cell, so the records' min
+  corner is the grid's origin plus the margin).
+- **The live ROTATION preview of a micro object lives in the MICRO pass.**
+  The splat pass's rotate preview is keyed by the world owner id
+  (`surfelBelongsToLayer` refuses id 0), so it shows nothing for a micro
+  object. The micro pass's world table carries its own rotation matrix and
+  pivot, and the shader applies it **in the field's frame**: the rotation is
+  applied at the ONE place the field is sampled (`microMapWorld` maps the
+  world point into the baked frame and reads the field there; a rotation
+  preserves distances, so the value needs no correction and the trace's step
+  stays conservative). Everything downstream — the union field, the gradient
+  and so the normal, the AO, the self-shadow — then works in the world frame
+  and needs no change; only the material lookup (the octree descent and the
+  cell that owns the surface) has to happen in the baked frame too. The
+  matrix is the app's own: the old pose to the new pose, about the same
+  pivot. Headless check: `VF_TEST_ROTATE_LIVE="90,0,0"` with
+  `VF_ROTATE_LAYER=micro/alpaca.vxw`.
 - Coverage: `tests/test_micro.cpp` (9 cases) pins the SDF's sign convention and
   half-cell offset, the eighth-voxel quantisation, the margin, the dense field
   against the CPU field, the brick packing, a CPU replica of the shader's
