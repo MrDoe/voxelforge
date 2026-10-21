@@ -592,7 +592,7 @@ signature is fixed, and the fix is pinned by the world-lattice rule above.
 | check | result |
 |---|---|
 | `test_micro.cpp` (13 cases) | pass — incl. a negative control for the continuity check, the cast-shadow verdict, and the **15 m pick** that the 0.30 m one missed |
-| `micro_check.py` (16 checks) | pass — visibility, material, silhouette, micro-to-micro shadow, RECEIVE, CAST, alpaca visible, fleece texture, **selectable**, **live rotation preview**, world untouched, SVO backend |
+| `micro_check.py` (20 checks) | pass — visibility, material, silhouette, micro-to-micro shadow, RECEIVE, CAST, alpaca visible, fleece texture, **selectable**, **live rotation preview**, **the interactive selection path** (a Ctrl+LMB pick and a plain click, through the real input path), **the MOVE DRAG** (grab → the X handle → a 2 m drag), **the autonomous behaviour** and **the AI's command**, world untouched, SVO backend |
 | `VF_TEST_MICRO_PICK=1` (headless) | **3/3** micro objects selectable through the app's own `pickMicroObjects` |
 | `test-unit` group | 8/8 pass |
 | `visual_check.py` | only the pre-existing `house: sky probe not blue-dominant` failure; every other metric is **bit-identical** to before the micro layers existed (coverage 70.8 / 94.6 / 96.2 %), because the objects are not in those views |
@@ -604,4 +604,7 @@ signature is fixed, and the fix is pinned by the world-lattice rule above.
 | CAST (micro → world) | the bake reports 7 surfels darkened |
 | micro → micro | 349 urn pixels darkened by a mean of 41 luma |
 | the alpaca | visible (86 k px), fleece luma spread 24.7 (a flat fill would be ~2) |
+| the rig | derived: 7 bones (spine, 4 legs, head, tail) from the object's own voxels, cached next to the layer |
+| the gait | the head up at t=0, a quarter down at t=1.2 s, the muzzle in the grass at t=3 s (2.5 s of easing) |
+| the move drag | `move: grabbed micro/alpaca.vxw on axis X` → the X handle at (349, 300) → the drag ends with delta (+2.000, 0, 0) m |
 | shadow reaches the LEGS | ratio 0.87 → 0.57 after the 0.35 m step cap |
