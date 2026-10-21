@@ -131,9 +131,14 @@ collision check: micro 'micro/urn.vxw'    approach along (1,0,0): stopped 0.62 m
 collision check: micro 'micro/alpaca.vxw' approach along (1,0,0): stopped 0.62 m in
 collision check: 1 walker(s), 600 steps: 0 sunken, 0 overlapping
                  (min ground clearance 0.002 m)
-collision check: walker 2 ('micro/alpaca.vxw') moved 0.55 m
+collision check: walker 2 ('micro/alpaca.vxw') moved 0.45 m
 collision check: PASS
 ```
+
+The moved distance is gait-dependent (0.45–0.65 m across rig revisions); the
+assertion is only that the walker *advanced*, so a frozen body still fails.
+A run with **zero active walkers now FAILS** instead of passing vacuously —
+see the gotcha at the end of this page.
 
 The camera starts 2 m **above** the camera so the drop actually travels (a
 drop from a point already at its stop was a vacuous pass: `fell 0.00`). The
