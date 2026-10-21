@@ -67,6 +67,14 @@ one costs a whole turn, because the bad call is rejected before any work runs.
 - **Don't kill processes you didn't start.** If another test driver owns the
   display or the GPU, wait for it or report the conflict; `pkill` on a shared
   binary destroys someone else's in-flight run.
+- **On a shared tree, stage the EXACT files — never a directory.** Other
+  sessions commit to the same branch, so `git add .opencode/wiki/` (or any
+  directory) sweeps their uncommitted work into your commit: the content
+  survives, but the attribution is muddled and your commit message does not
+  describe what is in it. Measured 2026-10-21: three wiki pages from two
+  other sessions landed in a commit titled "micro: a micro object is
+  selectable". Name every path explicitly, and `git status` before you
+  commit.
 - **Never `rm` with a glob near a file you depend on.** A tidy-up like
   `rm /tmp/x/*.vxw` will eat a backup you forgot was there, and an *unlabelled*
   backup cannot be told apart from a peer session's identically-named file —
