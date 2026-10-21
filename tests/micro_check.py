@@ -55,6 +55,7 @@ import statistics
 import subprocess
 import sys
 import tempfile
+import time
 
 # The repo root, so the script works from the build directory too (ctest runs
 # there) and not only from the source root.
@@ -159,23 +160,49 @@ def save_micro() -> None:
 
 
 def restore_micro() -> None:
-    """Put the manifest back exactly as it was found."""
+    """Put the manifest back exactly as it was found.
+
+    The app REWRITES world.json from its own layer list (AGENTS.md: "the app
+    overwrites assets/world.json from its own layer list"), so a write can
+    land after the gate's restore and leave the shipped scene with the micro
+    layers disabled. Measured 2026-10-21: the gate left all three micro
+    layers off, and `git diff assets/` was not empty afterwards. So the
+    restore VERIFIES and retries - a restore that reports success while the
+    file disagrees is worse than one that says it failed.
+    """
     if not _MICRO_SAVED:
         return
-    with open(MANIFEST) as f:
-        doc = json.load(f)
-    saved = {name: (enabled, rot) for name, enabled, rot in _MICRO_SAVED}
-    for layer in doc["layers"]:
-        if layer.get("role") != "micro":
-            continue
-        entry = saved.get(layer.get("file", ""))
-        if entry:
-            layer["enabled"] = entry[0]
-            layer["rot"] = entry[1]
-        # A key the gate may have introduced (an older run wrote "rotDeg")
-        # would otherwise survive into the shipped manifest.
-        layer.pop("rotDeg", None)
-    _write_manifest(doc)
+    for attempt in range(4):
+        with open(MANIFEST) as f:
+            doc = json.load(f)
+        saved = {name: (enabled, rot) for name, enabled, rot in _MICRO_SAVED}
+        for layer in doc["layers"]:
+            if layer.get("role") != "micro":
+                continue
+            entry = saved.get(layer.get("file", ""))
+            if entry:
+                layer["enabled"] = entry[0]
+                layer["rot"] = entry[1]
+            # A key the gate may have introduced (an older run wrote "rotDeg")
+            # would otherwise survive into the shipped manifest.
+            layer.pop("rotDeg", None)
+        _write_manifest(doc)
+        # Verify: re-read and compare the values we care about.
+        with open(MANIFEST) as f:
+            check = json.load(f)
+        ok = True
+        for layer in check["layers"]:
+            if layer.get("role") != "micro":
+                continue
+            entry = saved.get(layer.get("file", ""))
+            if entry and (layer.get("enabled", True) != entry[0]
+                          or float(layer.get("rot", 0.0)) != entry[1]):
+                ok = False
+        if ok:
+            return
+        time.sleep(0.4)
+    print("FAIL: the manifest's micro layers could not be restored - "
+          "check `git diff assets/world.json`")
 
 
 def differing(a: bytes, b: bytes, thr: int = 16) -> list[int]:
@@ -479,6 +506,11 @@ def main() -> int:
         #     VF_TEST_CLICK_SCAN drives the REAL input path with an injected
         #     pointer - no mouse, no synthetic input.
         print("[micro] checking the interactive selection path ...")
+        # The micro layers must be ON: the rotation check above leaves them
+        # off (it measures the alpaca against a background), and a scan over
+        # an empty scene finds nothing to click.
+        set_micro({"micro/vase.vxw": True, "micro/urn.vxw": True,
+                   "micro/alpaca.vxw": True})
         click_env = os.environ.copy()
         click_env["VF_TEST_CLICK_SCAN"] = "1"
         click_env["VF_OVERLAY_PATH"] = os.path.join(tmpdir, "overlay.vxw")
