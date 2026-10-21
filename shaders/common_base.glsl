@@ -399,7 +399,9 @@ FloraInfo floraField(vec3 p, float groundH, uint kind)
                 vec3 rel = p - base;
                 float s0 = clamp(dot(rel, axis), 0.0, hBlade);
                 float dseg = length(rel - axis * s0);
-                float wbl = mix(0.007, 0.014, hb2) * (1.0 - 0.6 * s0 / hBlade);
+                // The blade keeps most of its width to the tip: a blade that
+                // narrows to a point is a spike, not a blade.
+                float wbl = mix(0.007, 0.014, hb2) * (1.0 - 0.38 * s0 / hBlade);
                 float dBlade = dseg - wbl;
                 float prof = 1.0 - smoothstep(0.0, 0.014, dBlade);
                 if (prof < 0.001) continue;
@@ -444,14 +446,22 @@ float tuftAlpha(vec2 uv, float s1, float s2, out float tint)
         float bx = f * 1.25 - 0.125;                  // blade base x offset
         float bh = 0.62 + 0.38 * fract(f * 7.31);     // per-blade height
         if (uv.y > bh) continue;
+        // The blade ARCHES and keeps its width.
+        //
+        // A straight blade whose width tapers to a point reads as a SPIKE,
+        // and grass is not a spike: a blade leans over under its own weight
+        // and its tip is a wisp. So the centre line bends over (quadratic,
+        // so the bend grows toward the tip), the width is kept much longer,
+        // and the tip fades over the last fifth instead of the last tenth.
         float curve = (fract(f * 3.77) - 0.5) * 0.42; // wavy centerline
         float v = uv.y / bh;
         float halfw = 0.045 + 0.035 * fract(f * 1.91);
-        halfw *= (1.0 - 0.72 * v);                    // taper toward tip
-        float uc = bx + curve * v;
+        halfw *= (1.0 - 0.42 * v);                    // taper toward tip
+        float arch = (fract(f * 5.13) - 0.5) * 0.55;  // per-blade arch
+        float uc = bx + curve * v + arch * v * v;
         float d = abs(uv.x - uc);
         float edge = 1.0 - smoothstep(halfw * 0.50, halfw, d);
-        edge *= 1.0 - smoothstep(0.90, 1.0, v);       // wispy rounded tip
+        edge *= 1.0 - smoothstep(0.80, 1.0, v);       // wispy rounded tip
         if (edge >= a) { a = edge; tint = 0.70 + 0.62 * fract(f * 5.13); }
     }
     return a;
