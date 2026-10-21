@@ -153,14 +153,21 @@ changing something else. A visual complaint is a measurement request.
 - `tests/fur_check.py` (the `fur` group) measures the **noise floor first**
   (two identical renders; 0 pixels above 6/255), then the signal (the
   alpaca's pixels must change), the **confinement** (the change must be a
-  compact blob, and the house view must be untouched), the
+  compact blob, and the house view must be untouched), the **shape** (the
+  coat must be at least as *smooth* as the body under it — the numeric form
+  of "curly, not spiky": a straight coat concentrates its ink in narrow
+  streaks, and a narrow streak IS high-frequency energy, so it reads as
+  crunchier than the body it covers; a curled one spreads the same ink and
+  falls *below* the body's. With the curl removed the check fails), the
   **backend-independence** (the SVO reference must show it too — the fur is
   its own pass, not a splat-backend feature) and the **escape hatch**
   (`VF_FUR=0` must load no fur object and render the same frame).
-- `tests/test_micro.cpp` gains four cases: only a fur material grows a coat,
-  the roots sit **on** the surface while the strands point **out** of it, two
-  builds of the same field yield the same cards (determinism), and every
-  card is filed in a bucket cell that holds it.
+- `tests/test_micro.cpp` gains five cases: only a fur material grows a coat,
+  the roots sit **on** the surface while the strands point **out** of it
+  (and their angle to the normal stays inside the requested range — the
+  check the degenerate direction failed), two builds of the same field
+  yield the same cards (determinism), and every card is filed in a bucket
+  cell that holds it.
 
 Cross-refs: [[concepts/micro-voxel-svo-overlay]] (the objects the fur grows
 on), [[concepts/splat-base-seal]] (why the world's splats cannot do this),

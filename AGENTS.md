@@ -1048,14 +1048,20 @@ one costs a whole turn, because the bad call is rejected before any work runs.
   (the sun term is the cards' average) — evaluating the sky per card costs a
   sky evaluation per card hit, and a pixel through the coat hits a dozen.
 - Gate: `tests/fur_check.py` (the `fur` group) measures the noise floor
-  first, then the signal (the alpaca's pixels must change), the confinement
-  (the change must be a compact blob, and the house view must be untouched),
-  the backend-independence (the SVO reference must show it too) and the
-  escape hatch (`VF_FUR=0` must load no fur object and render the same
-  frame). `tests/test_micro.cpp` gains four cases: only a fur material grows
-  a coat, the roots sit ON the surface while the strands point OUT of it,
-  two builds of the same field yield the same cards, and every card is
-  filed in a cell that holds it.
+  first, then the signal (the alpaca's pixels must change), the
+  **confinement** (the change must be a compact blob, and the house view must
+  be untouched), the **shape** (the coat must be at least as SMOOTH as the
+  body under it — a straight, spiky coat concentrates its ink in narrow
+  streaks, and a narrow streak IS high-frequency energy, so a spiky coat
+  reads as crunchier than the body it covers; a curled one does not, and
+  with the curl removed this check fails), the **backend-independence** (the
+  SVO reference must show it too) and the **escape hatch** (`VF_FUR=0` must
+  load no fur object and render the same frame). `tests/test_micro.cpp`
+  gains five cases: only a fur material grows a coat, the roots sit ON the
+  surface while the strands point OUT of it (and their angle to the normal
+  stays inside the requested range — the check the degenerate direction
+  failed), two builds of the same field yield the same cards, and every
+  card is filed in a cell that holds it.
 
 ## Shaders — data-only rule
 - `shaders/svo_raymarch.comp` is the SVO reference shader (+`taa_resolve.comp`,
