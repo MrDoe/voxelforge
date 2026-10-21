@@ -206,6 +206,11 @@ bool buildMicroField(const std::vector<VoxelRecord>& records,
     const int M = kMicroMarginCells;
     out.dim = objDim + glm::ivec3(2 * M);
     out.origin = glm::vec3(-float(M) * out.voxel);
+    // The records occupy `objDim` cells starting M cells inside the grid. The
+    // range is inclusive, which is exactly what the footprint/ground code
+    // needs: the lowest solid cell and the two horizontal extents.
+    out.solidMin = lo + glm::ivec3(M);
+    out.solidMax = hi + glm::ivec3(M);
     const size_t n = out.size3();
     out.solid.assign(n, 0);
     out.mat.assign(n, 0);

@@ -6020,6 +6020,39 @@ sections run clean, no ImGui assertion.
 Committed as 8f45e63 on top of 2f03aba. See
 [[concepts/sidebar-ui-vocabulary]].
 
+## [2026-10-21] implement | Collision: the fly camera and the walking alpaca
+
+One oracle, two shapes. `src/voxel/collision.{hpp,cpp}` is pure geometry (a
+27-sample sphere sweep with half-radius substeps, axis sliding and an
+embedded-start escape; a cylinder footprint), unit-pinned by
+`tests/test_collision.cpp` (7 cases / 26 assertions). The App binding
+(`src/app/world/collision.cpp`) answers from the **live `ChunkStore`** — not
+`VoxelField`, so a stamp is collidable immediately — plus every micro field at
+its current transform, undone in the renderer's order: staged Move, behaviour,
+staged rotation, then `worldOffset` ([[concepts/micro-voxel-svo-overlay]]).
+
+The camera resolves its input **delta** only (`updateCamera` in
+`frame/run_input.cpp`); spawn/`--cam`/`--shot` placement is never collided.
+`VF_NO_COLLIDE=1` disables it. The walker response lives in
+`App::updateMicroBehaviours`, not `MicroBehaviour`: snapshot pose → update →
+withdraw a blocked step and retry turns `{1.2,-1.2,2.2,-2.2,3.0,-3.0}` →
+graze if every turn is blocked → lift-only ground clamp to the max terrain
+under the footprint's four corners + 0.002 m. Its predicate ignores terrain
+(the animal climbs it), blocks world **object** cells, other micro fields and
+water below `WATER_LEVEL + 0.01`.
+
+Measured on the shipped hamlet with `VF_TEST_COLLISION=1` (600 walker steps):
+camera 2.00 → 0.12 m (1.88 m fall, hit, outside); each micro approach stopped
+0.62 m into a 2 m sweep, outside; **0 sunken, 0 overlapping, min ground
+clearance 0.002 m**; the alpaca moved 0.55 m and `PASS`. The walker's min
+clearance is the clamp's own +0.002, so the check proves the clamp fired.
+`VF_TEST_COLLISION_STEPS=N` overrides the count; the hook runs before the
+first frame, so a shot shows the walkers 10 s on.
+
+Filed as [[concepts/collision]]. Open: static placement/Move-Apply overlap is
+reported only as geometry (no check wired), and a walker placed inside an
+object grazes rather than escaping (the shipped alpaca starts clear).
+
 ## 2026-10-21 ingest | The wheel scrolls the sidebar; the speed is a setting
 
 The mouse wheel scaled the camera's movement speed, invisibly:
@@ -6042,3 +6075,48 @@ used `Window::scrollDelta()`. **A grep of one input path is not a proof that
 an input is unbound**; follow the binding to its consumer.
 
 See [[concepts/sidebar-ui-vocabulary]].
+
+## [2026-10-21] feature | An animal that moves itself: a derived rig, a gait, and an AI that can drive it
+
+The user asked for three things in a row, and they turned out to be one
+system: the animal should move **by itself** (it grazes and walks with fluid
+movements), the motion should be **skeletal** (not a whole-body transform),
+and the method should be **generic** (it must work for a newly imported
+object, not just the alpaca the authoring tool knows about) — and the rig
+**may be calculated once and then saved**.
+
+**The rig is DERIVED, not authored.** Nothing knows what an alpaca is: the
+bones are found in the object's own voxels, so a newly imported model animates
+the moment it is loaded. The derivation is generic and geometric — the spine
+is the longer *horizontal* axis (NOT the longest: an animal is usually taller
+than it is long, and picking the vertical found no legs at all), the belly is
+a *percentile* of the band's heights (NOT the minimum: a quadruped's front
+legs stand inside the band, so the minimum is the hooves), the legs are the
+vertical clusters below the belly, and the head and the tail are the mass
+beyond the core's ends. A bone is a segment plus a role, and the gait is
+driven by the ROLES — so a cat animates the way a horse does.
+
+**The rig is calculated once and saved**: a cache next to the layer
+(`micro/alpaca.rig`), carrying the layer's signature, so an edited layer
+invalidates it and a missing one just means the rig is derived in memory.
+
+**A frame bug worth remembering**: the rig's points are in the FIELD's frame
+(the cells the object is made of) but the shader looks the bones up in the
+object's ANCHORED frame (the field's frame plus the placement). With the two
+out of step the nearest bone was garbage, the field was sampled through a
+wrong rotation, and **the animal did not move at all** — with every number in
+the log correct. That is the same class of bug as the world-lattice hover
+cell: a coordinate that means one thing on the CPU and another on the GPU.
+
+**The fur must not slide**: the texture is bound to the surface, not to the
+world, so the micro shader samples the atlas at the point's REST-POSE
+position — the very point the field is sampled at. The texture then follows
+its bone instead of sliding over the animal.
+
+**The AI can drive it**: `set_behaviour` is a chat tool, so "let the alpaca run"
+becomes `{"name":"alpaca","command":"run"}` and the app's
+`App::setMicroBehaviour` puts the animal into that command. The commands
+(run, walk, graze, stop, auto) are the same set the behaviour's own state
+machine uses, so an instruction and the animal's choice are one mechanism.
+
+See [[concepts/micro-voxel-svo-overlay]].

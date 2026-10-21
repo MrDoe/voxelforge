@@ -64,6 +64,13 @@ struct MicroField {
     // 5 mm vase) and has nothing to do with the world VOXEL constant.
     float voxel = 0.005f;
     glm::ivec3 dim { 0, 0, 0 };
+    // The SOLID cell range, inclusive, in this field's cell coordinates.
+    // `dim` is the GRID and carries the kMicroMarginCells air margin on every
+    // side, so it cannot answer "where is the object's body" - the walkers'
+    // ground clamp and footprint need the actual solid cells, not the box.
+    // solidMax < solidMin means "no cells" (a rejected/empty field).
+    glm::ivec3 solidMin { 0, 0, 0 };
+    glm::ivec3 solidMax { -1, -1, -1 };
     // World position of cell (0,0,0)'s CORNER. Micro worlds are placed by an
     // explicit world position (unlike the world lattice, which is centred on
     // the origin at -WORLD/2), so the origin is carried per object.

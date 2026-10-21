@@ -619,6 +619,30 @@ one costs a whole turn, because the bad call is rejected before any work runs.
   `App::ensureAcquireSemaphores()`, consumed in
   `App::recordInteractiveFrame()` — all in `src/app/rhi/surface.cpp` and
   `src/app/frame/record_interactive.cpp`).
+- **Collision = one oracle, two shapes.** `src/voxel/collision.{hpp,cpp}` is
+  pure geometry (a 27-sample sphere sweep, half-radius substeps, axis sliding,
+  embedded-start escape; a cylinder footprint), unit-pinned by
+  `tests/test_collision.cpp`. The App binding
+  (`src/app/world/collision.cpp`) reads the **LIVE `ChunkStore`** (terrain +
+  objects + edits), not `VoxelField`, plus every micro field at its current
+  transform — undo the staged Move, the behaviour, the staged rotation, then
+  `worldOffset`; that order must match the renderer. The fly camera is a
+  0.25 m sphere and `updateCamera` resolves its input DELTA only: spawn /
+  `--cam` / `--shot` placement is never collided. `VF_NO_COLLIDE=1` disables
+  it. A walking micro object is a **circumscribed** cylinder (the behaviour
+  turns it about its base) that ignores terrain (it is ground-clamped to it)
+  but blocks world `cell.obj` cells, other micro fields and water below
+  `WATER_LEVEL + 0.01`; a blocked step is withdrawn and retried at
+  `{1.2,-1.2,2.2,-2.2,3.0,-3.0}` rad, then grazes, and the body is lifted to
+  the max terrain (the CPU mirror of the SHADED height texture, patched after
+  every live stamp, so an added mound lifts it) under the footprint's four
+  corners + 0.002 m (lift-only, so an authored platform height survives). The
+  response lives in
+  `App::updateMicroBehaviours`, not `MicroBehaviour` (a pure transform).
+  `VF_TEST_COLLISION=1` drives the shipping paths headlessly and logs
+  `PASS`/`FAIL` (600 walker steps; `VF_TEST_COLLISION_STEPS=N` overrides).
+  Not covered: static placement/Move-Apply overlap, and a walker placed inside
+  geometry grazes instead of escaping. See `.opencode/wiki/concepts/collision.md`.
 
 ## Tests & verification — group-only
 - Build first with `ninja -C build`, then run only the focused group(s) that

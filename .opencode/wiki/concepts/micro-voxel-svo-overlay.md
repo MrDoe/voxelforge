@@ -445,6 +445,73 @@ layer, so the selection "does nothing". Up close the same object is 580 px ✓.
 **A micro object is selectable; it is small** — and the app's default camera
 is a house view, not an object view ✓.
 
+### The rig is DERIVED, cached, and generic
+
+The skeleton is **not authored**. Nothing in the code knows what an alpaca is:
+the bones are found in the object's own voxels, so a **newly imported model
+animates the moment it is loaded** — no per-object code, no per-object asset.
+
+The derivation (`src/voxel/micro_rig.cpp`) is generic and geometric:
+
+- the **spine** is the longer of the two *horizontal* axes — and it must not be
+  "the longest axis": an animal is usually **taller** than it is long (the
+  alpaca is 1.3 m tall and 1.1 m long), so the longest axis is the vertical
+  one and the whole derivation finds no legs at all (measured: 3 bones, 0 legs);
+- the **belly** is a *percentile* of the band's cell heights, not the band's
+  minimum: a quadruped's front legs stand *inside* the spine's band, so the
+  minimum is the hooves and nothing is "below the core" (the legs would be
+  part of the body);
+- the **legs** are the vertical clusters below the belly, merged by their
+  column size;
+- the **head** and the **tail** are the mass beyond the core's two ends.
+
+A bone is a **segment** plus its role, and the **gait is driven by the
+roles** — the legs swing in diagonal pairs, the head nods, the tail sways — so
+a cat animates the way a horse does.
+
+**The rig is calculated once and saved.** Deriving it is a pass over the
+object's voxels, so the result is cached next to the layer
+(`micro/alpaca.rig`) and read back on every later load. The cache carries the
+layer's signature (size + mtime), so an edited or re-imported layer
+invalidates it. A missing or stale cache just means the rig is derived in
+memory.
+
+**A frame bug worth remembering**: the rig's points come from the **field's**
+frame (the cells the object is made of), but the shader looks the bones up in
+the object's **anchored** frame (the field's frame plus the placement). With
+the two out of step, the nearest bone was garbage, the field was sampled
+through a wrong rotation, and **the animal did not move at all** — the walk
+looked broken with every number in the log correct. The rig is now shifted
+into the anchored frame when it is handed to the GPU.
+
+**A bone is a rigid rotation about its joint**, and the field is the REST
+POSE, so the animated surface is found by sampling the field through the
+bone's **inverse** rotation. The shader applies the inverse where the field
+is sampled (and the forward where the material is looked up), so the union
+field, the gradient (and so the normal), the AO and the self-shadow all keep
+working in the world frame untouched.
+
+### The fur must not slide
+
+The texture is bound to the **surface**, not to the world. A world-space
+sample slides over the animal as it walks and as its bones swing, so the micro
+shader samples the atlas at the point's **rest-pose** position — the very
+point the field is sampled at. The texture then sticks to the surface it
+belongs to, and follows its bone.
+
+### The AI can tell an animal what to do
+
+`set_behaviour` is a chat tool: *"let the alpaca run"* becomes
+`{"name":"alpaca","command":"run"}`, and the app's
+`App::setMicroBehaviour` puts the animal into that command. The commands
+are `run`, `walk`, `graze` (eat grass), `stop` and `auto` (the animal
+decides for itself) — the same set the behaviour's own state machine uses, so
+the AI's instruction and the animal's choice are the same mechanism.
+
+The behaviour is a pure transform (`MicroBehaviour`), so the instruction is
+just a field on it; the collision response stays in the app.
+
+
 ### The crash that never reproduced: what ASAN ruled out
 
 The user's session died with **"double free or corruption (out)"** right after
