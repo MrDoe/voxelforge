@@ -308,16 +308,25 @@ void App::rebuildFurCards()
     if (!m_microSvoPass.empty() || !m_furObjects.empty() || !m_microFields.empty()) {
         // The preview state lives on the fur objects, so it is carried over
         // rather than lost: a coat rebuilt mid-drag must not drop the drag.
-        std::vector<glm::vec3> previews;
-        std::vector<glm::mat3> rots;
-        std::vector<glm::vec3> pivots;
-        std::vector<bool> previewActive, rotActive;
-        for (const vf::voxel::FurObject& o : m_furObjects) {
-            previews.push_back(o.preview);
-            rots.push_back(o.rot);
-            pivots.push_back(o.pivot);
-            previewActive.push_back(o.previewActive);
-            rotActive.push_back(o.rotActive);
+        //
+        // It is carried over BY SOURCE, not by the coat's own index: the
+        // index SHIFTS when a material starts or stops growing fur (the
+        // Textures panel's per-material switch), and a shifted index would
+        // hand one object's preview to another.
+        const size_t nSrc = m_microFields.size();
+        std::vector<glm::vec3> prevOffset(nSrc);
+        std::vector<glm::mat3> prevRot(nSrc);
+        std::vector<glm::vec3> prevPivot(nSrc);
+        std::vector<char> prevOffsetOn(nSrc, 0), prevRotOn(nSrc, 0);
+        for (size_t i = 0; i < m_furObjects.size(); ++i) {
+            const int src = (i < m_furSourceField.size()) ? m_furSourceField[i] : -1;
+            if (src < 0 || src >= int(nSrc))
+                continue;
+            prevOffset[size_t(src)] = m_furObjects[i].preview;
+            prevOffsetOn[size_t(src)] = m_furObjects[i].previewActive ? 1 : 0;
+            prevRot[size_t(src)] = m_furObjects[i].rot;
+            prevPivot[size_t(src)] = m_furObjects[i].pivot;
+            prevRotOn[size_t(src)] = m_furObjects[i].rotActive ? 1 : 0;
         }
         m_furObjects.clear();
         for (size_t i = 0; i < m_furSourceField.size(); ++i) {
@@ -326,12 +335,12 @@ void App::rebuildFurCards()
                 continue;
             const int idx = growFurCards(m_microFields[size_t(fi)],
                                          m_microOccluders[size_t(fi)].worldOffset);
-            if (idx >= 0 && idx < int(previews.size())) {
-                m_furObjects[size_t(idx)].preview = previews[size_t(idx)];
-                m_furObjects[size_t(idx)].previewActive = previewActive[size_t(idx)];
-                m_furObjects[size_t(idx)].rot = rots[size_t(idx)];
-                m_furObjects[size_t(idx)].pivot = pivots[size_t(idx)];
-                m_furObjects[size_t(idx)].rotActive = rotActive[size_t(idx)];
+            if (idx >= 0) {
+                m_furObjects[size_t(idx)].preview = prevOffset[size_t(fi)];
+                m_furObjects[size_t(idx)].previewActive = prevOffsetOn[size_t(fi)] != 0;
+                m_furObjects[size_t(idx)].rot = prevRot[size_t(fi)];
+                m_furObjects[size_t(idx)].pivot = prevPivot[size_t(fi)];
+                m_furObjects[size_t(idx)].rotActive = prevRotOn[size_t(fi)] != 0;
             }
         }
         m_furPass.setObjects(m_furObjects);
