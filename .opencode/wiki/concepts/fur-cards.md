@@ -132,6 +132,30 @@ changing something else. A visual complaint is a measurement request.
 | the coat's luma spread | **36.98** against the bare body's 28.82 (the texture survives) |
 | the fur's effect at 8 m | the alpaca's pixels change; the house view does not |
 
+## The coat does NOT follow a per-bone animation (known, 2026-10-21)
+
+The rig that makes the alpaca walk animates the body **per bone**: the micro
+overlay carries a bone table (the segment, the joint, the animated rotation)
+and maps an *animated* point back to the *rest* pose before sampling the
+field, so **the field's cells never move**.
+
+The fur's cards are generated from the field's surface cells and are drawn in
+that same rest frame, with only the whole-object preview transform applied. So
+when a leg swings, the leg's surface moves and the coat on it does not: the
+fur hangs in the rest pose while the legs move through it.
+
+**It looks correct in a screenshot and is wrong in motion**, which is the
+worst shape of bug. The fix is small and the pieces exist: the card record
+carries its bone index (the curl vec4's spare lane is free), the fur pass's
+per-world table carries the same bone base the overlay carries (the items
+vec4 has spare lanes), and the shader applies the bone's *forward* rotation to
+the card's root, strand direction and normal — the inverse of the overlay's
+`microUnbone`.
+
+It was deliberately NOT done while the rig was in flight (its API was still
+moving, and a coat that detaches is a better bug than a coat that is a week
+late). Recorded here so the next session does not rediscover it as a mystery.
+
 ## The traps
 
 - **The alpaca's position was measured wrong twice.** A camera that "should"
