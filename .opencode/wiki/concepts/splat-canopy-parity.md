@@ -320,6 +320,71 @@ test; a material-gated exemption for foliage is the cheaper approximation.
 Both live in the bake (`src/voxel/surfelize.cpp`) and must be mirrored in the
 live-store path, or a stamp re-aims untouched splats.
 
+## The albedo evidence: it is the WRONG SURFACE, not the same surface shaded
+
+Ada's `VF_SPLAT_DEBUG=6` (palette albedo) dump at masked pixels:
+
+| pixel | splat rgb | svo rgb | splat albedo |
+|---|---|---|---|
+| (543,277) | 22,11,1 | 37,32,30 | 166,121,52 |
+| (93,18) | 39,20,6 | 79,61,48 | 177,129,56 |
+| (120,188) | 22,15,8 | 56,54,51 | 175,128,55 |
+
+Mean saturation at the mask: splat 0.828, SVO 0.273. The splat's visible surfel
+there is a warm **wood/thatch** cell, not foliage (mat 8 albedo is 10,132,8),
+and the SVO's is neutral. So the splat is painting a *neighbouring cell's disk*
+over a pixel that belongs to a different surface or to a gap - the 1.4-cell
+disk spills ~0.04 m past its own 0.1 m face. That reframes the flag A/Bs above:
+clearing the enclosure or the shadow does not stop the spill, it only makes the
+spilled disk bright enough to stop counting as near-black; the seal dial lets
+the background through instead of the true surface (which is depth-rejected).
+Caveat: the comparison is splat ALBEDO against SVO FINAL COLOUR, and AgX
+desaturates shadows, so the SVO numbers cannot prove which material it is - the
+solid part is that the splat's albedo at the mask is not the material the user
+sees as "the tree".
+
+The **bent-normal** hypothesis was tested and is negative: using the geometric
+normal for the sky term moved the mask 21,784 -> 21,161 px at flags 511 and
+11,258 -> 10,965 at 253, with the luma at the mask unchanged (19.9 / 21.1). The
+baked bent is not the surviving dark term, and the change was reverted.
+
+## The face clip: the flag (implemented 2026-10-21)
+
+The fix is to clip each disk to its own voxel face so it cannot claim a pixel
+that belongs to another cell or to the gap between cells. The shader half is
+`shaders/splat.frag`; the bake half is a per-surfel flag:
+
+- `mat_ao.x = material + 0.25` for a **single-exposed-face** object cell.
+  Decode `fract(vMat.x) > 0.1`. Every existing reader is blind to it:
+  `uint(vMat.x + 0.5)` still yields the material (8.25 + 0.5 = 8.75 -> 8), and
+  the `abs(vMat.x - 8.0) < 0.5` flora/shell tests still pass at 8.25 (checked
+  in `splat.vert`, `splat_cull.comp`, `splat_tile_bin.comp`,
+  `splat_tile_render.comp`, `splat.frag`).
+- The bake also **skips the neighbourhood normal smoothing** for those cells,
+  so the disk normal IS the exact axis and the disk position is the face
+  centre (`cellCentre + axis*0.5*VOXEL`). That is what makes the face square
+  derivable in the shader with no extra data: axis from the normal, the other
+  two axes are the square's directions, half-extent `0.5 * pc.b.y`.
+- Excluded: terrain (a heightfield sample is not a voxel face), multi-face
+  cells (mean normal, no single face), thin footprints (an ellipsoid spanning
+  several cells), and bridge/corner children (they clear the fraction).
+- The store path computes the same flag from its own exposed-face mask
+  (`SurfelCand::faceClip`), so a live edit cannot re-aim untouched splats.
+- Coverage on the shipped hamlet: **97,258 of 343,196 object surfels** (28.3%),
+  logged as `surfel face clip: N single-face object disks of M object surfels`.
+- The snap alone (flag set, shader ignoring it) is visually neutral: mask
+  94,116 -> 94,906 (+0.8%), frame 89.66 -> 89.74, sky-IoU 0.4800 -> 0.4809,
+  13.6% of pixels moved by mean 0.96. So the clip A/B measures the clip.
+- The shader must **discard** (every pass, including the depth prepass), not
+  zero the alpha in the band: the base pass seals the nearest fragment at
+  alpha 1 and the prepass writes its plane depth, so a band-only clip leaves
+  the spilled colour and rejects the true surface behind it.
+- Seam risk: at the face-square edge the Gaussian alpha is ~0.69 of centre
+  (r 1.4 cells, sigma 0.5 normalized), so two faces meeting at a crease each
+  reach the shared edge at ~0.7. Coplanar squares tile exactly and the seal
+  covers equal-depth seams, but a wall close-up is the shot that would show a
+  lattice grid; the canopy shot cannot see it.
+
 **The regression to watch on that experiment is the WATER.** A constant
 per-quad depth is systematically *nearer* than the true surface depth for a
 tilted disk (by up to `rMax*sin(tilt)`). The water is a flat plane seen at

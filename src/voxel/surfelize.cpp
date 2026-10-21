@@ -126,6 +126,9 @@ void appendEdgeBridges(glm::vec3 cellCentre, const Surfel& parent,
         rV = std::max(0.25f * VOXEL, rV);
         rU = std::max(0.60f * VOXEL, rU);
         Surfel bridge = parent;
+        // A child disk is NOT a single cell face: clear the face-clip fraction
+        // the parent may carry (the integer part is still the material).
+        bridge.mat_ao.x = float(int(parent.mat_ao.x + 0.5f));
         bridge.pos_rU = glm::vec4(pos, rU);
         bridge.normal_rV = glm::vec4(creaseN, rV);
         bridge.bent_sh = glm::vec4(
@@ -176,6 +179,7 @@ void appendCornerCaps(glm::vec3 cellCentre, const Surfel& parent,
         rV = std::max(0.20f * VOXEL, rV);
         rU = std::max(0.50f * VOXEL, rU);
         Surfel cap = parent;
+        cap.mat_ao.x = float(int(parent.mat_ao.x + 0.5f));
         cap.pos_rU = glm::vec4(pos, rU);
         cap.normal_rV = glm::vec4(n, rV);
         cap.bent_sh = glm::vec4(
@@ -976,7 +980,7 @@ SurfelSet buildSurfels(const VoxelField& field, const SurfelParams& params) {
     // Pass 2: blend, smooth, bake shadow+AO, and emit (also sharded; every
     // index is independent and keys/rawNormals are read-only here).
     const glm::vec3 sunDir = glm::normalize(params.sunDir);
-    std::atomic<size_t> terrainCount{ 0 }, objectCount{ 0 };
+    std::atomic<size_t> terrainCount{ 0 }, objectCount{ 0 }, faceClipCount{ 0 };
     {
         std::atomic<int> next{ 0 };
         unsigned hc = std::max(1u, std::thread::hardware_concurrency());
@@ -993,6 +997,33 @@ SurfelSet buildSurfels(const VoxelField& field, const SurfelParams& params) {
 
                     const auto s = field.sample(x, y, z);
                     glm::vec3 n = rawNormals[i];
+
+                    // Single-exposed-face classification (the disk face clip).
+                    // A cell with exactly ONE air neighbour emits one
+                    // axis-aligned face disk; the shader may clip that disk to
+                    // the 0.1 m face square so it cannot spill past its own
+                    // face into a neighbouring cell's pixels (the canopy
+                    // "slots"). Multi-face cells keep the mean normal and are
+                    // never clipped, and a thin footprint spans several cells
+                    // (excluded below). Objects only: a terrain top is a
+                    // heightfield sample, not a voxel face.
+                    static const int kFaceDirs[6][3] = {
+                        { 1, 0, 0 }, { -1, 0, 0 }, { 0, 1, 0 },
+                        { 0, -1, 0 }, { 0, 0, 1 }, { 0, 0, -1 } };
+                    bool faceClip = false;
+                    if (s.obj) {
+                        int faces = 0;
+                        for (const auto& d : kFaceDirs) {
+                            const int nx = x + d[0], ny = y + d[1], nz = z + d[2];
+                            const bool air =
+                                nx < 0 || nx >= latN || ny < 0 || ny >= latN ||
+                                nz < 0 || nz >= latN ||
+                                field.sample(nx, ny, nz).d > 0.0f;
+                            if (air)
+                                ++faces;
+                        }
+                        faceClip = faces == 1;
+                    }
 
                     // The analytic heightfield normal of a terrain TOP cell.
                     // It is computed here but APPLIED after the neighbour
@@ -1030,8 +1061,11 @@ SurfelSet buildSurfels(const VoxelField& field, const SurfelParams& params) {
                     // Face-expanded entries (one-cell-thick columns/plates)
                     // keep their axis-aligned face normal: smoothing them
                     // against neighbours from other faces would tilt them off
-                    // the voxel face they stand for.
-                    if (params.smoothNormals && faceEntry[i] == 0) {
+                    // the voxel face they stand for. A single-face cell skips
+                    // it for the same reason: the face clip is only well
+                    // defined while the disk normal stays the exact axis, and
+                    // the disk position is derived from it.
+                    if (params.smoothNormals && faceEntry[i] == 0 && !faceClip) {
                         glm::vec3 acc = n;
                         float wsum = 1.0f;
                         const int faceDirs[6][3] = { { 1, 0, 0 }, { -1, 0, 0 },
@@ -1149,6 +1183,11 @@ SurfelSet buildSurfels(const VoxelField& field, const SurfelParams& params) {
                                   [&](glm::vec3 q) { return field.sampleWorld(q).d <= 0.0f; },
                                   cellCentre, n, x, y, z)
                             : ThinFootprint {};
+                    // A thin footprint's disk is an ellipsoid spanning several
+                    // cells; clipping it to one face square would cut it in
+                    // half along the structure.
+                    if (fp.thin)
+                        faceClip = false;
 
                     // Foliage growth (2x) exists to SEAL sparse terrain canopy:
                     // grass cards and bushes are represented by splats alone,
@@ -1190,7 +1229,12 @@ SurfelSet buildSurfels(const VoxelField& field, const SurfelParams& params) {
                     sl.pos_rU = glm::vec4(pos, rU);
                     sl.normal_rV = glm::vec4(n, rV);
                     sl.bent_sh = glm::vec4(bent, shadow);
-                    sl.mat_ao = glm::vec4(float(mat), refl, rough, ao);
+                    // mat_ao.x = material + a QUARTER for a single-face disk.
+                    // Every reader rounds (uint(x+0.5), int(x+0.5f)) or tests
+                    // abs(x-8)<0.5, so the fraction is invisible to the
+                    // material and visible only to the face clip (fract>0.1).
+                    sl.mat_ao = glm::vec4(float(mat) + (faceClip ? 0.25f : 0.0f),
+                                          refl, rough, ao);
                     // w = per-cell texture override (0 = use the material's
                     // atlas slot): phase-2 per-object textures ride the
                     // otherwise spare channel. Raw integer 0..255; the shader
@@ -1204,6 +1248,8 @@ SurfelSet buildSurfels(const VoxelField& field, const SurfelParams& params) {
                         ++locObject;
                     else
                         ++locTerrain;
+                    if (faceClip)
+                        faceClipCount.fetch_add(1, std::memory_order_relaxed);
                 }
                 terrainCount += locTerrain;
                 objectCount += locObject;
@@ -1213,6 +1259,8 @@ SurfelSet buildSurfels(const VoxelField& field, const SurfelParams& params) {
     }
     set.terrainCount = terrainCount.load();
     set.objectCount = objectCount.load();
+    spdlog::info("surfel face clip: {} single-face object disks of {} object "
+                 "surfels", faceClipCount.load(), set.objectCount);
 
     // Shadow penumbra + AO smoothing: the baked march verdict is binary per
     // surfel (draws shadow boundaries along disk shapes) and the baked AO
@@ -2001,6 +2049,10 @@ struct SurfelCand {
     EdgeInfo edge;      // exposed-face hard-edge pairs only
     unsigned exposedFaces = 0; // lattice faces whose neighbour is air
     bool faceEntry = false;    // per-face expansion: never smoothed
+    // Exactly one exposed lattice face: the disk lies ON that face and may be
+    // clipped to its square by the shader (mat_ao.x fraction +0.25). Same
+    // rule as the bake; a divergent flag re-aims untouched splats.
+    bool faceClip = false;
 };
 
 // Store-space twins of solidDepthCells/solidRunCells: same world-space probe
@@ -2039,7 +2091,9 @@ void computeCandidateAnisotropy(const ChunkStore& store,
         cd.edge = cd.cell.obj ? edgeInfoFromMask(cd.exposedFaces) : EdgeInfo {};
         if (cd.faceEntry)
             continue; // an axis-aligned face entry has nothing to smooth
-        if (params.smoothNormals) {
+        // A single-face cell keeps its exact axis normal for the same reason:
+        // the shader's face clip is derived from it.
+        if (params.smoothNormals && !cd.faceClip) {
             glm::vec3 bendSum(0.0f);
             glm::vec3 acc = cd.n;
             float wsum = 1.0f;
@@ -2211,6 +2265,7 @@ std::vector<SurfelCand> collectChunkCandidates(const ChunkStore& store, int chun
                 base.pos = wp;
                 base.cell = c;
                 base.exposedFaces = exposed;
+                base.faceClip = c.obj && (exposed & (exposed - 1u)) == 0u;
                 base.layer = provenance.obj ? provenance.layer : uint8_t(0);
                 base.rawN = safeNormalize(raw); // a cancelling sum stays zero
                 const bool degenerate = glm::dot(raw, raw) < 1e-6f;
@@ -2234,6 +2289,9 @@ std::vector<SurfelCand> collectChunkCandidates(const ChunkStore& store, int chun
                         face.n = glm::vec3(float(dirs[d][0]), float(dirs[d][1]),
                                            float(dirs[d][2]));
                         face.faceEntry = true;
+                        // A per-face entry is a thin/degenerate structure's
+                        // face, not a single-face cell: never clip it.
+                        face.faceClip = false;
                         cands.push_back(face);
                     }
                     continue;
@@ -2339,7 +2397,11 @@ void shadeCandidates(const ChunkStore& store, const std::vector<SurfelCand>& can
         sl.pos_rU = glm::vec4(pos, rU);
         sl.normal_rV = glm::vec4(cd.n, rV);
         sl.bent_sh = glm::vec4(bent, shadow);
-        sl.mat_ao = glm::vec4(float(mat), refl, rough, packSurfelAo(ao, cd.layer));
+        // mat_ao.x fraction +0.25 = single-face disk (shader face clip); every
+        // existing reader rounds or tests abs(x-8)<0.5, so the material is
+        // unchanged. Mirror of the bake's pack.
+        sl.mat_ao = glm::vec4(float(mat) + (cd.faceClip ? 0.25f : 0.0f), refl,
+                              rough, packSurfelAo(ao, cd.layer));
         sl.tan_aspect = glm::vec4(tanOut, float(cd.cell.tags));
         out[i] = sl;
     }
