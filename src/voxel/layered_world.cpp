@@ -637,6 +637,16 @@ LayeredWorld::ReloadResult LayeredWorld::reloadIfChanged(glm::vec3 cam)
 {
     if (!m_loaded)
         return kNone;
+    // A running rebuild thread is READING the shared record arrays
+    // (m_records, m_colTop, m_objCells, ...) that parseAndComputeDirty
+    // below REWRITES - it clears and refills them. Bail out BEFORE the
+    // rewrite, not after: kick() checks m_rebuildRunning too late, by which
+    // point the arrays have already been swapped under the running thread's
+    // feet (a use-after-free that surfaces much later as heap corruption).
+    // requestReload() has the same guard in the same place. The change is
+    // picked up on the next poll (~0.5 s) once the rebuild has finished.
+    if (m_rebuildRunning)
+        return kNone;
     for (const Signature& s : m_signatures) {
         std::error_code ec;
         unsigned long long sz = static_cast<unsigned long long>(

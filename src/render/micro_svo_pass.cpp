@@ -45,13 +45,23 @@ struct alignas(16) MicroWorldRow {
     // Move delta for the selected micro object. The field stays where it was
     // baked and the RENDERED position is offset, so a drag is instant and
     // costs no re-bake.
+    // rot0/rot1/rot2 = the live ROTATION preview's matrix (row-major) and
+    // pivot = the pivot (xyz, world m) + an active flag (w). Same idea: the
+    // field, the material lookup and the octree stay in the BAKED frame and
+    // the RENDERED position is rotated out of it. A micro object has no world
+    // owner id, so the splat pass's rotate preview cannot show it - this is
+    // its only live rotation.
     float geo[4];
     uint32_t base[4];
     float lo[4];
     float hi[4];
     float preview[4];
+    float rot0[4];
+    float rot1[4];
+    float rot2[4];
+    float pivot[4];
 };
-static_assert(sizeof(MicroWorldRow) == 80, "std140 slot size");
+static_assert(sizeof(MicroWorldRow) == 144, "std140 slot size");
 
 } // namespace
 
@@ -164,6 +174,10 @@ bool MicroSvoPass::setMicroWorlds(const std::vector<voxel::MicroWorld>& worlds)
             row.hi[i] = s.worldMax[i];
         }
         row.preview[3] = 0.0f; // no live preview until one is set
+        // The rotation preview starts as the identity, inactive: pivot.w = 0
+        // is what tells the shader there is nothing to rotate.
+        row.rot0[0] = row.rot1[1] = row.rot2[2] = 1.0f;
+        row.pivot[3] = 0.0f;
 
         const uint32_t nodeOff = uint32_t(payload.size());
         const uint32_t handleOff = uint32_t(handles.size());
@@ -225,6 +239,24 @@ void MicroSvoPass::setWorldPreview(size_t worldIndex, glm::vec3 offset, bool act
     row.preview[1] = offset.y;
     row.preview[2] = offset.z;
     row.preview[3] = active ? 1.0f : 0.0f;
+    vmaFlushAllocation(m_ctx->allocator(), m_worldTable.alloc, 0, VK_WHOLE_SIZE);
+}
+
+void MicroSvoPass::setWorldRotation(size_t worldIndex, glm::mat3 R, glm::vec3 pivot,
+                                    bool active)
+{
+    if (!m_worldTable.mapped || worldIndex >= size_t(m_worldCount))
+        return;
+    auto* rows = reinterpret_cast<MicroWorldRow*>(m_worldTable.mapped);
+    MicroWorldRow& row = rows[worldIndex];
+    // Row-major, like the splat pass's rotate preview (uRotRow0..2).
+    row.rot0[0] = R[0][0]; row.rot0[1] = R[0][1]; row.rot0[2] = R[0][2];
+    row.rot1[0] = R[1][0]; row.rot1[1] = R[1][1]; row.rot1[2] = R[1][2];
+    row.rot2[0] = R[2][0]; row.rot2[1] = R[2][1]; row.rot2[2] = R[2][2];
+    row.pivot[0] = pivot.x;
+    row.pivot[1] = pivot.y;
+    row.pivot[2] = pivot.z;
+    row.pivot[3] = active ? 1.0f : 0.0f;
     vmaFlushAllocation(m_ctx->allocator(), m_worldTable.alloc, 0, VK_WHOLE_SIZE);
 }
 

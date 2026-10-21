@@ -80,11 +80,12 @@ const ImVec4 kWarn(1.0f, 0.70f, 0.25f, 1.0f);
 const ImVec4 kDanger(0.96f, 0.33f, 0.42f, 1.0f);
 
 // kPalette names (src/voxel/common.hpp) for the material combo.
-inline constexpr const char* kMatNames[21] = {
+inline constexpr const char* kMatNames[22] = {
     "0 grass dark", "1 grass light", "2 soil", "3 sand", "4 rock",
     "5 light rock", "6 wood", "7 roof", "8 foliage", "9 lava", "10 ember",
     "11 glow cyan", "12 glow green", "13 glow purple", "14 glow blue",
     "15 white-hot", "16 snow", "17 bark", "18 moss", "19 thatch", "20 plaster",
+    "21 fleece",
 };
 
 } // namespace app

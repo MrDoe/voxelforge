@@ -68,6 +68,17 @@ struct MicroWorld {
     // for a selected micro object: the field stays where it was baked and the
     // RENDERED position is offset, so a drag is instant and costs no re-bake.
     vec4 preview;
+    // Live ROTATION preview: the matrix rows (3x3, row-major) and the pivot
+    // (xyz = world m, w = 1 when the rotation preview is active). Same idea as
+    // the Move offset: the field, the material lookup and the octree stay in
+    // the BAKED frame, and the RENDERED position is rotated out of it, so a
+    // drag costs no re-bake. A micro object has no world owner id, so the
+    // splat pass's rotate preview cannot show it - this is its only live
+    // rotation.
+    vec4 rot0;
+    vec4 rot1;
+    vec4 rot2;
+    vec4 pivot;
 };
 layout(std140, set = 0, binding = 7) readonly uniform WorldTable {
     MicroWorld uWorlds[16];
@@ -197,8 +208,47 @@ float mFieldCell(uint off, ivec3 dim, ivec3 c, float voxel)
     return float(raw) * voxel / kMicroSdfQuantum;
 }
 
+// Is a live rotation preview active for this world?
+bool microRotOn(int w)
+{
+    return wt.uWorlds[w].pivot.w > 0.5;
+}
+
+// The rotation matrix (row-major) of a world's live rotation preview.
+mat3 microRot(int w)
+{
+    return mat3(wt.uWorlds[w].rot0.xyz, wt.uWorlds[w].rot1.xyz,
+                wt.uWorlds[w].rot2.xyz);
+}
+
+// A WORLD point -> the object's BAKED frame (the field's frame). The rotation
+// is about a pivot, so the pivot is fixed and only the offset rotates.
+vec3 microToBaked(int w, vec3 p)
+{
+    if (!microRotOn(w))
+        return p;
+    return wt.uWorlds[w].pivot.xyz +
+           transpose(microRot(w)) * (p - wt.uWorlds[w].pivot.xyz);
+}
+
+// A direction (no translation) into the baked frame.
+vec3 microDirToBaked(int w, vec3 d)
+{
+    if (!microRotOn(w))
+        return d;
+    return transpose(microRot(w)) * d;
+}
+
 // Signed distance to ONE micro world at p, sampled from the DENSE field.
 //
+// The live ROTATION preview (a micro object dragged round by the trackball)
+// is applied HERE, at the one place where the field is sampled: the world
+// point is mapped into the object's BAKED frame, the field is read there, and
+// the result is a distance in the world frame again (a rotation preserves
+// distances, so the value needs no correction and the trace's step stays
+// conservative). Everything downstream - the union field, the gradient (and
+// so the normal), the AO and the self-shadow - then works in the world frame
+// and needs no change at all.
 // The dense field is what makes the sphere tracer work. The bricks also carry
 // a per-cell distance, but the trilinear stencil reaches one cell past the
 // sample point and a brick can only be indexed inside itself, so the stencil
@@ -221,6 +271,10 @@ float mFieldCell(uint off, ivec3 dim, ivec3 c, float voxel)
 // conservative step instead.
 float microMapWorld(int w, vec3 p, float voxel, int gridN, uint gridBase)
 {
+    // The field lives in the BAKED frame, so a live rotation preview maps the
+    // world point into it first (see microToBaked). The distance that comes
+    // back is a distance in the world frame - a rotation preserves them.
+    p = microToBaked(w, p);
     vec3 wmin = wt.uWorlds[w].lo.xyz;
     vec3 wsize = wt.uWorlds[w].hi.xyz - wmin;
     vec3 rp = p - wmin;
@@ -306,6 +360,8 @@ float microMap(vec3 p)
 // fillMicroBrick), so this never has to consult the terrain heightfield the
 // way the main shader's isObjectSurface does - which also sidesteps that
 // test's world-scale +0.02 epsilon, four whole cells wide at a 5 mm voxel.
+// The field is read in the BAKED frame, so the material lookup - the octree
+// descent and the cell that owns the surface - has to happen there too.
 bool microSurface(vec3 p, vec3 rd, out vec3 albedo, out vec2 rr, out uint matId)
 {
     albedo = vec3(0.5);
@@ -315,8 +371,9 @@ bool microSurface(vec3 p, vec3 rd, out vec3 albedo, out vec2 rr, out uint matId)
         vec3 wmin = wt.uWorlds[w].lo.xyz;
         vec3 wsize = wt.uWorlds[w].hi.xyz - wmin;
         float voxel = wt.uWorlds[w].geo.x;
-        // A hair inside the solid, along the ray.
-        vec3 q = p + rd * (0.15 * voxel);
+        // A hair inside the solid, along the ray - in the BAKED frame, where
+        // the ray direction is the world one turned by the rotation.
+        vec3 q = microToBaked(w, p) + microDirToBaked(w, rd) * (0.15 * voxel);
         // Clamp the query INTO the box rather than rejecting points outside it.
         // The traced hit lies exactly ON the object's boundary by construction
         // (the trace stops where the field crosses zero, and the field is zero

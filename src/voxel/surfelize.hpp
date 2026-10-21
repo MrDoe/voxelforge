@@ -175,7 +175,11 @@ struct SurfelParams {
 struct Surfel {
     glm::vec4 pos_rU;     // xyz = world position (m), w = radiusU (m, along tangent)
     glm::vec4 normal_rV;  // xyz = geometric surface normal, w = radiusV (m)
-    glm::vec4 bent_sh;    // xyz = baked bent (AO) normal, w = baked shadow 0..1
+    glm::vec4 bent_sh;    // xyz = baked bent (AO) normal;
+                          // w  = baked shadow + 2*exactSky (see surfelize.cpp:
+                          //      object disks carry a 0/1 sky verdict so the
+                          //      fragment can skip the 0.4 m object-volume
+                          //      march; terrain/water leave it 0 and w < 1.5)
     glm::vec4 mat_ao;     // x=mat(float), y=refl, z=rough, w=packed AO metadata
     glm::vec4 tan_aspect; // xyz = in-plane tangent (unit; radiusU runs along it),
                           // w = per-cell texture override. Zero xyz = isotropic.

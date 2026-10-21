@@ -67,6 +67,17 @@ one costs a whole turn, because the bad call is rejected before any work runs.
 - **Don't kill processes you didn't start.** If another test driver owns the
   display or the GPU, wait for it or report the conflict; `pkill` on a shared
   binary destroys someone else's in-flight run.
+- **On a shared tree, stage the EXACT files — never a directory.** Other
+  sessions commit to the same branch, so `git add .opencode/wiki/` (or any
+  directory) sweeps their uncommitted work into your commit: the content
+  survives, but the attribution is muddled and your commit message does not
+  describe what is in it. Measured 2026-10-21: three wiki pages from two
+  other sessions landed in a commit titled "micro: a micro object is
+  selectable". Name every path explicitly, and `git status` before you
+  commit. **`git add -p` is not the fix** when two sessions edit the SAME
+  page (one wiki page had three authors in a day): the file is shared, so
+  the other session's hunks are in it too. Stage the exact path and check
+  `git diff --cached --stat` names only what you wrote about.
 - **Never `rm` with a glob near a file you depend on.** A tidy-up like
   `rm /tmp/x/*.vxw` will eat a backup you forgot was there, and an *unlabelled*
   backup cannot be told apart from a peer session's identically-named file —
@@ -98,6 +109,15 @@ one costs a whole turn, because the bad call is rejected before any work runs.
   The only ignored file is `assets/runtime_edits.vxw` — the live-edit session
   overlay the app rewrites on every brush stroke (state, not content; the app
   loads it explicitly, it is never a `world.json` layer).
+- **The app REWRITES `assets/world.json` from its own layer list.** Every
+  app run rewrites the manifest, so a run that started with a toggled layer
+  writes that toggle back — and a write can land AFTER a test restored the
+  file. Measured 2026-10-21: `tests/micro_check.py` left all three micro
+  layers disabled and `git diff assets/` was not empty, because the app's
+  write beat the gate's restore. Two rules follow: a test that toggles
+  manifest layers must **verify** the restore (re-read the file, retry, and
+  say so loudly if it cannot), and `git diff assets/` is the check that the
+  shipped scene survived.
 - **Five ways to destroy data here, and every one of them is silent.** The
   overlay is gitignored and the manifests are tracked, so damage is invisible
   in `git status`; check there before blaming a build.
@@ -828,10 +848,28 @@ one costs a whole turn, because the bad call is rejected before any work runs.
     voxels), not the maximum: the stencil reaches one cell past the sample
     point and a maximum-distance filler next to a real edge cell would
     explode the interpolated field into a tunnelling step.
+  - **OUTSIDE the grid the field must return the TRUE distance to the grid
+    box** (the shader's `microMapWorld` does exactly this, and the CPU's
+    `MicroField::sampleSdf` must mirror it): a trilinear sampler that finds
+    no cell in range returns **0**, and a sphere tracer that reads 0 **steps
+    0**, so the march collapses to its minimum step and never arrives. That
+    is not a hypothetical — it is why a micro object rendered perfectly and
+    could not be clicked (measured 2026-10-21: 0 of 81 rays hit the alpaca
+    from 15 m, while the AABB test passed on every one). The box *contains*
+    the object, so the box distance is a lower bound on the object distance
+    and `0.85 ×` it is a safe step.
   With the field right, the material lookup is a plain cell lookup: the cell
   **containing** the hit (`floor((p-mn)/cellSz)`), *not* the
   `trunc((p-mn)/cellSz - 0.5)` cell-**centre** convention the field stencil
   uses (at a face that lands on the air side — black albedo, grass material).
+- **A micro object is SELECTABLE** (`pickMicroField` + `App::pickMicroObjects`):
+  it is outside the world's store, so the pointer needs a pick of its own. It
+  is named by its manifest file (`PickHit::microFile`), never by a world owner
+  id. `m_hoverHit.voxel` must stay a **world-lattice** cell (the brush, the
+  box selection and `describeSurfelsAt` index the world with it) — a micro
+  cell index sends all of them to the wrong chunk. Headless check:
+  `VF_TEST_MICRO_PICK=1` runs the app's own pick path toward every micro
+  object and reports "N/N micro objects selectable" (no mouse involved).
 - **Shadows are two-way and COARSE on both halves.** Micro objects self-shadow
   and shadow each other exactly, and they exchange shadows with the world
   through the coarse representations, never through each other's lattices:
@@ -885,6 +923,35 @@ one costs a whole turn, because the bad call is rejected before any work runs.
   Gated by `tests/test_micro.cpp` (the pivot's world position is unchanged
   within 1 mm) and by `tests/micro_check.py` (the footprint's aspect flips and
   the base row does not move).
+- **A micro object is manipulable with the MOUSE, and the obstacle is the
+  owner id, not the geometry.** Three gates ask the world's code whether a
+  layer is real, and all three refused a micro object for the same reason —
+  it has no world owner id (it is a separate SVO world): the plain click
+  that activates an object (`m_layers.layerId(picked) != 0`), the Move axis
+  handles (`layerId != 0`) and the Rotate trackball (which asked
+  `m_layers.layerBox()` — the WORLD box, empty for a micro layer — and the id
+  again). Each of them must also accept `isMicroLayer(file)`, and the
+  trackball's box must come from `layerBounds()` (which is micro-aware).
+  The rotation's pivot comes from `App::layerPivotWorld` — the world's
+  `layerPivot` cannot know a layer that is not in the merged world; the
+  micro pivot is the bottom-centre of the object's RECORDS (the field's grid
+  starts `kMicroMarginCells` before the first cell, so the records' min
+  corner is the grid's origin plus the margin).
+- **The live ROTATION preview of a micro object lives in the MICRO pass.**
+  The splat pass's rotate preview is keyed by the world owner id
+  (`surfelBelongsToLayer` refuses id 0), so it shows nothing for a micro
+  object. The micro pass's world table carries its own rotation matrix and
+  pivot, and the shader applies it **in the field's frame**: the rotation is
+  applied at the ONE place the field is sampled (`microMapWorld` maps the
+  world point into the baked frame and reads the field there; a rotation
+  preserves distances, so the value needs no correction and the trace's step
+  stays conservative). Everything downstream — the union field, the gradient
+  and so the normal, the AO, the self-shadow — then works in the world frame
+  and needs no change; only the material lookup (the octree descent and the
+  cell that owns the surface) has to happen in the baked frame too. The
+  matrix is the app's own: the old pose to the new pose, about the same
+  pivot. Headless check: `VF_TEST_ROTATE_LIVE="90,0,0"` with
+  `VF_ROTATE_LAYER=micro/alpaca.vxw`.
 - Coverage: `tests/test_micro.cpp` (9 cases) pins the SDF's sign convention and
   half-cell offset, the eighth-voxel quantisation, the margin, the dense field
   against the CPU field, the brick packing, a CPU replica of the shader's
@@ -892,6 +959,118 @@ one costs a whole turn, because the bad call is rejected before any work runs.
   continuity across a brick boundary — with a negative control proving that
   check can detect the brick-clamped field. See
   `.opencode/wiki/concepts/micro-voxel-svo-overlay.md`.
+
+## Fur cards — a translucent layer over the micro objects
+- **A micro object is a SPHERE-TRACED SOLID: exact, opaque, hard-edged.** That
+  is right for a vase and wrong for an animal, whose coat is fuzz and whose
+  SILHOUETTE is the thing that says so. The fur is a separate, TRANSLUCENT
+  layer of **hair cards** — flat ribbons standing OUT of the surface, each
+  with a soft alpha profile across its width and a taper along its length.
+  One card stands for a clump of strands, so the cost scales with clumps.
+- **Why NOT the world's splats.** A surfel is a disk lying IN the tangent
+  plane, and the opaque base seal (the nearest fragment written at alpha 1)
+  is exactly what turns a lone silhouette splat into a hard-edged blob — the
+  documented fix is a coverage count in the unused D24_S8 stencil, not kernel
+  tuning. The fur sidesteps the whole question: it composites over an
+  already-opaque body, so transparency is correct by construction and the sky
+  only shows where a card reaches past the silhouette.
+- **The cards are generated on the CPU** (`src/voxel/fur_cards.{hpp,cpp}`) from
+  the field's SURFACE cells (a solid cell with a non-solid neighbour) whose
+  material grows fur — **21 `fleece`**; the vase and the urn (20 plaster) grow
+  nothing. Six cards per surface cell, 26 mm long, 4.5 mm wide, tilted 12–38°
+  out of the surface, groomed down it, each with a CURL. The alpaca:
+  **122 772 cards, 15.7 MB**, **~200 ms** at load. The cards live in the field's LOCAL frame, so the
+  layer's placement and the live rotation preview are applied by the shader
+  exactly as the micro overlay applies them to the field.
+- **The pass is a COMPUTE pass** (`shaders/fur_overlay.comp`,
+  `src/render/fur_pass.*`) that runs right after the micro overlay and
+  composites into the SAME HDR image. The G-buffer's world position is the
+  depth reference (a card behind the body or behind the world is dropped), so
+  it needs no depth attachment and touches no opaque pass. It is INERT when
+  no object carries fur: the dispatch is skipped and the frame is
+  byte-identical. `VF_FUR=0` is the escape hatch.
+- **Four things decide whether the coat reads at all**, and all four are
+  measured, not argued:
+  1. **The ribbon must be BILLBOARDED about the strand** (its width axis
+     perpendicular to the strand AND to the camera). A width axis taken from
+     the surface puts the ribbon in the tangent plane, so at the silhouette —
+     where the fuzz is most wanted — it is edge-on and vanishes. The
+     billboard left the changed-pixel count at 16 % of the near frame but
+     took its MEAN |diff| from 32 to 53, and the high-frequency noise from
+     18.4 to 15.4 (the bare body is 12.8).
+  2. **A card must never be thinner than ~1.5 px.** A sub-pixel card either
+     misses the pixel grid or lands on it whole, and the coat turns to
+     speckle; the card is widened to 1.5 px and its alpha scaled by the same
+     factor, so the ink is conserved. This alone took the high-frequency
+     noise from 20.9 to 19.0.
+  3. **The cards must be DENSE.** Two per cell left gaps (the coat was
+     sparse at close range).
+  4. **The strands must be CURLY, and the amplitude is measured against the
+     clump's WIDTH, not its length.** The centre line wanders across the
+     ribbon's plane in a wave that is zero at the root (where the strand is
+     anchored) and grows toward the tip; the ribbon's PLANE is unchanged, so
+     it costs one sine and the ray/plane intersection stays exact.
+     **The first attempt got the attribution wrong, and the NEGATIVE
+     CONTROL caught it.** A sweep that varied the curl, the width, the
+     density and the length together said the curl had taken the coat's
+     high-frequency metric from 16.1 to 12.7 — but re-rendering with ONLY
+     the curl removed changed it by 0.03. The win belonged to the DENSITY
+     and the WIDTH. And the direction was backwards: a big curl (0.45) makes
+     the coat **BLURRIER**, not softer, because a wave that wanders many
+     clump-widths sideways smears the strand's ink over a band (the metric
+     fell to 12.70, BELOW the bare body's 13.48 — the coat read as a haze).
+     The measured default is an amplitude of **0.20** (about two clump
+     widths): the coat's detail is 14.76 against the body's 13.48 — the
+     strands are READABLE — and its luma spread 36.98 against the body's
+     28.82, so the fleece's texture still shows.
+- **The strand's direction was a BUG, and it is what the "spikes" were.**
+  The obvious spelling — `groom*cos(spin) + t2*sin(spin)` — is not a
+  rotation unless the groom happens to lie along t1, and the groom is the
+  projection of "down", so it generally does not. The length then varied
+  with the spin, and at the spin where the two terms cancel the direction
+  was pure numerical noise: the card degenerated into a **spoke pointing
+  straight out of the surface** (measured: the strand's angle to the normal
+  ranged 8.6°–89.8° instead of the intended 12°–38°). Expressing the groom
+  in the surface's tangent frame and rotating THAT keeps the length at one.
+- **The coat is configurable in the GUI**: the Rendering section carries its
+  SHAPE (density, strand length, clump width, curl amplitude and cycles, and
+  how far a strand stands off the surface) and the Textures section carries
+  the **material** that wears it (a coat is a property of the material, not
+  of the object). The sliders REBUILD the coat — the cards are a CPU
+  product, a few hundred milliseconds — and they apply on RELEASE, not per
+  tick. A rebuild keeps the live preview: the Move offset and the rotation
+  pose live on the fur objects, so a coat rebuilt mid-drag does not drop
+  the drag.
+- **The alpha is a Gaussian across the width** — the same kernel shape the
+  splat backend uses, but on a sliver instead of a disk, so the edges are
+  transparent rather than a hard rim. The accumulation is the standard
+  many-layer approximation `1 - exp(-Σα)`, which is exact for the small
+  alphas a coat is made of, and the coverage composites the fur OVER the
+  body. The card record is 96 B, six vec4s (the sixth is the curl).
+- **The meadow got the same treatment**: a grass blade whose centre line is
+  straight and whose width tapers to a point reads as a spike, so the blade
+  now arches (quadratic, the bend growing toward the tip), keeps much more
+  of its width, and fades over the last fifth instead of the last tenth.
+- **The texture is sampled PER CARD**, not once per pixel: the fleece's
+  clumps are centimetres across, and one flat colour for the whole pixel
+  reads as washed-out plastic. The sky ambient is evaluated ONCE per pixel
+  (the sun term is the cards' average) — evaluating the sky per card costs a
+  sky evaluation per card hit, and a pixel through the coat hits a dozen.
+- Gate: `tests/fur_check.py` (the `fur` group) measures the noise floor
+  first, then the signal (the alpaca's pixels must change), the
+  **confinement** (the change must be a compact blob, and the house view must
+  be untouched), the **shape** (the coat must be at least as SMOOTH as the
+  body under it — a straight, spiky coat concentrates its ink in narrow
+  streaks, and a narrow streak IS high-frequency energy, so a spiky coat
+  reads as crunchier than the body it covers; a curled one does not, and
+  with the curl removed this check fails), the **backend-independence** (the
+  SVO reference must show it too) and the **escape hatch** (`VF_FUR=0` must
+  load no fur object and render the same frame). `tests/test_micro.cpp`
+  gains five cases: only a fur material grows a coat, the roots sit ON the
+  surface while the strands point OUT of it (and their angle to the normal
+  stays inside the requested range — the check the degenerate direction
+  failed), two builds of the same field yield the same cards, and every
+  card is filed in a cell that holds it.
 
 ## Shaders — data-only rule
 - `shaders/svo_raymarch.comp` is the SVO reference shader (+`taa_resolve.comp`,

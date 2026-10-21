@@ -29,6 +29,11 @@ are reproducible rather than remembered:
   5. NO WORLD REGRESSION - the house view must be pixel-identical with the
      micro layers on and off. The overlay must not be able to touch the 0.1 m
      path.
+  6. SELECTABLE - a micro object lives outside the world's store, so the
+     pointer needs a pick of its own. The app's own pick path is exercised
+     headlessly (VF_TEST_MICRO_PICK), because a pick that silently misses is
+     invisible in a screenshot: the object renders perfectly and cannot be
+     clicked.
 
 SCOPE: this gate covers the VISIBLE outcome. It does NOT cover the SDF's
 quantisation - measured: with the whole-voxel encoding restored, this gate
@@ -45,10 +50,12 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import statistics
 import subprocess
 import sys
 import tempfile
+import time
 
 # The repo root, so the script works from the build directory too (ctest runs
 # there) and not only from the source root.
@@ -75,13 +82,15 @@ def note(ok: bool, msg: str) -> None:
 
 
 def render(out: str, cam: str, w: int = W, h: int = H, mode: str = "",
-           flags: str = "") -> None:
+           flags: str = "", extra_env: dict | None = None) -> None:
     cmd = [APP, "--shot", out, "--cam", cam, "--width", str(w), "--height", str(h)]
     if mode:
         cmd += ["--mode", mode]
     env = os.environ.copy()
     if flags:
         env["VF_RENDER_FLAGS"] = flags
+    if extra_env:
+        env.update(extra_env)
     subprocess.run(
         cmd,
         check=True,
@@ -151,23 +160,49 @@ def save_micro() -> None:
 
 
 def restore_micro() -> None:
-    """Put the manifest back exactly as it was found."""
+    """Put the manifest back exactly as it was found.
+
+    The app REWRITES world.json from its own layer list (AGENTS.md: "the app
+    overwrites assets/world.json from its own layer list"), so a write can
+    land after the gate's restore and leave the shipped scene with the micro
+    layers disabled. Measured 2026-10-21: the gate left all three micro
+    layers off, and `git diff assets/` was not empty afterwards. So the
+    restore VERIFIES and retries - a restore that reports success while the
+    file disagrees is worse than one that says it failed.
+    """
     if not _MICRO_SAVED:
         return
-    with open(MANIFEST) as f:
-        doc = json.load(f)
-    saved = {name: (enabled, rot) for name, enabled, rot in _MICRO_SAVED}
-    for layer in doc["layers"]:
-        if layer.get("role") != "micro":
-            continue
-        entry = saved.get(layer.get("file", ""))
-        if entry:
-            layer["enabled"] = entry[0]
-            layer["rot"] = entry[1]
-        # A key the gate may have introduced (an older run wrote "rotDeg")
-        # would otherwise survive into the shipped manifest.
-        layer.pop("rotDeg", None)
-    _write_manifest(doc)
+    for attempt in range(4):
+        with open(MANIFEST) as f:
+            doc = json.load(f)
+        saved = {name: (enabled, rot) for name, enabled, rot in _MICRO_SAVED}
+        for layer in doc["layers"]:
+            if layer.get("role") != "micro":
+                continue
+            entry = saved.get(layer.get("file", ""))
+            if entry:
+                layer["enabled"] = entry[0]
+                layer["rot"] = entry[1]
+            # A key the gate may have introduced (an older run wrote "rotDeg")
+            # would otherwise survive into the shipped manifest.
+            layer.pop("rotDeg", None)
+        _write_manifest(doc)
+        # Verify: re-read and compare the values we care about.
+        with open(MANIFEST) as f:
+            check = json.load(f)
+        ok = True
+        for layer in check["layers"]:
+            if layer.get("role") != "micro":
+                continue
+            entry = saved.get(layer.get("file", ""))
+            if entry and (layer.get("enabled", True) != entry[0]
+                          or float(layer.get("rot", 0.0)) != entry[1]):
+                ok = False
+        if ok:
+            return
+        time.sleep(0.4)
+    print("FAIL: the manifest's micro layers could not be restored - "
+          "check `git diff assets/world.json`")
 
 
 def differing(a: bytes, b: bytes, thr: int = 16) -> list[int]:
@@ -293,8 +328,6 @@ def main() -> int:
             cwd=ROOT, env=os.environ.copy(), capture_output=True, text=True,
             check=True,
         )
-        import re
-
         m = re.search(r"micro cast shadow darkened (\d+) surfel", proc.stdout + proc.stderr)
         note(
             m is not None and int(m.group(1)) >= 5,
@@ -396,7 +429,104 @@ def main() -> int:
                 % (s0[3], s90[3]),
             )
 
-        # 5. NO WORLD REGRESSION: the house view is untouched.
+        # 5. SELECTABLE. A micro object is NOT in the world's store - it is a
+        #    separate SVO world on its own fine lattice - so the pointer needs
+        #    a pick of its own, and that pick is invisible in a screenshot.
+        #    The bug this pins: the field's CPU sampler returned 0 outside
+        #    the field's grid, so the pick's sphere-trace stepped 0 and
+        #    crawled at its minimum step - it covered ~0.6 m in its whole
+        #    budget and never reached an object 15 m away. The alpaca
+        #    rendered perfectly and could not be clicked.
+        #    The app's OWN pick path (pickMicroObjects) is exercised
+        #    headlessly by VF_TEST_MICRO_PICK - no mouse, no synthetic
+        #    input, the same call the pointer makes.
+        print("[micro] checking that the micro objects are selectable ...")
+        set_micro({"micro/vase.vxw": True, "micro/urn.vxw": True,
+                   "micro/alpaca.vxw": True})
+        pick_env = os.environ.copy()
+        pick_env["VF_TEST_MICRO_PICK"] = "1"
+        pick_env["VF_OVERLAY_PATH"] = os.path.join(tmpdir, "overlay.vxw")
+        proc = subprocess.run(
+            [APP, "--shot", os.path.join(tmpdir, "pick.ppm"), "--cam", MICRO_CAM,
+             "--width", "320", "--height", "200"],
+            cwd=ROOT, env=pick_env, capture_output=True, text=True, check=True,
+        )
+        m = re.search(r"VF_TEST_MICRO_PICK: (\d+)/(\d+) micro objects selectable",
+                      proc.stdout + proc.stderr)
+        note(
+            m is not None and int(m.group(2)) >= 1
+            and int(m.group(1)) == int(m.group(2)),
+            "the micro objects are selectable (%s)"
+            % (m.group(0) if m else "no report at all"),
+        )
+
+        # 5b. LIVE ROTATION. A micro object has no world owner id, so the
+        #     splat pass's rotate preview (which is keyed by exactly that id)
+        #     cannot show it - the micro pass holds its own live rotation, in
+        #     which the field stays in the baked frame and the RENDERED
+        #     position is rotated out of it. The preview must turn the object
+        #     on screen, and it must be a PREVIEW: the manifest is not
+        #     written (the gate restores it either way, but a preview that
+        #     committed would change the scene under the next check).
+        print("[micro] checking the live rotation preview ...")
+        rot_on = os.path.join(tmpdir, "rot_preview_on.ppm")
+        rot_off = os.path.join(tmpdir, "rot_preview_off.ppm")
+        rot_bg = os.path.join(tmpdir, "rot_preview_bg.ppm")
+        set_micro({"micro/vase.vxw": False, "micro/urn.vxw": False,
+                   "micro/alpaca.vxw": True})
+        render(rot_off, ALPACA_CAM, 600, 600)
+        render(rot_on, ALPACA_CAM, 600, 600,
+               extra_env={"VF_TEST_ROTATE_LIVE": "90,0,0",
+                          "VF_ROTATE_LAYER": "micro/alpaca.vxw"})
+        set_micro({"micro/vase.vxw": False, "micro/urn.vxw": False,
+                   "micro/alpaca.vxw": False})
+        render(rot_bg, ALPACA_CAM, 600, 600)
+        _, _, ra = read_ppm(rot_on)
+        _, _, rb = read_ppm(rot_off)
+        _, _, rbg = read_ppm(rot_bg)
+        rpx = differing(ra, rb, 14)
+        note(
+            len(rpx) > 500,
+            "the micro object turns in the live preview (%d px changed)" % len(rpx),
+        )
+        # The object must still be THERE: a preview that rotated the geometry
+        # out of the frame would also "change" many pixels.
+        still = differing(ra, rbg, 14)
+        note(
+            len(still) > 100,
+            "the alpaca is still on screen in the preview (%d px)" % len(still),
+        )
+
+        # 5c. THE INTERACTIVE PATH. The Ctrl+LMB pick and the plain click that
+        #     activates an object are TWO different code paths, and the gates
+        #     around them (the text-field gate, the mouse capture, the armed
+        #     tool) had never been exercised by anything: the earlier hooks
+        #     proved the micro march in isolation, so a selection that failed
+        #     in the app could still pass the gate.
+        #     VF_TEST_CLICK_SCAN drives the REAL input path with an injected
+        #     pointer - no mouse, no synthetic input.
+        print("[micro] checking the interactive selection path ...")
+        # The micro layers must be ON: the rotation check above leaves them
+        # off (it measures the alpaca against a background), and a scan over
+        # an empty scene finds nothing to click.
+        set_micro({"micro/vase.vxw": True, "micro/urn.vxw": True,
+                   "micro/alpaca.vxw": True})
+        click_env = os.environ.copy()
+        click_env["VF_TEST_CLICK_SCAN"] = "1"
+        click_env["VF_OVERLAY_PATH"] = os.path.join(tmpdir, "overlay.vxw")
+        proc = subprocess.run(
+            [APP, "--smoke", "240", "--width", "900", "--height", "600"],
+            cwd=ROOT, env=click_env, capture_output=True, text=True, check=True,
+        )
+        out = proc.stdout + proc.stderr
+        picked = len(re.findall(r"pick selected .* layer micro/", out))
+        activated = len(re.findall(r"rotate: activated micro/", out))
+        note(picked > 0,
+             "the Ctrl+LMB pick selects a micro object (%d picks)" % picked)
+        note(activated > 0,
+             "a plain click activates a micro object (%d activations)" % activated)
+
+        # 6. NO WORLD REGRESSION: the house view is untouched.
         print("[micro] rendering the house view (no micro object in it) ...")
         house_on = os.path.join(tmpdir, "house_on.ppm")
         house_off = os.path.join(tmpdir, "house_off.ppm")

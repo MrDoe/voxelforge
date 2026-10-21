@@ -19,7 +19,11 @@ namespace app {
 
 bool App::initWindow(const Args& args)
 {
-    return m_window.init(args.width, args.height, "Voxelforge");
+    // Automated runs render offscreen and never present, so their window is
+    // created unmapped: it cannot take focus or the pointer while it renders.
+    const bool headless = !args.shot.empty() || !args.shots.empty() || args.selftest ||
+                          args.smokeFrames > 0;
+    return m_window.init(args.width, args.height, "Voxelforge", !headless);
 }
 
 void App::ensureAcquireSemaphores()
@@ -89,6 +93,7 @@ bool App::createOffscreen(uint32_t w, uint32_t h)
     // views to freed images and every write lands nowhere. This is why the
     // magenta-diagnostic dispatch produced no pixels at all.
     m_microSvoPass.updateDescriptors(m_hdr, m_gpos, m_gnorm);
+    m_furPass.updateDescriptors(m_hdr, m_gpos);
     m_splatPass.updateDescriptors(m_hdr.view, m_gpos.view, m_gnorm.view,
                                   m_heightImg.view, m_objVolImg.view);
     m_postPass.updateDescriptors(m_hdr.view, m_gpos.view, m_offscreen.view);
@@ -182,6 +187,7 @@ void App::uploadLightSources()
     m_svoPass.setLights(ubo);
     m_splatPass.setLights(ubo);
     m_microSvoPass.setLights(ubo);
+    m_furPass.setLights(ubo);
     if (n > 0)
         spdlog::info("lighting: {} authored (world.json), {} derived from emissive "
                      "materials, {}/{} budget used, K={}",
@@ -276,6 +282,15 @@ bool App::initVulkan()
     m_microSvoPass.updateDescriptors(m_hdr, m_gpos, m_gnorm);
     m_microSvoPass.setHeightmapView(m_heightImg.view);
     m_microSvoPass.setObjVolumeView(m_objVolImg.view);
+    // The FUR pass: the translucent hair-card layer over the micro objects.
+    // It follows the micro overlay and composites into the same HDR image, so
+    // it has to be initialised before the micro objects are loaded (the
+    // cards are uploaded to it).
+    if (!m_furPass.init(m_ctx))
+        return false;
+    m_furPass.updateDescriptors(m_hdr, m_gpos);
+    m_furPass.setHeightmapView(m_heightImg.view);
+    m_furPass.setObjVolumeView(m_objVolImg.view);
     // Load the separate micro SVO worlds now that the pass and its shared
     // resources exist. Independent of the world bake above: these objects are
     // never part of the world record set.
@@ -300,6 +315,8 @@ bool App::initVulkan()
                           m_texAtlas.tableUbo());
     m_microSvoPass.setTexAtlas(m_texAtlas.view(), m_texAtlas.sampler(),
                                m_texAtlas.tableUbo());
+    m_furPass.setTexAtlas(m_texAtlas.view(), m_texAtlas.sampler(),
+                          m_texAtlas.tableUbo());
     // seed the GUI picker from the manifest + whatever is on disk
     vf::voxel::worldfile::loadTextureManifest(m_manifestPath, m_texBindings);
     rescanTextureFiles();

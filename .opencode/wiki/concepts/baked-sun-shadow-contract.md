@@ -159,6 +159,41 @@ The binding constraint on any splat sun march is field resolution, not taps:
 carries no information at all. Do not use it for shading normals, and do not
 expect a contact shadow from it.
 
+## The packed word also carries the baked SKY verdict (2026-10-21)
+
+`bent_sh.w` is no longer just the shadow: it packs **two** baked fields,
+`w = shadow + 2*sky`, where `sky` is the exact per-surfel open-sky verdict
+(0/1) the CPU bake resolves against the records field.
+
+Three landmines, all of them silent:
+
+- **The object branch is mandatory.** Terrain and water leave the sky bit 0
+  and keep `w = shadow` (< 1.5), so a bare `step(1.5, w)` would read every
+  terrain surfel as *enclosed*. The decode is
+  `surfelBakedShadow(p) = p - 2*step(1.5, p)` and
+  `surfelBakedSky(p) = step(1.5, p)`, and the shader asks for the sky bit
+  only when `surfelIsObject(packedAo)` - the terrain keeps the GPU's
+  `skyVisibilitySplat` march (a terrain point under a canopy really is
+  occluded, and the coarse object volume answers that case the way the SVO
+  does).
+- **Two writers, one contract.** The bake and the live-store path
+  (`shadeCandidates`) must pack the same way, or a live-rebuilt disk would
+  decode with a different sky verdict than its neighbours and the brush would
+  draw a hard shading seam. The pack happens AFTER the shadow smoothing
+  pass: averaging the packed word over face neighbours would mix two
+  unrelated quantities and corrupt both.
+- **Always decode before reading a shadow.** The packed value reaches 3, so
+  every reader of `vShade.w` / `s.bent_sh.w` as a shadow has to go through
+  `surfelBakedShadow` first - the two call sites of `shadeSurfel` and the
+  `dbg > 7.5` debug view included.
+
+Why it exists: the splat backend decided "enclosed?" by marching the coarse
+0.4 m object volume, which smears a sparse tree canopy into a roof and lit
+it as a sealed room (daylight ambient scaled to 0.16, IBL to 0.04) - the SVO
+backend marches the exact geometry and says "open sky". See
+[[concepts/splat-canopy-parity]] for the measurement and for what the term
+is worth.
+
 Cross-links: [[concepts/dynamic-sun-shadows]], [[concepts/sun-direction-pipeline]],
 [[concepts/enclosed-space-lighting]], [[concepts/live-edit-surfel-parity]],
 [[concepts/detail-pipeline]], [[concepts/measurement-discipline]].

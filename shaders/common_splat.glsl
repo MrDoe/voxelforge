@@ -155,7 +155,8 @@ vec3 splatHeightNormal(vec3 p)
 // the CPU from the exact oracle (zero march cost per fragment); the flora
 // shadow re-evaluation reuses the baked value.
 vec3 shadeSurfel(vec3 p, vec3 rd, vec3 alb, vec2 rr, vec3 ro, vec3 n,
-                 vec3 bent, float sh, float ao, uint mId, float shRaw)
+                 vec3 bent, float sh, float ao, uint mId, float shRaw,
+                 float packedAo)
 {
     alb = detailAlbedo(alb, p, n, mId);
     n = detailNormal(n, p, mId);
@@ -166,8 +167,27 @@ vec3 shadeSurfel(vec3 p, vec3 rd, vec3 alb, vec2 rr, vec3 ro, vec3 n,
     // Daylight ambient is scaled down hard in enclosed space, and a dim,
     // albedo-scaled fill replaces it so cave rock stays readable instead of
     // collapsing to black (authored lights add on top of that).
-    float enclosed = 1.0 - ((gRenderFlags & 256) != 0
-                            ? skyVisibilitySPlat(p, bent) : 1.0);
+    // Object disks carry the exact baked sky verdict: the 0.4 m object volume
+    // smeared a sparse canopy into a roof and lit it as a sealed room. Terrain
+    // keeps the GPU march - a terrain point under a canopy really is occluded,
+    // and the coarse volume answers that case the way the SVO does.
+    //
+    // "Never darker" union: the two tests fail in OPPOSITE directions. The
+    // coarse volume over-occludes a sparse canopy (it calls open sky a roof),
+    // and the per-surfel exact test over-occludes the narrow-bent sheltered
+    // spots (a porch under an eave). The splat's soft look wants the UNION:
+    // a disk counts as open when EITHER test sees sky, so the bake can only
+    // BRIGHTEN the baseline and can never push a surface further into
+    // enclosure than the volume did. Measured: the exact test alone takes
+    // the house shot's black-in-silhouette from 4.91% over the 5% gate to
+    // 5.66% (the sheltered spots it newly encloses), and the union keeps
+    // the house at its baseline while still rescuing the 44% of object disks
+    // the volume wrongly sealed. The cost is that the per-fragment march
+    // stays for object disks (the perf win of skipping it is given up).
+    const float skyOpen = surfelIsObject(packedAo)
+        ? max(surfelBakedSky(shRaw), skyVisibilitySPlat(p, bent))
+        : skyVisibilitySPlat(p, bent);
+    float enclosed = 1.0 - ((gRenderFlags & 256) != 0 ? skyOpen : 1.0);
     // A carve brush cuts the cave out of TERRAIN, which the object volume
     // cannot see. The baked sun shadow does know about it, so use it here -
     // but the RAW one: the caller gates `sh` to 1.0 whenever the surfel faces
@@ -175,10 +195,21 @@ vec3 shadeSurfel(vec3 p, vec3 rd, vec3 alb, vec2 rr, vec3 ro, vec3 n,
     // almost every wall of a cave, which silently pinned this product to 0.
     // Measured: a carved interior rendered 45.26 mean luma with enclosure ON
     // and 45.84 with it OFF, because `sh` was 1 exactly where it was needed.
-    enclosed = max(enclosed, aoShEnclosure(ao, shRaw));
+    enclosed = max(enclosed, aoShEnclosure(ao, surfelBakedShadow(shRaw)));
     float skyAmb = mix(1.0, 0.16, enclosed);
     float skyIbl = mix(1.0, 0.04, enclosed);
 
+    // DEAD END, measured 2026-10-21: the ambient direction was tried with
+    // the GEOMETRIC normal instead of the baked bent normal (a foliage cell
+    // is one voxel thick, so the CPU aoBake's bent taps are dominated by the
+    // cell's own leaf and the baked bent points along the leaf, into the
+    // canopy, where the SVO's per-pixel sdfAO at the exact face sees open
+    // sky). It barely moves the tree view's near-black mask: 21,784 ->
+    // 21,161 px at the default flags and 11,258 -> 10,965 px with the
+    // enclosure and the sun shadow both off, and the luma at the mask does
+    // not move at all (19.9 / 21.1). The baked bent is therefore NOT the
+    // surviving dark term, and the two backends' twins must stay
+    // textually identical, so the bent stays.
     vec3 amb = skyIrradiance(bent) * (0.28 + 0.30 * ao) * skyAmb;
     // Moon takes over from the sun at night; scaled by skyAmb so a cave still
     // gets almost none of it (the lamp inside is what should read).

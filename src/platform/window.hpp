@@ -8,7 +8,7 @@ namespace vf {
 
 class Window {
 public:
-    bool init(int width, int height, const std::string& title);
+    bool init(int width, int height, const std::string& title, bool visible = true);
     void shutdown();
     void pollEvents();
     void waitEvents();

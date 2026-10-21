@@ -237,8 +237,72 @@ A drop-in fur is gated by `tools/check_texture.py --material fleece` (the
 are indistinguishable to every other check, so the gate measures the luma
 spread of the alpaca's own pixels.
 
-## Live movement: a micro layer can be moved and turned
+## A micro object is PICKABLE (and the frame bug that made it invisible)
 
+The app's pick path marches the **world's** store, which by design holds no
+micro cells (they are separate SVO worlds on their own fine lattice). A micro
+object was therefore invisible to the pointer: clicking it selected nothing, and
+the Move mode refused it because it has no world owner id.
+
+`pickMicroField` is the missing half — a sphere-trace of the micro field in
+world space, with the hit bisected to the field's zero crossing. Two frame
+mistakes of mine, both invisible in a screenshot and obvious in the field
+profile:
+
+- the local point was offset **twice** — the field's own origin is applied
+  *inside* `sampleSdf`, so subtracting it as well offset the sample twice and
+  the ray missed the object by the whole margin;
+- the bisection bracket was a fixed step back instead of the **previous
+  sample**: the march can step `0.85·d`, which is far more than the minimum
+  step, and a bracket that does not contain the crossing makes the hit land
+  cells *inside* the object.
+
+**The frame bug that matters most**: `m_hoverHit.voxel` is a **world-lattice**
+coordinate — the brush, the box selection and `describeSurfelsAt` all index the
+world with it. A micro object lives on its own lattice, so writing its cell
+index there sends every one of them to the wrong place *and to the wrong
+chunk*. The pick now stores the world cell under the hit
+(`worldToVoxel(mp.pos)`) and names the object by its manifest file
+(`PickHit::microFile`), since a micro object has no world owner id.
+
+### The pick still missed: the CPU sampler had no out-of-grid fallback
+
+With the wiring right, the pick *still* never hit anything — and this is the
+part worth remembering, because **every layer of it looked correct** and a
+screenshot could never show it.
+
+`MicroField::sampleSdf` is a trilinear sample of the dense field. Outside the
+field's grid there is no cell in range, the accumulator stays at **0**, and the
+sampler returns 0. A sphere tracer that reads 0 **steps 0**: the pick march
+collapsed to its minimum step (a quarter of the object's own voxel) and
+covered about **0.6 m** in its entire 512-step budget. The camera is 15 m from
+the shore, so the ray never arrived. Measured: **0 of 81 rays** hit the real
+alpaca — while the AABB test passed on every one of them, because the *box*
+was found and the *field* was not.
+
+The GPU never had this bug: `microMapWorld` in `shaders/micro_overlay.comp`
+falls back to **the true distance to the world's box** outside it, precisely
+because a flat constant is fatal for a sphere tracer (the shader says so in a
+comment). The CPU sampler had no such branch. The fix mirrors the shader
+exactly — outside the grid, return the distance to the grid box, with a floor
+so the step stays positive on the face. The box *contains* the object, so the
+box distance is a lower bound on the object distance and `0.85 ×` it is a safe
+step.
+
+**Why the unit test did not catch it**: the pick test cast its ray from
+**0.30 m** away. The crawl reaches 0.6 m, so it *arrived* and the test passed.
+The app's camera is 15 m away, so it did not. The regression test now casts
+from **15 m** — the real distance — and pins the out-of-grid distance as
+positive and growing.
+
+**How it is verified without a mouse**: `VF_TEST_MICRO_PICK=1` makes the app
+run *its own* `pickMicroObjects` from the camera toward every micro object and
+report the result (`3/3 micro objects selectable`). It is a headless hook, so
+the check needs no pointer and cannot disturb a user's cursor — and it
+exercises the real path (the occluder list, the AABB, the field), not a
+re-implementation. `tests/micro_check.py` asserts it.
+
+## Live movement: a micro layer can be moved and turned
 A micro layer's `pos` is the world position of the object's **min corner** (a
 world layer's `pos` is a lattice offset instead), and `rot`/`rotX`/`rotZ` spin
 the object about its **bottom-centre pivot** — the same pivot the world uses,
@@ -281,12 +345,104 @@ a world x/z, so it measures nothing at all. It takes two views — from above
 for the footprint's aspect, from the side for the base row — to measure both
 halves of the contract.
 
+### A micro object is manipulable with the MOUSE (three gates that refused it)
+
+The panel's inspector was not enough: the object had to be draggable and
+turnable with the pointer, like any other object in the scene. Three gates
+refused it, and all three refused it for the same reason — **a micro object
+has no world owner id**, and the world's code asks for that id to decide
+whether a layer is real:
+
+| gate | what it asked | the fix |
+|---|---|---|
+| the plain click that activates an object | `m_layers.layerId(picked) != 0` | also accept `isMicroLayer(picked)` |
+| the Move axis handles | `layerId != 0` | also accept a micro layer — the bounds already came from `layerBounds()`, which is micro-aware |
+| the Rotate trackball | `m_layers.layerBox()` (the *world* box — empty for a micro layer) **and** `layerId != 0` | use `layerBounds()` and accept a micro layer |
+
+The activation gate is the one the user notices: with it closed, a plain click
+on the alpaca selected **nothing at all** — no trackball, no owner, and the
+Move mode had no handles to grab.
+
+**The rotation's pivot** also had to become micro-aware (`App::layerPivotWorld`):
+the world's `layerPivot` cannot know a layer that is not in the merged world.
+The micro pivot is the bottom-centre of the object's **records** — the field's
+grid starts `kMicroMarginCells` before the first cell, so the records' min
+corner is the grid's origin plus the margin, and the records' extent is the
+grid's extent minus it. Same convention as the world (centre in x/z, base in
+y), so "yaw about the base" means the same thing for both.
+
+### The live rotation preview lives in the MICRO pass
+
+The splat pass's rotate preview is keyed by the world owner id
+(`surfelBelongsToLayer` refuses id 0), so it cannot show a micro object: a
+micro layer has no owner id, so the preview matched **nothing** and the object
+sat still while the ring turned.
+
+The micro pass therefore carries its own: the world table's row gains a
+rotation matrix and a pivot, and the shader applies it **in the field's
+frame**. The trick that keeps the change small: the rotation is applied at the
+**one place the field is sampled** — `microMapWorld` maps the world point
+into the object's baked frame, reads the field there, and returns a distance
+in the world frame (a rotation preserves distances, so the value needs no
+correction and the trace's step stays conservative). Everything downstream —
+the union field, the gradient (and so the normal), the AO, the self-shadow —
+then works in the world frame and needed **no change at all**. Only the
+material lookup had to be told, because the octree descent and the cell that
+owns the surface live in the baked frame.
+
+The matrix is the app's own: the **old pose to the new pose**, about the same
+pivot, exactly like the splat pass's preview. The shader applies its
+transpose to go the other way (world → baked).
+
+**Verified headlessly**: `VF_TEST_ROTATE_LIVE="90,0,0"` with
+`VF_ROTATE_LAYER=micro/alpaca.vxw` turns the alpaca on screen without
+writing the manifest, and `tests/micro_check.py` measures it (the preview
+changes the frame, and the object is still there).
+
+### The crash that never reproduced: what ASAN ruled out
+
+The user's session died with **"double free or corruption (out)"** right after
+`edit mode -> move (disarmed)` — a heap corruption, and a heap corruption is
+never "just a rendering bug". One real bug of mine could produce exactly that
+signature: `m_hoverHit.voxel` is a **world-lattice** cell, and a micro
+object's cell index (a 5 mm lattice) written there sends the brush, the box
+selection and `describeSurfelsAt` to the wrong chunk with a wildly out-of-range
+index. That is fixed ✓ — but it was never *proven* to be the crash, and
+"probably" is not a diagnosis.
+
+So the ASAN build (`/tmp/opencode/asan`, `-fsanitize=address`) drove the paths
+that can be driven **without a mouse** (the user asked for that, and it is
+also the only way to test a headlessly):
+
+| path under ASAN | result |
+|---|---|
+| the pick toward all three micro objects (`VF_TEST_MICRO_PICK=1`) | clean |
+| the Move preview on the alpaca and on the vase (`VF_TEST_MOVE_LIVE=...,micro/...`) | clean |
+| the Rotate preview on the alpaca (`VF_TEST_ROTATE_LIVE` + `VF_ROTATE_LAYER`) | clean |
+| the Move preview **and** a bounding-box selection together | clean |
+| a **world reload** → the micro objects re-baked and the occluder list re-pointed at them | clean |
+
+The reload case is the one that matters most and the one that was hardest to
+reach: the app polls the **layer files'** mtimes (not the manifest), the
+micro layers are not in the merged world, so touching `micro/alpaca.vxw` does
+nothing — a **world** layer's mtime has to change, **while the app runs**
+(the initial load records the signatures, so a file touched before the start
+is already in them). `VF_SYNC_RELOAD=1` makes the rebuild inline so it lands
+inside the measured window.
+
+**What is left**: the interactive path — the real Ctrl+LMB click, the panel's
+Move button, the trackball drag — cannot be driven without taking the user's
+mouse. So the honest status is *not reproduced*, with the plausible suspects
+that could be reached all clean. The one bug of mine that would produce that
+signature is fixed, and the fix is pinned by the world-lattice rule above.
+
 ## Verification
 
 | check | result |
 |---|---|
-| `test_micro.cpp` (10 cases) | pass — incl. a negative control for the continuity check and the cast-shadow verdict |
-| `micro_check.py` (11 checks) | pass — visibility, material, silhouette, micro-to-micro shadow, RECEIVE, CAST, alpaca visible, fleece texture, world untouched, SVO backend |
+| `test_micro.cpp` (13 cases) | pass — incl. a negative control for the continuity check, the cast-shadow verdict, and the **15 m pick** that the 0.30 m one missed |
+| `micro_check.py` (16 checks) | pass — visibility, material, silhouette, micro-to-micro shadow, RECEIVE, CAST, alpaca visible, fleece texture, **selectable**, **live rotation preview**, world untouched, SVO backend |
+| `VF_TEST_MICRO_PICK=1` (headless) | **3/3** micro objects selectable through the app's own `pickMicroObjects` |
 | `test-unit` group | 8/8 pass |
 | `visual_check.py` | only the pre-existing `house: sky probe not blue-dominant` failure; every other metric is **bit-identical** to before the micro layers existed (coverage 70.8 / 94.6 / 96.2 %), because the objects are not in those views |
 | `live_edit_check.py` | exactly the documented pre-existing baseline: 3× `object_smooth` + 1× `object undo`, same 11002/11008 numbers — no regression |

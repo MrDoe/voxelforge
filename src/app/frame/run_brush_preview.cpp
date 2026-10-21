@@ -49,9 +49,14 @@ void App::updateBrushPreview()
         m_gizmoValid = false;
         if (m_editActive && m_editBrush == EditBrush::Move &&
             !m_moveLayer.empty()) {
-            const uint8_t layerId = m_layers.layerId(m_moveLayer);
+            // layerBounds() knows about MICRO layers (their box comes from
+            // their own fine lattice), but a micro object has no world owner
+            // id - it is a separate SVO world - so the id test alone would
+            // refuse it and the axis handles would never appear: the object
+            // could not be dragged with the mouse at all.
             const vf::voxel::WorldAABB b = layerBounds(m_moveLayer);
-            if (b.valid() && layerId != 0) {
+            if (b.valid() && (m_layers.layerId(m_moveLayer) != 0 ||
+                              isMicroLayer(m_moveLayer))) {
                 const glm::vec3 c = 0.5f * (b.lo + b.hi);
                 const glm::vec3 he = 0.5f * (b.hi - b.lo) + kBrushSkin;
                 vol = glm::vec4(c, 0.f);
@@ -88,9 +93,13 @@ void App::updateBrushPreview()
                    !m_rotateLayer.empty()) {
             // One click activates the owner; keep its full layer tinted
             // while the bounds-centered trackball remains available.
+            // layerBounds() (not m_layers.layerBox()) is what knows about a
+            // MICRO layer, and a micro object has no world owner id - so
+            // both tests have to be relaxed for it, or the trackball never
+            // appears and the Rotate mode does nothing at all.
             const uint8_t layerId = m_layers.layerId(m_rotateLayer);
-            const vf::voxel::WorldAABB b = m_layers.layerBox(m_rotateLayer);
-            if (b.valid() && layerId != 0) {
+            const vf::voxel::WorldAABB b = layerBounds(m_rotateLayer);
+            if (b.valid() && (layerId != 0 || isMicroLayer(m_rotateLayer))) {
                 const glm::vec3 c = 0.5f * (b.lo + b.hi);
                 const glm::vec3 he = 0.5f * (b.hi - b.lo) + kBrushSkin;
                 vol = glm::vec4(c, 0.f);
@@ -297,10 +306,19 @@ void App::updateBrushPreview()
     // highlight feeds: selected (strong) + hover (faint) -> shader UBO
     {
         glm::vec4 selFeed(0.f), hovFeed(0.f);
+        // A MICRO hit is not a world cell: its lattice is 5 mm and its world
+        // cell (the one the brush and the box selection index) can be a
+        // metre away from the surface - the outline would float in the air
+        // NEXT to the object, which reads as "nothing was selected". Feed
+        // the hit POINT for a micro object, so the box lands on it.
         if (m_hasSelection)
-            selFeed = glm::vec4(vf::voxel::voxelCenter(m_selectedHit.voxel), 1.f);
+            selFeed = m_selectedHit.microFile.empty()
+                ? glm::vec4(vf::voxel::voxelCenter(m_selectedHit.voxel), 1.f)
+                : glm::vec4(m_selectedHit.pos, 1.f);
         if (previewHit.hit)
-            hovFeed = glm::vec4(vf::voxel::voxelCenter(previewHit.voxel), 1.f);
+            hovFeed = previewHit.microFile.empty()
+                ? glm::vec4(vf::voxel::voxelCenter(previewHit.voxel), 1.f)
+                : glm::vec4(previewHit.pos, 1.f);
         m_postPass.setSelection(selFeed);
         m_postPass.setHover(hovFeed);
         // Bounding-box wireframe: the same cells the stamp and the tint use,

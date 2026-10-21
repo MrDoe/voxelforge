@@ -15,7 +15,9 @@
 #include "app/app.hpp"
 
 #include <algorithm>
+#include <chrono>
 #include <cmath>
+#include <cstdlib>
 #include <cstring>
 #include <spdlog/spdlog.h>
 
@@ -35,6 +37,10 @@ void App::loadMicroObjects()
         m_microSvoPass.setMicroWorlds({});
         m_microFields.clear();
         m_microOccluders.clear();
+        m_furObjects.clear();
+        m_furIndexOfMicro.clear();
+        m_furSourceField.clear();
+        m_furPass.setObjects({});
         return;
     }
     const std::string dir = std::filesystem::path(m_manifestPath).parent_path().string();
@@ -42,8 +48,16 @@ void App::loadMicroObjects()
     std::vector<glm::vec3> occluderOffsets;
     std::vector<std::string> occluderFiles;
     std::vector<vf::voxel::MicroWorld> worlds;
+    // VF_FUR=0 turns the fur off. It is the escape hatch: with the cards
+    // gone the pass never dispatches and the frame is byte-identical to the
+    // frame without the feature.
+    const bool furEnabled = getenv("VF_FUR") == nullptr || atoi(getenv("VF_FUR")) != 0;
+    int microWorldCount = 0;
     m_microFields.clear();
     m_microOccluders.clear();
+    m_furObjects.clear();
+    m_furIndexOfMicro.clear();
+    m_furSourceField.clear();
     // RESERVE before anything points into this vector. A push_back that
     // reallocates moves the fields, and every MicroOccluder::field pointer
     // would dangle - measured: the surfel bake's micro march read a garbage
@@ -119,11 +133,39 @@ void App::loadMicroObjects()
         m_microFields.push_back(field);
         occluderOffsets.push_back(offset);
         occluderFiles.push_back(l.file);
+        // The FUR CARDS. A micro object whose material grows fur (21,
+        // `fleece`) gets a coat of hair cards; the vase and the urn do not,
+        // and the fur pass stays empty for them.
+        //
+        // The cards are generated in the field's LOCAL frame, so the layer's
+        // world placement and the live rotation preview are applied by the
+        // shader exactly as the micro overlay applies them to the field -
+        // the fur and the body can never drift apart.
+        int furIndex = -1;
+        if (furEnabled && !world.chunkGrid.empty()) {
+            const auto t0 = std::chrono::steady_clock::now();
+            furIndex = growFurCards(field, offset);
+            if (furIndex >= 0) {
+                const size_t nCards = m_furObjects[size_t(furIndex)].cards.size();
+                const double ms = std::chrono::duration<double, std::milli>(
+                                      std::chrono::steady_clock::now() - t0)
+                                      .count();
+                spdlog::info("fur: '{}' -> {} cards ({:.1f} ms)", l.file, nCards, ms);
+            }
+        }
         spdlog::info("micro: '{}' -> {} voxels on a {:.3f} m lattice ({}x{}x{} cells), "
                      "gridN {}, {} bricks, {:.1f} KB",
                      l.file, data.voxels.size(), field.voxel, field.dim.x, field.dim.y,
                      field.dim.z, world.gridN, world.brickCount(),
                      double(world.bytes()) / 1024.0);
+        // The micro pass indexes the worlds it accepted (a world with an
+        // empty chunk grid is skipped), so the fur index mapping has to use
+        // the SAME count or the preview would land on the wrong object.
+        if (!world.chunkGrid.empty()) {
+            m_furIndexOfMicro.push_back(furIndex);
+            m_furSourceField.push_back(furIndex >= 0 ? int(m_microFields.size()) - 1 : -1);
+            ++microWorldCount;
+        }
         worlds.push_back(std::move(world));
     }
     // Second pass: NOW that no more fields can move, point the occluders at
@@ -138,6 +180,9 @@ void App::loadMicroObjects()
         m_microOccluders.push_back(oc);
     }
     m_microSvoPass.setMicroWorlds(worlds);
+    // The fur cards go up last: the pass needs the objects, and the preview
+    // mirroring needs the index mapping that was just built.
+    m_furPass.setObjects(m_furObjects);
 }
 
 App::MicroObjectPick
@@ -199,6 +244,109 @@ int App::microWorldIndex(const std::string& file) const
     return -1;
 }
 
+bool App::layerPivotWorld(const std::string& file, glm::vec3& pivot) const
+{
+    // A MICRO layer has no entry in the merged world, so the world pivot
+    // lookup cannot know it. Its pivot is the BOTTOM-CENTRE of its own
+    // records - the same convention the manifest's rotation uses (the
+    // centre in x/z, the base in y), so "yaw about the base" means the same
+    // thing for a micro object as for a world object.
+    if (!isMicroLayer(file))
+        return m_layers.layerPivot(file, pivot);
+    for (const vf::voxel::MicroOccluder& o : m_microOccluders) {
+        if (o.layerFile != file || !o.field)
+            continue;
+        // The field's grid starts kMicroMarginCells BEFORE the object's first
+        // cell, so the records' min corner is the grid's origin plus the
+        // margin, and the records' extent is the grid's extent minus it.
+        const float M = float(vf::voxel::kMicroMarginCells);
+        const glm::vec3 minCorner =
+            o.field->origin + o.worldOffset + glm::vec3(M) * o.field->voxel;
+        const glm::vec3 objDim = glm::vec3(o.field->dim) - 2.0f * M;
+        pivot = minCorner + glm::vec3(0.5f * objDim.x * o.field->voxel, 0.0f,
+                                      0.5f * objDim.z * o.field->voxel);
+        return true;
+    }
+    return false;
+}
+
+// Grow the fur cards for ONE micro field and append them to m_furObjects.
+// Returns the new object's fur index, or -1 when it grows no coat.
+//
+// The cards are a function of the field and the parameters, so this is the
+// only place that knows how to make one: the load and the rebuild (the
+// sidebar's sliders changed) share it.
+int App::growFurCards(const vf::voxel::MicroField& field, glm::vec3 worldOffset)
+{
+    if (!m_furEnabled)
+        return -1;
+    vf::voxel::FurParams fp;
+    fp.sunDir = glm::vec3(m_sunDir);
+    fp.perCell = m_furPerCell;
+    fp.length = m_furLength;
+    fp.width = m_furWidth;
+    fp.curlAmp = m_furCurl;
+    fp.curlCycles = m_furCycles;
+    fp.tiltMax = m_furTilt;
+    fp.tiltMin = std::min(12.0f, m_furTilt);
+    fp.materials = m_furMaterials;
+    vf::voxel::FurObject fo;
+    std::string ferr;
+    if (!vf::voxel::buildFurCards(field, fp, fo, &ferr))
+        return -1;
+    fo.worldMin = field.origin + worldOffset;
+    m_furObjects.push_back(std::move(fo));
+    return int(m_furObjects.size()) - 1;
+}
+
+// Re-grow every coat with the current parameters and upload it.
+//
+// The cards are a CPU product (a few hundred milliseconds for the alpaca),
+// so this is called when a slider is RELEASED, not per tick.
+void App::rebuildFurCards()
+{
+    if (!m_microSvoPass.empty() || !m_furObjects.empty() || !m_microFields.empty()) {
+        // The preview state lives on the fur objects, so it is carried over
+        // rather than lost: a coat rebuilt mid-drag must not drop the drag.
+        //
+        // It is carried over BY SOURCE, not by the coat's own index: the
+        // index SHIFTS when a material starts or stops growing fur (the
+        // Textures panel's per-material switch), and a shifted index would
+        // hand one object's preview to another.
+        const size_t nSrc = m_microFields.size();
+        std::vector<glm::vec3> prevOffset(nSrc);
+        std::vector<glm::mat3> prevRot(nSrc);
+        std::vector<glm::vec3> prevPivot(nSrc);
+        std::vector<char> prevOffsetOn(nSrc, 0), prevRotOn(nSrc, 0);
+        for (size_t i = 0; i < m_furObjects.size(); ++i) {
+            const int src = (i < m_furSourceField.size()) ? m_furSourceField[i] : -1;
+            if (src < 0 || src >= int(nSrc))
+                continue;
+            prevOffset[size_t(src)] = m_furObjects[i].preview;
+            prevOffsetOn[size_t(src)] = m_furObjects[i].previewActive ? 1 : 0;
+            prevRot[size_t(src)] = m_furObjects[i].rot;
+            prevPivot[size_t(src)] = m_furObjects[i].pivot;
+            prevRotOn[size_t(src)] = m_furObjects[i].rotActive ? 1 : 0;
+        }
+        m_furObjects.clear();
+        for (size_t i = 0; i < m_furSourceField.size(); ++i) {
+            const int fi = m_furSourceField[i];
+            if (fi < 0 || fi >= int(m_microFields.size()))
+                continue;
+            const int idx = growFurCards(m_microFields[size_t(fi)],
+                                         m_microOccluders[size_t(fi)].worldOffset);
+            if (idx >= 0) {
+                m_furObjects[size_t(idx)].preview = prevOffset[size_t(fi)];
+                m_furObjects[size_t(idx)].previewActive = prevOffsetOn[size_t(fi)] != 0;
+                m_furObjects[size_t(idx)].rot = prevRot[size_t(fi)];
+                m_furObjects[size_t(idx)].pivot = prevPivot[size_t(fi)];
+                m_furObjects[size_t(idx)].rotActive = prevRotOn[size_t(fi)] != 0;
+            }
+        }
+        m_furPass.setObjects(m_furObjects);
+    }
+}
+
 void App::updateMicroMovePreview()
 {
     // The preview offset belongs to the SELECTED micro object while it is
@@ -209,9 +357,36 @@ void App::updateMicroMovePreview()
     if (idx < 0) {
         for (size_t i = 0; i < m_microOccluders.size(); ++i)
             m_microSvoPass.setWorldPreview(i, glm::vec3(0.f), false);
+        for (size_t i = 0; i < m_furObjects.size(); ++i)
+            m_furPass.setWorldPreview(i, glm::vec3(0.f), false);
         return;
     }
     m_microSvoPass.setWorldPreview(size_t(idx), m_moveDelta, true);
+    // The fur follows the body it belongs to - and the OBJECT keeps the
+    // offset, so a coat rebuilt mid-drag does not drop the drag.
+    if (idx < int(m_furIndexOfMicro.size())) {
+        const int fi = m_furIndexOfMicro[size_t(idx)];
+        if (fi >= 0) {
+            m_furPass.setWorldPreview(size_t(fi), m_moveDelta, true);
+            m_furObjects[size_t(fi)].preview = m_moveDelta;
+            m_furObjects[size_t(fi)].previewActive = true;
+        }
+    }
+}
+
+void App::clearMicroRotatePreview()
+{
+    // The live rotation preview lives in the micro pass, because a micro
+    // object has no world owner id and the splat pass's rotate preview is
+    // keyed by exactly that. Clearing it is a no-op when no micro world is
+    // loaded.
+    for (size_t i = 0; i < m_microOccluders.size(); ++i)
+        m_microSvoPass.setWorldRotation(i, glm::mat3(1.0f), glm::vec3(0.0f),
+                                         false);
+    for (size_t i = 0; i < m_furObjects.size(); ++i) {
+        m_furPass.setWorldRotation(i, glm::mat3(1.0f), glm::vec3(0.0f), false);
+        m_furObjects[i].rotActive = false;
+    }
 }
 
 } // namespace app

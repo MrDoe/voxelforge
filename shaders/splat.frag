@@ -139,6 +139,31 @@ void main()
         discard;
     vec3 q = ro + rd * t;
 
+    // Single-face clip (NOT APPLIED - measured net loss, 2026-10-21): a disk
+    // that stands for one exposed voxel face may not claim the pixels outside
+    // that face's square. The bake flags such disks (mat_ao.x = material +
+    // 0.25) and guarantees the exact axis normal and the face-centre
+    // position, and the clip is two lines:
+    //
+    //   if (surfelIsSingleFace(vMat.x) && !surfelInsideFace(q, vCenter, n, pc.b.y))
+    //       discard;
+    //
+    // It must discard in EVERY pass, the depth-only prepass included, or the
+    // prepass still writes the spilled depth and the base seal still writes
+    // the spilled colour at alpha 1 - the clip would be a no-op.
+    //
+    // MEASURED: it removes only 6% of the tree artifact (21,856 -> 20,476
+    // px) and costs MORE black inside the silhouette on every shot (the wall
+    // close-up 30.30% -> 31.74%, the house 7.41% -> 8.72%, the water 3.76% ->
+    // 4.13%) plus 18-30% of every frame moved and 0.38% more sky. The reason
+    // is that the over-coverage is LOAD-BEARING: a face's corners are 0.0707 m
+    // from its centre and a 0.0707 m disk would reach them with a Gaussian
+    // alpha of ~0.37, so four of them sum to 0.84 and the corners would be a
+    // pinhole grid. A disk is a CIRCLE - it cannot cover its own corner
+    // without also covering the neighbour's face. The way out is the corner
+    // caps (they already exist, default OFF): clip the face AND emit a small
+    // unflagged cap at every corner the square cannot cover.
+
     float extent = max(sp.uSplat.z, 1.0);
     float u = dot(q - vCenter, vT) / max(vRadii.x, 1e-5);
     float v = dot(q - vCenter, vB) / max(vRadii.y, 1e-5);
@@ -267,7 +292,7 @@ void main()
             alpha = 1.0;
         } else if (dbg > 7.5) {
             // baked shadow factor as grey
-            col = vec3(clamp(vShade.w, 0.0, 1.0));
+            col = vec3(clamp(surfelBakedShadow(vShade.w), 0.0, 1.0));
             alpha = 1.0;
         } else if (dbg > 6.5) {
             // roughness as grey
@@ -356,10 +381,10 @@ void main()
         // The shadow GATE stays on the surfel's own normal: the shadow was
         // baked with it, and re-evaluating the gate per fragment would tear
         // the terminator along the surfel boundaries.
-        float shB = ((gRenderFlags & 2) != 0 && dot(n, kSunDir) > 0.02) ? vShade.w : 1.0;
+        float shB = ((gRenderFlags & 2) != 0 && dot(n, kSunDir) > 0.02) ? surfelBakedShadow(vShade.w) : 1.0;
         float aoB = ((gRenderFlags & 1) != 0) ? clamp(aoBaked, 0.0, 1.0) : 1.0;
         vec3 bentB = normalize(vShade.xyz);
-        col = shadeSurfel(q, rd, alb, rr, ro, nShade, bentB, shB, aoB, mId, vShade.w);
+        col = shadeSurfel(q, rd, alb, rr, ro, nShade, bentB, shB, aoB, mId, vShade.w, vMat.w);
         float fog = 1.0 - exp(-t * 0.0016);
         vec3 fc = fogColor(rd, q);
         // valley mist over the stream + damp hollows (reference river mood)

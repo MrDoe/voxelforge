@@ -126,6 +126,9 @@ void appendEdgeBridges(glm::vec3 cellCentre, const Surfel& parent,
         rV = std::max(0.25f * VOXEL, rV);
         rU = std::max(0.60f * VOXEL, rU);
         Surfel bridge = parent;
+        // A child disk is NOT a single cell face: clear the face-clip fraction
+        // the parent may carry (the integer part is still the material).
+        bridge.mat_ao.x = float(int(parent.mat_ao.x + 0.5f));
         bridge.pos_rU = glm::vec4(pos, rU);
         bridge.normal_rV = glm::vec4(creaseN, rV);
         bridge.bent_sh = glm::vec4(
@@ -176,6 +179,7 @@ void appendCornerCaps(glm::vec3 cellCentre, const Surfel& parent,
         rV = std::max(0.20f * VOXEL, rV);
         rU = std::max(0.50f * VOXEL, rU);
         Surfel cap = parent;
+        cap.mat_ao.x = float(int(parent.mat_ao.x + 0.5f));
         cap.pos_rU = glm::vec4(pos, rU);
         cap.normal_rV = glm::vec4(n, rV);
         cap.bent_sh = glm::vec4(
@@ -490,14 +494,21 @@ ThinFootprint thinFootprintAt(SolidAt solidAt, glm::vec3 cellCentre, glm::vec3 n
     return fp;
 }
 
-// Binary sun-occlusion march over field.sample: exact Amanatides DDA over
-// lattice cells for the first 3 m (visits every cell like the SVO
-
-// reference, so thin eaves/logs are never tunnelled), then sphere-tracing
-// with tight clamps to 60 m. 0 = occluded, 1 = clear. Templated on the query
-// so it serves both the base VoxelField and the runtime ChunkStore.
+// Binary occlusion march over field.sample: exact Amanatides DDA over lattice
+// cells for the first 3 m (visits every cell like the SVO reference, so thin
+// eaves/logs are never tunnelled), then sphere-tracing with tight clamps to
+// `maxDist`. 0 = occluded, 1 = clear. Templated on the query so it serves both
+// the base VoxelField and the runtime ChunkStore.
+//
+// `solidEps` is the cell-solid threshold. The SUN march keeps the original
+// -0.02 so a surfel's own quantised cell cannot self-shadow. The SKY march
+// passes a small POSITIVE epsilon instead: skyVisibilitySvo's brickDDAB treats
+// `sdf <= 0` as solid, the field stores the same int8 (VoxelField::sample), so
+// a 0-quantised leaf cell MUST count as an occluder or the bake disagrees with
+// the reference it is replacing.
 template <typename FieldT>
-float shadowMarch(const FieldT& f, glm::vec3 ro, glm::vec3 rd)
+float shadowMarch(const FieldT& f, glm::vec3 ro, glm::vec3 rd,
+                  float maxDist = 60.0f, float solidEps = -0.02f)
 {
     // Phase 1: cell-exact DDA to 3 m. sampleWorld floors to the cell, so
     // testing every visited cell matches the voxel truth (SVO parity).
@@ -512,7 +523,7 @@ float shadowMarch(const FieldT& f, glm::vec3 ro, glm::vec3 rd)
         float t = 0.05f;
         for (int i = 0; i < 64; ++i) {
             const glm::vec3 sp = ro + rd * t;
-            if (f.sampleWorld(sp).d < -0.02f)
+            if (f.sampleWorld(sp).d < solidEps)
                 return 0.0f;
             // advance to next cell boundary (NaN-safe: rdi inf -> huge tMax)
             float tn = tMax.x;
@@ -525,25 +536,62 @@ float shadowMarch(const FieldT& f, glm::vec3 ro, glm::vec3 rd)
             if (ax == 0) { cell.x += stp.x; tMax.x += tDelta.x; }
             else if (ax == 1) { cell.y += stp.y; tMax.y += tDelta.y; }
             else { cell.z += stp.z; tMax.z += tDelta.z; }
-            if (t > 3.0f)
+            if (t > std::min(3.0f, maxDist))
                 break;
         }
     }
-    // Phase 2: sphere-tracing to 60 m for hills/treelines.
+    // Phase 2: sphere-tracing to `maxDist` for hills/treelines.
     {
-        float t = 3.0f;
+        float t = std::min(3.0f, maxDist);
         for (int i = 0; i < 80; ++i) {
             const glm::vec3 sp = ro + rd * t;
             const float d = f.sampleWorld(sp).d;
-            if (d < -0.02f)
+            if (d < solidEps)
                 return 0.0f;
             t += glm::clamp(std::fabs(d) * 0.7f, 0.04f, 1.0f);
-            if (t > 60.0f)
+            if (t > maxDist)
                 break;
         }
     }
     return 1.0f;
 }
+
+// Exact sky visibility for one surfel - the bake-side twin of
+// skyVisibilitySvo (shaders/common_svo.glsl), which is the reference the splat
+// backend has to match: same direction mix(bent, +Y, 0.65), same 0.25 m origin
+// offset, same 24 m reach, same `sdf <= 0` cell-solid test (solidEps above).
+//
+// The splat fragment used to answer this from the 0.4 m object volume
+// (skyVisibilitySPlat): its texels smear a sparse canopy into a solid roof, so
+// a leaf disk with open sky between the leaves read as a sealed room and its
+// sky ambient collapsed to 16% of the analytic value. The SVO's cell-exact
+// march along the same direction sees the gaps. One binary verdict per surfel,
+// like every other baked occlusion term in the project.
+// Returns 1 = open sky, 0 = enclosed.
+template <typename FieldT>
+float skyMarch(const FieldT& f, glm::vec3 p, glm::vec3 bent)
+{
+    const glm::vec3 dir =
+        safeNormalize(glm::mix(bent, glm::vec3(0.0f, 1.0f, 0.0f), 0.65f));
+    return shadowMarch(f, p + dir * 0.25f, dir, 24.0f, 1e-4f);
+}
+
+// Which direction should the sky ray use? Measured, do not re-litigate:
+//
+//   direction                  open disks       tree mask (640)  house black
+//   shading bent (2-ring)      151,012 (44.0%)    24,163 px         5.66%
+//   geometric normal           148,623 (43.3%)    24,344 px         5.72%
+//   sdfAO's 3-ring (0.14/0.45/1.25) 151,355 (44.1%) 24,035 px       5.67%
+//
+// The verdict is direction-insensitive and the house does not recover under any
+// of them, so the bake ships the historical 2-ring shading bent (which is also
+// what the fragment's `bent` is, so bake and shader agree). The theory that the
+// SVO's bent points OUT because it is an SDF gradient is also false: sdfAO
+// (common_svo.glsl:522) builds its bent with the SAME AO-weighted accumulation
+// used here, only with a third ring. The house's extra black is not the ray
+// direction - it is that the exact verdict ENCLOSES disks the 0.4 m volume
+// called open (sheltered spots), which is why the shader takes the union
+// max(bakedSky, coarse volume) instead of the baked verdict alone.
 
 // Few-tap bent-normal AO over the exact oracle (mirrors splatAO's rings).
 template <typename FieldT>
@@ -976,7 +1024,7 @@ SurfelSet buildSurfels(const VoxelField& field, const SurfelParams& params) {
     // Pass 2: blend, smooth, bake shadow+AO, and emit (also sharded; every
     // index is independent and keys/rawNormals are read-only here).
     const glm::vec3 sunDir = glm::normalize(params.sunDir);
-    std::atomic<size_t> terrainCount{ 0 }, objectCount{ 0 };
+    std::atomic<size_t> terrainCount{ 0 }, objectCount{ 0 }, faceClipCount{ 0 };
     {
         std::atomic<int> next{ 0 };
         unsigned hc = std::max(1u, std::thread::hardware_concurrency());
@@ -993,6 +1041,33 @@ SurfelSet buildSurfels(const VoxelField& field, const SurfelParams& params) {
 
                     const auto s = field.sample(x, y, z);
                     glm::vec3 n = rawNormals[i];
+
+                    // Single-exposed-face classification (the disk face clip).
+                    // A cell with exactly ONE air neighbour emits one
+                    // axis-aligned face disk; the shader may clip that disk to
+                    // the 0.1 m face square so it cannot spill past its own
+                    // face into a neighbouring cell's pixels (the canopy
+                    // "slots"). Multi-face cells keep the mean normal and are
+                    // never clipped, and a thin footprint spans several cells
+                    // (excluded below). Objects only: a terrain top is a
+                    // heightfield sample, not a voxel face.
+                    static const int kFaceDirs[6][3] = {
+                        { 1, 0, 0 }, { -1, 0, 0 }, { 0, 1, 0 },
+                        { 0, -1, 0 }, { 0, 0, 1 }, { 0, 0, -1 } };
+                    bool faceClip = false;
+                    if (s.obj) {
+                        int faces = 0;
+                        for (const auto& d : kFaceDirs) {
+                            const int nx = x + d[0], ny = y + d[1], nz = z + d[2];
+                            const bool air =
+                                nx < 0 || nx >= latN || ny < 0 || ny >= latN ||
+                                nz < 0 || nz >= latN ||
+                                field.sample(nx, ny, nz).d > 0.0f;
+                            if (air)
+                                ++faces;
+                        }
+                        faceClip = faces == 1;
+                    }
 
                     // The analytic heightfield normal of a terrain TOP cell.
                     // It is computed here but APPLIED after the neighbour
@@ -1030,8 +1105,11 @@ SurfelSet buildSurfels(const VoxelField& field, const SurfelParams& params) {
                     // Face-expanded entries (one-cell-thick columns/plates)
                     // keep their axis-aligned face normal: smoothing them
                     // against neighbours from other faces would tilt them off
-                    // the voxel face they stand for.
-                    if (params.smoothNormals && faceEntry[i] == 0) {
+                    // the voxel face they stand for. A single-face cell skips
+                    // it for the same reason: the face clip is only well
+                    // defined while the disk normal stays the exact axis, and
+                    // the disk position is derived from it.
+                    if (params.smoothNormals && faceEntry[i] == 0 && !faceClip) {
                         glm::vec3 acc = n;
                         float wsum = 1.0f;
                         const int faceDirs[6][3] = { { 1, 0, 0 }, { -1, 0, 0 },
@@ -1149,6 +1227,11 @@ SurfelSet buildSurfels(const VoxelField& field, const SurfelParams& params) {
                                   [&](glm::vec3 q) { return field.sampleWorld(q).d <= 0.0f; },
                                   cellCentre, n, x, y, z)
                             : ThinFootprint {};
+                    // A thin footprint's disk is an ellipsoid spanning several
+                    // cells; clipping it to one face square would cut it in
+                    // half along the structure.
+                    if (fp.thin)
+                        faceClip = false;
 
                     // Foliage growth (2x) exists to SEAL sparse terrain canopy:
                     // grass cards and bushes are represented by splats alone,
@@ -1190,7 +1273,12 @@ SurfelSet buildSurfels(const VoxelField& field, const SurfelParams& params) {
                     sl.pos_rU = glm::vec4(pos, rU);
                     sl.normal_rV = glm::vec4(n, rV);
                     sl.bent_sh = glm::vec4(bent, shadow);
-                    sl.mat_ao = glm::vec4(float(mat), refl, rough, ao);
+                    // mat_ao.x = material + a QUARTER for a single-face disk.
+                    // Every reader rounds (uint(x+0.5), int(x+0.5f)) or tests
+                    // abs(x-8)<0.5, so the fraction is invisible to the
+                    // material and visible only to the face clip (fract>0.1).
+                    sl.mat_ao = glm::vec4(float(mat) + (faceClip ? 0.25f : 0.0f),
+                                          refl, rough, ao);
                     // w = per-cell texture override (0 = use the material's
                     // atlas slot): phase-2 per-object textures ride the
                     // otherwise spare channel. Raw integer 0..255; the shader
@@ -1204,6 +1292,8 @@ SurfelSet buildSurfels(const VoxelField& field, const SurfelParams& params) {
                         ++locObject;
                     else
                         ++locTerrain;
+                    if (faceClip)
+                        faceClipCount.fetch_add(1, std::memory_order_relaxed);
                 }
                 terrainCount += locTerrain;
                 objectCount += locObject;
@@ -1213,6 +1303,8 @@ SurfelSet buildSurfels(const VoxelField& field, const SurfelParams& params) {
     }
     set.terrainCount = terrainCount.load();
     set.objectCount = objectCount.load();
+    spdlog::info("surfel face clip: {} single-face object disks of {} object "
+                 "surfels", faceClipCount.load(), set.objectCount);
 
     // Shadow penumbra + AO smoothing: the baked march verdict is binary per
     // surfel (draws shadow boundaries along disk shapes) and the baked AO
@@ -1383,6 +1475,64 @@ SurfelSet buildSurfels(const VoxelField& field, const SurfelParams& params) {
     for (int i = 0; i < n; ++i)
         if (isObj[order[i]])
             set.objectChunks[chunkOf[order[i]]] = 1;
+
+    // ---- exact sky visibility (enclosure) per OBJECT surfel -----------------
+    // Resolves the SVO's own sky ray once per disk against the records-derived
+    // field, and packs the binary verdict into bent_sh.w (see skyMarch).
+    //
+    // Placed here, deliberately:
+    //   * AFTER the AO/shadow smoothing, which averages bent_sh.w over face
+    //     neighbours and would otherwise average the bit into a fraction;
+    //   * BEFORE the bridge/cap emission and the micro-detail children, which
+    //     copy the parent's w and must inherit the verdict;
+    //   * BEFORE the LOD merge, which keeps object surfels unmerged (a copy)
+    //     and only averages w over terrain members (no sky bit on those).
+    // Terrain keeps its plain shadow (w < 1.5) and the fragment's GPU test: a
+    // terrain point under a canopy genuinely IS occluded, and the coarse
+    // volume answers that case the way the SVO does. It is the canopy OBJECT
+    // disks that it turns into a roof.
+    //
+    // Packing contract (shared with shaders/common_surfel.glsl):
+    //   w = shadow + 2*sky,  shadow in [0,1],  sky in {0,1}.
+    {
+        std::atomic<int> open{ 0 }, tested{ 0 };
+        std::atomic<int> next{ 0 };
+        unsigned hc = std::max(1u, std::thread::hardware_concurrency());
+        std::vector<std::thread> threads;
+        constexpr int kSkyBatch = 256;
+        for (unsigned t = 0; t < hc; ++t)
+            threads.emplace_back([&] {
+                int lo = 0, lt = 0;
+                for (;;) {
+                    const int begin = next.fetch_add(kSkyBatch);
+                    if (begin >= n)
+                        break;
+                    const int end = std::min(begin + kSkyBatch, n);
+                    for (int i = begin; i < end; ++i) {
+                        // Same object test as set.objectChunks: the surfel array
+                        // is chunk-sorted, so index the flags through `order`.
+                        if (!isObj[order[i]])
+                            continue;
+                        ++lt;
+                        const float sky = skyMarch(
+                            field, glm::vec3(surfels[i].pos_rU),
+                            glm::vec3(surfels[i].bent_sh));
+                        if (sky > 0.5f) {
+                            surfels[i].bent_sh.w += 2.0f;
+                            ++lo;
+                        }
+                    }
+                }
+                open.fetch_add(lo);
+                tested.fetch_add(lt);
+            });
+        for (auto& th : threads)
+            th.join();
+        spdlog::info(
+            "surfel exact sky: {} of {} object disks see open sky ({:.1f}%)",
+            open.load(), tested.load(),
+            100.0f * float(open.load()) / float(std::max(tested.load(), 1)));
+    }
 
     // ---- hard-edge bridges -------------------------------------------------
     // One small, tangent-aligned splat per exposed face pair. They inherit the
@@ -2001,6 +2151,10 @@ struct SurfelCand {
     EdgeInfo edge;      // exposed-face hard-edge pairs only
     unsigned exposedFaces = 0; // lattice faces whose neighbour is air
     bool faceEntry = false;    // per-face expansion: never smoothed
+    // Exactly one exposed lattice face: the disk lies ON that face and may be
+    // clipped to its square by the shader (mat_ao.x fraction +0.25). Same
+    // rule as the bake; a divergent flag re-aims untouched splats.
+    bool faceClip = false;
 };
 
 // Store-space twins of solidDepthCells/solidRunCells: same world-space probe
@@ -2039,7 +2193,9 @@ void computeCandidateAnisotropy(const ChunkStore& store,
         cd.edge = cd.cell.obj ? edgeInfoFromMask(cd.exposedFaces) : EdgeInfo {};
         if (cd.faceEntry)
             continue; // an axis-aligned face entry has nothing to smooth
-        if (params.smoothNormals) {
+        // A single-face cell keeps its exact axis normal for the same reason:
+        // the shader's face clip is derived from it.
+        if (params.smoothNormals && !cd.faceClip) {
             glm::vec3 bendSum(0.0f);
             glm::vec3 acc = cd.n;
             float wsum = 1.0f;
@@ -2211,6 +2367,7 @@ std::vector<SurfelCand> collectChunkCandidates(const ChunkStore& store, int chun
                 base.pos = wp;
                 base.cell = c;
                 base.exposedFaces = exposed;
+                base.faceClip = c.obj && (exposed & (exposed - 1u)) == 0u;
                 base.layer = provenance.obj ? provenance.layer : uint8_t(0);
                 base.rawN = safeNormalize(raw); // a cancelling sum stays zero
                 const bool degenerate = glm::dot(raw, raw) < 1e-6f;
@@ -2234,6 +2391,9 @@ std::vector<SurfelCand> collectChunkCandidates(const ChunkStore& store, int chun
                         face.n = glm::vec3(float(dirs[d][0]), float(dirs[d][1]),
                                            float(dirs[d][2]));
                         face.faceEntry = true;
+                        // A per-face entry is a thin/degenerate structure's
+                        // face, not a single-face cell: never clip it.
+                        face.faceClip = false;
                         cands.push_back(face);
                     }
                     continue;
@@ -2304,6 +2464,11 @@ void shadeCandidates(const ChunkStore& store, const std::vector<SurfelCand>& can
         float ao = 1.0f;
         glm::vec3 bent = cd.n;
         aoBake(store, pos + cd.n * 0.02f, cd.n, ao, bent);
+        // Exact sky verdict: the SAME ray and the SAME packing as the bake
+        // (bent_sh.w = shadow + 2*sky), so a live-rebuilt disk keeps the
+        // canopy ambient its neighbours have. Terrain cells pack 0 and keep
+        // the fragment's GPU test, same split as the bake.
+        const float sky = cd.cell.obj ? skyMarch(store, pos, bent) : 0.0f;
 
         const uint8_t mat = cd.cell.mat;
         const float refl = kMaterialReflection[std::min(int(mat), kPaletteN - 1)].x;
@@ -2338,8 +2503,12 @@ void shadeCandidates(const ChunkStore& store, const std::vector<SurfelCand>& can
         Surfel sl;
         sl.pos_rU = glm::vec4(pos, rU);
         sl.normal_rV = glm::vec4(cd.n, rV);
-        sl.bent_sh = glm::vec4(bent, shadow);
-        sl.mat_ao = glm::vec4(float(mat), refl, rough, packSurfelAo(ao, cd.layer));
+        sl.bent_sh = glm::vec4(bent, shadow + 2.0f * sky);
+        // mat_ao.x fraction +0.25 = single-face disk (shader face clip); every
+        // existing reader rounds or tests abs(x-8)<0.5, so the material is
+        // unchanged. Mirror of the bake's pack.
+        sl.mat_ao = glm::vec4(float(mat) + (cd.faceClip ? 0.25f : 0.0f), refl,
+                              rough, packSurfelAo(ao, cd.layer));
         sl.tan_aspect = glm::vec4(tanOut, float(cd.cell.tags));
         out[i] = sl;
     }

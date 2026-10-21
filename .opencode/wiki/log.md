@@ -5545,3 +5545,488 @@ artifact view still changes **3.02 %** of pixels and a cabin-wall close-up
 being restored rather than dark disks added, but not zero. The geometry-level
 record count is the claim that survives; the old pixel numbers should not be
 quoted.
+
+## [2026-10-21] fix | A micro object renders but cannot be clicked
+
+The user reported that micro objects were still not selectable. The wiring was
+in place and the CPU pick unit test passed — and the pick still never hit
+anything. Root cause: `MicroField::sampleSdf` returned **0** outside the
+field's grid (the trilinear stencil finds no cell in range, so the accumulator
+never moves), and a sphere tracer that reads 0 **steps 0**. The pick march
+collapsed to its minimum step and covered ~0.6 m in its whole 512-step budget;
+the camera is 15 m from the shore, so the ray never arrived. Measured 0 of 81
+rays hitting the real alpaca, while the AABB test passed on every one — the
+box was found, the field was not.
+
+The GPU never had the bug: `microMapWorld` falls back to the true distance to
+the world's box outside it. The CPU sampler now mirrors the shader exactly.
+
+The unit test missed it because it cast its ray from **0.30 m** — inside the
+crawl's reach. The regression test now casts from **15 m**, the real distance,
+and pins the out-of-grid distance as positive and growing.
+
+Verified headlessly (no mouse, no synthetic input): `VF_TEST_MICRO_PICK=1`
+runs the app's own `pickMicroObjects` toward every micro object and reports
+**3/3 selectable**; `tests/micro_check.py` asserts it as a new check.
+
+See [[concepts/micro-voxel-svo-overlay]].
+
+## [2026-10-21] ingest | The "slots in the tree" artifact, measured and guarded
+
+The user's "slots/slits" in the hamlet tree are real and splat-only (the SVO
+reference is clean). The camera was reconstructed from the HUD line in the
+user's own screenshot and reproduces their frame at Pearson r = +0.74; the
+instrument is a **near-black mask** (splat below luma 30 where the SVO is at
+or above 30): 21,785 px at the test resolution, 76,268 px at 1280x800, with
+the mean luma at the mask 19.9 against the reference's 60.7.
+
+The decomposition is measured, not argued: the disk **reach** is the
+dominant term (`VF_SPLAT_RADIUS=0.5` swings the mask +31 luma while
+`VF_SPLAT_OPACITY` and `VF_SPLAT_SIGMA` are inert), the coarse-object-volume
+enclosure test is worth ~6, and the splat path's *binary* baked sun shadow
+against the SVO's 16-tap PCF accounts for the rest. Four theories were killed
+by measurement, not taste: a coverage hole at the chunk boundary (flat
+coverage debug: zero uncovered pixels), a stale height texture (the
+heightfield-residual debug is uniform over the seam), the micro overlay (the
+micro layers are ~80 degrees off-axis; there is no `VF_MICRO` switch in this
+tree), and nondeterminism (two identical renders differ by <=5/255,
+scattered).
+
+`tests/visual_check.py` now renders both backends at the user's camera and
+fails if the mask grows past its documented baseline, so the artifact cannot
+come back unnoticed. The fix itself is in flight with the peer session that
+owns the footprint rule.
+
+See [[concepts/splat-canopy-parity]].
+
+## [2026-10-21] ingest | Measuring without taking the user's mouse
+
+The user asked for it outright: "Don't grab the mouse when testing!". The
+interactive app grabs the cursor on right-mouse look, and a headless `--shot`
+still creates a GLFW window - on the user's display that is a focus steal and
+a stray right-click captures the pointer for good. The safe recipe is
+`xvfb-run -a` (the window lands on a virtual display) plus
+`VF_OVERLAY_PATH=<tmp>` for scratch renders, because a headless run is not
+read-only against the tracked overlay.
+
+See [[concepts/headless-render-mouse-safety]].
+
+## [2026-10-21] ingest | A shutdown SIGSEGV in App::~App()
+
+The app can die on the way out with SIGSEGV inside `App::~App()` - a `free()`
+of a stack address, with only the main thread alive. The overlay file
+survives it, but the crash can land before `OverlayWriter::flush()` persists
+the last stroke. The shipped binary has no DWARF, so the backtrace stops at
+`free()`; the obvious use-after-free candidates (the overlay writer thread,
+the layered-world rebuild thread, the member destruction order) are ruled out.
+
+See [[concepts/app-shutdown-segfault]].
+
+## [2026-10-21] correction | The canopy artifact is the base seal, not the footprint
+
+The first ranking was wrong. Re-measured with the ownership mask
+(`VF_SPLAT_DEBUG=16`): **91% of the splat-only near-black pixels are OBJECT
+pixels** - the tree - where the SVO reference shows lit geometry of the same
+tree. The splat path was painting the canopy's inner, shadowed leaves over the
+lit front leaves.
+
+The mechanism: the base seal writes the **nearest fragment's** colour at
+alpha 1, and "nearest" is the depth prepass's **disk plane** depth. A flat
+disk of radius 1.4 cells over-covers its neighbours, so a dark inner leaf's
+plane can be nearer than the lit front leaf's plane over the pixels the lit
+leaf should own - and the seal hands the whole pixel to the dark one. The
+band pass cannot repair it; the seal already wrote alpha 1.
+
+`VF_SPLAT_SEAL_ALPHA` is a monotone dial over that, and it moves the frame
+*towards* the reference: mask 21,703 -> 5,316 px (8.48% -> 2.08%) and the
+silhouette IoU against the SVO 0.8955 -> 0.9626, at the cost of a frame 13%
+brighter than the reference. The proper fix is the one
+[[concepts/splat-base-seal]] already names - a coverage count in the
+allocated-but-unused D24_S8 stencil, so the seal can pick the *dominant*
+surface instead of the *nearest plane*.
+
+What the ranking got wrong, and how it was caught:
+
+- The **footprint** is the right lever but the wrong selection: the
+  shading-variance radius rule at FULL strength (`VF_CHAOS_SHRINK=1.0`) moves
+  the mask 21,785 -> 21,764 (0.1%). A global shrink moves it a lot and
+  breaks the silhouette (IoU 0.4497 at radius 0.5 vs 0.4800).
+- The **shading** terms (the coarse-object-volume enclosure test, the binary
+  baked shadow vs the SVO's 16-tap PCF) are real bugs worth ~6 luma and the
+  rest, but with both off half the masked pixels are still near-black.
+
+See [[concepts/splat-canopy-parity]] and [[concepts/splat-base-seal]].
+
+## [2026-10-21] fix | A micro object is manipulable with the mouse
+
+The pick was fixed (the previous entry) and a plain click on the alpaca still
+selected **nothing**, and the Move and Rotate gizmos never appeared. Three
+gates refused it, all for the same reason: **a micro object has no world
+owner id** (it is a separate SVO world), and the world's code asks for that
+id to decide whether a layer is real — the plain click that activates an
+object, the Move axis handles, and the Rotate trackball (which asked the
+WORLD's box, `m_layers.layerBox()`, which is empty for a micro layer). Each
+now also accepts a micro layer, and the trackball's box comes from
+`layerBounds()`, which is micro-aware. The rotation's pivot comes from the
+new `App::layerPivotWorld` — the bottom-centre of the object's RECORDS, the
+same convention as the world.
+
+**The live rotation preview lives in the micro pass.** The splat pass's
+rotate preview is keyed by the world owner id (`surfelBelongsToLayer` refuses
+id 0), so it showed nothing for a micro object: the ring turned and the
+object sat still. The micro pass's world table now carries its own rotation
+matrix and pivot, and the shader applies it **in the field's frame** — the
+one place the field is sampled maps the world point into the baked frame, and
+because a rotation preserves distances the value needs no correction and the
+trace's step stays conservative. Everything downstream (the union field, the
+gradient and so the normal, the AO, the self-shadow) then works in the world
+frame and needed no change; only the material lookup had to be told, because
+the octree descent and the cell that owns the surface live in the baked
+frame.
+
+A micro rotation COMMIT also re-bakes only the micro objects now
+(milliseconds) instead of triggering a 20 s world reload, like the Move
+commit already did.
+
+See [[concepts/micro-voxel-svo-overlay]].
+
+## [2026-10-21] experiment | Band depth tolerance is a cheaper lever than unsealing
+
+The canopy mask is **not** a seal-ranking problem: after per-face expansion
+and flat-centre depth both failed, the surviving hypothesis was the band's
+depth tolerance (`VF_SPLAT_DEPTH_TOL`, 0.002 NDC ~ 10 cm). The dark nearest
+fragment wins the prepass, and the lit layer behind it is rejected by the band
+before it can blend over. Swept at 1280x800 (plane depth, `VF_NO_OVERLAY=1`,
+SVO frame mean 90.89, baseline mask 94,116 / frame 89.66 / sky-IoU 0.4800):
+
+| setting | mask px | frame mean | sky-IoU | new sky |
+|---|---|---|---|---|
+| baseline | 94,116 | 89.66 | 0.4800 | 0 |
+| tol 0.02 | 74,761 (-20.6%) | 91.92 | 0.4828 | +1,862 |
+| tol 0.04 | 69,125 (-26.6%) | 92.30 | 0.4831 | +1,887 |
+| tol 0.02 + seal 0.5 | 55,871 (-40.6%) | 95.15 | 0.4854 | +5,384 |
+| tol 0.02 + seal 0.75 | 43,300 (-54.0%) | 96.66 | 0.4858 | +6,900 |
+
+The knee is 0.02: 4x more tolerance buys only 5.6k more px while the ghosting
+window grows with distance (0.02 NDC is ~1.3 m at 14 m, ~2.7 m at 50 m). The
+combination beats a pure unseal at the same mask level on BOTH the frame
+(unseal reached 35,198 px only at 101.25) and the silhouette (IoU 0.4858 vs
+0.4782). It is a trade, not a fix: at 0.02 the mask is still 74,761 px.
+Ada's independent 640x400 sweep agrees in shape (mask 21,784 -> 16,324,
+frame 93.2 -> 95.8).
+
+Mechanism note: the effect saturates because the band accumulates *Gaussian*
+alpha, so a lit surfel contributes only when its disk CENTRE is within ~0.2 m
+of the pixel; the tolerance decides which in-range fragments pass, but it
+cannot pull in a lit layer that is laterally far. That is why the residue is
+best explained by disk spill filling the gaps between leaves (the SVO's exact
+ray finds the lit ground through a gap the 1.4-cell disk covers). Next test:
+whether the residue is instead the enclosure/ shadow SHADING terms
+(`VF_RENDER_FLAGS=255/509/253` A/B).
+
+## [2026-10-21] correction | The slots are the WRONG SURFACE: a disk spills over its neighbour
+
+The last of the three candidate causes, and the one that survives every
+measurement: **the splat path paints a different cell's surface at the
+artifact pixels**. The palette-albedo debug (`VF_SPLAT_DEBUG=6`) reads warm
+bark/wood at the masked pixels (166,121,52) where the SVO frame reads
+neutral grey (37,32,30), and the mean saturation at the mask is 0.828
+(splat) against 0.273 (SVO).
+
+A wood/bark cell's disk has **spilled** over its neighbour: the disk is 1.4
+cells wide against a 0.1 m voxel face, so it covers ~4 cm past the face, and
+at a canopy's density those spills fill the gaps between the leaves. The SVO
+marches cells, its ray passes between the leaves and hits the lit ground;
+the splat paints the spilled dark leaf instead.
+
+That reframes every shading term as a CONSEQUENCE, not a cause: turning the
+enclosure off (-33%) or the sun shadow off (-21%) only makes the spilled
+disk bright enough to stop counting as near-black - the pixels are still
+wrong, they are just no longer black. Relaxing the seal lets the BACKGROUND
+through (the true surface behind is depth-rejected), which is why the
+unsealed frame is brighter rather than more correct. And the mask luma
+barely moves while the count falls (19.9 -> 20.7): the survivors are the
+spilled disks with the most extreme shading.
+
+The one fix that makes the pixels right is to **clip each disk to its own
+voxel face** - and that needs a flag from the bake (which cells have a
+single axis face) plus a shader-side clip that skips the anisotropic
+thin-structure disks.
+
+Two more dead ends recorded, both measured: the **flat-centre depth**
+(Voronoi ownership instead of the nearest tilted plane) is slightly worse -
+mask 21,703 -> 22,526 px at 640x400 and 94,116 -> 97,090 px at 1280x800 -
+and the **geometric normal in the ambient** barely moves it (21,784 ->
+21,161 px) with no change in the luma at the mask, so the baked bent normal
+is not the surviving dark term either.
+
+See [[concepts/splat-canopy-parity]].
+
+## [2026-10-21] correction | The face clip is a net loss: the over-coverage is load-bearing
+
+The bake flagged the single-face disks (`mat_ao.x = material + 0.25`, 97,258
+of 343,196 object surfels) and the shader clip is two lines - but the A/B
+says do not ship it: it removes only 6% of the tree artifact (21,856 ->
+20,476 px) and costs MORE black inside the silhouette on every shot (the wall
+close-up 30.30 -> 31.74%, the house 7.41 -> 8.72%, the water 3.76 -> 4.13%),
+0.38% more sky and 18-30% of every frame moved.
+
+The reason is the useful part: **the over-coverage is load-bearing**. A
+face's corners are 0.0707 m from its centre and a 0.0707 m disk would reach
+them with a Gaussian alpha of ~0.37, so four of them sum to 0.84 - the
+corners would be a 16%-transparent pinhole grid. The radius is 1.4 cells
+precisely so the corners close, and that same generosity is what spills ~9 cm
+onto the neighbours' faces. **A disk is a circle: it cannot cover its own
+corner without also covering the neighbour's face.**
+
+So "clip the disk to its face" and "no pinholes at the corners" are mutually
+exclusive - unless the corner is covered by something else, and that thing
+already exists: the **corner caps** (default OFF, only ~557 among ~3.4M
+surfels on the hamlet). The design that follows is clip + a small unflagged
+cap at every corner the square cannot cover.
+
+The clip is reverted in the tree (the helper and the measurement stay in the
+shader as a comment), and the reverted tree measures bit-for-bit the
+baseline again (21,856 px, luma 19.6 at the mask, frame 93.3).
+
+See [[concepts/splat-canopy-parity]].
+
+## [2026-10-21] investigate | The heap corruption: ASAN rules out every headless path
+
+The user's "double free or corruption (out)" (right after `edit mode -> move
+(disarmed)`) is a heap corruption, so it is never "just a rendering bug". One
+real bug of mine could produce that signature — a micro-lattice cell index
+written into `m_hoverHit.voxel`, a world-lattice field — and it is fixed, but
+it was never *proven* to be the crash.
+
+So the ASAN build drove every path that can be driven WITHOUT a mouse (the
+user asked for that, and it is the only headless way to test): the pick
+toward all three micro objects, the Move preview on the alpaca and the vase,
+the Rotate preview, Move together with a bounding-box selection, and a
+**world reload** that re-bakes the micro objects and re-points the occluder
+list (which holds pointers into `m_microFields`) at them. **All clean.**
+
+The reload case was the hardest to reach and the most likely: the app polls
+the **layer files'** mtimes, the micro layers are not in the merged world, so
+touching `micro/alpaca.vxw` does nothing — a **world** layer's mtime has to
+change, **while the app runs** (the initial load records the signatures, so a
+file touched before the start is already in them), and `VF_SYNC_RELOAD=1`
+makes the rebuild inline so it lands inside the measured window.
+
+What is left is the interactive path (the real Ctrl+LMB click, the panel's
+Move button, the trackball drag), which cannot be driven without taking the
+user's mouse. The honest status is *not reproduced*.
+
+See [[concepts/micro-voxel-svo-overlay]].
+
+## [2026-10-21] correction | The clip's seam is the EDGE, not the corner
+
+The clip A/B above is sound (the reverted build reproduces the `before`
+frame bit-for-bit: 0 px changed by >2, so the 52.6% delta is the clip
+alone), but its stated mechanism is off, and that changes the way out.
+
+Clipped squares **tile**: a pixel on a cell boundary lies inside exactly
+one square, so there is no four-way sum at all. With
+`baseRadius = 1.4*VOXEL = 0.14 m` and `sigma2 = 0.5`, a boundary pixel is
+`u = 0.357` from each face centre, so
+
+- today, TWO unclipped disks cover it at alpha 0.79 each -> **0.957** (a
+  ~4% background bleed, not 9%);
+- clipped, ONE square covers it at **0.79** -> a ~21% bleed along EVERY
+  0.1 m cell boundary, on every surface.
+
+The corner is worse (0.0707 m out, alpha 0.70) but it is a *point*; the
+edge is a *line*. So corner caps cannot fix this - they would cover the
+junctions and leave every cell-to-cell seam open. What the clip proves is
+the shape of the real fix: a kernel that is ~0.95-1.0 **at the square
+boundary** tiles opaque with no seam and no spill, because a single square
+is then enough. That is a flat-top / soft-square kernel (all the softness
+inside the square), not a clip and not a smaller radius. Its cost is
+voxel-square silhouettes at 0.1 m - what the SVO shows, not what the splat
+path currently looks like. Not built.
+
+Measurement trap from the same hour: a headless run loads
+`build/shaders/*.spv` at pass init, and a peer's rebuild landed between my
+process start and pass init. My 1280x800 "clip" run differed from the
+pre-clip baseline by 16 px (mean 0.005) and read as "the clip is inert";
+it had in fact loaded the reverted build. Check the `.spv` mtime against
+the process start before attributing a pixel diff to a shader change.
+
+See [[concepts/splat-canopy-parity]].
+
+## [2026-10-21] measure | Exact sky verdicts: the union is a -9% win, and the house baseline was stale
+
+Landed the pair (bake `src/voxel/surfelize.cpp` + decode/union in the four
+splat shaders): object surfels now pack `bent_sh.w = shadow + 2*exactSky`,
+the fragment takes `max(bakedSky, skyVisibilitySPlat)` so the bake can only
+brighten the coarse volume's verdict. Three measurements produced the shape:
+
+1. **The exact verdict alone is not landable.** It fixes the tree
+   (25,680 -> 24,163 px mask, -6%) but a house A/B on the same binary gave
+   5.52% (pre-bake path, `VF_SKY_OFF` probe) -> 5.66% (exact only). The
+   mechanism: 56% of object disks are enclosed by the cell-exact test, and
+   it encloses sheltered spots the 0.4 m volume called open.
+2. **The union is strictly better than both**: 23,493 px (-8.5%; -9.3% on
+   the second rig), house 5.42%, hero 0.31%, water 3.19%. Measured by
+   re-rendering the pre-bake path on the identical binary.
+3. **The "4.91% house baseline" is stale.** On the current tree the pre-bake
+   path renders the house at 5.52%, so the 5% bound is red *before* this
+   change and the union improves it by 0.10 points. The micro cast shadow
+   was excluded (102 surfels; the alpaca sits below that view's right edge).
+   Recovering the 4.91 -> 5.52 delta needs a HEAD-without-the-pair bisect.
+
+Falsified on the way (do not repeat): the sky ray's direction (shading bent
+/ geometric normal / `sdfAO`'s 3-ring all give 44.0/43.3/44.1% open and a
+house that does not recover), and the premise that `sdfAO`'s bent is an SDF
+gradient (it is the same AO-weighted accumulation, only a third ring).
+The remaining canopy darkness is the disk spill and the binary-vs-PCF sun
+shadow, not enclosure. See [[concepts/splat-canopy-parity]].
+
+
+The app WAS selecting: the pick fired and the activation fired. Three things
+were missing, all of them the part a user looks at:
+
+- the Move axis handles were **never drawn** for a micro object (the overlay
+  asked the WORLD's layer box, which is empty for a layer that is not in the
+  merged world) — the object could be grabbed by the maths and showed nothing
+  to grab;
+- the selection outline was fed the **world cell** under the hit, which for a
+  5 mm object can be a metre from the surface — the outline floated in the
+  air next to the object, which reads as "nothing was selected";
+- the label said "Selected voxel" — a micro object is not a voxel. It now
+  names the selected layer.
+
+**The real lesson is the instrument**: every earlier hook proved that
+`pickMicroObjects()` finds an object IN ISOLATION. The screen→ray
+conversion, the store-vs-micro competition and the gates around the
+selection were never measured, so a selection that failed in the app could
+still pass the gate. So: the pick is now ONE method (`App::pickAtWindowPos`)
+that `processInput` uses and a test can call; `App::m_testPointer` injects a
+window position and a button state into `processInput`, so the REAL path can
+be driven headlessly (the user's rule: a test must not take the pointer);
+and `VF_TEST_CLICK_SCAN` clicks the pixels where a micro object wins the
+real pick, through both gestures. Measured 12/12 picks and 12/12
+activations, every gate clear.
+
+And the thing the user was fighting: from the app's DEFAULT view the alpaca
+is a ~28x10 px sliver 15 m away (three hits on a 12 px scan grid) — a
+one-pixel miss picks the ground, which is a different layer, so the
+selection "does nothing". Up close it is 580 px. A micro object is
+selectable; it is small.
+
+See [[concepts/micro-voxel-svo-overlay]].
+
+## [2026-10-21] ingest | Fur cards over the micro objects (and the premise that was wrong)
+
+The question was "can we use real Gaussian splats instead of the filled
+circular surfels for the alpaca's fur?" The premise was wrong and that is the
+first thing worth recording: **the alpaca is not a surfel at all**. It is a
+micro-voxel object (`role: "micro"` -> `MicroField` -> `MicroWorld` ->
+`MicroSvoPass` -> `micro_overlay.comp`), a sphere-traced solid on its own 8 mm
+lattice. Its surface is exact, opaque and hard-edged - right for a ceramic
+vase, wrong for an animal, whose coat is fuzz and whose SILHOUETTE is the
+thing that says so. The old pre-rework scene did have a baked
+`assets/alpaca.vxw` world object that WAS surfel-rendered, which is probably
+where the assumption came from.
+
+**The answer: yes, but as a separate translucent layer, not as a change to
+the splat kernel.** A surfel is a disk lying IN the tangent plane, and the
+opaque base seal (the nearest fragment written at alpha 1) is exactly what
+turns a lone silhouette splat into a hard-edged blob - the documented fix is
+a coverage count in the unused D24_S8 stencil, not kernel tuning. So the fur
+is its own compute pass (`fur_overlay.comp`) that composites hair cards over
+the already-opaque body: the sky only shows where a card reaches past the
+silhouette, and no opaque pass changes.
+
+Three decisions decide whether the coat reads, and all three are measured:
+
+- **The ribbon is billboarded about the strand** (its width axis is
+  perpendicular to the strand AND to the camera). A surface-aligned width
+  axis puts the ribbon in the tangent plane, so at the silhouette - where the
+  fuzz is most wanted - it is edge-on and vanishes. Near view: mean |diff|
+  32 -> 53, high-frequency noise 18.4 -> 15.4 (the bare body is 12.8).
+- **A card is never thinner than ~1.5 px**: widened to 1.5 px with its alpha
+  scaled to match, so the ink is conserved. Alone: the noise 20.9 -> 19.0.
+- **The cards must be dense**: four per surface cell (two left gaps).
+
+Other decisions: the texture is sampled PER CARD (the fleece's clumps are
+centimetres across; one flat colour per pixel reads as washed-out plastic),
+the sky ambient is evaluated once per pixel (a sky evaluation per card hit
+would cost a dozen per pixel), the accumulation is `1 - exp(-sum alpha)`, and
+the cards live in the field's LOCAL frame so the live rotation preview
+applies to the fur exactly as it applies to the body.
+
+The instrument was broken TWICE before the feature looked broken: a camera
+that "should" have framed the alpaca was actually pointing at a cabin wall,
+so the fur's effect at 8 m measured as exactly zero. A broken instrument
+produces a false negative, which is the most convincing kind.
+
+Numbers: 81 848 cards, 7.9 MB GPU, 177 ms at load, 0-1 ms per frame at
+900x600 (inside the run-to-run noise). Gates: `tests/fur_check.py` (the new
+`fur` group: noise floor first, then the signal, the confinement, the
+backend-independence and the escape hatch) and four new cases in
+`tests/test_micro.cpp`.
+
+See [[concepts/fur-cards]].
+
+## [2026-10-21] ingest | Curly strands, and the bug that WAS the spikes
+
+The feedback on the first fur was "more curly, less spikes". Chasing it
+turned up a real BUG, and the bug was most of the spikes.
+
+**The strand's direction was not a rotation.** It was spelled
+`groom*cos(spin) + t2*sin(spin)`, which only preserves the length when the
+groom happens to lie along `t1` - and the groom is the projection of
+"down", so it generally does not. The length varied with the spin, and at
+the spin where the two terms cancel the direction was numerical noise: the
+card degenerated into a **spoke pointing straight out of the surface**.
+Measured (the unit test that caught it): the strand's angle to the normal
+ranged 8.6-89.8 degrees instead of the intended 12-38. Expressing the
+groom in the surface's tangent frame and rotating THAT keeps the length at
+one for every spin.
+
+**The curl.** The centre line now wanders across the ribbon's plane in a
+wave that is zero at the root (where the strand is anchored) and grows
+toward the tip; the ribbon's PLANE is unchanged, so the ray/plane
+intersection stays exact and the curl costs one sine.
+
+**And then the attribution was WRONG, and the negative control caught it.**
+A sweep that varied the curl, the width, the density and the length
+*together* appeared to show the curl taking the coat's high-frequency
+metric from 16.1 to 12.7 - but re-rendering with **only** the curl removed
+moved it by **0.03**. The win belonged to the density and the width. And
+the direction was backwards: a big curl (0.45) makes the coat **BLURRIER**,
+not softer, because a wave that wanders many clump-widths sideways smears
+the strand's ink over a band - the metric fell to 12.70, *below* the bare
+body's 13.48, and the coat read as a haze. (The user said so: "now fur
+looks too blurry.")
+
+The measured default is an amplitude of **0.20** - about two clump widths -
+so the wave is visible but the strand stays readable: the coat's detail is
+**14.76** against the body's 13.48, and its luma spread **36.98** against
+the body's 28.82, so the fleece's texture still shows.
+
+Two lessons worth more than the feature: **a confounded sweep produces a
+false attribution** (vary one thing, or run the negative control), and
+**"softer" is not the same axis as "curlier"** - a bigger wave is a bigger
+smear.
+
+**The coat is now configurable in the GUI.** The Rendering section carries
+its SHAPE (density, strand length, clump width, curl amplitude and cycles,
+how far a strand stands off the surface) and the Textures section carries
+the MATERIAL that wears it - a coat is a property of the material, not of
+the object. The fleece (21) was not even VISIBLE in the Textures panel
+before, because that panel's loop stopped at material 20. The sliders
+rebuild the coat (a CPU product) and apply on RELEASE; a rebuild keeps
+the live Move/Rotate preview, because that state lives on the fur objects.
+
+**The meadow got the same lesson**: a grass blade whose centre line is
+straight and whose width tapers to a point reads as a spike, so the blade
+now arches, keeps much more of its width, and fades over the last fifth
+instead of the last tenth. Measured on the house view: 1.74% of the pixels
+move.
+
+The lesson worth keeping: **a visual complaint is a measurement request**,
+and the thing it measures can be a bug rather than a parameter.
+
+See [[concepts/fur-cards]].
