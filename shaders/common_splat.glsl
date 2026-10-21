@@ -179,6 +179,17 @@ vec3 shadeSurfel(vec3 p, vec3 rd, vec3 alb, vec2 rr, vec3 ro, vec3 n,
     float skyAmb = mix(1.0, 0.16, enclosed);
     float skyIbl = mix(1.0, 0.04, enclosed);
 
+    // DEAD END, measured 2026-10-21: the ambient direction was tried with
+    // the GEOMETRIC normal instead of the baked bent normal (a foliage cell
+    // is one voxel thick, so the CPU aoBake's bent taps are dominated by the
+    // cell's own leaf and the baked bent points along the leaf, into the
+    // canopy, where the SVO's per-pixel sdfAO at the exact face sees open
+    // sky). It barely moves the tree view's near-black mask: 21,784 ->
+    // 21,161 px at the default flags and 11,258 -> 10,965 px with the
+    // enclosure and the sun shadow both off, and the luma at the mask does
+    // not move at all (19.9 / 21.1). The baked bent is therefore NOT the
+    // surviving dark term, and the two backends' twins must stay
+    // textually identical, so the bent stays.
     vec3 amb = skyIrradiance(bent) * (0.28 + 0.30 * ao) * skyAmb;
     // Moon takes over from the sun at night; scaled by skyAmb so a cave still
     // gets almost none of it (the lamp inside is what should read).

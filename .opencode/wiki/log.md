@@ -5723,3 +5723,41 @@ best explained by disk spill filling the gaps between leaves (the SVO's exact
 ray finds the lit ground through a gap the 1.4-cell disk covers). Next test:
 whether the residue is instead the enclosure/ shadow SHADING terms
 (`VF_RENDER_FLAGS=255/509/253` A/B).
+
+## [2026-10-21] correction | The slots are the WRONG SURFACE: a disk spills over its neighbour
+
+The last of the three candidate causes, and the one that survives every
+measurement: **the splat path paints a different cell's surface at the
+artifact pixels**. The palette-albedo debug (`VF_SPLAT_DEBUG=6`) reads warm
+bark/wood at the masked pixels (166,121,52) where the SVO frame reads
+neutral grey (37,32,30), and the mean saturation at the mask is 0.828
+(splat) against 0.273 (SVO).
+
+A wood/bark cell's disk has **spilled** over its neighbour: the disk is 1.4
+cells wide against a 0.1 m voxel face, so it covers ~4 cm past the face, and
+at a canopy's density those spills fill the gaps between the leaves. The SVO
+marches cells, its ray passes between the leaves and hits the lit ground;
+the splat paints the spilled dark leaf instead.
+
+That reframes every shading term as a CONSEQUENCE, not a cause: turning the
+enclosure off (-33%) or the sun shadow off (-21%) only makes the spilled
+disk bright enough to stop counting as near-black - the pixels are still
+wrong, they are just no longer black. Relaxing the seal lets the BACKGROUND
+through (the true surface behind is depth-rejected), which is why the
+unsealed frame is brighter rather than more correct. And the mask luma
+barely moves while the count falls (19.9 -> 20.7): the survivors are the
+spilled disks with the most extreme shading.
+
+The one fix that makes the pixels right is to **clip each disk to its own
+voxel face** - and that needs a flag from the bake (which cells have a
+single axis face) plus a shader-side clip that skips the anisotropic
+thin-structure disks.
+
+Two more dead ends recorded, both measured: the **flat-centre depth**
+(Voronoi ownership instead of the nearest tilted plane) is slightly worse -
+mask 21,703 -> 22,526 px at 640x400 and 94,116 -> 97,090 px at 1280x800 -
+and the **geometric normal in the ambient** barely moves it (21,784 ->
+21,161 px) with no change in the luma at the mask, so the baked bent normal
+is not the surviving dark term either.
+
+See [[concepts/splat-canopy-parity]].

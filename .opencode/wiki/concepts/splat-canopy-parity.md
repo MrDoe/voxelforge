@@ -126,7 +126,54 @@ distant hillside lets the hillside bleed through. The right shape is a
 **per-material band** (foliage wide, everything else tight) - a real shader
 change with its own A/B.
 
-### What the mechanism now says: the disks FILL THE GAPS between the leaves
+### The albedo debug settles it: it is the WRONG SURFACE, not a darker one
+
+At the masked pixels, `VF_SPLAT_DEBUG=6` (the palette albedo) reads **warm
+bark/wood** while the SVO frame at the same pixels is **neutral grey**:
+
+| pixel | splat rgb | SVO rgb | splat albedo (debug 6) |
+|---|---|---|---|
+| (543, 277) | 22 11 1 | 37 32 30 | 166 121 52 |
+| (93, 18) | 39 20 6 | 79 61 48 | 177 129 56 |
+| (120, 188) | 22 15 8 | 56 54 51 | 175 128 55 |
+
+Mean saturation at the mask: **splat 0.828, SVO 0.273**.
+
+So the splat path is painting a **different cell's** surface at those pixels -
+a warm wood/bark cell rendered in shadow (hence near-black) where the SVO
+renders a neutral cell. A wood/bark cell's disk has **spilled** over its
+neighbour.
+
+That reframes every shading hypothesis above as a **consequence**:
+
+- turning the enclosure off (-33%) or the sun shadow off (-21%) does not
+  stop the spill - it only makes the spilled disk bright enough to stop
+  counting as near-black. The pixels are still wrong, just no longer black.
+- relaxing the seal lets the *background* through (the true surface behind
+  is depth-rejected), which is why the unsealed frame is brighter rather
+  than more correct.
+- the mask luma barely moves while the count falls (19.9 -> 20.7): the
+  survivors are the spilled disks with the most extreme shading.
+
+**So the one fix that makes those pixels RIGHT is to stop the spill: clip
+each disk to its own voxel face.** The enclosure proxy, the binary baked
+shadow and the bent normal are each worth fixing on their own merits - the
+canopy really is being lit as a sealed room - but none of them is the
+artifact.
+
+### The bent normal is not it either (measured)
+
+The ambient's direction was tried with the **geometric** normal instead of
+the baked bent one (a foliage cell is one voxel thick, so the CPU
+`aoBake`'s centre/bent taps are dominated by the cell's own leaf and the
+baked bent points along the leaf - into the canopy - where the SVO's
+per-pixel `sdfAO` at the exact face sees open sky). It barely moves: the
+mask 21,784 -> 21,161 px at the default flags and 11,258 -> 10,965 px with
+the enclosure and the sun shadow both off, and the luma at the mask does not
+move at all (19.9 / 21.1). The baked bent is not the surviving dark term.
+(The two backends' shading twins must stay textually identical, so the bent
+stays anyway.)
+
 
 The dark leaf is not "in front of" the lit surface. The disk is 1.4 cells
 wide against a 0.1 m voxel face, so it spills ~4 cm past the face, and at a
@@ -234,6 +281,44 @@ SVO sees behind it is rejected by the **band's depth tolerance** (0.002 NDC ≈
 10 cm) before it can blend over - so the next measurement is a larger
 `VF_SPLAT_DEPTH_TOL`, at the default seal. If a larger tolerance collapses the
 mask without unsealing, the fix belongs to the band, not the seal.
+
+## The other half is SHADING (2026-10-21)
+
+Render-flag A/B at 1280x800 (plane depth, `VF_NO_OVERLAY=1`, baseline
+94,116 px / 18.65 / frame 89.66):
+
+| flags | mask px | frame mean |
+|---|---|---|
+| 511 default | 94,116 | 89.66 |
+| 255 enclosure off | 66,994 (-29%) | 92.08 |
+| 509 shadows off | 75,727 (-19.5%) | 102.27 |
+| 253 both off | 53,894 (-43%) | 104.14 |
+
+Ada measured the same shape independently at 640x400 (-33% / -21% / -48%),
+so this is not a camera artefact. **Roughly half the mask is the shading
+fields, not geometry**:
+
+- `enclosed` is a ONE-RAY BINARY test (`skyVisibilitySPlat`) marched over the
+  **coarse 0.4 m object volume**. That volume dilates a 1-cell (0.1 m) leaf
+  into a ~0.4 m blob, so a dense canopy reads as a cave roof, while the SVO's
+  `skyVisibilitySvo` marches the exact bricks and finds the gaps between
+  leaves. With `enclosed ~ 1` the daylight ambient is scaled to 0.16 and the
+  IBL to 0.04, so the canopy collapses to interior lighting.
+- the same value takes `max(enclosed, aoShEnclosure(ao, sh))`, where the proxy
+  is `(1-ao)*(1-sh)` - it fires precisely where both fields are dark, which is
+  a canopy as much as a cave.
+- the baked sun shadow is binary per cell at the cell's MEAN normal, so a
+  multi-face leaf cell can be shadowed while the SVO's face-exact march is lit.
+
+A **global** flag clear is not the fix: `VF_RENDER_FLAGS=255` also disables the
+authored light sources and brightens every surface, and combining it with
+`tol 0.02` costs the silhouette (sky-IoU 0.4639 vs 0.4800, +25,546 "sky" px
+mostly from the brightened frame reclassifying). The targeted version is a
+**baked per-surfel sky verdict evaluated on the exact `VoxelField`** (so the
+splat agrees with the SVO's own march), keeping the terrain-cave start-column
+test; a material-gated exemption for foliage is the cheaper approximation.
+Both live in the bake (`src/voxel/surfelize.cpp`) and must be mirrored in the
+live-store path, or a stamp re-aims untouched splats.
 
 **The regression to watch on that experiment is the WATER.** A constant
 per-quad depth is systematically *nearer* than the true surface depth for a
