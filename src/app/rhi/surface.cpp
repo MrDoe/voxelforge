@@ -19,7 +19,11 @@ namespace app {
 
 bool App::initWindow(const Args& args)
 {
-    return m_window.init(args.width, args.height, "Voxelforge");
+    // Automated runs render offscreen and never present, so their window is
+    // created unmapped: it cannot take focus or the pointer while it renders.
+    const bool headless = !args.shot.empty() || !args.shots.empty() || args.selftest ||
+                          args.smokeFrames > 0;
+    return m_window.init(args.width, args.height, "Voxelforge", !headless);
 }
 
 void App::ensureAcquireSemaphores()

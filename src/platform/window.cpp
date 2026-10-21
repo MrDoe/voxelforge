@@ -3,7 +3,7 @@
 
 namespace vf {
 
-bool Window::init(int width, int height, const std::string& title)
+bool Window::init(int width, int height, const std::string& title, bool visible)
 {
     glfwSetErrorCallback([](int code, const char* desc) {
         spdlog::error("GLFW error {}: {}", code, desc ? desc : "?");
@@ -14,6 +14,10 @@ bool Window::init(int width, int height, const std::string& title)
     }
     glfwWindowHint(GLFW_CLIENT_API, GLFW_NO_API);
     glfwWindowHint(GLFW_RESIZABLE, GLFW_TRUE);
+    // Automated capture runs still need an X11 window for the Vulkan surface,
+    // but it must never be mapped: a visible window steals focus and the
+    // pointer from whatever the user is doing while a test renders.
+    glfwWindowHint(GLFW_VISIBLE, visible ? GLFW_TRUE : GLFW_FALSE);
     m_window = glfwCreateWindow(width, height, title.c_str(), nullptr, nullptr);
     if (!m_window) {
         spdlog::critical("Window creation failed");
