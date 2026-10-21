@@ -237,6 +237,34 @@ A drop-in fur is gated by `tools/check_texture.py --material fleece` (the
 are indistinguishable to every other check, so the gate measures the luma
 spread of the alpaca's own pixels.
 
+## A micro object is PICKABLE (and the frame bug that made it invisible)
+
+The app's pick path marches the **world's** store, which by design holds no
+micro cells (they are separate SVO worlds on their own fine lattice). A micro
+object was therefore invisible to the pointer: clicking it selected nothing, and
+the Move mode refused it because it has no world owner id.
+
+`pickMicroField` is the missing half — a sphere-trace of the micro field in
+world space, with the hit bisected to the field's zero crossing. Two frame
+mistakes of mine, both invisible in a screenshot and obvious in the field
+profile:
+
+- the local point was offset **twice** — the field's own origin is applied
+  *inside* `sampleSdf`, so subtracting it as well offset the sample twice and
+  the ray missed the object by the whole margin;
+- the bisection bracket was a fixed step back instead of the **previous
+  sample**: the march can step `0.85·d`, which is far more than the minimum
+  step, and a bracket that does not contain the crossing makes the hit land
+  cells *inside* the object.
+
+**The frame bug that matters most**: `m_hoverHit.voxel` is a **world-lattice**
+coordinate — the brush, the box selection and `describeSurfelsAt` all index the
+world with it. A micro object lives on its own lattice, so writing its cell
+index there sends every one of them to the wrong place *and to the wrong
+chunk*. The pick now stores the world cell under the hit
+(`worldToVoxel(mp.pos)`) and names the object by its manifest file
+(`PickHit::microFile`), since a micro object has no world owner id.
+
 ## Live movement: a micro layer can be moved and turned
 
 A micro layer's `pos` is the world position of the object's **min corner** (a
