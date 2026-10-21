@@ -755,16 +755,24 @@ TEST_CASE("fur cards: the roots sit ON the surface, and the cards stand off it")
         if (std::abs(d0) < 1.5f * vox)
             ++onSurface;
         // The strand points OUT of the surface, not along it: a card lying in
-        // the tangent plane is invisible from the front.
+        // the tangent plane is invisible from the front - and, worse, a
+        // DEGENERATE direction (the bug the spin used to have) points
+        // straight out and reads as a spoke. The angle to the normal must
+        // stay inside the requested range, which is what pins the bug.
         const float ndl = glm::dot(vec3(c.nrmAlpha), vec3(c.dirWidth));
+        const float lo = std::sin(glm::radians(p.tiltMin));
+        const float hi = std::sin(glm::radians(p.tiltMax));
+        CHECK_MESSAGE(ndl >= lo - 1e-3f, "ndl=", ndl, " below ", lo);
+        CHECK_MESSAGE(ndl <= hi + 1e-3f, "ndl=", ndl, " above ", hi);
         CHECK_MESSAGE(ndl > 0.15f, "ndl=", ndl, " len=", c.rootLen.w);
         // The card is a sliver, not a disk.
         CHECK(c.dirWidth.w < c.rootLen.w);
         // The strand is CURLY, not a straight needle: the centre line's
         // amplitude is a real fraction of the strand's length, and it makes
-        // at least one cycle.
-        CHECK(c.curl.x > 0.05f * c.rootLen.w);
-        CHECK(c.curl.x < 0.60f * c.rootLen.w);
+        // at least one cycle. The bounds are the parameter's own (0.45 of the
+        // length) times the per-card jitter (0.55..1.45).
+        CHECK(c.curl.x > 0.20f * c.rootLen.w);
+        CHECK(c.curl.x < 0.70f * c.rootLen.w);
         CHECK(c.curl.y >= 0.5f);
     }
     CHECK(onSurface == int(o.cards.size()));
