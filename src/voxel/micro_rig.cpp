@@ -227,6 +227,10 @@ bool deriveMicroRig(const MicroField& field, MicroRig& out)
         b.b = c;
         out.bones.push_back(b);
     }
+    // The legs, the head and the tail hang off the SPINE, so a bow of the
+    // body carries them with it (the chain is what keeps a limb attached
+    // to the shoulder it belongs to).
+    const int spineBone = 0;
     // The legs: their segment runs from the core's bottom (the joint) down
     // to the foot, so the seam with the body is INSIDE the core and never
     // shows on the silhouette.
@@ -235,6 +239,7 @@ bool deriveMicroRig(const MicroField& field, MicroRig& out)
         MicroBone b;
         b.role = BoneRole::Leg;
         b.legIndex = int(i);
+        b.parent = spineBone;
         b.a = legs[i].top;
         b.a[upAxis] = coreBottom;
         b.b = legs[i].bottom;
@@ -244,6 +249,7 @@ bool deriveMicroRig(const MicroField& field, MicroRig& out)
     if (headCount >= 4) {
         MicroBone b;
         b.role = BoneRole::Head;
+        b.parent = spineBone;
         b.a = out.center;
         b.a[axis] = coreHi[axis];
         b.b = 0.5f * (headLo + headHi);
@@ -254,6 +260,7 @@ bool deriveMicroRig(const MicroField& field, MicroRig& out)
     if (tailCount >= 4) {
         MicroBone b;
         b.role = BoneRole::Tail;
+        b.parent = spineBone;
         b.a = out.center;
         b.a[axis] = coreLo[axis];
         b.b = 0.5f * (tailLo + tailHi);

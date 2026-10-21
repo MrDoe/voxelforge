@@ -78,10 +78,14 @@ struct MicroBehaviour {
     // newly imported model animates too) and the gait below drives it by
     // ROLE, not by a hand-written bone list.
     MicroRig rig;
-    // The per-bone rotation and the joint it turns about, filled by
-    // animateBones(). A bone's joint is the end of its segment that touches
-    // the core, so a leg turns at the hip.
+    // The per-bone transform, filled by animateBones(): the CHAINED rotation
+    // and the translation that goes with it. A bone's transform is its
+    // parent's composed with its own rotation about its joint, so a limb
+    // follows the body it hangs off (without this the head keeps turning
+    // about its rest joint while the body bows under it, and the neck tears
+    // away from the shoulders).
     std::vector<glm::mat3> boneRot;
+    std::vector<glm::vec3> boneXform;   // the translation of each transform
     std::vector<glm::vec3> boneJoint;
 
     // Set the behaviour up for an object placed at `pos`. `seed` makes two

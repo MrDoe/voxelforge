@@ -60,7 +60,8 @@ public:
     // Rewrite the SKELETON's bone rotations of one micro world. The gait
     // drives them every frame; the segments and the joints stay as they were
     // uploaded.
-    void setBoneRotations(size_t worldIndex, const std::vector<glm::mat3>& rot);
+    void setBoneRotations(size_t worldIndex, const std::vector<glm::mat3>& rot,
+                          const std::vector<glm::vec3>& xform);
 
     bool empty() const { return m_worldCount == 0; }
     size_t worldCount() const { return m_worldCount; }

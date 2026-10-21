@@ -183,6 +183,7 @@ void MicroBehaviour::animateBones()
     const size_t n = rig.bones.size();
     if (boneRot.size() != n) {
         boneRot.assign(n, glm::mat3(1.f));
+        boneXform.assign(n, glm::vec3(0.f));
         boneJoint.resize(n);
         for (size_t i = 0; i < n; ++i)
             boneJoint[i] = rig.bones[i].a;
@@ -263,7 +264,24 @@ void MicroBehaviour::animateBones()
             break;
         }
         boneJoint[i] = b.a;
-        boneRot[i] = axisRotation(axis, angle);
+        // The LOCAL transform: a rotation about the bone's own joint, in the
+        // rest frame.
+        const glm::mat3 R = axisRotation(axis, angle);
+        glm::vec3 t = b.a - R * b.a;
+        // CHAIN it: the bone's world transform is its parent's composed with
+        // its own. Without this the head keeps turning about its REST joint
+        // while the body bows under it - the neck visibly tears away from
+        // the shoulders (which is what the user saw).
+        const int parent = b.parent;
+        if (parent >= 0 && size_t(parent) < n) {
+            const glm::mat3 Rp = boneRot[size_t(parent)];
+            const glm::vec3 tp = boneXform[size_t(parent)];
+            boneRot[i] = Rp * R;
+            boneXform[i] = Rp * t + tp;
+        } else {
+            boneRot[i] = R;
+            boneXform[i] = t;
+        }
     }
 }
 

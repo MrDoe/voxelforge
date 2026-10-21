@@ -55,6 +55,11 @@ struct MicroBone {
     // Which leg of the pair (0..3), so the gait can pair them diagonally. A
     // non-leg bone keeps it at -1.
     int legIndex = -1;
+    // The bone this one hangs off (-1 = the root). A skeleton is a CHAIN: a
+    // child's transform has to be composed with its parent's, or the head
+    // keeps turning about its REST joint while the body bows under it, and
+    // the neck tears away from the shoulders.
+    int parent = -1;
 };
 
 struct MicroRig {

@@ -31,13 +31,15 @@ std::vector<uint8_t> loadSpirv(const std::string& path)
 // Mirrors the std140 MicroWorld struct in micro_overlay.comp: geo, base, lo, hi
 // - four 16-byte slots per world. kMicroMaxWorlds is the shader's table size.
 constexpr int kMicroMaxWorlds = 16;
-// One bone: the segment it occupies, the joint it turns about, and the
-// animated rotation matrix (row-major).
+// One bone: the segment it occupies, and its CHAINED transform - a rigid
+// one (R*p + t), because the composition of two pivot-rotations is not a
+// pivot-rotation, and a child that turns about a rest joint while the parent
+// moves tears at the seam.
 struct alignas(16) MicroBoneRow {
-    float a[4];
-    float b[4];
-    float joint[4];
-    float r0[4];
+    float a[4];       // the segment's start
+    float b[4];       // the segment's end
+    float xform[4];   // the chained transform's translation (xyz)
+    float r0[4];      // the chained transform's rotation (row-major)
     float r1[4];
     float r2[4];
 };
@@ -208,7 +210,10 @@ bool MicroSvoPass::setMicroWorlds(const std::vector<voxel::MicroWorld>& worlds)
             MicroBoneRow& br = row.bone[bi];
             br.a[0] = b.a.x; br.a[1] = b.a.y; br.a[2] = b.a.z;
             br.b[0] = b.b.x; br.b[1] = b.b.y; br.b[2] = b.b.z;
-            br.joint[0] = b.a.x; br.joint[1] = b.a.y; br.joint[2] = b.a.z;
+            // The transform's translation: the bone's local rotation is
+            // about its own joint, so the translation carries the joint
+            // (the app recomposes it every frame with the parent's).
+            br.xform[0] = b.a.x; br.xform[1] = b.a.y; br.xform[2] = b.a.z;
             br.r0[0] = 1.f;
             br.r1[1] = 1.f;
             br.r2[2] = 1.f;
@@ -303,7 +308,8 @@ void MicroSvoPass::setWorldRotation(size_t worldIndex, glm::mat3 R, glm::vec3 pi
 }
 
 void MicroSvoPass::setBoneRotations(size_t worldIndex,
-                                    const std::vector<glm::mat3>& rot)
+                                    const std::vector<glm::mat3>& rot,
+                                    const std::vector<glm::vec3>& xform)
 {
     // The gait rewrites the bones' rotations every frame. Only the matrix
     // part of each bone changes, so the world table is edited in place (the
@@ -321,6 +327,11 @@ void MicroSvoPass::setBoneRotations(size_t worldIndex,
         br.r0[0] = R[0][0]; br.r0[1] = R[0][1]; br.r0[2] = R[0][2];
         br.r1[0] = R[1][0]; br.r1[1] = R[1][1]; br.r1[2] = R[1][2];
         br.r2[0] = R[2][0]; br.r2[1] = R[2][1]; br.r2[2] = R[2][2];
+        if (size_t(i) < xform.size()) {
+            br.xform[0] = xform[size_t(i)].x;
+            br.xform[1] = xform[size_t(i)].y;
+            br.xform[2] = xform[size_t(i)].z;
+        }
     }
     vmaFlushAllocation(m_ctx->allocator(), m_worldTable.alloc, 0, VK_WHOLE_SIZE);
 }

@@ -510,7 +510,7 @@ void App::updateMicroBehaviours(float dt)
         // their rotations (the segments and the joints stay as they were
         // uploaded).
         b.animateBones();
-        m_microSvoPass.setBoneRotations(i, b.boneRot);
+        m_microSvoPass.setBoneRotations(i, b.boneRot, b.boneXform);
     }
 }
 
