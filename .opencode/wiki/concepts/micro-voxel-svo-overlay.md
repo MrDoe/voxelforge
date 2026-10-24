@@ -601,6 +601,16 @@ Verified: `VF_TRACE_RIG=1` shows bones 5/6 role `Neck` and 7 role `Head`,
 chained, and a full graze drops the head tip 0.61 m with z held — a curve, not
 a swing.
 
+**The neck fix has a rendered number too.** The old-vs-new neck pair
+(`alpaca_fix_neck_{before,after}.png`, same camera, same crop, the 3-link chain
+present in BOTH — only the classification rule differs) shows the same bug the
+fur stat measures: in the 820×560 crop the old rule leaves **10.1 %**
+background (blue-dominant water/sky) pixels in the band above the
+shoulder-to-head line — 3705 px of see-through where the neck's upper surface
+belongs — against **1.0 %** (359 px) with the rest-frame rule; mean luma rises
+53.9 → 62.7 and pixels below luma 40 fall 35.3 % → 23.7 %. The deformation and
+the fur slide are one bug, not two.
+
 **The residual is a reach limit, not a skinning bug.** At a full graze the
 muzzle still sits ≈0.30 m above the base plane: a real ground reach needs a
 total neck angle of ≈1.6 rad, which at three links is 25–32° per joint and

@@ -10,6 +10,7 @@ Do not infer causation from vertical position in the file itself.
 ## Index
 
 ### 2026-10-24
+- **verification** — The neck defect as a number: 10.1% see-through vs 1.0% in the same crop (vision model retired; ascii_view + masks instead)
 - **ingest** — Fur ownership decided in the REST frame; the Move preview is a field transform; the neck is a 3-link chain
 
 ### 2026-10-10
@@ -6359,5 +6360,28 @@ Screenshots: `tests/screenshots/alpaca_fix_body_{rest,graze}.png` (the same
 crop, pose A/B) and `alpaca_fix_neck_{before,after}.png` (the same camera and
 crop, old rule vs rest-frame rule). Gates: 13 micro cases / 7853 assertions,
 `micro_check` 20 checks passed (261.8 s), `assets/` clean after.
+
+See [[concepts/micro-voxel-svo-overlay]].
+
+## [2026-10-24] verification | The neck defect has a number, not just a picture
+
+`describe_image` is unavailable (the MiniMax `:free` vision variant was retired
+on 2026-10-22, HTTP 404), so the screenshots were judged with
+`tools/ascii_view.py` block maps plus pixel statistics — the repo's own rule
+that a caption is too coarse and a mask is the instrument.
+
+The old-vs-new neck pair holds the camera, the crop, the pose and the 3-link
+chain constant; only `microBoneAt`'s classification rule differs. In the
+820×560 crop, the band above the shoulder-to-head line is **10.1 %**
+blue-dominant (water/sky: seeing THROUGH the neck) under the old rule — 3705 px
+— against **1.0 %** (359 px) with the rest-frame rule. Mean luma 53.9 → 62.7,
+pixels below luma 40 35.3 % → 23.7 %. So the "neck loses volume" is measurable
+surface that the wrong un-boning transform displaced, and it is the same bug
+the fur stat reports as a 413 mm texture shift.
+
+The block map is what made it legible: in `before` the upper neck band reads
+`~~~~`/`TTTTT` (background), in `after` it reads `-----`/`=====` (the neck's
+surface). Recorded because "look at the PNG" is not a check an agent can run
+here.
 
 See [[concepts/micro-voxel-svo-overlay]].
