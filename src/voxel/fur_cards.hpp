@@ -148,6 +148,6 @@ struct FurParams {
 // material at all.
 bool buildFurCards(const MicroField& field, const FurParams& params, FurObject& out,
                    std::string* err, const MicroRig* rig = nullptr,
-                   glm::vec3 worldOffset = glm::vec3(0.f));
+                   glm::vec3 worldOffset = glm::vec3(0.0f));
 
 }  // namespace vf::voxel
