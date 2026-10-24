@@ -70,6 +70,7 @@ void MicroBehaviour::update(float dt)
     // step is clamped, so a 5 s hitch advances the walk by one frame's
     // worth, not by five seconds'.
     dt = std::min(dt, 0.1f);
+    const float prevHeading = heading;
     stateT += dt;
     wander += dt;
 
@@ -117,7 +118,7 @@ void MicroBehaviour::update(float dt)
         float d = headingTarget - heading;
         while (d > 3.14159265f) d -= 6.28318531f;
         while (d < -3.14159265f) d += 6.28318531f;
-        const float maxTurn = 1.1f * dt;   // rad/s
+        const float maxTurn = 2.0f * dt;   // rad/s (faster turn, less spinning)
         if (std::abs(d) <= maxTurn) {
             heading = headingTarget;
             hasHeadingTarget = false;
@@ -130,6 +131,25 @@ void MicroBehaviour::update(float dt)
     if (heading > 3.14159265f) heading -= 6.28318531f;
     if (heading < -3.14159265f) heading += 6.28318531f;
 
+    // Smooth the head turn toward its target so the head eases rather than
+    // snapping. When there is no target it eases back to centre.
+    {
+        float d = headTurn - headTurnCur;
+        const float maxH = 3.0f * dt;
+        if (std::abs(d) <= maxH)
+            headTurnCur = headTurn;
+        else
+            headTurnCur += (d > 0.f ? maxH : -maxH);
+        // Ease the target back to zero when not turning.
+        if (!hasHeadingTarget)
+            headTurn *= 0.92f;
+        // The head does not turn independently of the body: a turning alpaca
+        // looks where it is going through its whole body, not by craning its
+        // neck, so the head stays aligned with the spine.
+        headTurn = 0.f;
+        headTurnCur = 0.f;
+    }
+
     // The walk: the offset advances along the heading. The gait phase is
     // driven by the DISTANCE travelled, not by the time, so the feet keep
     // their rhythm when the animal turns or slows. A STOP freezes it (the
@@ -138,7 +158,16 @@ void MicroBehaviour::update(float dt)
         const float step = speed * dt;
         offset.x += std::sin(heading) * step;
         offset.z += std::cos(heading) * step;
-        gait += (step / std::max(0.05f, stride)) * 6.28318531f;
+        // Gait advances with DISTANCE (so feet keep rhythm). A turn is also
+        // a step: when the animal spins in place the gait must still advance,
+        // otherwise the legs freeze and the body slides. Add a contribution
+        // proportional to the yaw change, so a turn looks like stepping
+        // around rather than pivoting on frozen feet.
+        float turnDelta = heading - prevHeading;
+        while (turnDelta > 3.14159265f) turnDelta -= 6.28318531f;
+        while (turnDelta < -3.14159265f) turnDelta += 6.28318531f;
+        const float turnStep = std::abs(turnDelta) * 0.35f; // metres-equivalent
+        gait += ((step + turnStep) / std::max(0.05f, stride)) * 6.28318531f;
     }
 
     // The graze: a bow that eases in over the first second and out over the
@@ -177,6 +206,8 @@ void MicroBehaviour::pinPose(glm::vec3 offsetIn, float headingDeg,
     heading = glm::radians(headingDeg);
     gait = gaitPhase;
     grazeOverride = glm::clamp(grazeBlend, 0.f, 1.f);
+    headTurn = 0.f;
+    headTurnCur = 0.f;
     // The same yaw the walk applies; the sway/bob are gait-driven and are
     // deliberately left out - a pinned pose must be exactly reproducible.
     rot = axisRotation(glm::vec3(0, 1, 0), heading);
@@ -249,11 +280,14 @@ void MicroBehaviour::animateBones()
                    : 0.f);
     // The head/neck chain's TOTAL tip angle. The links share it, so the neck
     // curves; see the Neck/Head case below.
-    const float headTotal = 0.06f * std::sin(gait * 2.f) + grazeBlend * 0.70f;
+    const float headTotal = grazeBlend * 0.70f; // no walk nod: a real walk
+                                               // keeps the head steady; only
+                                               // the graze bows it down
     for (size_t i = 0; i < n; ++i) {
         const MicroBone& b = rig.bones[i];
         float angle = 0.f;
         glm::vec3 axis = side;
+        bool isNeckHead = false;
         switch (b.role) {
         case BoneRole::Leg: {
             // The diagonal pairs: the first and the last of the sorted legs
@@ -266,7 +300,7 @@ void MicroBehaviour::animateBones()
             const float ph = phase0 ? 0.f : 3.14159265f;
             // The swing is about the leg's own axis across the body, and it
             // is larger for the leg that is BEHIND (it has to catch up).
-            angle = std::sin(stride + ph) * 0.32f;
+            angle = std::sin(stride + ph) * 0.22f;
             // A grazing animal STANDS on four feet: it does not freeze
             // mid-stride. Ease the leg swing out as the graze blends in, so
             // all four hooves plant while the head lowers.
@@ -292,8 +326,12 @@ void MicroBehaviour::animateBones()
             // The neck reaches down and forward, on top of the bow. The angle
             // is SHARED by the chain's links (the tip's total is their sum),
             // so the bend is a curve along the neck, not a hinge at its base.
+            // The head also TURNS (a yaw relative to the body) so it can look
+            // where the animal is going - shared across the links like the
+            // pitch, so the neck curves rather than kinking.
             angle = headTotal / float(std::max(1, neckLinks));
             axis = side;
+            isNeckHead = true;
             break;
         }
         case BoneRole::Tail: {
@@ -308,7 +346,10 @@ void MicroBehaviour::animateBones()
         boneJoint[i] = b.a;
         // The LOCAL transform: a rotation about the bone's own joint, in the
         // rest frame.
-        const glm::mat3 R = axisRotation(axis, angle);
+        const glm::mat3 R = isNeckHead
+            ? axisRotation(side, angle) *
+              axisRotation(up, headTurnCur / float(std::max(1, neckLinks)))
+            : axisRotation(axis, angle);
         glm::vec3 t = b.a - R * b.a;
         // CHAIN it: the bone's world transform is its parent's composed with
         // its own. Without this the head keeps turning about its REST joint

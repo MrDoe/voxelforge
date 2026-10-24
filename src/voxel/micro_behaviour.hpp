@@ -48,13 +48,22 @@ struct MicroBehaviour {
 
     // The configuration. The defaults suit a 1.3 m animal; a manifest can
     // override them through the layer's "behaviour" block.
-    float speed = 0.22f;       // m/s
+    float speed = 0.20f;       // m/s - a calm alpaca walk
     float radius = 1.2f;       // the wander radius around the anchor (m)
-    float bob = 0.014f;        // the gait bob (m, peak)
-    float sway = 0.030f;       // the gait sway (radians, peak)
+    float bob = 0.004f;        // the gait bob (m, peak) - kept small so the
+                               // back stays level (a real alpaca does not
+                               // bounce); the ground clamp handles slopes
+    float sway = 0.025f;       // the gait sway (radians, peak) - gentle roll
     float grazePitch = 0.0f;   // the graze bow (radians, peak); 0 keeps all
                                // four feet planted (rigid legs cannot extend)
-    float stride = 0.85f;      // the distance per gait cycle (m)
+    float stride = 0.90f;      // the distance per gait cycle (m)
+
+    // HEAD TURNING. The head can look in a direction independently of the
+    // body's yaw - toward a target, an obstacle, or the direction of travel.
+    // It is a yaw relative to the body, smoothed so the head eases rather
+    // than snapping. The neck links share it, like the pitch.
+    float headTurn = 0.f;      // target (radians, relative to body)
+    float headTurnCur = 0.f;   // smoothed current (radians)
 
     // The runtime state.
     State state = State::Walk;
