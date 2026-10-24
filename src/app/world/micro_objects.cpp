@@ -16,7 +16,10 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstdio>
 #include <cstring>
+#include <map>
+#include <string>
 #include <spdlog/spdlog.h>
 
 namespace vf {
@@ -391,6 +394,59 @@ bool App::setMicroBehaviour(const std::string& file, const std::string& command,
     return false;
 }
 
+namespace {
+
+struct FreezePose {
+    glm::vec3 offset { 0.f };
+    float headingDeg = 0.f;
+    float gait = 0.f;
+    float graze = 0.f;
+};
+
+// VF_TEST_BEHAVIOUR_FREEZE="name:dx,dy,dz:headingDeg:gait[:graze][;...]"
+//
+// A headless `--shot` of an ANIMATED micro object is NOT deterministic: the
+// behaviour advances with the frame clock (the step is clamped to 0.1 s) for
+// every frame before the shot, so two runs of the identical binary differ by
+// tens of thousands of pixels. That makes a shader A/B on the alpaca pose
+// noise. Pinning the transform, the gait phase and the graze blend makes the
+// render exact.
+const std::map<std::string, FreezePose>& freezePoses()
+{
+    static std::map<std::string, FreezePose> poses;
+    static const bool once = [] {
+        const char* spec = std::getenv("VF_TEST_BEHAVIOUR_FREEZE");
+        if (!spec || !*spec)
+            return true;
+        const std::string all(spec);
+        size_t pos = 0;
+        while (pos < all.size()) {
+            size_t end = all.find(';', pos);
+            if (end == std::string::npos)
+                end = all.size();
+            const std::string item = all.substr(pos, end - pos);
+            pos = end + 1;
+            char name[64] = {};
+            float x = 0.f, y = 0.f, z = 0.f, hd = 0.f, gait = 0.f, graze = 0.f;
+            const int got = std::sscanf(item.c_str(), "%63[^:]:%f,%f,%f:%f:%f:%f",
+                                        name, &x, &y, &z, &hd, &gait, &graze);
+            if (got >= 5) {
+                FreezePose p;
+                p.offset = glm::vec3(x, y, z);
+                p.headingDeg = hd;
+                p.gait = gait;
+                p.graze = got >= 6 ? graze : 0.f;
+                poses[name] = p;
+            }
+        }
+        return true;
+    }();
+    (void)once;
+    return poses;
+}
+
+} // namespace
+
 void App::updateMicroBehaviours(float dt)
 {
     // The autonomous behaviours, once per frame. Each one produces a
@@ -405,7 +461,30 @@ void App::updateMicroBehaviours(float dt)
         vf::voxel::MicroBehaviour& b = m_microBehaviours[i];
         if (!b.active)
             continue;
-        const bool held = m_moveStaged || m_rotationStaged;
+        // A pinned pose wins over both the state machine and the user's
+        // manipulation: it exists so a render is exactly reproducible. It
+        // does NOT skip the ground clamp below - a pinned pose still stands
+        // on the terrain, and the clamp is deterministic for a fixed offset.
+        bool frozen = false;
+        {
+            const auto& poses = freezePoses();
+            if (!poses.empty() && i < m_microOccluders.size()) {
+                std::string stem = m_microOccluders[i].layerFile;
+                const size_t slash = stem.find_last_of('/');
+                if (slash != std::string::npos)
+                    stem = stem.substr(slash + 1);
+                if (stem.size() > 4)
+                    stem.resize(stem.size() - 4);
+                const auto fit = poses.find(stem);
+                if (fit != poses.end()) {
+                    b.pinPose(fit->second.offset, fit->second.headingDeg,
+                              fit->second.gait, fit->second.graze);
+                    frozen = true;
+                }
+            }
+        }
+
+        const bool held = !frozen && (m_moveStaged || m_rotationStaged);
         if (held) {
             m_microSvoPass.setWorldAnimation(i, glm::vec3(0.f), glm::mat3(1.f),
                                              b.pivot, false);
@@ -418,7 +497,8 @@ void App::updateMicroBehaviours(float dt)
         const glm::vec3 prevOffset = b.offset;
         const float prevHeading = b.heading;
         const float prevGait = b.gait;
-        b.update(dt);
+        if (!frozen)
+            b.update(dt);
 
         // OBSTACLE RESPONSE. The behaviour itself has no notion of geometry
         // (it is a pure transform), so the collision lives here: a candidate
@@ -426,7 +506,7 @@ void App::updateMicroBehaviours(float dt)
         // withdrawn, and the heading is turned toward the first free retry.
         // If every retry is blocked the animal stops to graze, which is also
         // the only state that cannot walk into the obstacle next frame.
-        if (i < m_microFields.size() &&
+        if (!frozen && i < m_microFields.size() &&
             microFootprintBlocked(int(i), b.offset)) {
             // The animal is touching something. It must TURN AWAY, and the
             // turn must be a TARGET, not a jump: a jump is applied on every
@@ -511,6 +591,123 @@ void App::updateMicroBehaviours(float dt)
         // uploaded).
         b.animateBones();
         m_microSvoPass.setBoneRotations(i, b.boneRot, b.boneXform);
+        // DIAGNOSTIC (VF_TEST_FUR_STAT=1, frame 0 only): measures the rule this
+        // shader depends on. The OLD rule picked the bone nearest the POSED
+        // point measured against the REST segments; the rule now un-bones the
+        // point with each bone's own transform and measures in the rest frame.
+        // For every surface cell this reports how often the two disagree and
+        // how far the texture coordinate (the rest point the fur is sampled
+        // at) moves when they do - so a regression in microBoneAt is a number,
+        // not a fur pattern that slides. Measured on the alpaca at a full
+        // graze: 54.2% of surface cells / 90.5% of neck+head, 413 mm mean
+        // shift. At rest the two rules are identical by construction.
+        if (getenv("VF_TEST_FUR_STAT") && m_frameIdx == 0 &&
+            i < m_microFields.size() && i < m_microOccluders.size()) {
+            const vf::voxel::MicroField& f = m_microFields[i];
+            // The field is LOCAL; the rig was shifted into the ANCHORED frame
+            // (placement + grid origin), exactly as the shader's baked frame.
+            const glm::vec3 frame = m_microOccluders[i].worldOffset + f.origin;
+            const int nb = int(b.rig.bones.size());
+            if (nb > 0 && f.size3() > 0) {
+                auto segDist = [](const glm::vec3& p, const glm::vec3& a,
+                                  const glm::vec3& c) {
+                    const glm::vec3 ab = c - a;
+                    const float t = glm::clamp(
+                        glm::dot(p - a, ab) / glm::max(glm::dot(ab, ab), 1e-12f),
+                        0.0f, 1.0f);
+                    return glm::length(p - (a + ab * t));
+                };
+                size_t surf = 0, wrong = 0, neckSurf = 0, neckWrong = 0;
+                double sumErr = 0.0, maxErr = 0.0;
+                double sumNeck = 0.0, maxNeck = 0.0;
+                for (int z = 1; z + 1 < f.dim.z; ++z)
+                    for (int y = 1; y + 1 < f.dim.y; ++y)
+                        for (int x = 1; x + 1 < f.dim.x; ++x) {
+                            const size_t ci = f.idx(x, y, z);
+                            if (!f.solid[ci])
+                                continue;
+                            const bool exposed =
+                                !f.solid[f.idx(x + 1, y, z)] ||
+                                !f.solid[f.idx(x - 1, y, z)] ||
+                                !f.solid[f.idx(x, y + 1, z)] ||
+                                !f.solid[f.idx(x, y - 1, z)] ||
+                                !f.solid[f.idx(x, y, z + 1)] ||
+                                !f.solid[f.idx(x, y, z - 1)];
+                            if (!exposed)
+                                continue;
+                            const glm::vec3 p =
+                                frame + (glm::vec3(x, y, z) + 0.5f) * f.voxel;
+                            int newBest = -1, oldBest = -1;
+                            float newD = 1e30f, oldD = 1e30f;
+                            glm::vec3 restOld(0.0f);
+                            for (int k = 0; k < nb; ++k) {
+                                const auto& mb = b.rig.bones[k];
+                                const glm::mat3 R = b.boneRot[k];
+                                const glm::vec3 q =
+                                    glm::transpose(R) * (p - b.boneXform[k]);
+                                const float dn = segDist(q, mb.a, mb.b);
+                                if (dn < newD) {
+                                    newD = dn;
+                                    newBest = k;
+                                }
+                                const float dold = segDist(p, mb.a, mb.b);
+                                if (dold < oldD) {
+                                    oldD = dold;
+                                    oldBest = k;
+                                    restOld = q;
+                                }
+                            }
+                            const float err = glm::length(restOld - p);
+                            const auto role = b.rig.bones[newBest].role;
+                            const bool neck =
+                                role == vf::voxel::BoneRole::Neck ||
+                                role == vf::voxel::BoneRole::Head;
+                            ++surf;
+                            sumErr += err;
+                            maxErr = std::max(maxErr, double(err));
+                            if (neck) {
+                                ++neckSurf;
+                                sumNeck += err;
+                                maxNeck = std::max(maxNeck, double(err));
+                                if (oldBest != newBest)
+                                    ++neckWrong;
+                            }
+                            if (oldBest != newBest)
+                                ++wrong;
+                        }
+                spdlog::info(
+                    "furstat origin=({:+.3f},{:+.3f},{:+.3f}) surface {} "
+                    "misclassified {} ({:.1f}%) texShift mean {:.1f} mm max "
+                    "{:.1f} mm | neck/head surface {} misclassified {} "
+                    "({:.1f}%) shift mean {:.1f} mm max {:.1f} mm",
+                    double(frame.x), double(frame.y), double(frame.z),
+                    surf, wrong, 100.0 * double(wrong) / std::max<size_t>(surf, 1),
+                    sumErr / std::max<size_t>(surf, 1) * 1000.0, maxErr * 1000.0,
+                    neckSurf, neckWrong,
+                    100.0 * double(neckWrong) / std::max<size_t>(neckSurf, 1),
+                    sumNeck / std::max<size_t>(neckSurf, 1) * 1000.0,
+                    maxNeck * 1000.0);
+            }
+        }
+        if (getenv("VF_TRACE_RIG") && m_frameIdx == 0) {
+            spdlog::info("rig{} fwd=({:+.2f},{:+.2f},{:+.2f}) up=({:+.2f},{:+.2f},{:+.2f}) "
+                         "center=({:+.2f},{:+.2f},{:+.2f})",
+                         i, double(b.rig.forward.x), double(b.rig.forward.y),
+                         double(b.rig.forward.z), double(b.rig.up.x),
+                         double(b.rig.up.y), double(b.rig.up.z),
+                         double(b.rig.center.x), double(b.rig.center.y),
+                         double(b.rig.center.z));
+            for (size_t k = 0; k < b.rig.bones.size(); ++k) {
+                const auto& mb = b.rig.bones[k];
+                const glm::vec3 tip = b.boneRot[k] * mb.b + b.boneXform[k];
+                spdlog::info("  bone {} role {} parent {} a=({:+.3f},{:+.3f},{:+.3f}) "
+                             "b=({:+.3f},{:+.3f},{:+.3f}) posedTip=({:+.3f},{:+.3f},{:+.3f})",
+                             k, int(mb.role), mb.parent,
+                             double(mb.a.x), double(mb.a.y), double(mb.a.z),
+                             double(mb.b.x), double(mb.b.y), double(mb.b.z),
+                             double(tip.x), double(tip.y), double(tip.z));
+            }
+        }
     }
 }
 

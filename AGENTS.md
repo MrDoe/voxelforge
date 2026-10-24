@@ -1053,6 +1053,27 @@ one costs a whole turn, because the bad call is rejected before any work runs.
     wrong rotation, and **the animal does not move at all** — with every
     number in the log correct. The rig is shifted into the anchored frame
     when it is handed to the GPU.
+  - **The head is a CHAIN of three links, not one bone.** A single
+    `Head` bone turns the whole neck about its base: one hard crease at the
+    shoulder, a rigid pole above it, and a wedge opens on the outside of the
+    bend — the neck "loses volume" and reads as a hinged prop. The front
+    extension is emitted as `Neck`, `Neck`, `Head`, each a child of the
+    previous, and `animateBones` gives each link `headTotal / linkCount`, so
+    the neck CURVES while the tip still turns by the full angle (the links
+    compose). A rig with one `Head` bone divides by one and behaves exactly as
+    before. The count is fixed and the geometry comes from the object's own
+    voxels, so a newly imported model gets the same chain. Raising the shader's
+    bone capacity 8 → 12 (`MicroWorldRow` 1392 B) is what makes room for it: an
+    alpaca rig is 7 bones without the chain, and a silently truncated bone list
+    makes every parent index above the cut name the wrong bone.
+    `VF_TRACE_RIG=1` logs the roles, parents and posed tips at frame 0.
+  - **A headless shot of a walking animal is NOT deterministic** — the
+    behaviour advances with the frame clock, so two runs of the same binary
+    differ by tens of thousands of pixels and a shader A/B is noise.
+    `VF_TEST_BEHAVIOUR_FREEZE="name:dx,dy,dz:headingDeg:gait[:graze][;…]"`
+    pins the transform, gait phase and graze blend (`MicroBehaviour::pinPose`)
+    while keeping the ground clamp, and every A/B render then also passes a
+    fixed `--animtime`.
 - **The fur must not SLIDE.** The texture is bound to the SURFACE, not to
   the world, so the micro shader samples the atlas at the point's REST-POSE
   position — the very point the field is sampled at. A world-space sample
@@ -1062,11 +1083,28 @@ one costs a whole turn, because the bad call is rejected before any work runs.
   ANIMATED normal makes the fur pattern crawl over the body on every bone
   rotation (the graze bows the spine 35°). The shader un-bones the normal into
   the rest frame, samples there, and re-bones the bumped normal for shading
-  (`microDirUnbone`/`microDirRebone`/`microDirFromBaked`). **The staged Move
-  preview is a DISPLAY offset**: `main()` shifts the hit point so the object
-  appears dragged, so every SURFACE lookup (texture, material cell, normal,
-  AO) must take it back out (`microShadeToBaked`, `microMapShade`) — the field
-  *trace* must NOT, or the object stops following the pointer.
+  (`microDirUnbone`/`microDirRebone`/`microDirFromBaked`). **Which bone owns a
+  point is decided in the REST frame, and getting that wrong is what made the
+  fur slide.** `microBoneAt` must un-bone the point with EACH candidate bone's
+  own transform and measure it against THAT bone's own rest segment; asking
+  which REST segment is nearest the POSED point (the old rule) reclassifies
+  whatever the pose moved. Measured on the alpaca at a full graze: 54.2 % of
+  all surface cells and 90.5 % of the neck/head misclassified, mean texture
+  shift 413 mm (max 710 mm) — the fleece sampled a point up to 0.7 m away and
+  the neck deformed as if it belonged to the head. At rest every candidate
+  returns the same point, so the rule reduces to plain nearest-segment.
+  `VF_TEST_FUR_STAT=1` prints that old-vs-new comparison over the object's
+  surface cells at frame 0; read it, not the picture.
+  **The staged Move preview is a FIELD TRANSFORM, not a display offset.**
+  `microMapWorld` applies it through `microShadeToBaked` (move, then rotation,
+  then the behaviour), so trace, depth test and every surface lookup share one
+  frame; `main()` no longer shifts the hit point and `microMapShade` is just
+  `microMap`. It used to be a display-only shift applied AFTER the trace,
+  which meant the covered pixels were the old silhouette, the depth was the
+  old depth, and shading sampled the object beside the one on screen.
+  Verified headlessly: `VF_TEST_MOVE_LIVE="0.5,0,0,micro/alpaca.vxw"` and a
+  frozen pose offset by the same 0.5 m are pixel-identical (mean |d| 0.01,
+  0 px > 10).
   **The fleece is GEOMETRY, not just the fur photo.** `tools/micro_voxel.cpp`
   displaces the fleece surface by a per-region staple length (back/neck 5 cm,
   head 4, legs 2.6–2.8, ears 0.8; the muzzle, eyes and hooves get none). A

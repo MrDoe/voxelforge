@@ -87,9 +87,13 @@ struct alignas(16) MicroWorldRow {
     // SEGMENT and JOINT never change, and the gait rewrites only their
     // rotations.
     float bones[4];
-    MicroBoneRow bone[8];
+    // 12 slots, not 8: a quadruped rig is already 7 bones (spine, 4 legs,
+    // tail, head) and the neck is a CHAIN of three, so 8 would silently drop
+    // the head - and every bone index above the cut, including the parents
+    // the shader composes, would name the wrong bone.
+    MicroBoneRow bone[12];
 };
-static_assert(sizeof(MicroWorldRow) == 1008, "std140 slot size");
+static_assert(sizeof(MicroWorldRow) == 1392, "std140 slot size");
 
 } // namespace
 
@@ -204,8 +208,9 @@ bool MicroSvoPass::setMicroWorlds(const std::vector<voxel::MicroWorld>& worlds)
         row.preview[3] = 0.0f; // no live preview until one is set
         // The bones: their segments and joints (static) and the identity
         // rotation, which the gait then drives.
-        row.bones[0] = float(s.rig.bones.size());
-        for (size_t bi = 0; bi < s.rig.bones.size() && bi < 8; ++bi) {
+        const size_t kMaxBones = sizeof(row.bone) / sizeof(row.bone[0]);
+        row.bones[0] = float(std::min(s.rig.bones.size(), kMaxBones));
+        for (size_t bi = 0; bi < s.rig.bones.size() && bi < kMaxBones; ++bi) {
             const auto& b = s.rig.bones[bi];
             MicroBoneRow& br = row.bone[bi];
             br.a[0] = b.a.x; br.a[1] = b.a.y; br.a[2] = b.a.z;

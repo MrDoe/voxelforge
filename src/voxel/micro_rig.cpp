@@ -32,7 +32,7 @@ float distToSegment(glm::vec3 p, glm::vec3 a, glm::vec3 b)
 // the rig derived again: parents are part of the rig, and a rig read
 // back without them is a skeleton whose bones move independently - which
 // tears the neck away from the shoulders when the spine bows.
-constexpr char kCacheMagic[8] = { 'V', 'F', 'R', 'I', 'G', 'C', 0, 2 };
+constexpr char kCacheMagic[8] = { 'V', 'F', 'R', 'I', 'G', 'C', 0, 3 };
 
 } // namespace
 
@@ -266,16 +266,34 @@ bool deriveMicroRig(const MicroField& field, MicroRig& out)
         b.b = legs[i].bottom;
         out.bones.push_back(b);
     }
-    // The head: the front extension, from the core's front to the tip.
+    // The head: the front extension, from the core's front to the tip. It is
+    // a CHAIN of links, NOT one bone. A single bone turns the whole neck about
+    // its base: the bend is one hard crease at the shoulder, the neck stays a
+    // rigid pole above it, and the outside of the bend opens a wedge - the
+    // head sweeps an arc while the neck reads as a hinged prop. Split into
+    // three, each joint turns a third of the total: the neck CURVES, every
+    // crease is a third as deep, and the tip still turns by the full angle
+    // (the links compose). The count is fixed and the geometry comes from the
+    // object's own voxels, so this stays generic.
     if (headCount >= 4) {
-        MicroBone b;
-        b.role = BoneRole::Head;
-        b.parent = spineBone;
-        b.a = out.center;
-        b.a[axis] = coreHi[axis];
-        b.b = 0.5f * (headLo + headHi);
-        b.b[axis] = headHi[axis];
-        out.bones.push_back(b);
+        const int kNeckLinks = 3;
+        glm::vec3 a = out.center;
+        a[axis] = coreHi[axis];
+        glm::vec3 b = 0.5f * (headLo + headHi);
+        b[axis] = headHi[axis];
+        int parent = spineBone;
+        for (int link = 0; link < kNeckLinks; ++link) {
+            MicroBone nb;
+            const float t0 = float(link) / float(kNeckLinks);
+            const float t1 = float(link + 1) / float(kNeckLinks);
+            // The LAST link is the head itself; the ones below are the neck.
+            nb.role = (link + 1 == kNeckLinks) ? BoneRole::Head : BoneRole::Neck;
+            nb.parent = parent;
+            nb.a = glm::mix(a, b, t0);
+            nb.b = glm::mix(a, b, t1);
+            out.bones.push_back(nb);
+            parent = int(out.bones.size()) - 1;
+        }
     }
     // The tail: the back extension.
     if (tailCount >= 4) {

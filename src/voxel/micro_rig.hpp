@@ -42,8 +42,9 @@ namespace vf::voxel {
 enum class BoneRole {
     Spine,  // the body: the root of the hierarchy
     Leg,    // a limb below the core
-    Head,   // the head and neck: the front extension
+    Head,   // the head: the TIP of the front extension
     Tail,   // the tail: the back extension
+    Neck,   // a link of the front extension BELOW the head (the chain)
 };
 
 struct MicroBone {

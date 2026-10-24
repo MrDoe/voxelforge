@@ -9,6 +9,9 @@ Do not infer causation from vertical position in the file itself.
 
 ## Index
 
+### 2026-10-24
+- **ingest** — Fur ownership decided in the REST frame; the Move preview is a field transform; the neck is a 3-link chain
+
 ### 2026-10-10
 - **ingest** — Bounding-box selection scopes the brush
 - **finding** — A peer's non-atomic world.json rewrite fakes a visual_check failure
@@ -6289,5 +6292,72 @@ ignores the working directory and writes to
 
 Screenshots now live in `tests/screenshots/` by user request; AGENTS.md holds
 the rule.
+
+See [[concepts/micro-voxel-svo-overlay]].
+
+## [2026-10-24] fix | The fur was sampled off the skin, the drag shaded the wrong object, the neck was a hinge
+
+Three reports, three causes, all in how a micro object's physics is *posed* —
+none in its geometry.
+
+**1. The fur slid and the neck deformed: ONE bug, in `microBoneAt`.** The bone
+segments are stored in the REST pose, but the rule asked which rest segment was
+nearest the **posed** point. The pose moves the point, so the answer follows the
+pose: under the alpaca's 35° graze bow 54.2 % of all surface cells and 90.5 % of
+the neck/head were classified to the wrong bone. Two consequences at once — the
+fleece sampled a rest point a mean 413 mm (max 710 mm) away, which is the
+"fur slides"; and the surface was un-boned through the wrong transform, so the
+neck bent as if it belonged to the head. The rule now un-bones the point with
+EACH candidate bone's own transform and measures it against THAT bone's own
+segment (at rest they are all the same point, so it reduces to nearest-segment).
+`VF_TEST_FUR_STAT=1` prints the comparison per object at frame 0; the rest-pose
+floor is 1.5 % / 1.8 mm.
+
+**2. The drag preview shaded the object beside the one on screen.** The staged
+Move was a DISPLAY offset: `main()` shifted the hit point after the trace, so
+the covered pixels were the old silhouette, the depth was the old depth, and
+every surface lookup sampled a field 0.5 m away (normal collapses to the
+bounding box, fur speckles). It is now a FIELD TRANSFORM in `microMapWorld`
+(`microShadeToBaked`: move, then rotation, then the behaviour), the one frame
+the trace, the depth test and the shading share. Proof, not impression:
+`VF_TEST_MOVE_LIVE="0.5,0,0,micro/alpaca.vxw"` against a frozen pose offset by
+0.5 m is pixel-identical (mean |d| 0.01, 0 px > 10).
+
+**3. The neck hinged because it WAS one bone.** The head was a single `Head`
+bone, so a graze turned the whole neck about its base — one crease at the
+shoulder and a wedge on the outside of the bend. The front extension is now a
+chain `Neck, Neck, Head`, each a child of the previous, each turning
+`headTotal / linkCount`; the links compose so the tip still reaches the full
+angle while the neck curves. Shader bone slots 8 → 12 (`MicroWorldRow` 1392 B;
+an alpaca rig is 7 bones before the chain) and the rig cache magic v2 → v3.
+`VF_TRACE_RIG=1` shows the chain and a 0.61 m tip drop at a graze.
+
+**A determinism hook was required before any of this could be judged.** A
+headless shot of an animated object advances the behaviour on the frame clock,
+so two identical runs differ by ~34 k px. `VF_TEST_BEHAVIOUR_FREEZE` pins the
+transform, gait phase and graze blend (`pinPose`, ground clamp still applied)
+and every A/B also pins `--animtime`. The old-vs-new neck pair was rendered by
+temporarily restoring the old classification rule in the shader (md5 verified
+back afterwards).
+
+**Residual, reported rather than papered over.** At a full graze the muzzle
+still sits ≈0.30 m above the base plane: a real ground reach needs ≈1.6 rad of
+total neck angle, i.e. 25–32° per joint, which opens a ≈2.4 cm notch on the
+outside of a rigid-skin bend at 5 mm voxels (today's 9.5°/joint gives ≈7 mm).
+The graze constants were left alone; the honest levers are a longer derived
+neck, smooth-blend skinning, or two-segment legs.
+
+**Worktree find, not caused by this session:** `assets/world.json` was dirty
+with the alpaca at `[16.10, -0.25, 14.90]` — inside a tree (probed solid,
+y 1–8) — against HEAD's authored `[11.55, ...]`, and the whole file had been
+rewritten compactly by an earlier app run (mtime two days old). Restored from
+HEAD; the only semantic difference was that position (layers, textures and
+lights compared as multisets). Reminder of the standing rule: the app rewrites
+the manifest on every run, so `git diff assets/` is part of every gate.
+
+Screenshots: `tests/screenshots/alpaca_fix_body_{rest,graze}.png` (the same
+crop, pose A/B) and `alpaca_fix_neck_{before,after}.png` (the same camera and
+crop, old rule vs rest-frame rule). Gates: 13 micro cases / 7853 assertions,
+`micro_check` 20 checks passed (261.8 s), `assets/` clean after.
 
 See [[concepts/micro-voxel-svo-overlay]].

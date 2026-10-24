@@ -74,6 +74,12 @@ struct MicroBehaviour {
     glm::vec3 pivot { 0.f };  // the rotation pivot (the bottom-centre)
     bool active = false;      // the layer asked for a behaviour
 
+    // A PINNED graze blend (0 = standing, 1 = fully bowed), or -1 to take it
+    // from the state machine. The deterministic pose hook sets it: the blend
+    // otherwise depends on stateT and the object's seed, so a "grazing"
+    // screenshot could not be reproduced.
+    float grazeOverride = -1.f;
+
     // The SKELETON. The rig is DERIVED from the object's own voxels (so a
     // newly imported model animates too) and the gait below drives it by
     // ROLE, not by a hand-written bone list.
@@ -100,6 +106,14 @@ struct MicroBehaviour {
     // sways. It is driven by the rig's roles, so it works on any rig - an
     // imported cat animates the same way an imported horse does.
     void animateBones();
+
+    // PIN a pose: the transform, the gait phase and (optionally) the graze
+    // blend, with no state machine and no wandering. A headless `--shot` of an
+    // animated object is otherwise non-deterministic (the behaviour advances
+    // with the frame clock before the shot), so a shader A/B has to freeze it
+    // first.
+    void pinPose(glm::vec3 offsetIn, float headingDeg, float gaitPhase,
+                 float grazeBlend = 0.f);
 
     // The INVERSE of the animated transform: a world point (or a direction)
     // into the object's own frame. The pick needs it - a moving object is

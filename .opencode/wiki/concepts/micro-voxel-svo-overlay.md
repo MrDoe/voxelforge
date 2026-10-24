@@ -2,7 +2,7 @@
 title: Micro-voxel objects as separate SVO worlds (2026-10-20)
 tags: [micro-voxel, svo, sdf, encoding, shader, separate-lattice, overlay]
 sourceRefs: [src/voxel/micro_field.hpp, src/voxel/micro_field.cpp, src/voxel/micro_svo.hpp, src/voxel/micro_svo.cpp, src/render/micro_svo_pass.hpp, src/render/micro_svo_pass.cpp, src/app/world/micro_objects.cpp, src/voxel/surfelize.cpp, src/voxel/surfelize.hpp, shaders/micro_overlay.comp, tools/micro_voxel.cpp, tests/test_micro.cpp, tests/micro_check.py]
-lastReviewed: 2026-10-20
+lastReviewed: 2026-10-24
 ---
 
 # Micro-voxel objects as separate SVO worlds
@@ -572,6 +572,44 @@ command (`"behaviour": "stop"`), snapshots whole layer entries, prints the
 snapshot (so a pre-existing loss is visible in the log), and replaces each
 entry whole on restore, verifying by equality.
 
+### The neck is a chain, not a hinge
+
+The head used to be **one** `Head` bone, so a graze turned the whole neck about
+its base: one hard crease at the shoulder, a rigid pole above it, and a wedge
+opened on the **outside** of the bend. The head swept an arc and the neck read
+as a hinged prop — the user's "the neck loses volume and looks unnatural".
+Rotating the single bone cannot fix this: any one-bone bend is a hinge.
+
+The front extension is now a **chain**: `Neck`, `Neck`, `Head`, each a child of
+the previous, and `animateBones` gives each link `headTotal / linkCount`. The
+links compose, so the tip still turns by the full angle while the curve is
+spread along the neck and every crease is a third as deep. A rig with one
+`Head` bone divides by one and behaves exactly as before, so this is a property
+of the rig *shape*, not a special case for the alpaca.
+
+Two things had to move with it:
+- **the shader's bone capacity, 8 → 12** (`MicroWorldRow` 1008 → 1392 B). An
+  alpaca rig is 7 bones *without* the chain; three links make 9, and a silently
+  truncated list makes every parent index above the cut name the wrong bone —
+  the neck would compose against a leg. The host clamps to the slot count and
+  writes the *clamped* count, so the shader never walks past the array.
+- **the rig cache magic, v2 → v3.** A cached v2 rig has one head bone and no
+  `Neck` role; loading it would animate the old hinge with the new code, and
+  the cache is keyed by the layer's signature, not by the rig format.
+
+Verified: `VF_TRACE_RIG=1` shows bones 5/6 role `Neck` and 7 role `Head`,
+chained, and a full graze drops the head tip 0.61 m with z held — a curve, not
+a swing.
+
+**The residual is a reach limit, not a skinning bug.** At a full graze the
+muzzle still sits ≈0.30 m above the base plane: a real ground reach needs a
+total neck angle of ≈1.6 rad, which at three links is 25–32° per joint and
+opens a ≈2.4 cm notch on the outside of the bend at a 5 mm voxel (the current
+9.5°/joint opens ≈7 mm, below voxel size). The graze constants (`grazePitch`
+spine bow 0.62, `headTotal` 0.50) were therefore left as they were: the honest
+levers are a longer derived neck, smooth-blend skinning, or two-segment legs —
+not a bigger angle through rigid skin.
+
 ### The fur must not slide
 
 The texture is bound to the **surface**, not to the world. A world-space
@@ -596,9 +634,27 @@ ragged fleece edge, and the dark-pixel count in the body core is unchanged
 `VOXELFORGE_ASSET_DIR/assets/micro/`, **not** the working directory, so a
 throwaway `--out` name still lands in the tracked tree.
 
-Two details are load-bearing, and both were reported as "the fur moves with
-the alpaca":
+Three details are load-bearing, and two of them were reported as "the fur
+moves with the alpaca":
 
+- **Which bone owns a point must be decided in the REST frame.** This is the
+  root cause of the slide, and it is subtler than the normal. `microBoneAt`
+  used to ask which *rest* segment was nearest the *posed* point — but the
+  segments live in the rest pose and the pose has moved the point, so the
+  answer follows the pose instead of the body. Under the alpaca's 35° graze
+  bow the whole front of the torso stopped being nearest its own segment and
+  was handed to the `Head` or a `Leg`: **54.2 % of all surface cells and
+  90.5 % of the neck/head** were misclassified, and the texture coordinate
+  moved by a mean **413 mm (max 710 mm)**. Two things broke at once — the
+  fleece sampled a rest point up to 0.7 m away (so it slid), and the surface
+  was un-boned through the wrong transform (so the neck deformed). The rule
+  now un-bones the point with **each candidate bone's own transform** and
+  measures it against **that bone's own segment**: for the right bone the
+  point lands back on its rest pose at the distance the skin sits from the
+  bone axis, and a wrong transform throws it off. At rest every candidate
+  returns the same point, so it reduces exactly to nearest-segment.
+  `VF_TEST_FUR_STAT=1` prints the old-vs-new comparison over the object's
+  surface cells at frame 0 (1.5 % / 1.8 mm at rest is the noise floor).
 - **The normal must be taken into the rest frame as well.** `detailAlbedo`
   and `detailNormal` (in `common_base.glsl`) choose their triplanar
   projection axes from the normal argument (`pow(abs(n), 8)`), so sampling
@@ -609,22 +665,36 @@ the alpaca":
   normal for shading (`microDirRebone` → `microDirFromBaked`). At a rest pose
   the round trip is an exact identity: the vase (no skeleton) differs from
   the pre-fix shader by max 3/255, i.e. float noise.
-- **The staged Move preview is a DISPLAY offset, not a world position.**
-  `main()` shifts the hit point by `preview.xyz` so the object appears
-  dragged, while `microMapWorld` traces in the baked frame. Every lookup that
-  describes the *surface* must subtract the offset again
-  (`microShadeToBaked`, `microMapShade` for the normal and the AO) or it
-  samples the field *beside* the object: the material cell falls back to the
-  filler, the normal collapses to the bounding box's, and the animal shades
-  like cardboard while it is being dragged. The field **trace** must keep
-  using `microToBaked` — subtracting the offset there would make the object
-  stop following the pointer.
+- **The staged Move preview is a FIELD TRANSFORM, not a display offset.**
+  It used to be applied in `main()` *after* the trace: the hit point was
+  shifted by `preview.xyz` so the object appeared dragged, while the field was
+  traced in the baked frame. The consequence is exactly what the user saw
+  during a drag — the covered pixels were the object's old silhouette, the
+  depth was its old depth, and shading sampled the field *beside* the object
+  (the material cell fell back to the filler, the normal collapsed to the
+  bounding box's, and the speckled alpaca shaded like cardboard). The preview
+  now belongs to `microMapWorld`, through `microShadeToBaked` (staged Move,
+  then rotation, then the behaviour), so the trace, the depth test and every
+  surface lookup share one frame. `main()` no longer shifts anything and
+  `microMapShade` is plain `microMap`. The trace must *include* the preview —
+  that is what makes the object follow the pointer. Proof:
+  `VF_TEST_MOVE_LIVE="0.5,0,0,micro/alpaca.vxw"` against a frozen pose offset
+  by the same 0.5 m is **pixel-identical** (mean |d| 0.01, 0 px > 10), which a
+  display-only shift can never be.
 
-Verification gotcha: a headless `--shot` of an **animated** micro object is
-not deterministic — the behaviour advances during the frames before the shot
+Verification: a headless `--shot` of an **animated** micro object is *not*
+deterministic — the behaviour advances during the frames before the shot
 (`run.cpp` clamps the step to 0.1 s), so two identical runs of the alpaca
-differ by ~34 k px. Any shader A/B on the animal is therefore pose noise;
-A/B on a skeleton-free object (the vase) instead.
+differ by ~34 k px and any shader A/B on the animal is pose noise.
+`VF_TEST_BEHAVIOUR_FREEZE="alpaca:dx,dy,dz:headingDeg:gait[:graze]"`
+pinPose()s the transform, the gait phase and the graze blend (the ground clamp
+still runs, and it is deterministic for a fixed offset); every A/B render also
+passes a fixed `--animtime`. That is what made the old-vs-new neck renders
+comparable pixel for pixel. `VF_TRACE_RIG=1` logs the bone roles, parents and
+posed tips at frame 0. The screenshots of this work are
+`tests/screenshots/alpaca_fix_body_{rest,graze}.png` and
+`alpaca_fix_neck_{before,after}.png` (the `before` pair is the old
+classification rule rendered from the same camera).
 
 ### The AI can tell an animal what to do
 

@@ -169,6 +169,20 @@ void MicroBehaviour::update(float dt)
     offset.y = bob;
 }
 
+void MicroBehaviour::pinPose(glm::vec3 offsetIn, float headingDeg,
+                              float gaitPhase, float grazeBlend)
+{
+    state = State::Walk;
+    offset = offsetIn;
+    heading = glm::radians(headingDeg);
+    gait = gaitPhase;
+    grazeOverride = glm::clamp(grazeBlend, 0.f, 1.f);
+    // The same yaw the walk applies; the sway/bob are gait-driven and are
+    // deliberately left out - a pinned pose must be exactly reproducible.
+    rot = axisRotation(glm::vec3(0, 1, 0), heading);
+    animateBones();
+}
+
 void MicroBehaviour::animateBones()
 {
     // The GAIT, driven by the rig's roles.
@@ -211,14 +225,31 @@ void MicroBehaviour::animateBones()
         return glm::dot(rig.bones[a].a, side) > glm::dot(rig.bones[b].a, side);
     });
 
+    // How many links the front extension is made of (Neck links + the Head
+    // tip). The bend is spread over them, so a three-link neck curves instead
+    // of hinging at the shoulder; a rig with one Head bone divides by one and
+    // behaves exactly as before.
+    int neckLinks = 0;
+    for (size_t i = 0; i < n; ++i)
+        if (rig.bones[i].role == BoneRole::Neck ||
+            rig.bones[i].role == BoneRole::Head)
+            ++neckLinks;
     const float stride = gait;
     // How far down the animal is leaning (0 = standing, 1 = fully bowed).
-    const float grazeBlend = (state == State::Graze)
-                                 ? std::min(smoothstep01(stateT / kGrazeEase),
-                                            smoothstep01((kGrazeHold +
-                                                          5.0f * hash01(seed + 2.0f) -
-                                                          stateT) / kGrazeEase))
-                                 : 0.f;
+    // A pinned pose overrides it, so a screenshot of the graze is exact.
+    const float grazeBlend =
+        (grazeOverride >= 0.f)
+            ? grazeOverride
+            : ((state == State::Graze)
+                   ? std::min(smoothstep01(stateT / kGrazeEase),
+                              smoothstep01((kGrazeHold +
+                                            5.0f * hash01(seed + 2.0f) -
+                                            stateT) /
+                                           kGrazeEase))
+                   : 0.f);
+    // The head/neck chain's TOTAL tip angle. The links share it, so the neck
+    // curves; see the Neck/Head case below.
+    const float headTotal = 0.06f * std::sin(gait * 2.f) + grazeBlend * 0.50f;
     for (size_t i = 0; i < n; ++i) {
         const MicroBone& b = rig.bones[i];
         float angle = 0.f;
@@ -248,9 +279,12 @@ void MicroBehaviour::animateBones()
             axis = side;
             break;
         }
+        case BoneRole::Neck:
         case BoneRole::Head: {
-            // The head and neck reach down and forward, on top of the bow.
-            angle = 0.06f * std::sin(stride * 2.f) + grazeBlend * 0.50f;
+            // The neck reaches down and forward, on top of the bow. The angle
+            // is SHARED by the chain's links (the tip's total is their sum),
+            // so the bend is a curve along the neck, not a hinge at its base.
+            angle = headTotal / float(std::max(1, neckLinks));
             axis = side;
             break;
         }

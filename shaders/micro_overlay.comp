@@ -106,7 +106,7 @@ struct MicroWorld {
     // world table - their segments and joints never change, and the gait
     // rewrites only their rotations.
     vec4 bones;
-    MicroBone bone[8];
+    MicroBone bone[12];
 };
 layout(std140, set = 0, binding = 7) readonly uniform WorldTable {
     MicroWorld uWorlds[16];
@@ -285,14 +285,30 @@ vec3 microDirUnanimate(int w, vec3 d)
                            wt.uWorlds[w].arot2.xyz)) * d;
 }
 
-// The SKELETON. A bone is a SEGMENT in the object's own frame (the rig is
+// The SKELETON. A bone is a SEGMENT in the object's own REST frame (the rig is
 // DERIVED from the object's voxels, so a newly imported model has one too),
-// and a point belongs to the nearest segment. The seams fall where two
-// bones meet INSIDE the body, so they never show on the silhouette.
+// and a point belongs to the bone whose rest pose it lies nearest. The seams
+// fall where two bones meet INSIDE the body, so they never show on the
+// silhouette.
 //
-// A bone is a rigid rotation about its joint, and the field is the REST
-// POSE - so the animated surface is found by sampling the field through the
-// bone's INVERSE rotation.
+// WHICH BONE IS THE WHOLE PROBLEM, and it has to be answered in the REST
+// frame. The segments are stored in the rest pose, so testing the POSED point
+// against them (the old rule) reclassifies whatever the pose has moved: the
+// moment the spine bows 35 deg to graze, the whole front of the torso stops
+// being nearest its own segment and is handed to the HEAD or a LEG. Two things
+// break at once and both are visible on screen:
+//   * the surface is un-boned through the WRONG transform, so the neck and
+//     torso deform as if they belonged to the head - the neck then bends
+//     against the body instead of with it;
+//   * its texture is sampled at the WRONG rest point, so the fleece slides
+//     over the body as the animal moves.
+//
+// So ask each candidate the question that HAS an answer: un-bone the point
+// with THAT bone's own transform and measure the distance to THAT bone's own
+// segment. For the right bone the point lands back on its rest pose, at the
+// distance the skin sits from the bone axis; a wrong transform throws it off.
+// At rest every candidate returns the same point, so this reduces exactly to
+// the plain nearest-segment rule.
 int microBoneAt(int w, vec3 p)
 {
     const int count = int(wt.uWorlds[w].bones.x);
@@ -302,11 +318,12 @@ int microBoneAt(int w, vec3 p)
     float bestD = 1e30;
     for (int i = 0; i < count; ++i) {
         const MicroBone mb = wt.uWorlds[w].bone[i];
+        const mat3 R = mat3(mb.r0.xyz, mb.r1.xyz, mb.r2.xyz);
+        const vec3 q = transpose(R) * (p - mb.joint.xyz);
         const vec3 a = mb.a.xyz;
-        const vec3 b = mb.b.xyz;
-        const vec3 ab = b - a;
-        const float t = clamp(dot(p - a, ab) / max(dot(ab, ab), 1e-12), 0.0, 1.0);
-        const float d = length(p - (a + ab * t));
+        const vec3 ab = mb.b.xyz - a;
+        const float t = clamp(dot(q - a, ab) / max(dot(ab, ab), 1e-12), 0.0, 1.0);
+        const float d = length(q - (a + ab * t));
         if (d < bestD) {
             bestD = d;
             best = i;
@@ -356,14 +373,18 @@ vec3 microToBaked(int w, vec3 p)
            transpose(microRot(w)) * (p - wt.uWorlds[w].pivot.xyz);
 }
 
-// The RENDERED point -> the BAKED frame, for SHADING and for every lookup.
+// The RENDERED point -> the BAKED frame. THE one frame mapping: the field
+// trace uses it (microMapWorld) and so does every surface lookup - texture,
+// material cell, octree, normal, AO.
 //
-// It differs from microToBaked() by the staged Move preview: main() shifts the
-// hit point by that delta so the object appears dragged, and the field is
-// traced in the baked frame - but the texture, the material and the octree are
-// all baked-frame data, so shading must take the delta back out. Without this
-// a drag slides the fur across the animal (and samples the wrong material
-// cell), which is exactly what the user saw.
+// It differs from microToBaked() by the staged Move preview, which is a FIELD
+// TRANSFORM like the behaviour and the rotation preview, not a display offset.
+// It used to be applied in main() AFTER the trace, which meant the trace saw
+// the object where it was baked while the display moved the surface: the
+// covered pixels were the old silhouette, the depth was the old depth, and
+// shading sampled the object beside the one on screen. As part of this mapping
+// the trace, the depth test and the shading agree while the object is dragged,
+// and nothing downstream has to un-shift anything.
 vec3 microShadeToBaked(int w, vec3 p)
 {
     const vec4 pv = wt.uWorlds[w].preview;
@@ -457,10 +478,19 @@ vec3 microDirToBaked(int w, vec3 d)
 // conservative step instead.
 float microMapWorld(int w, vec3 p, float voxel, int gridN, uint gridBase)
 {
-    // The field lives in the BAKED frame, so a live rotation preview maps the
-    // world point into it first (see microToBaked). The distance that comes
-    // back is a distance in the world frame - a rotation preserves them.
-    p = microToBaked(w, p);
+    // The field lives in the BAKED frame, so the live transform previews map
+    // the world point into it first (see microShadeToBaked: the rotation,
+    // then the staged Move). The distance that comes back is a distance in the
+    // world frame - a translation and a rotation both preserve them.
+    //
+    // The Move preview belongs HERE, not in main(). It used to shift the hit
+    // point after the trace, which meant the TRACE saw the object where it was
+    // BAKED while the display moved the surface: the pixels the object covered
+    // were its old silhouette, its depth was the old depth, and the shading
+    // sampled the object BESIDE the one on screen. As a field transform the
+    // trace, the depth test and every surface lookup agree, which is the same
+    // rule the behaviour and the rotation preview already follow.
+    p = microShadeToBaked(w, p);
     // The SKELETON: the field is the REST POSE, so the animated surface is
     // found by sampling through the bone's INVERSE rotation. The bone of a
     // point is the bone whose segment is nearest it.
@@ -519,25 +549,18 @@ float microMap(vec3 p)
     return d;
 }
 
-// The union field as SHADING sees it.
+// The union field as SHADING sees it: the SAME field the trace marches.
 //
-// The staged Move preview is a DISPLAY offset: main() shifts the hit point so
-// the object appears dragged, while the trace runs in the baked frame. Every
-// lookup that describes the SURFACE - the texture, the material cell, the
-// normal, the AO - must take that offset back out, or it samples the field
-// BESIDE the object: the normal collapses to the bounding box's and the animal
-// shades like cardboard exactly while it is being dragged.
+// It used to subtract the staged Move preview here, because main() applied the
+// preview as a DISPLAY-only shift after the trace. The preview is part of the
+// field-sampling frame now (microMapWorld -> microShadeToBaked), so there is
+// nothing left to undo: trace, depth test and every surface lookup agree while
+// an object is dragged - the normal no longer collapses to the bounding box's
+// and the object no longer shades like cardboard mid-drag. It stays a named
+// function because shading must be able to say which field it means.
 float microMapShade(vec3 p)
 {
-    float d = 1e30;
-    for (int w = 0; w < wt.uWorldInfo.x && w < MAX_MICRO_WORLDS; ++w) {
-        const vec4 pv = wt.uWorlds[w].preview;
-        const vec3 q = pv.w > 0.5 ? p - pv.xyz : p;
-        d = min(d, microMapWorld(w, q, wt.uWorlds[w].geo.x,
-                                 int(wt.uWorlds[w].geo.y),
-                                 wt.uWorlds[w].base.x));
-    }
-    return d;
+    return microMap(p);
 }
 
 // Material + surface response of the micro cell that owns the surface hit.
@@ -988,28 +1011,13 @@ void main()
     int microTraceWorld = -1;
     if (!microTrace(ro, rd, sceneHasGeometry ? sceneT : 400.0, t, microTraceWorld))
         return;
-    // The depth comparison must use the PREVIEWED position: a previewed
-    // object can be nearer than (or behind) the world geometry it was baked
-    // against.
-    float tShown = t;
-    {
-        const vec4 pv = wt.uWorlds[microTraceWorld].preview;
-        if (pv.w > 0.5) {
-            const vec3 pp = ro + rd * t + pv.xyz;
-            tShown = dot(pp - ro, rd);
-        }
-    }
-    if (sceneHasGeometry && tShown >= sceneT)
+    // t IS the displayed depth: the trace runs in the same frame the surface
+    // is displayed in (microMapWorld applies the previews), so there is no
+    // separate "shown" depth to compare and no hit point to shift.
+    if (sceneHasGeometry && t >= sceneT)
         return; // the main backend already resolved this pixel nearer
 
     vec3 p = ro + rd * t;
-    // The live preview offset (a staged Move delta) shifts the RENDERED
-    // position; the field itself stays where it was baked.
-    {
-        const vec4 pv = wt.uWorlds[microTraceWorld].preview;
-        if (pv.w > 0.5)
-            p += pv.xyz;
-    }
     vec3 col = shadeMicro(p, rd, microTraceWorld);
     if (any(isnan(col)) || any(isinf(col)))
         return;
