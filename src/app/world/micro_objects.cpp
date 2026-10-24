@@ -977,6 +977,3 @@ void App::updateMicroBehaviours(float dt)
 
 } // namespace app
 } // namespace vf
-
-} // namespace app
-} // namespace vf
