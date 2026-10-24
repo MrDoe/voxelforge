@@ -436,14 +436,26 @@ void App::updateMicroBehaviours(float dt)
         vf::voxel::MicroBehaviour& b = m_microBehaviours[i];
         if (!b.active)
             continue;
+        // The fur pass has its OWN table, so the coat's index is the micro
+        // world's index mapped through the fur mapping (-1 when that object
+        // grows no coat).
+        const int fi = (i < m_furIndexOfMicro.size()) ? m_furIndexOfMicro[i] : -1;
         const bool held = m_moveStaged || m_rotationStaged;
         if (held) {
+            if (fi >= 0)
+                m_furPass.setWorldAnimation(size_t(fi), glm::vec3(0.f),
+                                            glm::mat3(1.f), glm::vec3(0.f), false);
             m_microSvoPass.setWorldAnimation(i, glm::vec3(0.f), glm::mat3(1.f),
                                              b.pivot, false);
             continue;
         }
         b.update(dt);
         m_microSvoPass.setWorldAnimation(i, b.offset, b.rot, b.pivot, true);
+        // The COAT follows the walk: the behaviour moves the animal, and a
+        // coat left in the rest pose would hang in the air where the animal
+        // used to be.
+        if (fi >= 0 && getenv("VF_FUR_NOANIM") == nullptr)
+            m_furPass.setWorldAnimation(size_t(fi), b.offset, b.rot, b.pivot, true);
     }
 }
 

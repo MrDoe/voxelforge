@@ -40,8 +40,16 @@ struct alignas(16) FurWorldRow {
     float rot2[4];    // the live rotation preview's matrix (row-major)
     float pivot[4];   // xyz = the pivot (world m), w = active
     float world[4];   // xyz = the object's world AABB min
+    // The autonomous BEHAVIOUR's transform: the offset + an active flag, the
+    // rotation matrix and the pivot. The coat has to follow it, or it hangs
+    // in the air where the animal used to be.
+    float anim[4];
+    float arot0[4];
+    float arot1[4];
+    float arot2[4];
+    float apivot[4];
 };
-static_assert(sizeof(FurWorldRow) == 160, "std140 slot size");
+static_assert(sizeof(FurWorldRow) == 240, "std140 slot size");
 
 }  // namespace
 
@@ -146,6 +154,11 @@ bool FurPass::setObjects(const std::vector<voxel::FurObject>& objects)
             row.rot0[0] = row.rot1[1] = row.rot2[2] = 1.0f;
             row.pivot[3] = 0.0f;
         }
+        // The behaviour's transform starts inactive: the identity rotation
+        // and no offset, so a coat that is not animated sits exactly where
+        // the field does.
+        row.arot0[0] = row.arot1[1] = row.arot2[2] = 1.0f;
+        row.anim[3] = 0.0f;
         cards.insert(cards.end(), o.cards.begin(), o.cards.end());
         cellStart.insert(cellStart.end(), o.cellStart.begin(), o.cellStart.end());
         cellItems.insert(cellItems.end(), o.cellItems.begin(), o.cellItems.end());
@@ -218,6 +231,29 @@ void FurPass::setWorldRotation(size_t worldIndex, glm::mat3 R, glm::vec3 pivot, 
     row.pivot[1] = pivot.y;
     row.pivot[2] = pivot.z;
     row.pivot[3] = active ? 1.0f : 0.0f;
+    vmaFlushAllocation(m_ctx->allocator(), m_table.alloc, 0, VK_WHOLE_SIZE);
+}
+
+// The behaviour's transform, mirrored from the micro overlay so the coat and
+// the body are always in the same pose. The overlay is the authority (it owns
+// the behaviour), and the fur pass has to follow it frame by frame.
+void FurPass::setWorldAnimation(size_t worldIndex, glm::vec3 offset, glm::mat3 R,
+                                glm::vec3 pivot, bool active)
+{
+    if (!m_table.mapped || worldIndex >= size_t(m_objectCount))
+        return;
+    auto* rows = reinterpret_cast<FurWorldRow*>(m_table.mapped);
+    FurWorldRow& row = rows[worldIndex];
+    row.anim[0] = offset.x;
+    row.anim[1] = offset.y;
+    row.anim[2] = offset.z;
+    row.anim[3] = active ? 1.0f : 0.0f;
+    row.arot0[0] = R[0][0]; row.arot0[1] = R[0][1]; row.arot0[2] = R[0][2];
+    row.arot1[0] = R[1][0]; row.arot1[1] = R[1][1]; row.arot1[2] = R[1][2];
+    row.arot2[0] = R[2][0]; row.arot2[1] = R[2][1]; row.arot2[2] = R[2][2];
+    row.apivot[0] = pivot.x;
+    row.apivot[1] = pivot.y;
+    row.apivot[2] = pivot.z;
     vmaFlushAllocation(m_ctx->allocator(), m_table.alloc, 0, VK_WHOLE_SIZE);
 }
 

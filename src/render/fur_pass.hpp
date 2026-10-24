@@ -44,6 +44,12 @@ public:
     // follows the object it belongs to.
     void setWorldPreview(size_t worldIndex, glm::vec3 offset, bool active);
     void setWorldRotation(size_t worldIndex, glm::mat3 R, glm::vec3 pivot, bool active);
+    // The autonomous behaviour's transform (the whole-object walk), mirrored
+    // from the micro overlay so the coat and the body are always in the same
+    // pose. Without it the coat would hang in the air where the animal used
+    // to be.
+    void setWorldAnimation(size_t worldIndex, glm::vec3 offset, glm::mat3 R,
+                           glm::vec3 pivot, bool active);
 
     bool empty() const { return m_objectCount == 0; }
     size_t objectCount() const { return m_objectCount; }

@@ -132,12 +132,27 @@ changing something else. A visual complaint is a measurement request.
 | the coat's luma spread | **36.98** against the bare body's 28.82 (the texture survives) |
 | the fur's effect at 8 m | the alpaca's pixels change; the house view does not |
 
-## The coat does NOT follow a per-bone animation (known, 2026-10-21)
+## The coat follows the walk, but not yet the legs
 
-The rig that makes the alpaca walk animates the body **per bone**: the micro
-overlay carries a bone table (the segment, the joint, the animated rotation)
-and maps an *animated* point back to the *rest* pose before sampling the
-field, so **the field's cells never move**.
+**The walk is handled.** The alpaca is a **grazer**: it wanders around its
+anchor, so the coat has to move with it or it hangs in the air where the
+animal used to be. The fur's per-object table therefore carries the
+behaviour's transform (the offset, the rotation matrix and the pivot) and
+the app mirrors it from the micro overlay every frame — the same way it
+mirrors the rotation preview.
+
+The order is the micro overlay's, and it matters: the **behaviour** is the
+outermost transform (the object walks, and the user's staged rotation rides
+on top of it), so it is undone FIRST on the way into the field's frame and
+applied LAST on the way out; the **rotation preview** is next; the **Move
+preview** is the innermost (a rendered-position offset).
+
+**The per-bone animation is still missing**, and that is the known gap.
+
+The rig that makes the alpaca walk ALSO animates the body **per bone**: the
+micro overlay carries a bone table (the segment, the joint, the animated
+rotation) and maps an *animated* point back to the *rest* pose before
+sampling the field, so **the field's cells never move**.
 
 The fur's cards are generated from the field's surface cells and are drawn in
 that same rest frame, with only the whole-object preview transform applied. So

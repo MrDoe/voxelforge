@@ -55,6 +55,21 @@ struct FurWorld {
     vec4 rot2;    // the live rotation preview's matrix (row-major)
     vec4 pivot;   // xyz = the pivot (world m), w = active
     vec4 world;   // xyz = the object's world AABB min (the local frame's origin)
+    // The AUTONOMOUS BEHAVIOUR's transform: an offset (xyz) + an active flag
+    // (w), a rotation matrix (row-major) and its pivot (world m). It turns a
+    // static micro object into one that walks on its own.
+    //
+    // The coat MUST follow it: the behaviour moves the animal, and a coat
+    // left in the rest pose would hang in the air where the animal used to
+    // be. The order is the micro overlay's, exactly: the behaviour is the
+    // OUTERMOST transform (the object walks, and the user's staged rotation
+    // rides on top of it), so it is undone FIRST going into the local frame
+    // and applied LAST coming out.
+    vec4 anim;
+    vec4 arot0;
+    vec4 arot1;
+    vec4 arot2;
+    vec4 apivot;
 };
 layout(std140, set = 0, binding = 30) readonly uniform FurTable {
     FurWorld uWorlds[16];
@@ -94,12 +109,44 @@ mat3 furRot(int w)
                 ft.uWorlds[w].rot2.xyz);
 }
 
-// A WORLD point -> the object's LOCAL frame (the field's frame). The live
-// rotation preview is applied here, at the one place the object's frame is
-// resolved, exactly as the micro overlay applies it to the field.
+// The BEHAVIOUR's transform, applied to a world point: the rotation about
+// the pivot, then the offset. Its inverse undoes it. Same shape and order as
+// the micro overlay's microAnimate/microUnanimate.
+vec3 furAnimate(int w, vec3 p)
+{
+    const FurWorld W = ft.uWorlds[w];
+    if (W.anim.w < 0.5)
+        return p;
+    const mat3 R = mat3(W.arot0.xyz, W.arot1.xyz, W.arot2.xyz);
+    p = W.apivot.xyz + R * (p - W.apivot.xyz);
+    return p + W.anim.xyz;
+}
+
+vec3 furUnanimate(int w, vec3 p)
+{
+    const FurWorld W = ft.uWorlds[w];
+    if (W.anim.w < 0.5)
+        return p;
+    const mat3 R = mat3(W.arot0.xyz, W.arot1.xyz, W.arot2.xyz);
+    p -= W.anim.xyz;
+    return W.apivot.xyz + transpose(R) * (p - W.apivot.xyz);
+}
+
+vec3 furDirUnanimate(int w, vec3 d)
+{
+    const FurWorld W = ft.uWorlds[w];
+    if (W.anim.w < 0.5)
+        return d;
+    return transpose(mat3(W.arot0.xyz, W.arot1.xyz, W.arot2.xyz)) * d;
+}
+
+// A WORLD point -> the object's LOCAL frame (the field's frame). The
+// behaviour's transform is undone FIRST (it is the outermost one) and the
+// live rotation preview second, exactly as the micro overlay does it.
 vec3 furToLocal(int w, vec3 p)
 {
     const FurWorld W = ft.uWorlds[w];
+    p = furUnanimate(w, p);
     if (W.pivot.w > 0.5)
         p = W.pivot.xyz + transpose(furRot(w)) * (p - W.pivot.xyz);
     return p - W.world.xyz;
@@ -109,6 +156,7 @@ vec3 furToLocal(int w, vec3 p)
 vec3 furDirToLocal(int w, vec3 d)
 {
     const FurWorld W = ft.uWorlds[w];
+    d = furDirUnanimate(w, d);
     if (W.pivot.w > 0.5)
         return transpose(furRot(w)) * d;
     return d;
@@ -123,6 +171,7 @@ vec3 furToWorld(int w, vec3 pLocal)
     vec3 p = pLocal + W.world.xyz;
     if (W.pivot.w > 0.5)
         p = W.pivot.xyz + furRot(w) * (p - W.pivot.xyz);
+    p = furAnimate(w, p);
     if (W.preview.w > 0.5)
         p += W.preview.xyz;
     return p;
@@ -134,7 +183,7 @@ vec3 furDirToWorld(int w, vec3 d)
     vec3 v = d;
     if (W.pivot.w > 0.5)
         v = furRot(w) * v;
-    return v;
+    return furDirUnanimate(w, v);
 }
 
 // The linear index of a grid cell.
