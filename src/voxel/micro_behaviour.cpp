@@ -280,7 +280,7 @@ void MicroBehaviour::animateBones()
                    : 0.f);
     // The head/neck chain's TOTAL tip angle. The links share it, so the neck
     // curves; see the Neck/Head case below.
-    const float headTotal = grazeBlend * 1.60f; // no walk nod: a real walk
+    const float headTotal = grazeBlend * 0.85f; // no walk nod: a real walk
                                                // keeps the head steady; only
                                                // the graze bows it down. 1.6 rad
                                                // reaches the ground (3 links
@@ -319,7 +319,7 @@ void MicroBehaviour::animateBones()
             // lifts the back feet off the ground (rigid legs cannot extend), so
             // the animal would no longer stand on four feet. The head reaches
             // down through the neck instead.
-            angle = 0.0f;
+            angle = grazeBlend * 0.15f;
             axis = side;
             break;
         }
