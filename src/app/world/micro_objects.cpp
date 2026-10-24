@@ -693,6 +693,12 @@ void App::updateMicroBehaviours(float dt)
             b.hasHeadingTarget = false;
         }
 
+        // Pose-aware ground clamp: animate the bones FIRST so the clamp can
+        // account for a swinging leg that dips below the rest bottom (the
+        // animal's feet must not sink into the terrain). The transforms are
+        // in the local frame and independent of the lift, so re-running
+        // animateBones after the clamp would be identical.
+        b.animateBones();
         // GROUND CLAMP. A walking animal must not sink into the terrain: lift
         // the body until its lowest SOLID cell clears the highest ground under
         // the footprint (the max at the four corners is what stops a slope
@@ -718,7 +724,50 @@ void App::updateMicroBehaviours(float dt)
                     for (float z : zs)
                         ground = std::max(ground, terrainTopAt(x, z));
                 if (ground > -1e8f) {
-                    const float bottom = lo.y + b.offset.y;
+                    // Pose-aware bottom: transform the 8 corners of the rest
+                    // solid AABB by their nearest bone + the behaviour
+                    // rotation, so a swinging leg that dips below the rest
+                    // bottom is caught (feet must not sink or slide).
+                    float posedLowest = lo.y;
+                    if (!b.rig.bones.empty()) {
+                        float minY = 1e9f;
+                        for (int cx = 0; cx < 2; ++cx)
+                            for (int cy = 0; cy < 2; ++cy)
+                                for (int cz = 0; cz < 2; ++cz) {
+                                    glm::vec3 c(
+                                        lo.x + (cx ? (hi.x - lo.x) : 0.f),
+                                        lo.y + (cy ? (hi.y - lo.y) : 0.f),
+                                        lo.z + (cz ? (hi.z - lo.z) : 0.f));
+                                    // rest frame (local): subtract grid origin
+                                    c -= (o.worldOffset + f.origin);
+                                    int bn = 0;
+                                    float bd = 1e9f;
+                                    for (int k = 0; k < (int)b.rig.bones.size(); ++k) {
+                                        const glm::vec3 ab =
+                                            b.rig.bones[size_t(k)].b -
+                                            b.rig.bones[size_t(k)].a;
+                                        const float t = glm::clamp(
+                                            glm::dot(c - b.rig.bones[size_t(k)].a, ab) /
+                                                glm::max(glm::dot(ab, ab), 1e-12f),
+                                            0.0f, 1.0f);
+                                        const float d = glm::length(
+                                            c - (b.rig.bones[size_t(k)].a + ab * t));
+                                        if (d < bd) {
+                                            bd = d;
+                                            bn = k;
+                                        }
+                                    }
+                                    glm::vec3 posed =
+                                        b.boneRot[size_t(bn)] * c +
+                                        b.boneXform[size_t(bn)];
+                                    glm::vec3 world =
+                                        b.rot * (posed - b.pivot) + b.pivot;
+                                    minY = std::min(minY, world.y);
+                                }
+                        if (minY < 1e8f)
+                            posedLowest = minY;
+                    }
+                    const float bottom = b.offset.y + posedLowest;
                     if (ground > bottom)
                         b.offset.y += ground - bottom + 0.002f;
                 }
@@ -739,7 +788,6 @@ void App::updateMicroBehaviours(float dt)
         // The SKELETON's bones: the gait drives them, and the pass rewrites
         // their rotations (the segments and the joints stay as they were
         // uploaded).
-        b.animateBones();
         m_microSvoPass.setBoneRotations(i, b.boneRot, b.boneXform);
         // DIAGNOSTIC (VF_TEST_FUR_STAT=1, frame 0 only): measures the rule
         // the SHADER uses on the POSED surface, and how far that rule moves

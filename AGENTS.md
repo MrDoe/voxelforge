@@ -839,11 +839,16 @@ one costs a whole turn, because the bad call is rejected before any work runs.
   point only. CMakeLists lists every `.cpp` explicitly — a new file that is not
   listed there does not build.
 - `src/app/chat_ui.cpp`, `src/ai/*` — chat UI, LLM client/tool parsing, MCP
-  server (`vf_mcp`: add_box/cylinder/ellipsoid/stamp, add_voxels, write_object,
-  read_object, delete_object, list_layers, enable_layer, probe, ground,
-  clear_edits). See the voxel-object skill for how to author arbitrary objects
-  via these tools (the `.vxw` file is produced by `write_object`/`add_voxels`,
-  never hand-written binary).
+  server (`vf_mcp`: authoring — add_box/cylinder/ellipsoid/stamp, add_voxels,
+  write_object, read_object, delete_object, import_mesh, clear_edits; inspection
+  — list_layers, get_layer, inspect_layer, layer_stats, list_micro, list_materials,
+  list_textures, list_models, list_lights, world_info, probe, probe_region, ground;
+  placement — set_layer_transform, set_layer_behaviour, enable_layer,
+  duplicate_layer, rename_layer, delete_layer; textures/lights — set_texture,
+  add_light, remove_light; control — reload_world, render_shot). See the
+  voxel-object skill for how to author arbitrary objects via these tools (the
+  `.vxw` file is produced by `write_object`/`add_voxels`, never hand-written
+  binary).
 - `tools/heightmap_gen.cpp` — offline baker; classifies terrain materials
   against lattice geometry (`latSlope`) so baked materials match what the GPU
   renders. `tools/scene_slice.cpp` — ASCII cross-sections of the field.
