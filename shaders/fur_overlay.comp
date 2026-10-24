@@ -205,6 +205,8 @@ float cardHit(int w, uint ci, vec3 roL, vec3 rdL, float tMax, vec3 rd,
     const vec4 shade = fCard[ci * 6u + 4u];
     const vec4 curl = fCard[ci * 6u + 5u];
 
+
+
     const vec3 root = rootLen.xyz;
     const vec3 dir = dirWidth.xyz;
     const float len = max(rootLen.w, 1e-4);
