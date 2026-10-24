@@ -653,18 +653,21 @@ moves with the alpaca":
   segments live in the rest pose and the pose has moved the point, so the
   answer follows the pose instead of the body. Under the alpaca's 35° graze
   bow the whole front of the torso stopped being nearest its own segment and
-  was handed to the `Head` or a `Leg`: **54.2 % of all surface cells and
-  90.5 % of the neck/head** were misclassified, and the texture coordinate
-  moved by a mean **413 mm (max 710 mm)**. Two things broke at once — the
-  fleece sampled a rest point up to 0.7 m away (so it slid), and the surface
-  was un-boned through the wrong transform (so the neck deformed). The rule
-  now un-bones the point with **each candidate bone's own transform** and
-  measures it against **that bone's own segment**: for the right bone the
-  point lands back on its rest pose at the distance the skin sits from the
-  bone axis, and a wrong transform throws it off. At rest every candidate
-  returns the same point, so it reduces exactly to nearest-segment.
-  `VF_TEST_FUR_STAT=1` prints the old-vs-new comparison over the object's
-  surface cells at frame 0 (1.5 % / 1.8 mm at rest is the noise floor).
+  was handed to the `Head` or a `Leg`: **65.7 % of all surface cells** were
+  misclassified (16.6 mm mean, 186.8 mm max) and **90.5 % of the neck/head**
+  — the fleece sampled a rest point up to 0.19 m away and the neck deformed as
+  if it belonged to the head. Two things broke at once — the fleece slid, and
+  the surface was un-boned through the wrong transform. The rule now un-bones
+  the **POSED** point with **each candidate bone's own transform** and measures
+  it against **that bone's own segment**: for the right bone the point lands
+  back on its rest pose at the distance the skin sits from the bone axis, and
+  a wrong transform throws it off. At rest every candidate returns the same
+  point, so it reduces exactly to nearest-segment.
+  `VF_TEST_FUR_STAT=1` poses each exposed rest cell by its rest-pose owner
+  (the configuration the renderer actually visits) and prints per-object
+  shader-vs-rest, old-rule, and walk-pose-A->B drift at frame 0: the new rule
+  misclassifies 1.4 % of surface cells at graze (0.3/51.4 mm mean/max; neck/
+  head 0.2 %) vs 65.7 % for the old rule; at rest 1.0 % (0.2/39.2 mm).
 - **The normal must be taken into the rest frame as well.** `detailAlbedo`
   and `detailNormal` (in `common_base.glsl`) choose their triplanar
   projection axes from the normal argument (`pow(abs(n), 8)`), so sampling
@@ -701,10 +704,19 @@ pinPose()s the transform, the gait phase and the graze blend (the ground clamp
 still runs, and it is deterministic for a fixed offset); every A/B render also
 passes a fixed `--animtime`. That is what made the old-vs-new neck renders
 comparable pixel for pixel. `VF_TRACE_RIG=1` logs the bone roles, parents and
-posed tips at frame 0. The screenshots of this work are
-`tests/screenshots/alpaca_fix_body_{rest,graze}.png` and
+posed tips at frame 0. The walk leaves a small residual seam drift at the
+hip/belly: between gait phases 4-5 % of surface cells change bone with ~3 mm
+mean texture drift (max 160 mm, dominated by leg<->leg and leg<->spine flips
+near the hips and tail sway). Rendered walk sweeps (gait 0/pi/2/pi/3pi/2 at
+the close camera) show continuous fleece with no visible sliding or seams —
+the residual is confined to fleece-covered hip cells and is below visibility,
+so no shader/rig change was made; `VF_TEST_FUR_STAT` watches it on every
+change to the bone rule. The screenshots of this work are
+`tests/screenshots/alpaca_fix_body_{rest,graze}.png`,
 `alpaca_fix_neck_{before,after}.png` (the `before` pair is the old
-classification rule rendered from the same camera).
+classification rule rendered from the same camera), and
+`alpaca_walk_gait_{0,1.5708,3.1416,4.7124}.png` plus
+`alpaca_walk_graze.png` at the close camera (`11.55,1.0,16.8 -> 11.55,0.6,14.9`).
 
 ### The AI can tell an animal what to do
 

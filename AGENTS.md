@@ -1085,16 +1085,26 @@ one costs a whole turn, because the bad call is rejected before any work runs.
   the rest frame, samples there, and re-bones the bumped normal for shading
   (`microDirUnbone`/`microDirRebone`/`microDirFromBaked`). **Which bone owns a
   point is decided in the REST frame, and getting that wrong is what made the
-  fur slide.** `microBoneAt` must un-bone the point with EACH candidate bone's
-  own transform and measure it against THAT bone's own rest segment; asking
-  which REST segment is nearest the POSED point (the old rule) reclassifies
-  whatever the pose moved. Measured on the alpaca at a full graze: 54.2 % of
-  all surface cells and 90.5 % of the neck/head misclassified, mean texture
-  shift 413 mm (max 710 mm) — the fleece sampled a point up to 0.7 m away and
-  the neck deformed as if it belonged to the head. At rest every candidate
-  returns the same point, so the rule reduces to plain nearest-segment.
-  `VF_TEST_FUR_STAT=1` prints that old-vs-new comparison over the object's
-  surface cells at frame 0; read it, not the picture.
+  fur slide.** `microBoneAt` must un-bone the POSED point with EACH candidate
+  bone's own transform and measure the result against THAT bone's own rest
+  segment, then take the nearest; asking which REST segment is nearest the
+  POSED point (the old rule) reclassifies whatever the pose moved. The
+  diagnostic (`VF_TEST_FUR_STAT=1`) poses each exposed rest cell by its
+  rest-pose owner before evaluating either rule, so it measures a configuration
+  the renderer actually visits. Measured on the alpaca at a full graze: the new
+  rule misclassifies 1.4 % of surface cells (0.3/51.4 mm mean/max shift;
+  neck/head 0.2 %) while the old rule misclassifies 65.7 % (16.6/186.8 mm) —
+  the fleece sampled a point up to 0.19 m away and the neck deformed as if it
+  belonged to the head. At rest every candidate returns the same point, so the
+  rule reduces to plain nearest-segment.
+  `VF_TEST_FUR_STAT=1` prints per-object shader-vs-rest, old-rule, and
+  walk-pose-A->B drift at frame 0; read it, not the picture.
+  The walk leaves a small residual seam drift at the hip/belly: between gait
+  phases 4-5 % of surface cells change bone with ~3 mm mean texture drift
+  (max 160 mm, dominated by leg<->leg and leg<->spine flips near the hips and
+  tail sway). Rendered walk sweeps (gait 0/pi/2/pi/3pi/2, close camera) show
+  continuous fleece with no visible sliding or seams — the residual is confined
+  to fleece-covered hip cells and is below visibility.
   **The staged Move preview is a FIELD TRANSFORM, not a display offset.**
   `microMapWorld` applies it through `microShadeToBaked` (move, then rotation,
   then the behaviour), so trace, depth test and every surface lookup share one

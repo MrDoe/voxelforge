@@ -591,21 +591,31 @@ void App::updateMicroBehaviours(float dt)
         // uploaded).
         b.animateBones();
         m_microSvoPass.setBoneRotations(i, b.boneRot, b.boneXform);
-        // DIAGNOSTIC (VF_TEST_FUR_STAT=1, frame 0 only): measures the rule this
-        // shader depends on. The OLD rule picked the bone nearest the POSED
-        // point measured against the REST segments; the rule now un-bones the
-        // point with each bone's own transform and measures in the rest frame.
-        // For every surface cell this reports how often the two disagree and
-        // how far the texture coordinate (the rest point the fur is sampled
-        // at) moves when they do - so a regression in microBoneAt is a number,
-        // not a fur pattern that slides. Measured on the alpaca at a full
-        // graze: 54.2% of surface cells / 90.5% of neck+head, 413 mm mean
-        // shift. At rest the two rules are identical by construction.
+        // DIAGNOSTIC (VF_TEST_FUR_STAT=1, frame 0 only): measures the rule
+        // the SHADER uses on the POSED surface, and how far that rule moves
+        // the fur's texture coordinate when the animal MOVES.
+        //
+        // The texture is sampled at the point UN-BONED into the rest pose
+        // (microBoneAt -> microUnbone), so the fur stays glued to the skin
+        // only if the bone rule is stable. The shader's rule un-bones the
+        // POSED point with EACH bone's own transform and measures the result
+        // against THAT bone's rest segment, then takes the nearest.
+        //
+        // This probe poses each exposed rest cell by its REST-POSE owner (the
+        // bone whose segment is nearest the cell at rest - the truth), then
+        // reports three comparisons:
+        //   shader    - the shader rule's bone flips and texture drift against
+        //               the rest assignment;
+        //   old rule  - the same for the retired "nearest REST segment to the
+        //               POSED point" rule (it reclassifies what the pose moved);
+        //   walk A->B - the shader rule's bone flips and texture drift between
+        //               the pinned pose and the same pose a quarter stride
+        //               later - FUR SLIDE WHILE THE ANIMAL MOVES, as a number.
+        // Feeding the REST position straight to a non-rest pose (the old
+        // probe) measures a configuration the renderer never visits.
         if (getenv("VF_TEST_FUR_STAT") && m_frameIdx == 0 &&
             i < m_microFields.size() && i < m_microOccluders.size()) {
             const vf::voxel::MicroField& f = m_microFields[i];
-            // The field is LOCAL; the rig was shifted into the ANCHORED frame
-            // (placement + grid origin), exactly as the shader's baked frame.
             const glm::vec3 frame = m_microOccluders[i].worldOffset + f.origin;
             const int nb = int(b.rig.bones.size());
             if (nb > 0 && f.size3() > 0) {
@@ -617,9 +627,55 @@ void App::updateMicroBehaviours(float dt)
                         0.0f, 1.0f);
                     return glm::length(p - (a + ab * t));
                 };
-                size_t surf = 0, wrong = 0, neckSurf = 0, neckWrong = 0;
-                double sumErr = 0.0, maxErr = 0.0;
-                double sumNeck = 0.0, maxNeck = 0.0;
+                // A second pose a quarter stride later. animateBones() reads
+                // only gait/graze/state, so a copy is enough.
+                vf::voxel::MicroBehaviour poseB = b;
+                poseB.gait = b.gait + 1.5707963f;
+                poseB.animateBones();
+                auto shaderRule = [&](const glm::vec3& p,
+                                      const std::vector<glm::mat3>& rot,
+                                      const std::vector<glm::vec3>& xf,
+                                      int& boneOut, glm::vec3& restOut) {
+                    boneOut = -1;
+                    float bestD = 1e30f;
+                    for (int k = 0; k < nb; ++k) {
+                        const glm::vec3 q =
+                            glm::transpose(rot[size_t(k)]) * (p - xf[size_t(k)]);
+                        const float d = segDist(q, b.rig.bones[size_t(k)].a,
+                                                b.rig.bones[size_t(k)].b);
+                        if (d < bestD) {
+                            bestD = d;
+                            boneOut = k;
+                            restOut = q;
+                        }
+                    }
+                };
+                auto oldRule = [&](const glm::vec3& p, int& boneOut,
+                                   glm::vec3& restOut) {
+                    boneOut = -1;
+                    float bestD = 1e30f;
+                    for (int k = 0; k < nb; ++k) {
+                        const float d = segDist(p, b.rig.bones[size_t(k)].a,
+                                                b.rig.bones[size_t(k)].b);
+                        if (d < bestD) {
+                            bestD = d;
+                            boneOut = k;
+                            restOut = glm::transpose(b.boneRot[size_t(k)]) *
+                                      (p - b.boneXform[size_t(k)]);
+                        }
+                    }
+                };
+                size_t surf = 0, newFlip = 0, oldFlip = 0, driftFlip = 0;
+                size_t neckSurf = 0, neckNewFlip = 0, neckDriftFlip = 0;
+                double newSum = 0.0, newMax = 0.0;
+                double oldSum = 0.0, oldMax = 0.0;
+                double driftSum = 0.0, driftMax = 0.0;
+                // Where the drift lives, by the owner's role.
+                size_t roleSurf[5] = { 0, 0, 0, 0, 0 };
+                size_t roleFlip[5] = { 0, 0, 0, 0, 0 };
+                double roleDrift[5] = { 0, 0, 0, 0, 0 };
+                size_t pairFlip[5][5] = {};
+                glm::vec3 maxDriftRest(0.0f);
                 for (int z = 1; z + 1 < f.dim.z; ++z)
                     for (int y = 1; y + 1 < f.dim.y; ++y)
                         for (int x = 1; x + 1 < f.dim.x; ++x) {
@@ -635,58 +691,116 @@ void App::updateMicroBehaviours(float dt)
                                 !f.solid[f.idx(x, y, z - 1)];
                             if (!exposed)
                                 continue;
-                            const glm::vec3 p =
+                            const glm::vec3 rest =
                                 frame + (glm::vec3(x, y, z) + 0.5f) * f.voxel;
-                            int newBest = -1, oldBest = -1;
-                            float newD = 1e30f, oldD = 1e30f;
-                            glm::vec3 restOld(0.0f);
+                            // The truth: the bone nearest the cell AT REST.
+                            int owner = 0;
+                            float ownerD = 1e30f;
                             for (int k = 0; k < nb; ++k) {
-                                const auto& mb = b.rig.bones[k];
-                                const glm::mat3 R = b.boneRot[k];
-                                const glm::vec3 q =
-                                    glm::transpose(R) * (p - b.boneXform[k]);
-                                const float dn = segDist(q, mb.a, mb.b);
-                                if (dn < newD) {
-                                    newD = dn;
-                                    newBest = k;
-                                }
-                                const float dold = segDist(p, mb.a, mb.b);
-                                if (dold < oldD) {
-                                    oldD = dold;
-                                    oldBest = k;
-                                    restOld = q;
+                                const float d =
+                                    segDist(rest, b.rig.bones[size_t(k)].a,
+                                            b.rig.bones[size_t(k)].b);
+                                if (d < ownerD) {
+                                    ownerD = d;
+                                    owner = k;
                                 }
                             }
-                            const float err = glm::length(restOld - p);
-                            const auto role = b.rig.bones[newBest].role;
+                            const glm::vec3 pA =
+                                b.boneRot[size_t(owner)] * rest +
+                                b.boneXform[size_t(owner)];
+                            const glm::vec3 pB =
+                                poseB.boneRot[size_t(owner)] * rest +
+                                poseB.boneXform[size_t(owner)];
+                            int newA = -1, newB = -1, oldA = -1;
+                            glm::vec3 qA(0.0f), qB(0.0f), qOld(0.0f);
+                            shaderRule(pA, b.boneRot, b.boneXform, newA, qA);
+                            shaderRule(pB, poseB.boneRot, poseB.boneXform, newB, qB);
+                            oldRule(pA, oldA, qOld);
+                            const double eNew = glm::length(qA - rest);
+                            const double eOld = glm::length(qOld - rest);
+                            const double eDrift = glm::length(qA - qB);
+                            ++surf;
+                            newSum += eNew;
+                            newMax = std::max(newMax, eNew);
+                            oldSum += eOld;
+                            oldMax = std::max(oldMax, eOld);
+                            driftSum += eDrift;
+                            driftMax = std::max(driftMax, eDrift);
+                            if (newA != owner) ++newFlip;
+                            if (oldA != owner) ++oldFlip;
+                            if (newA != newB) ++driftFlip;
+                            const auto role = b.rig.bones[size_t(owner)].role;
+                            const int roleIdx = int(role);
+                            if (roleIdx >= 0 && roleIdx < 5) {
+                                ++roleSurf[roleIdx];
+                                if (newA != newB) {
+                                    ++roleFlip[roleIdx];
+                                    roleDrift[roleIdx] += eDrift;
+                                    const int ra = int(b.rig.bones[size_t(newA)].role);
+                                    const int rb = int(b.rig.bones[size_t(newB)].role);
+                                    if (ra >= 0 && ra < 5 && rb >= 0 && rb < 5)
+                                        ++pairFlip[ra][rb];
+                                }
+                            }
+                            if (eDrift > double(driftMax) - 1e-9)
+                                maxDriftRest = rest - frame;
                             const bool neck =
                                 role == vf::voxel::BoneRole::Neck ||
                                 role == vf::voxel::BoneRole::Head;
-                            ++surf;
-                            sumErr += err;
-                            maxErr = std::max(maxErr, double(err));
                             if (neck) {
                                 ++neckSurf;
-                                sumNeck += err;
-                                maxNeck = std::max(maxNeck, double(err));
-                                if (oldBest != newBest)
-                                    ++neckWrong;
+                                if (newA != owner) ++neckNewFlip;
+                                if (newA != newB) ++neckDriftFlip;
                             }
-                            if (oldBest != newBest)
-                                ++wrong;
                         }
+                const double inv = 1.0 / double(std::max<size_t>(surf, 1));
+                {
+                    static const char* rn[5] = { "spine", "leg", "head",
+                                                "tail", "neck" };
+                    std::string pairs;
+                    for (int ra = 0; ra < 5; ++ra)
+                        for (int rb = 0; rb < 5; ++rb)
+                            if (pairFlip[ra][rb]) {
+                                pairs += rn[ra];
+                                pairs += "->";
+                                pairs += rn[rb];
+                                pairs += ":";
+                                pairs += std::to_string(pairFlip[ra][rb]);
+                                pairs += " ";
+                            }
+                    spdlog::info("furstat walk pairs: {}", pairs);
+                }
                 spdlog::info(
-                    "furstat origin=({:+.3f},{:+.3f},{:+.3f}) surface {} "
-                    "misclassified {} ({:.1f}%) texShift mean {:.1f} mm max "
-                    "{:.1f} mm | neck/head surface {} misclassified {} "
-                    "({:.1f}%) shift mean {:.1f} mm max {:.1f} mm",
-                    double(frame.x), double(frame.y), double(frame.z),
-                    surf, wrong, 100.0 * double(wrong) / std::max<size_t>(surf, 1),
-                    sumErr / std::max<size_t>(surf, 1) * 1000.0, maxErr * 1000.0,
-                    neckSurf, neckWrong,
-                    100.0 * double(neckWrong) / std::max<size_t>(neckSurf, 1),
-                    sumNeck / std::max<size_t>(neckSurf, 1) * 1000.0,
-                    maxNeck * 1000.0);
+                    "furstat walk by owner: spine {}/{} ({:.1f}%) {:.1f} mm | "
+                    "leg {}/{} ({:.1f}%) {:.1f} mm | head {}/{} tail {}/{} "
+                    "at rest ({:+.3f},{:+.3f},{:+.3f})",
+                    roleFlip[0], roleSurf[0],
+                    100.0 * double(roleFlip[0]) /
+                        double(std::max<size_t>(roleSurf[0], 1)),
+                    roleDrift[0] * 1000.0 /
+                        double(std::max<size_t>(roleFlip[0], 1)),
+                    roleFlip[1], roleSurf[1],
+                    100.0 * double(roleFlip[1]) /
+                        double(std::max<size_t>(roleSurf[1], 1)),
+                    roleDrift[1] * 1000.0 /
+                        double(std::max<size_t>(roleFlip[1], 1)),
+                    roleFlip[2], roleSurf[2], roleFlip[3], roleSurf[3],
+                    double(maxDriftRest.x), double(maxDriftRest.y),
+                    double(maxDriftRest.z));
+                spdlog::info(
+                    "furstat origin=({:+.3f},{:+.3f},{:+.3f}) surface {} | "
+                    "shader flips {} ({:.1f}%) drift {:.1f}/{:.1f} mm | "
+                    "old-rule flips {} ({:.1f}%) drift {:.1f}/{:.1f} mm | "
+                    "walk A->B flips {} ({:.1f}%) drift {:.1f}/{:.1f} mm | "
+                    "neck/head surface {} shader flips {} A->B flips {}",
+                    double(frame.x), double(frame.y), double(frame.z), surf,
+                    newFlip, 100.0 * double(newFlip) * inv,
+                    newSum * inv * 1000.0, newMax * 1000.0,
+                    oldFlip, 100.0 * double(oldFlip) * inv,
+                    oldSum * inv * 1000.0, oldMax * 1000.0,
+                    driftFlip, 100.0 * double(driftFlip) * inv,
+                    driftSum * inv * 1000.0, driftMax * 1000.0,
+                    neckSurf, neckNewFlip, neckDriftFlip);
             }
         }
         if (getenv("VF_TRACE_RIG") && m_frameIdx == 0) {

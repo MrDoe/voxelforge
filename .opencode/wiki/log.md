@@ -6385,3 +6385,27 @@ surface). Recorded because "look at the PNG" is not a check an agent can run
 here.
 
 See [[concepts/micro-voxel-svo-overlay]].
+
+## [2026-10-24] verification | The walk fur drift is measured and below visibility
+
+`VF_TEST_FUR_STAT=1` was reworked to pose each exposed rest cell by its
+rest-pose owner before evaluating either rule, so it measures a configuration
+the renderer actually visits (the old probe fed the rest position straight to
+the non-rest pose and measured a configuration that never happens). The
+diagnostic now reports shader-vs-rest, old-rule, and walk-pose-A->B drift per
+object, plus a role (spine/leg/head/tail) breakdown and a flip-pair matrix.
+
+Numbers on the alpaca (gait 1.5708): shader-vs-rest 4.2 % (2.9/160 mm),
+old-rule 3.3 % (3.3/300.4 mm), walk A->B 4.9 % (3.2/160 mm); neck/head 0
+flips. At graze: shader 1.4 % (0.3/51.4 mm, neck/head 0.2 %) vs old rule
+65.7 % (16.6/186.8 mm). The residual walk drift is dominated by leg<->leg
+(375) and leg<->spine (296) flips at the hip/belly plus tail sway, ~3 mm
+mean over all cells. Rendered walk sweeps (gait 0/pi/2/pi/3pi/2 and graze,
+close camera `11.55,1.0,16.8 -> 11.55,0.6,14.9`) show continuous fleece
+with no visible sliding or seams — the residual is confined to
+fleece-covered hip cells and is below visibility. Five new screenshots saved
+under `tests/screenshots/alpaca_walk_gait_*.png` and `alpaca_walk_graze.png`.
+No shader/rig change was made; `VF_TEST_FUR_STAT` watches the residual on
+every change to the bone rule.
+
+`micro_check` (257 s) and `vf_tests --test-case="*micro*"` (13/13) pass.
