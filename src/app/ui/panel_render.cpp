@@ -302,6 +302,66 @@ void App::drawPanelRender()
         });
         groupEnd();
     }
+    // ---- Fur coat: the hair cards over the micro objects ------------------
+    // The coat is a CPU product (the cards are grown from the field's
+    // surface cells), so every control here REBUILDS it - and it applies on
+    // RELEASE, not per tick, because growing the alpaca's coat costs a few
+    // hundred milliseconds.
+    if (groupHeader("render.fur", "FUR COAT", false)) {
+        bool furDirty = false;
+        controlRow("Enabled", [&] {
+            if (ImGui::Checkbox("##furEnabled", &m_furEnabled))
+                furDirty = true;
+        });
+        hintLine("The hair cards over a micro object. Off is the bit-exact "
+                 "escape hatch: the pass never dispatches.");
+        controlRow("Density", [&] {
+            ImGui::SetNextItemWidth(-1.0f);
+            if (ImGui::SliderInt("##furPerCell", &m_furPerCell, 1, 12,
+                                 "%d / cell"))
+                furDirty = true;
+        });
+        hintLine("Cards per surface cell. Two left gaps at close range.");
+        controlRow("Strand length", [&] {
+            ImGui::SetNextItemWidth(-1.0f);
+            if (ImGui::SliderFloat("##furLen", &m_furLength, 0.008f, 0.060f,
+                                   "%.0f mm", ImGuiSliderFlags_Logarithmic))
+                furDirty = true;
+        });
+        controlRow("Clump width", [&] {
+            ImGui::SetNextItemWidth(-1.0f);
+            if (ImGui::SliderFloat("##furWid", &m_furWidth, 0.001f, 0.012f,
+                                   "%.1f mm", ImGuiSliderFlags_Logarithmic))
+                furDirty = true;
+        });
+        controlRow("Curl", [&] {
+            ImGui::SetNextItemWidth(-1.0f);
+            if (ImGui::SliderFloat("##furCurl", &m_furCurl, 0.0f, 0.8f, "%.2f"))
+                furDirty = true;
+        });
+        hintLine("How far the strand's centre line wanders, as a fraction of "
+                 "its length. Measured against the CLUMP's width: a wave "
+                 "that wanders many widths sideways is a smear, not a curl.");
+        controlRow("Curl cycles", [&] {
+            ImGui::SetNextItemWidth(-1.0f);
+            if (ImGui::SliderFloat("##furCycles", &m_furCycles, 0.2f, 3.0f,
+                                   "%.2f"))
+                furDirty = true;
+        });
+        controlRow("Lift", [&] {
+            ImGui::SetNextItemWidth(-1.0f);
+            if (ImGui::SliderFloat("##furTilt", &m_furTilt, 0.0f, 70.0f,
+                                   "%.0f deg"))
+                furDirty = true;
+        });
+        hintLine("How far the strand stands off the surface. A steep strand "
+                 "reads as a spike; wool lies close to the body.");
+        if (furDirty) {
+            rebuildFurCards();
+            hintLine("Coat rebuilt.");
+        }
+        groupEnd();
+    }
 
     if (m_scenePreview) {
         if (groupHeader("render.preview", "SCENE PREVIEW")) {

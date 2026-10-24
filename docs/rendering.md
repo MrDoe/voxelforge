@@ -651,3 +651,116 @@ surfel count and the depth test rejects the dry cells before shading.
   highlight is screenshot-testable (`tests/live_edit_check.py`). The SVO
   backend has no equivalent per-surfel tint; the tile path (`VF_TILE=1`)
   does not implement it yet.
+
+## Fur cards over the micro objects (`fur_overlay.comp`)
+
+A micro object is a sphere-traced solid: exact, opaque, hard-edged. That is
+right for a ceramic vase and wrong for an animal, whose coat is fuzz and
+whose **silhouette** is the thing that says so. The fur is a separate
+**translucent** layer of hair cards - flat ribbons standing out of the
+surface, each with a soft alpha profile across its width and a taper along
+its length. One card stands for a clump of strands.
+
+**Why this is not a splat feature.** A surfel is a disk lying *in* the
+tangent plane, and the opaque base seal (the nearest fragment written at
+alpha 1) is exactly what turns a lone silhouette splat into a hard-edged
+blob; the documented fix for that is a coverage count in the unused
+`D24_S8` stencil, not kernel tuning. The fur sidesteps the question: it
+composites over an already-opaque body, so transparency is correct by
+construction and the sky only shows where a card reaches past the
+silhouette.
+
+**The pipeline**
+
+| stage | where | what |
+|---|---|---|
+| generate | `src/voxel/fur_cards.cpp` (CPU, at load) | one card per surface cell per slot, for the materials that grow fur (21 `fleece`) |
+| upload | `src/render/fur_pass.cpp` | the cards, the bucket grid and the per-object table |
+| draw | `shaders/fur_overlay.comp` (compute) | a DDA through the bucket grid, composited into the HDR the micro overlay wrote |
+
+The pass runs **after** the micro overlay (it reads the G-buffer the overlay
+wrote) and **before** the post pass. The G-buffer's world position is the
+depth reference, so a card behind the body or behind the world is dropped
+without a depth attachment and without touching any opaque pass. With no
+object carrying fur the dispatch is skipped and the frame is byte-identical
+(`VF_FUR=0` is the escape hatch).
+
+**The three decisions that decide whether the coat reads**
+
+1. **The ribbon is billboarded about the strand**: its width axis is
+   perpendicular to the strand *and* to the camera. A width axis taken from
+   the surface puts the ribbon in the tangent plane, so at the silhouette it
+   is edge-on and vanishes - the coat would be a faint wash in the interior
+   and the outline would stay razor sharp. The strand direction still comes
+   from the surface (the groom), and the surface normal is still the
+   *shading* normal, so the coat is lit like the body.
+2. **A card is never thinner than ~1.5 px.** A sub-pixel card either misses
+   the pixel grid or lands on it whole, and the coat turns to speckle. The
+   card is widened to 1.5 px and its alpha scaled by the same factor, so the
+   ink is conserved.
+3. **The cards must be dense** - four per surface cell. Two left gaps at
+   close range; more buys very little.
+4. **The strands must be CURLY, and the amplitude is measured against the
+   clump's WIDTH, not its length.** The centre line wanders across the
+   ribbon's plane in a wave that is zero at the root (where the strand is
+   anchored) and grows toward the tip; the ribbon's *plane* is unchanged, so
+   the ray/plane intersection stays exact and the curl costs one sine.
+
+   The first attempt got the attribution wrong, and a negative control
+   caught it: a sweep that varied the curl, the width, the density and the
+   length together appeared to show the curl taking the coat's
+   high-frequency metric from 16.1 to 12.7 - but re-rendering with *only*
+   the curl removed moved it by 0.03. The win belonged to the density and
+   the width, and the direction was backwards: a big curl (0.45) makes the
+   coat **blurrier**, because a wave that wanders many clump-widths sideways
+   smears the strand's ink over a band (the metric fell to 12.70, below the
+   bare body's 13.48, and the coat read as a haze). The measured default is
+   an amplitude of **0.20**, about two clump widths: the coat's detail is
+   14.76 against the body's 13.48 (the strands are readable) and its luma
+   spread 36.98 against the body's 28.82 (the fleece's texture still
+   shows).
+
+**A bug the curl exposed.** The strand's direction was spelled
+`groom*cos(spin) + t2*sin(spin)`, which is not a rotation unless the groom
+happens to lie along `t1` - and the groom is the projection of "down", so
+it generally does not. The length varied with the spin, and at the spin
+where the two terms cancel the direction was numerical noise: the card
+degenerated into a **spoke pointing straight out of the surface** (the
+strand's angle to the normal measured 8.6 to 89.8 degrees instead of the
+intended 12 to 38). Expressing the groom in the surface's tangent frame and
+rotating *that* keeps the length at one - and that was what the "spikes"
+were.
+
+**The alpha** is a Gaussian across the width (the splat backend's kernel
+shape, on a sliver instead of a disk, so the edges are transparent rather
+than a hard rim) times a taper along the strand. The accumulation is the
+standard many-layer approximation `1 - exp(-Σα)`, and the coverage
+composites the fur over the body. The **texture is sampled per card**: the
+fleece's clumps are centimetres across, and one flat colour per pixel reads
+as washed-out plastic. The sky ambient is evaluated once per pixel (the sun
+term is the cards' average).
+
+**The coat in the GUI.** The sidebar's **Rendering** section carries the
+coat's shape (density, strand length, clump width, curl amplitude and
+cycles, and how far a strand stands off the surface) and the **Textures**
+section carries the *material* that wears it - a coat is a property of the
+material, not of the object, so a checkbox per material turns the coat on
+wherever a micro object uses it. The sliders rebuild the coat (the cards
+are a CPU product, a few hundred milliseconds) and apply on **release**,
+not per tick; a rebuild keeps the live Move/Rotate preview, because that
+state lives on the fur objects and rides across the upload.
+
+**Descriptor bindings** (set 0, the fur pass): 0/1/2 the cards and the two
+bucket arrays (storage buffers), 8/9 the terrain height texture and the
+coarse object volume, 11/12 the black environment cubemap and the BRDF LUT
+(the IBL is black in this renderer; they exist so the descriptor set is
+complete), 13/14 the HDR and the G-buffer, 22/23 the texture atlas and its
+table, 25 the point lights, 26 the irradiance volume, 30 the per-object
+table.
+
+**The cards live in the field's LOCAL frame**, so the layer's world
+placement and the live rotation preview are applied by the shader exactly as
+the micro overlay applies them to the field - the fur and the body can never
+drift apart. The preview is mirrored onto the fur through an index map
+(`m_furIndexOfMicro`), because a micro object without fur has no entry in
+the fur pass's table.

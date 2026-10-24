@@ -112,6 +112,7 @@ const ImVec4 kTextTertiary(0.427f, 0.478f, 0.541f, 1.0f);
 // must cover every palette entry (kPaletteN), or the last materials are
 // unreachable from every combo - which is how material 21 (fleece) stayed
 // invisible: the array stopped at 20 while the palette had 22 entries.
+// kPalette names (src/voxel/common.hpp) for the material combo.
 inline constexpr const char* kMatNames[22] = {
     "0 grass dark", "1 grass light", "2 soil", "3 sand", "4 rock",
     "5 light rock", "6 wood", "7 roof", "8 foliage", "9 lava", "10 ember",

@@ -1,0 +1,556 @@
+#version 460
+#extension GL_GOOGLE_include_directive : require
+// Fur cards: the translucent hair-clump layer over a micro-voxel object.
+//
+// A micro object is a SPHERE-TRACED solid: its surface is exact, opaque and
+// hard-edged. For a ceramic vase that is right. For an animal it is not - an
+// alpaca's coat is fuzz, and the silhouette is the thing that says so.
+//
+// So the fur is a separate, TRANSLUCENT layer of hair cards: small flat
+// slivers that stand out of the surface, each with a soft alpha profile
+// across its width and a taper along its length. They are composited over the
+// already-opaque body, so:
+//
+//   * the sky only shows where a card extends PAST the silhouette - which is
+//     exactly where fur should be translucent;
+//   * the opaque pipeline is untouched. The world's own splats cannot do
+//     this: they are disks lying IN the tangent plane, and the opaque base
+//     seal (the nearest fragment written at alpha 1) is what turns a lone
+//     silhouette splat into a hard-edged blob.
+//
+// The cards are generated on the CPU from the field's surface cells (see
+// voxel/fur_cards.cpp) and live in the object's LOCAL frame, so the layer's
+// world placement and the live rotation preview are applied here exactly as
+// the micro overlay applies them to the field.
+//
+// Per pixel this is a DDA through the card grid: the grid is a uniform bucket
+// grid over the object, and a card is filed in every cell its bounding box
+// touches, so a ray that clips a card always visits a cell that holds it.
+
+layout(local_size_x = 8, local_size_y = 8, local_size_z = 1) in;
+
+// The composite targets. The HDR the main backend and the micro overlay
+// already wrote; the G-buffer's world position is the depth reference, so a
+// card BEHIND the body or behind the world is dropped.
+layout(set = 0, binding = 13, rgba16f) uniform highp image2D uOutHdr;
+layout(set = 0, binding = 14, rgba16f) uniform highp image2D uOutGPos;
+
+// The cards: six vec4s each (rootLen, dirWidth, nrmAlpha, tint, shade, curl).
+layout(std430, set = 0, binding = 0) readonly buffer FurCards { vec4 fCard[]; };
+// The bucket grid: the per-cell offsets into the item list, and the items.
+layout(std430, set = 0, binding = 1) readonly buffer FurCellStart { uint fCellStart[]; };
+layout(std430, set = 0, binding = 2) readonly buffer FurCellItems { uint fCellItems[]; };
+
+// The per-object table. The layout mirrors the micro overlay's world table
+// (the preview and the rotation preview are the SAME values, so the fur and
+// the body can never drift apart) and adds the card and grid ranges.
+struct FurWorld {
+    vec4 cards;   // x = the first card, y = the card count
+    vec4 grid;    // xyz = the grid's LOCAL origin, w = the cell size (m)
+    vec4 gdim;    // xyz = the grid's dims, w = the cellStart base
+    vec4 items;   // x = the cellItems base
+    vec4 preview; // xyz = the Move preview offset (m), w = active
+    vec4 rot0;
+    vec4 rot1;
+    vec4 rot2;    // the live rotation preview's matrix (row-major)
+    vec4 pivot;   // xyz = the pivot (world m), w = active
+    vec4 world;   // xyz = the object's world AABB min (the local frame's origin)
+    // The AUTONOMOUS BEHAVIOUR's transform: an offset (xyz) + an active flag
+    // (w), a rotation matrix (row-major) and its pivot (world m). It turns a
+    // static micro object into one that walks on its own.
+    //
+    // The coat MUST follow it: the behaviour moves the animal, and a coat
+    // left in the rest pose would hang in the air where the animal used to
+    // be. The order is the micro overlay's, exactly: the behaviour is the
+    // OUTERMOST transform (the object walks, and the user's staged rotation
+    // rides on top of it), so it is undone FIRST going into the local frame
+    // and applied LAST coming out.
+    vec4 anim;
+    vec4 arot0;
+    vec4 arot1;
+    vec4 arot2;
+    vec4 apivot;
+};
+layout(std140, set = 0, binding = 30) readonly uniform FurTable {
+    FurWorld uWorlds[16];
+    ivec4 uInfo; // x = the world count
+} ft;
+
+layout(push_constant) uniform PC {
+    vec4 camPos;
+    vec4 camRight;
+    vec4 camUp;
+    vec4 camFwd;
+    vec4 a; // tanHalfFov, aspect, extentX, extentY
+    vec4 b; // worldSize, voxelSize, gridN, frameIdx
+    vec4 sunDir;
+    vec4 misc; // x=renderFlags, y=animTime, z=tonemapLook, w=exposure
+} pc;
+
+// The shared model wants the terrain height texture and the coarse object
+// volume by these names (common_base.glsl declares them per shader).
+layout(set = 0, binding = 8, rg32f) uniform readonly highp image2D uHeight;
+layout(set = 0, binding = 9, r8_snorm) uniform readonly highp image3D uObjVol;
+
+const float kWaterLevel = -0.9;
+
+#include "common_base.glsl"
+
+const int MAX_FUR_WORLDS = 16;
+
+// A card is never drawn thinner than this many pixels.
+const float kMinCardPx = 1.5;
+
+// The rotation matrix (row-major in the table, read as columns here - the
+// same convention the micro overlay uses, so the two agree exactly).
+mat3 furRot(int w)
+{
+    return mat3(ft.uWorlds[w].rot0.xyz, ft.uWorlds[w].rot1.xyz,
+                ft.uWorlds[w].rot2.xyz);
+}
+
+// The BEHAVIOUR's transform, applied to a world point: the rotation about
+// the pivot, then the offset. Its inverse undoes it. Same shape and order as
+// the micro overlay's microAnimate/microUnanimate.
+vec3 furAnimate(int w, vec3 p)
+{
+    const FurWorld W = ft.uWorlds[w];
+    if (W.anim.w < 0.5)
+        return p;
+    const mat3 R = mat3(W.arot0.xyz, W.arot1.xyz, W.arot2.xyz);
+    p = W.apivot.xyz + R * (p - W.apivot.xyz);
+    return p + W.anim.xyz;
+}
+
+vec3 furUnanimate(int w, vec3 p)
+{
+    const FurWorld W = ft.uWorlds[w];
+    if (W.anim.w < 0.5)
+        return p;
+    const mat3 R = mat3(W.arot0.xyz, W.arot1.xyz, W.arot2.xyz);
+    p -= W.anim.xyz;
+    return W.apivot.xyz + transpose(R) * (p - W.apivot.xyz);
+}
+
+vec3 furDirUnanimate(int w, vec3 d)
+{
+    const FurWorld W = ft.uWorlds[w];
+    if (W.anim.w < 0.5)
+        return d;
+    return transpose(mat3(W.arot0.xyz, W.arot1.xyz, W.arot2.xyz)) * d;
+}
+
+// A WORLD point -> the object's LOCAL frame (the field's frame). The
+// behaviour's transform is undone FIRST (it is the outermost one) and the
+// live rotation preview second, exactly as the micro overlay does it.
+vec3 furToLocal(int w, vec3 p)
+{
+    const FurWorld W = ft.uWorlds[w];
+    p = furUnanimate(w, p);
+    if (W.pivot.w > 0.5)
+        p = W.pivot.xyz + transpose(furRot(w)) * (p - W.pivot.xyz);
+    return p - W.world.xyz;
+}
+
+// A direction (no translation) into the local frame.
+vec3 furDirToLocal(int w, vec3 d)
+{
+    const FurWorld W = ft.uWorlds[w];
+    d = furDirUnanimate(w, d);
+    if (W.pivot.w > 0.5)
+        return transpose(furRot(w)) * d;
+    return d;
+}
+
+// The local frame -> the world, for the SHADING. The rotation preview is
+// undone and the Move preview applied, which is what the micro overlay does
+// with the position it shades.
+vec3 furToWorld(int w, vec3 pLocal)
+{
+    const FurWorld W = ft.uWorlds[w];
+    vec3 p = pLocal + W.world.xyz;
+    if (W.pivot.w > 0.5)
+        p = W.pivot.xyz + furRot(w) * (p - W.pivot.xyz);
+    p = furAnimate(w, p);
+    if (W.preview.w > 0.5)
+        p += W.preview.xyz;
+    return p;
+}
+
+vec3 furDirToWorld(int w, vec3 d)
+{
+    const FurWorld W = ft.uWorlds[w];
+    vec3 v = d;
+    if (W.pivot.w > 0.5)
+        v = furRot(w) * v;
+    return furDirUnanimate(w, v);
+}
+
+// The linear index of a grid cell.
+int cellIndex(ivec3 c, ivec3 dim)
+{
+    return (c.z * dim.y + c.y) * dim.x + c.x;
+}
+
+// One card's contribution to the pixel. Returns the alpha it contributed and
+// accumulates the lighting terms.
+float cardHit(int w, uint ci, vec3 roL, vec3 rdL, float tMax, vec3 rd,
+              inout vec3 sumSun, inout vec3 sumPos, inout vec3 sumNrm,
+              inout vec3 sumAlb, inout float sumAo)
+{
+    const vec4 rootLen = fCard[ci * 6u + 0u];
+    const vec4 dirWidth = fCard[ci * 6u + 1u];
+    const vec4 nrmAlpha = fCard[ci * 6u + 2u];
+    const vec4 tint = fCard[ci * 6u + 3u];
+    const vec4 shade = fCard[ci * 6u + 4u];
+    const vec4 curl = fCard[ci * 6u + 5u];
+
+    const vec3 root = rootLen.xyz;
+    const vec3 dir = dirWidth.xyz;
+    const float len = max(rootLen.w, 1e-4);
+    const float wid = max(dirWidth.w, 1e-4);
+    const vec3 n = nrmAlpha.xyz;
+
+    // The card's WIDTH AXIS, and this is the one decision that decides
+    // whether the coat reads at all.
+    //
+    // A card is a flat ribbon, and a flat ribbon has no area when it is seen
+    // edge-on. The width axis derived from the surface (perpendicular to the
+    // strand and to the surface normal) puts the ribbon IN the tangent
+    // plane, so at the SILHOUETTE - where the surface is edge-on to the
+    // camera, and where the fuzz is most wanted - the ribbon is edge-on too
+    // and vanishes. The silhouette would stay razor sharp and the coat would
+    // be a faint wash in the interior.
+    //
+    // So the ribbon is BILLBOARDED about the strand: its width axis is
+    // perpendicular to the strand AND to the direction to the camera, which
+    // makes the card always present its full width to the viewer. The strand
+    // direction still comes from the surface (the groom), and the surface
+    // normal is still the SHADING normal, so the coat is lit like the body.
+    //
+    // The card's own twist (tint.w) is applied about the strand, and the
+    // ribbon's PLANE is built from the twisted axis, so the plane the ray is
+    // intersected against and the axis the alpha is measured along are the
+    // same frame - no drift between the geometry and the shading.
+    vec3 toCam = roL - root;
+    const float tc = length(toCam);
+    if (tc < 1e-5)
+        return 0.0;
+    toCam /= tc;
+    vec3 side = cross(dir, toCam);
+    float sl = length(side);
+    if (sl < 1e-4) {
+        // The strand points at the camera: the width axis is undefined, so
+        // fall back to the surface frame (the card is edge-on anyway).
+        side = cross(dir, n);
+        sl = length(side);
+        if (sl < 1e-5)
+            return 0.0;
+    }
+    side /= sl;
+    const float tw = tint.w;
+    if (abs(tw) > 1e-4) {
+        const vec3 k = dir;
+        const float c = cos(tw), s = sin(tw);
+        side = side * c + cross(k, side) * s;
+    }
+    const vec3 planeN = normalize(cross(dir, side));
+
+    // The ray/plane intersection. The ribbon's plane contains the strand and
+    // the direction to the camera, so its normal is perpendicular to both.
+    const float denom = dot(rdL, planeN);
+    if (abs(denom) < 1e-6)
+        return 0.0;
+    const float tp = dot(root - roL, planeN) / denom;
+    if (tp <= 0.0 || tp > tMax)
+        return 0.0;
+    const vec3 hit = roL + rdL * tp;
+
+    // The local coordinates: along the strand (0 at the root, 1 at the tip)
+    // and across it (0 at the centre, +-0.5 at the edges).
+    const float sAlong = dot(hit - root, dir) / len;
+    if (sAlong < 0.0 || sAlong > 1.0)
+        return 0.0;
+
+    // The MINIMUM SCREEN-SPACE WIDTH. A card that is thinner than a pixel
+    // cannot be drawn: it either misses the pixel grid or lands on it whole,
+    // and the coat turns into speckle. So a card narrower than kMinCardPx is
+    // widened to that many pixels and its alpha scaled down by the same
+    // factor - the ink is conserved, the silhouette is not.
+    //
+    // The metres per pixel at the hit: the frame's height covers
+    // 2*tanHalfFov*t metres over pc.a.w pixels.
+    const float mpp = 2.0 * pc.a.x * tp / max(pc.a.w, 1.0);
+    const float minW = kMinCardPx * mpp;
+    const float wEff = max(wid, minW);
+    const float energy = wid / wEff; // the peak alpha follows the width
+    // The CURL. The strand is not a straight needle: its CENTRE LINE wanders
+    // across the ribbon's plane in a wave that is zero at the root (where the
+    // strand is anchored) and grows toward the tip. That is the difference
+    // between a SPIKE and a piece of wool, and it costs one sine: the
+    // ribbon's PLANE is unchanged, so the ray/plane intersection above is
+    // still exact - only the centre line moves.
+    const float wave = curl.x * sin(6.2831853 * curl.y * sAlong + curl.z) * sAlong;
+    const float u = (dot(hit - root, side) - wave) / wEff;
+    if (abs(u) > 0.5)
+        return 0.0;
+
+    // The alpha profile. Across the width it is a GAUSSIAN - the same kernel
+    // shape the splat backend uses, but on a sliver instead of a disk, so the
+    // edges are transparent rather than a hard rim. Along the strand it
+    // tapers to a point and fades out over the last fifth, so the tip is a
+    // wisp.
+    const float x = u * 2.0;
+    const float across = exp(-2.6 * x * x);
+    // Along the strand it keeps most of its width and fades out over the
+    // last quarter, so the tip is a soft wisp and not a needle point.
+    const float along = (1.0 - 0.45 * sAlong * sAlong) *
+                        smoothstep(0.0, 0.05, sAlong) *
+                        smoothstep(1.0, 0.72, sAlong);
+    const float a = nrmAlpha.w * across * along * energy;
+    if (a < 0.004)
+        return 0.0;
+
+    // The shading normal: the surface normal at the root, turned toward the
+    // camera (a card is two-sided) and taken out of the local frame.
+    vec3 nWorld = normalize(furDirToWorld(w, n));
+    if (dot(nWorld, rd) > 0.0)
+        nWorld = -nWorld;
+    const vec3 pWorld = furToWorld(w, root + dir * (sAlong * len));
+
+    // The sun term, with the card's baked shadow. The AO is accumulated
+    // separately, because the sky ambient is evaluated ONCE per pixel (see
+    // main) - evaluating the sky per card would cost a sky evaluation per
+    // card hit, and a pixel through the coat hits a dozen.
+    const float ndl = max(dot(nWorld, kSunDir), 0.0);
+    const float shadow = ((gRenderFlags & 2) != 0) ? shade.y : 1.0;
+    sumSun += vec3(a * ndl * shadow);
+    sumPos += a * pWorld;
+    sumNrm += a * nWorld;
+    // The card's OWN albedo, sampled at the card's position. Evaluating the
+    // texture once per pixel (at the average position) instead would give the
+    // whole coat one flat colour - the fleece's clumps are centimetres
+    // across, so the per-card sample is what keeps the variation.
+    //
+    // A TEXTURED material takes its colour from the atlas and IGNORES the
+    // record's colour (the same rule the world follows); an untextured one
+    // keeps the record's colour.
+    const uint mId = uint(shade.z + 0.5);
+    vec3 alb = kPalette[clamp(mId, 0u, 21u)];
+    const vec3 tex = sampleTex(pWorld, nWorld, mId);
+    if (tex.r >= 0.0)
+        alb = tex;
+    else
+        alb = tint.rgb;
+    sumAlb += a * alb;
+    sumAo += a * shade.x;
+    return a;
+}
+
+// The DDA over one object's card grid.
+void accumulateWorld(int w, vec3 ro, vec3 rd, float sceneT, inout float sumA,
+                     inout vec3 sumSun, inout vec3 sumPos, inout vec3 sumNrm,
+                     inout vec3 sumAlb, inout float sumAo, inout uint matId)
+{
+    const FurWorld W = ft.uWorlds[w];
+    if (W.cards.y <= 0.0)
+        return;
+    const ivec3 dim = ivec3(W.gdim);
+    if (any(lessThanEqual(dim, ivec3(0))))
+        return;
+
+    // The ray in the object's local frame. A rigid transform preserves the
+    // parameter, so t means the same thing in both frames.
+    const vec3 roL = furToLocal(w, ro);
+    const vec3 rdL = normalize(furDirToLocal(w, rd));
+
+    const vec3 g0 = W.grid.xyz;
+    const vec3 gs = vec3(W.grid.w);
+    const vec3 g1 = g0 + vec3(dim) * gs;
+
+    // The ray against the grid's box.
+    vec3 t0 = vec3(0.0), t1 = vec3(0.0);
+    for (int a = 0; a < 3; ++a) {
+        const float o = (a == 0) ? roL.x : ((a == 1) ? roL.y : roL.z);
+        const float d = (a == 0) ? rdL.x : ((a == 1) ? rdL.y : rdL.z);
+        const float lo = (a == 0) ? g0.x : ((a == 1) ? g0.y : g0.z);
+        const float hi = (a == 0) ? g1.x : ((a == 1) ? g1.y : g1.z);
+        if (abs(d) < 1e-9) {
+            if (o < lo || o > hi)
+                return; // parallel and outside
+            t0[a] = -1e30;
+            t1[a] = 1e30;
+        } else {
+            const float ta = (lo - o) / d;
+            const float tb = (hi - o) / d;
+            t0[a] = min(ta, tb);
+            t1[a] = max(ta, tb);
+        }
+    }
+    float tEnter = max(max(t0.x, t0.y), t0.z);
+    float tExit = min(min(t1.x, t1.y), t1.z);
+    if (tEnter > tExit)
+        return;
+    tEnter = max(tEnter, 0.0);
+    // The fur is hidden behind the opaque surface the G-buffer holds. The
+    // slack keeps the cards whose ROOT sits ON that surface (the near side
+    // of the coat) alive, while a card on the far side - whose root is
+    // centimetres behind - is still dropped. A card's TIP may legitimately
+    // reach past the body's silhouette, and that is kept: the tip is in
+    // front of the surface, so it is inside the range.
+    tExit = min(tExit, sceneT + 0.01);
+    if (tEnter > tExit)
+        return;
+
+    const vec3 pEnter = roL + rdL * tEnter;
+    ivec3 cell = ivec3(floor((pEnter - g0) / gs));
+    cell = clamp(cell, ivec3(0), dim - ivec3(1));
+
+    ivec3 stp;
+    vec3 tMax, tDelta;
+    // X
+    if (rdL.x > 1e-9) {
+        stp.x = 1;
+        tMax.x = (g0.x + float(cell.x + 1) * gs.x - roL.x) / rdL.x;
+        tDelta.x = gs.x / rdL.x;
+    } else if (rdL.x < -1e-9) {
+        stp.x = -1;
+        tMax.x = (g0.x + float(cell.x) * gs.x - roL.x) / rdL.x;
+        tDelta.x = -gs.x / rdL.x;
+    } else {
+        stp.x = 0; tMax.x = 1e30; tDelta.x = 1e30;
+    }
+    // Y
+    if (rdL.y > 1e-9) {
+        stp.y = 1;
+        tMax.y = (g0.y + float(cell.y + 1) * gs.y - roL.y) / rdL.y;
+        tDelta.y = gs.y / rdL.y;
+    } else if (rdL.y < -1e-9) {
+        stp.y = -1;
+        tMax.y = (g0.y + float(cell.y) * gs.y - roL.y) / rdL.y;
+        tDelta.y = -gs.y / rdL.y;
+    } else {
+        stp.y = 0; tMax.y = 1e30; tDelta.y = 1e30;
+    }
+    // Z
+    if (rdL.z > 1e-9) {
+        stp.z = 1;
+        tMax.z = (g0.z + float(cell.z + 1) * gs.z - roL.z) / rdL.z;
+        tDelta.z = gs.z / rdL.z;
+    } else if (rdL.z < -1e-9) {
+        stp.z = -1;
+        tMax.z = (g0.z + float(cell.z) * gs.z - roL.z) / rdL.z;
+        tDelta.z = -gs.z / rdL.z;
+    } else {
+        stp.z = 0; tMax.z = 1e30; tDelta.z = 1e30;
+    }
+
+    const uint startBase = uint(W.gdim.w);
+    const uint itemBase = uint(W.items.x);
+    float t = tEnter;
+    // A bounded walk: the grid is small (a few thousand cells) and the ray
+    // crosses a handful of them, but a degenerate direction must not spin.
+    for (int iter = 0; iter < 512; ++iter) {
+        if (t > tExit)
+            break;
+        const int li = cellIndex(cell, dim);
+        const uint c0 = fCellStart[startBase + uint(li)];
+        const uint c1 = fCellStart[startBase + uint(li) + 1u];
+        for (uint k = c0; k < c1; ++k) {
+            const uint ci = fCellItems[itemBase + k];
+            const uint card = uint(W.cards.x) + ci;
+            const float a = cardHit(w, card, roL, rdL, tExit, rd, sumSun, sumPos,
+                                    sumNrm, sumAlb, sumAo);
+            if (a > 0.0) {
+                sumA += a;
+                matId = uint(fCard[card * 6u + 4u].z + 0.5);
+            }
+        }
+        // Advance to the next cell.
+        if (tMax.x < tMax.y && tMax.x < tMax.z) {
+            cell.x += stp.x; t = tMax.x; tMax.x += tDelta.x;
+        } else if (tMax.y < tMax.z) {
+            cell.y += stp.y; t = tMax.y; tMax.y += tDelta.y;
+        } else {
+            cell.z += stp.z; t = tMax.z; tMax.z += tDelta.z;
+        }
+        if (any(lessThan(cell, ivec3(0))) || any(greaterThanEqual(cell, dim)))
+            break;
+    }
+}
+
+void main()
+{
+    const ivec2 pix = ivec2(gl_GlobalInvocationID.xy);
+    if (pix.x >= int(pc.a.z) || pix.y >= int(pc.a.w))
+        return;
+    if (ft.uInfo.x <= 0)
+        return;
+
+    kSunDir = normalize(pc.sunDir.xyz);
+    gRenderFlags = int(pc.misc.x + 0.5);
+    gTexOv = 0.0;
+    gUnderwater = false;
+
+    const vec3 ro = pc.camPos.xyz;
+    const vec2 ndc = (vec2(pix) + 0.5) / vec2(pc.a.z, pc.a.w) * 2.0 - 1.0;
+    const vec3 rd = normalize(pc.camFwd.xyz + ndc.x * pc.a.x * pc.a.y * pc.camRight.xyz -
+                              ndc.y * pc.a.x * pc.camUp.xyz);
+
+    // The depth reference: the nearest opaque surface the backend (or the
+    // micro overlay) already resolved. The sky writes zero, so it is "no
+    // geometry" and the fur is free to extend past the silhouette.
+    const vec4 gp = imageLoad(uOutGPos, pix);
+    const bool hasScene = !(gp.xyz == vec3(0.0));
+    const float sceneT = hasScene ? dot(gp.xyz - ro, rd) : 1e9;
+
+    float sumA = 0.0;
+    vec3 sumSun = vec3(0.0);
+    vec3 sumPos = vec3(0.0);
+    vec3 sumNrm = vec3(0.0);
+    vec3 sumAlb = vec3(0.0);
+    float sumAo = 0.0;
+    uint matId = 0u;
+
+    for (int w = 0; w < int(ft.uInfo.x) && w < MAX_FUR_WORLDS; ++w) {
+        accumulateWorld(w, ro, rd, sceneT, sumA, sumSun, sumPos, sumNrm, sumAlb,
+                        sumAo, matId);
+    }
+    if (sumA < 0.003)
+        return; // nothing to composite
+
+    const vec3 nAvg = normalize(sumNrm);
+    const vec3 pAvg = sumPos / sumA;
+    const float aoAvg = (gRenderFlags & 1) != 0 ? (sumAo / sumA) : 1.0;
+
+    // The lighting, evaluated ONCE per pixel: the sun term is the average of
+    // the cards' own, and the sky ambient is a function of the average
+    // normal. Evaluating the sky per card would cost a sky evaluation per
+    // card hit, and a pixel through the coat hits a dozen.
+    vec3 light = sunCol() * (sumSun / sumA);
+    light += skyIrradiance(nAvg) * (0.28 + 0.30 * aoAvg);
+
+    // The albedo: the alpha-weighted average of the CARDS' own colours, so
+    // the coat keeps the fleece's variation instead of one flat tone.
+    vec3 alb = sumAlb / sumA;
+    if (uTex.matTex[matId].x >= 0.0) {
+        // A TEXTURED material: the universal mottling and grain only (the
+        // photo carries its own accents). This is detailAlbedo's textured
+        // path, spelled out because the texture itself was already sampled
+        // per card.
+        alb *= 0.86 + 0.28 * fbm(pAvg.xz * 1.7 + pAvg.y * 1.3);
+        alb *= 0.93 + 0.10 * vnoise(pAvg.xz * 23.0 + pAvg.y * 17.0);
+    } else {
+        // An untextured material keeps its record's colour and gets the
+        // per-material accents.
+        alb = detailAlbedo(alb, pAvg, nAvg, matId);
+    }
+
+    // The coverage. The cards are composited back-to-front in the ideal
+    // case; here the accumulated alpha is the standard many-layer
+    // approximation, which is exact for the small alphas a coat is made of.
+    const float coverage = 1.0 - exp(-sumA);
+    const vec3 furCol = alb * light;
+    const vec3 before = imageLoad(uOutHdr, pix).rgb;
+    imageStore(uOutHdr, pix, vec4(mix(before, furCol, coverage), 1.0));
+}

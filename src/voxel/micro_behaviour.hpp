@@ -52,7 +52,8 @@ struct MicroBehaviour {
     float radius = 1.2f;       // the wander radius around the anchor (m)
     float bob = 0.014f;        // the gait bob (m, peak)
     float sway = 0.030f;       // the gait sway (radians, peak)
-    float grazePitch = 0.30f;  // the graze bow (radians, peak)
+    float grazePitch = 0.0f;   // the graze bow (radians, peak); 0 keeps all
+                               // four feet planted (rigid legs cannot extend)
     float stride = 0.85f;      // the distance per gait cycle (m)
 
     // The runtime state.

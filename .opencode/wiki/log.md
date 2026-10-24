@@ -6409,3 +6409,118 @@ No shader/rig change was made; `VF_TEST_FUR_STAT` watches the residual on
 every change to the bone rule.
 
 `micro_check` (257 s) and `vf_tests --test-case="*micro*"` (13/13) pass.
+## [2026-10-21] ingest | Fur cards over the micro objects (and the premise that was wrong)
+
+The question was "can we use real Gaussian splats instead of the filled
+circular surfels for the alpaca's fur?" The premise was wrong and that is the
+first thing worth recording: **the alpaca is not a surfel at all**. It is a
+micro-voxel object (`role: "micro"` -> `MicroField` -> `MicroWorld` ->
+`MicroSvoPass` -> `micro_overlay.comp`), a sphere-traced solid on its own 8 mm
+lattice. Its surface is exact, opaque and hard-edged - right for a ceramic
+vase, wrong for an animal, whose coat is fuzz and whose SILHOUETTE is the
+thing that says so. The old pre-rework scene did have a baked
+`assets/alpaca.vxw` world object that WAS surfel-rendered, which is probably
+where the assumption came from.
+
+**The answer: yes, but as a separate translucent layer, not as a change to
+the splat kernel.** A surfel is a disk lying IN the tangent plane, and the
+opaque base seal (the nearest fragment written at alpha 1) is exactly what
+turns a lone silhouette splat into a hard-edged blob - the documented fix is
+a coverage count in the unused D24_S8 stencil, not kernel tuning. So the fur
+is its own compute pass (`fur_overlay.comp`) that composites hair cards over
+the already-opaque body: the sky only shows where a card reaches past the
+silhouette, and no opaque pass changes.
+
+Three decisions decide whether the coat reads, and all three are measured:
+
+- **The ribbon is billboarded about the strand** (its width axis is
+  perpendicular to the strand AND to the camera). A surface-aligned width
+  axis puts the ribbon in the tangent plane, so at the silhouette - where the
+  fuzz is most wanted - it is edge-on and vanishes. Near view: mean |diff|
+  32 -> 53, high-frequency noise 18.4 -> 15.4 (the bare body is 12.8).
+- **A card is never thinner than ~1.5 px**: widened to 1.5 px with its alpha
+  scaled to match, so the ink is conserved. Alone: the noise 20.9 -> 19.0.
+- **The cards must be dense**: four per surface cell (two left gaps).
+
+Other decisions: the texture is sampled PER CARD (the fleece's clumps are
+centimetres across; one flat colour per pixel reads as washed-out plastic),
+the sky ambient is evaluated once per pixel (a sky evaluation per card hit
+would cost a dozen per pixel), the accumulation is `1 - exp(-sum alpha)`, and
+the cards live in the field's LOCAL frame so the live rotation preview
+applies to the fur exactly as it applies to the body.
+
+The instrument was broken TWICE before the feature looked broken: a camera
+that "should" have framed the alpaca was actually pointing at a cabin wall,
+so the fur's effect at 8 m measured as exactly zero. A broken instrument
+produces a false negative, which is the most convincing kind.
+
+Numbers: 81 848 cards, 7.9 MB GPU, 177 ms at load, 0-1 ms per frame at
+900x600 (inside the run-to-run noise). Gates: `tests/fur_check.py` (the new
+`fur` group: noise floor first, then the signal, the confinement, the
+backend-independence and the escape hatch) and four new cases in
+`tests/test_micro.cpp`.
+
+See [[concepts/fur-cards]].
+
+## [2026-10-21] ingest | Curly strands, and the bug that WAS the spikes
+
+The feedback on the first fur was "more curly, less spikes". Chasing it
+turned up a real BUG, and the bug was most of the spikes.
+
+**The strand's direction was not a rotation.** It was spelled
+`groom*cos(spin) + t2*sin(spin)`, which only preserves the length when the
+groom happens to lie along `t1` - and the groom is the projection of
+"down", so it generally does not. The length varied with the spin, and at
+the spin where the two terms cancel the direction was numerical noise: the
+card degenerated into a **spoke pointing straight out of the surface**.
+Measured (the unit test that caught it): the strand's angle to the normal
+ranged 8.6-89.8 degrees instead of the intended 12-38. Expressing the
+groom in the surface's tangent frame and rotating THAT keeps the length at
+one for every spin.
+
+**The curl.** The centre line now wanders across the ribbon's plane in a
+wave that is zero at the root (where the strand is anchored) and grows
+toward the tip; the ribbon's PLANE is unchanged, so the ray/plane
+intersection stays exact and the curl costs one sine.
+
+**And then the attribution was WRONG, and the negative control caught it.**
+A sweep that varied the curl, the width, the density and the length
+*together* appeared to show the curl taking the coat's high-frequency
+metric from 16.1 to 12.7 - but re-rendering with **only** the curl removed
+moved it by **0.03**. The win belonged to the density and the width. And
+the direction was backwards: a big curl (0.45) makes the coat **BLURRIER**,
+not softer, because a wave that wanders many clump-widths sideways smears
+the strand's ink over a band - the metric fell to 12.70, *below* the bare
+body's 13.48, and the coat read as a haze. (The user said so: "now fur
+looks too blurry.")
+
+The measured default is an amplitude of **0.20** - about two clump widths -
+so the wave is visible but the strand stays readable: the coat's detail is
+**14.76** against the body's 13.48, and its luma spread **36.98** against
+the body's 28.82, so the fleece's texture still shows.
+
+Two lessons worth more than the feature: **a confounded sweep produces a
+false attribution** (vary one thing, or run the negative control), and
+**"softer" is not the same axis as "curlier"** - a bigger wave is a bigger
+smear.
+
+**The coat is now configurable in the GUI.** The Rendering section carries
+its SHAPE (density, strand length, clump width, curl amplitude and cycles,
+how far a strand stands off the surface) and the Textures section carries
+the MATERIAL that wears it - a coat is a property of the material, not of
+the object. The fleece (21) was not even VISIBLE in the Textures panel
+before, because that panel's loop stopped at material 20. The sliders
+rebuild the coat (a CPU product) and apply on RELEASE; a rebuild keeps
+the live Move/Rotate preview, because that state lives on the fur objects.
+
+**The meadow got the same lesson**: a grass blade whose centre line is
+straight and whose width tapers to a point reads as a spike, so the blade
+now arches, keeps much more of its width, and fades over the last fifth
+instead of the last tenth. Measured on the house view: 1.74% of the pixels
+move.
+
+The lesson worth keeping: **a visual complaint is a measurement request**,
+and the thing it measures can be a bug rather than a parameter.
+
+See [[concepts/fur-cards]].
+

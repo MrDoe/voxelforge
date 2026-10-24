@@ -249,7 +249,7 @@ void MicroBehaviour::animateBones()
                    : 0.f);
     // The head/neck chain's TOTAL tip angle. The links share it, so the neck
     // curves; see the Neck/Head case below.
-    const float headTotal = 0.06f * std::sin(gait * 2.f) + grazeBlend * 0.50f;
+    const float headTotal = 0.06f * std::sin(gait * 2.f) + grazeBlend * 0.70f;
     for (size_t i = 0; i < n; ++i) {
         const MicroBone& b = rig.bones[i];
         float angle = 0.f;
@@ -279,7 +279,11 @@ void MicroBehaviour::animateBones()
             // front legs to reach the grass, the way a grazing quadruped
             // does. Without it the head can only dip by the length of its
             // neck (0.32 m on the alpaca), which is nowhere near the ground.
-            angle = grazeBlend * 0.62f;
+            // The body stays LEVEL while grazing: a spine bow tips the body and
+            // lifts the back feet off the ground (rigid legs cannot extend), so
+            // the animal would no longer stand on four feet. The head reaches
+            // down through the neck instead.
+            angle = 0.0f;
             axis = side;
             break;
         }

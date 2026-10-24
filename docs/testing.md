@@ -163,6 +163,7 @@ Env knobs: `VF_SSAO_STRENGTH` / `VF_SSAO_RADIUS` / `VF_SSAO_BLUR` /
 | `test-live-edit` | brushes, live patches, undo/clear | store doctests + full live-edit check + fast variant |
 | `test-preview` | brush hover preview: tint hue, Depth marker, SVO parity | `live_edit_check.py --only preview` (renders its own baseline) |
 | `test-visual` | camera, shaders, scene geometry | full visual check + fast variant + GPU selftest |
+| `test-fur` | the fur cards over the micro objects | `fur_check.py` (noise floor, signal, confinement, backend parity, escape hatch) |
 | `test-effects` | SSAO/post effects | full SSAO check + fast variant |
 | `test-textures` | atlas/material textures | full texture check + fast variant |
 | `test-fog` | volumetric fog | full fog check + fast variant |

@@ -39,12 +39,14 @@
 #include "render/ssao_pass.hpp"
 #include "render/svo_pass.hpp"
 #include "render/micro_svo_pass.hpp"
+#include "render/fur_pass.hpp"
 #include "render/taa_pass.hpp"
 #include "render/texture_atlas.hpp"
 #include "render/volumetric_fog_pass.hpp"
 #include "voxel/chunk_index.hpp"
 #include "voxel/box_select.hpp"
 #include "voxel/editable_world.hpp"
+#include "voxel/fur_cards.hpp"
 #include "voxel/layered_world.hpp"
 #include "voxel/live_editor.hpp"
 #include "voxel/mesh_import.hpp"
@@ -276,6 +278,38 @@ private:
     // One behaviour per micro world (parallel to m_microOccluders). A layer
     // with a "behaviour" in the manifest walks on its own.
     std::vector<vf::voxel::MicroBehaviour> m_microBehaviours;
+    // The fur cards of the micro objects that carry a fur material, and the
+    // objects' world AABBs (the cards are generated in the field's local
+    // frame, so the world min is what turns that frame into the world one).
+    std::vector<vf::voxel::FurObject> m_furObjects;
+    // The fur index of each MICRO world (-1 when that object carries no
+    // fur), so the live preview can be mirrored onto the fur. The two lists
+    // are indexed differently on purpose: the fur pass has its own table, and
+    // a micro object without fur simply has no entry in it.
+    std::vector<int> m_furIndexOfMicro;
+    // The field each fur object was grown from, so the coat can be REBUILT
+    // (the parameters changed) without re-reading the layers.
+    std::vector<int> m_furSourceField;
+    // The FUR COAT's look. The sliders live in the sidebar's Rendering
+    // section; the per-material switch lives in Textures, because a coat is a
+    // property of the MATERIAL, not of the object.
+    bool m_furEnabled = true;
+    int m_furPerCell = 5;
+    float m_furLength = 0.030f;
+    float m_furWidth = 0.0028f;
+    float m_furCurl = 0.20f;
+    float m_furCycles = 1.2f;
+    float m_furTilt = 38.0f;
+    // The materials that grow a coat. 21 is `fleece`.
+    std::vector<uint8_t> m_furMaterials { 21 };
+    // Grow the cards with the current parameters and upload them. The cards
+    // are a function of the field and the parameters, so this is the same
+    // work the load does - a few hundred milliseconds, which is why the
+    // sliders apply on release and not per tick.
+    void rebuildFurCards();
+    // Grow the cards for ONE micro field and append them to m_furObjects.
+    // Returns the new object's fur index, or -1 when it grows no coat.
+    int growFurCards(const vf::voxel::MicroField& field, glm::vec3 worldOffset);
     // Sun: m_sunDir is the single source of truth for where the sun is (it
     // rides the per-frame push constant), so every control that moves the sun
     // funnels through setSunAngles and nothing keeps parallel angle floats.
@@ -407,6 +441,11 @@ private:
     // to the splat or water pass. Empty = the feature is off and record() is a
     // single branch.
     vf::MicroSvoPass m_microSvoPass;
+    // The translucent hair-card layer over the micro objects. It follows the
+    // micro overlay and composites into the same HDR image, so the fur can be
+    // transparent without touching the opaque pipeline. Empty = the feature
+    // is off and record() is a single branch.
+    vf::FurPass m_furPass;
     vf::SplatPass m_splatPass;
     vf::TaaPass m_taaPass;
     vf::PostPass m_postPass;

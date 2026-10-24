@@ -291,9 +291,23 @@ void App::runPostInputTestHooks(const char* testRotateLive)
                     // its own live rotation.
                     if (isMicroLayer(m_rotateLayer)) {
                         const int mi = microWorldIndex(m_rotateLayer);
-                        if (mi >= 0)
+                        if (mi >= 0) {
                             m_microSvoPass.setWorldRotation(size_t(mi), R,
                                                             pivot, true);
+                            // The fur rotates with the body it belongs to,
+                            // and the OBJECT keeps the pose, so a coat
+                            // rebuilt mid-drag does not drop the drag.
+                            if (mi < int(m_furIndexOfMicro.size())) {
+                                const int fi = m_furIndexOfMicro[size_t(mi)];
+                                if (fi >= 0) {
+                                    m_furPass.setWorldRotation(size_t(fi), R,
+                                                              pivot, true);
+                                    m_furObjects[size_t(fi)].rot = R;
+                                    m_furObjects[size_t(fi)].pivot = pivot;
+                                    m_furObjects[size_t(fi)].rotActive = true;
+                                }
+                            }
+                        }
                     }
                     refreshPreviewLights(); // carried lamps + derived clusters ride the synthetic pose
                 }

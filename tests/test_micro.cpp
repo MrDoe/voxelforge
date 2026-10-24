@@ -17,6 +17,7 @@
 //   * a CPU replica of the shader's trace finding the object's SURFACE (and
 //     not the world's bounding box),
 //   * the material lookup landing on the SOLID cell, not on air filler.
+#include "voxel/fur_cards.hpp"
 #include "voxel/micro_field.hpp"
 #include "voxel/micro_svo.hpp"
 #include "voxel/surfelize.hpp"
@@ -37,7 +38,7 @@ namespace {
 // It is anchored at the layer's ORIGIN so the object's first cell lands on
 // field index kMicroMarginCells and the object's near surface sits exactly on
 // the world offset - which makes every expectation below a plain number.
-WorldFileData cubeLayer(int half, float voxel)
+WorldFileData cubeLayer(int half, float voxel, uint8_t material = 20)
 {
     WorldFileData d;
     const int side = 2 * half + 1;
@@ -57,7 +58,7 @@ WorldFileData cubeLayer(int half, float voxel)
                 v.g = 179;
                 v.b = 164;
                 v.a = 255;
-                v.materialId = 20;
+                v.materialId = material;
                 d.voxels.push_back(v);
             }
     return d;
@@ -684,4 +685,199 @@ TEST_CASE("micro world: the field is CONTINUOUS across a brick boundary")
                                       fw.mapBrickClamped(before)));
     }
     CHECK(worstJump > 0.5f * vox);
+}
+
+// ---------------------------------------------------------------------------
+// The FUR CARDS.
+//
+// The fur is a translucent layer of hair cards over a micro object, and the
+// three things that can go wrong are all silent: a coat that grows on an
+// object that has no fur material, cards whose roots float off the surface
+// (the coat then hangs in the air), and cards that differ between two builds
+// of the same object (the same scene would render differently from one run
+// to the next).
+// ---------------------------------------------------------------------------
+
+TEST_CASE("fur cards: only a fur material grows a coat")
+{
+    const float vox = 0.005f;
+    FurParams p;
+    p.materials = { 21 };  // fleece
+
+    // A plaster cube (material 20) has no fur: the card list is empty and
+    // the generation says so rather than failing silently.
+    {
+        WorldFileData d = cubeLayer(3, vox, 20);
+        MicroField f;
+        std::string err;
+        REQUIRE(buildMicroField(d.voxels, d.meta, f, &err));
+        FurObject o;
+        std::string ferr;
+        CHECK_FALSE(buildFurCards(f, p, o, &ferr));
+        CHECK(o.cards.empty());
+    }
+    // The same cube in fleece grows one.
+    {
+        WorldFileData d = cubeLayer(3, vox, 21);
+        MicroField f;
+        std::string err;
+        REQUIRE(buildMicroField(d.voxels, d.meta, f, &err));
+        FurObject o;
+        std::string ferr;
+        REQUIRE(buildFurCards(f, p, o, &ferr));
+        CHECK(o.cards.size() > 0);
+    }
+}
+
+TEST_CASE("fur cards: the roots sit ON the surface, and the cards stand off it")
+{
+    const float vox = 0.005f;
+    FurParams p;
+    p.materials = { 21 };
+    WorldFileData d = cubeLayer(3, vox, 21);
+    MicroField f;
+    std::string err;
+    REQUIRE(buildMicroField(d.voxels, d.meta, f, &err));
+
+    FurObject o;
+    std::string ferr;
+    REQUIRE(buildFurCards(f, p, o, &ferr));
+    REQUIRE(o.cards.size() > 0);
+
+    int onSurface = 0;
+    for (const FurCard& c : o.cards) {
+        const vec3 root = vec3(c.rootLen);
+        // The root is within a voxel of the surface: the field's value there
+        // is (almost) zero. A root that floated off the surface would leave
+        // the coat hanging in the air.
+        const float d0 = f.sampleSdf(root + f.origin);
+        CHECK(std::abs(d0) < 1.5f * vox);
+        if (std::abs(d0) < 1.5f * vox)
+            ++onSurface;
+        // The strand points OUT of the surface, not along it: a card lying in
+        // the tangent plane is invisible from the front - and, worse, a
+        // DEGENERATE direction (the bug the spin used to have) points
+        // straight out and reads as a spoke. The angle to the normal must
+        // stay inside the requested range, which is what pins the bug.
+        const float ndl = glm::dot(vec3(c.nrmAlpha), vec3(c.dirWidth));
+        const float lo = std::sin(glm::radians(p.tiltMin));
+        const float hi = std::sin(glm::radians(p.tiltMax));
+        CHECK_MESSAGE(ndl >= lo - 1e-3f, "ndl=", ndl, " below ", lo);
+        CHECK_MESSAGE(ndl <= hi + 1e-3f, "ndl=", ndl, " above ", hi);
+        CHECK_MESSAGE(ndl > 0.15f, "ndl=", ndl, " len=", c.rootLen.w);
+        // The card is a sliver, not a disk.
+        CHECK(c.dirWidth.w < c.rootLen.w);
+        // The strand is CURLY, not a straight needle: the centre line's
+        // amplitude is a real fraction of the strand's length, and it makes
+        // at least one cycle. The bounds are the PARAMETER's own times the
+        // per-card jitter (0.55..1.45), so they follow a change of the
+        // parameter instead of going stale.
+        CHECK(c.curl.x > p.curlAmp * 0.45f * c.rootLen.w);
+        CHECK(c.curl.x < p.curlAmp * 1.55f * c.rootLen.w);
+        CHECK(c.curl.y >= 0.5f);
+    }
+    CHECK(onSurface == int(o.cards.size()));
+}
+
+TEST_CASE("fur cards: the bucket grid covers the CURL")
+{
+    // The centre line wanders off the straight root-to-tip line, so a card
+    // filed in the cells of that line alone would be a card the DDA walks
+    // past. The bucket range must cover the curl's amplitude.
+    const float vox = 0.005f;
+    FurParams p;
+    p.materials = { 21 };
+    WorldFileData d = cubeLayer(3, vox, 21);
+    MicroField f;
+    std::string err;
+    REQUIRE(buildMicroField(d.voxels, d.meta, f, &err));
+    FurObject o;
+    std::string ferr;
+    REQUIRE(buildFurCards(f, p, o, &ferr));
+    REQUIRE(!o.cards.empty());
+
+    // Every card appears in at least one cell, and every card's cells are
+    // inside the grid.
+    const int cells = o.grid.dim.x * o.grid.dim.y * o.grid.dim.z;
+    CHECK(cells > 0);
+    std::vector<int> seen(o.cards.size(), 0);
+    for (uint32_t idx : o.cellItems) {
+        REQUIRE(idx < o.cards.size());
+        ++seen[idx];
+    }
+    for (size_t i = 0; i < seen.size(); ++i)
+        CHECK(seen[i] >= 1);
+    // The grid's extent covers every card's root and its tip.
+    for (const FurCard& c : o.cards) {
+        const vec3 root = vec3(c.rootLen);
+        const vec3 tip = root + vec3(c.dirWidth) * c.rootLen.w;
+        for (const vec3& p2 : { root, tip }) {
+            const vec3 rel = p2 - o.grid.origin;
+            CHECK(rel.x >= -o.grid.cell.x);
+            CHECK(rel.y >= -o.grid.cell.y);
+            CHECK(rel.z >= -o.grid.cell.z);
+            CHECK(rel.x <= float(o.grid.dim.x) * o.grid.cell.x + o.grid.cell.x);
+            CHECK(rel.y <= float(o.grid.dim.y) * o.grid.cell.y + o.grid.cell.y);
+            CHECK(rel.z <= float(o.grid.dim.z) * o.grid.cell.z + o.grid.cell.z);
+        }
+    }
+}
+
+TEST_CASE("fur cards: the same field yields the same cards twice")
+{
+    // The determinism the whole renderer relies on: two builds of the same
+    // object must produce the same coat, or the same scene renders
+    // differently from one run to the next.
+    const float vox = 0.005f;
+    FurParams p;
+    p.materials = { 21 };
+    WorldFileData d = cubeLayer(3, vox, 21);
+    MicroField f;
+    std::string err;
+    REQUIRE(buildMicroField(d.voxels, d.meta, f, &err));
+
+    FurObject a, b;
+    std::string ferr;
+    REQUIRE(buildFurCards(f, p, a, &ferr));
+    REQUIRE(buildFurCards(f, p, b, &ferr));
+    REQUIRE(a.cards.size() == b.cards.size());
+    for (size_t i = 0; i < a.cards.size(); ++i) {
+        CHECK(a.cards[i].rootLen == b.cards[i].rootLen);
+        CHECK(a.cards[i].dirWidth == b.cards[i].dirWidth);
+        CHECK(a.cards[i].nrmAlpha == b.cards[i].nrmAlpha);
+    }
+    CHECK(a.cellStart == b.cellStart);
+    CHECK(a.cellItems == b.cellItems);
+}
+
+TEST_CASE("fur cards: every card is filed in a cell that holds it")
+{
+    // The bucket grid is the shader's DDA: a ray that clips a card must
+    // find it. A card filed in the wrong cell is a card that is never drawn.
+    const float vox = 0.005f;
+    FurParams p;
+    p.materials = { 21 };
+    WorldFileData d = cubeLayer(3, vox, 21);
+    MicroField f;
+    std::string err;
+    REQUIRE(buildMicroField(d.voxels, d.meta, f, &err));
+    FurObject o;
+    std::string ferr;
+    REQUIRE(buildFurCards(f, p, o, &ferr));
+    REQUIRE(!o.cellItems.empty());
+
+    // Every item index is a valid card, and every card appears at least once.
+    std::vector<int> seen(o.cards.size(), 0);
+    for (uint32_t idx : o.cellItems) {
+        REQUIRE(idx < o.cards.size());
+        ++seen[idx];
+    }
+    for (size_t i = 0; i < seen.size(); ++i)
+        CHECK(seen[i] >= 1);
+    // The cellStart array is a prefix sum over the cells.
+    REQUIRE(o.cellStart.size() == size_t(o.grid.dim.x) * size_t(o.grid.dim.y) *
+                                     size_t(o.grid.dim.z) + 1);
+    for (size_t i = 1; i < o.cellStart.size(); ++i)
+        CHECK(o.cellStart[i] >= o.cellStart[i - 1]);
+    CHECK(o.cellStart.back() == o.cellItems.size());
 }

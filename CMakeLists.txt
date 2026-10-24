@@ -96,6 +96,7 @@ add_library(vf_core STATIC src/core/camera.cpp
                           src/voxel/surfelize.cpp
                           src/voxel/micro_field.cpp src/voxel/micro_svo.cpp
                           src/voxel/micro_behaviour.cpp src/voxel/micro_rig.cpp
+                          src/voxel/fur_cards.cpp
                           src/voxel/heightmap.cpp src/voxel/worldfile.cpp
                           src/voxel/picking.cpp src/voxel/editable_world.cpp
                           src/ai/ollama_client.cpp)
@@ -161,6 +162,7 @@ target_link_libraries(vf_rhi PUBLIC vf_platform vf_vma spdlog::spdlog)
 
 add_library(vf_render STATIC src/render/svo_pass.cpp src/render/taa_pass.cpp src/render/post_pass.cpp src/render/splat_pass.cpp
     src/render/micro_svo_pass.cpp
+    src/render/fur_pass.cpp
     src/render/ssr_pass.cpp src/render/ssao_pass.cpp src/render/volumetric_fog_pass.cpp
     src/render/motion_blur_pass.cpp src/render/dof_pass.cpp src/render/environment_pass.cpp
     src/render/texture_atlas.cpp)
@@ -181,6 +183,7 @@ set(VF_SHADER_SRCS ${CMAKE_CURRENT_SOURCE_DIR}/shaders/svo_raymarch.comp
     ${CMAKE_CURRENT_SOURCE_DIR}/shaders/splat.vert
     ${CMAKE_CURRENT_SOURCE_DIR}/shaders/splat.frag
     ${CMAKE_CURRENT_SOURCE_DIR}/shaders/micro_overlay.comp
+    ${CMAKE_CURRENT_SOURCE_DIR}/shaders/fur_overlay.comp
     ${CMAKE_CURRENT_SOURCE_DIR}/shaders/splat_cull.comp
     ${CMAKE_CURRENT_SOURCE_DIR}/shaders/splat_hiz.comp
     ${CMAKE_CURRENT_SOURCE_DIR}/shaders/splat_tile_bin.comp
@@ -339,6 +342,16 @@ add_test(NAME micro_check
     COMMAND ${Python3_EXECUTABLE} ${GROUP_GATE} visual,micro
             ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/tests/micro_check.py
             $<TARGET_FILE:voxelforge>)
+# The FUR cards: a translucent hair-card layer over the micro objects. The
+# gate measures the noise floor first, then the signal (the alpaca's pixels
+# must change), the confinement (the change must be a compact blob and the
+# house view must be untouched), the backend-independence (the SVO
+# reference must show it too) and the escape hatch (VF_FUR=0 must load no
+# fur object and render the same frame).
+add_test(NAME fur_check
+    COMMAND ${Python3_EXECUTABLE} ${GROUP_GATE} visual,micro,fur
+            ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/tests/fur_check.py
+            $<TARGET_FILE:voxelforge>)
 add_test(NAME ssao_check
     COMMAND ${Python3_EXECUTABLE} ${GROUP_GATE} effects
             ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/tests/ssao_check.py
@@ -413,6 +426,8 @@ set_tests_properties(box_select_check
     PROPERTIES LABELS "live-edit;preview;box-select" SKIP_RETURN_CODE 77)
 set_tests_properties(micro_check
     PROPERTIES LABELS "visual;micro" SKIP_RETURN_CODE 77)
+set_tests_properties(fur_check
+    PROPERTIES LABELS "visual;micro;fur" SKIP_RETURN_CODE 77)
 set_tests_properties(ssao_check
     PROPERTIES LABELS "effects;ssao" SKIP_RETURN_CODE 77)
 set_tests_properties(texture_check
@@ -498,6 +513,8 @@ vf_add_test_group(live-edit vf_tests voxelforge)
 # Brush preview only (no unit binary needed - it is all rendered frames).
 vf_add_test_group(preview voxelforge)
 vf_add_test_group(visual voxelforge)
+# The fur cards over the micro objects.
+vf_add_test_group(fur voxelforge)
 vf_add_test_group(effects voxelforge)
 vf_add_test_group(textures voxelforge)
 vf_add_test_group(fog voxelforge)
