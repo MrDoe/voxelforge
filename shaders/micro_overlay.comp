@@ -719,7 +719,7 @@ bool microTrace(vec3 ro, vec3 rd, float tMax, out float tHit, out int outWorld)
             continue; // the camera is inside this world; it cannot be seen
         float t = minStep;
         float prevT = t;
-        for (int i = 0; i < 512; ++i) {
+        for (int i = 0; i < 128; ++i) {
             if (t > bestT)
                 break;
             const float d = microMapWorld(w, ro + rd * t, voxel, gridN, gridBase);
@@ -731,7 +731,7 @@ bool microTrace(vec3 ro, vec3 rd, float tMax, out float tHit, out int outWorld)
             if (d < 0.0) {
                 // bisect between the last outside sample and this inside one
                 float lo = prevT, hi = t;
-                for (int b = 0; b < 16; ++b) {
+                for (int b = 0; b < 8; ++b) {
                     const float mid = 0.5 * (lo + hi);
                     if (microMapWorld(w, ro + rd * mid, voxel, gridN, gridBase) > 0.0)
                         lo = mid;
