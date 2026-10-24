@@ -267,6 +267,10 @@ void MicroBehaviour::animateBones()
             // The swing is about the leg's own axis across the body, and it
             // is larger for the leg that is BEHIND (it has to catch up).
             angle = std::sin(stride + ph) * 0.32f;
+            // A grazing animal STANDS on four feet: it does not freeze
+            // mid-stride. Ease the leg swing out as the graze blends in, so
+            // all four hooves plant while the head lowers.
+            angle *= (1.f - grazeBlend);
             break;
         }
         case BoneRole::Spine: {
