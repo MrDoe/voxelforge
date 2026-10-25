@@ -23,7 +23,7 @@
     { "file": "hamlet_reeds_far.vxw", "role": "object", "name": "hamlet_reeds_far",  "pos": [0.00, 0.00, 0.00], "rot": 0.0, "rotX": 0.0,  "rotZ": 0.0, "enabled": true },
     { "file": "micro/vase.vxw", "role": "micro", "name": "vase",  "pos": [12.00, -0.25, 12.00], "rot": 0.0, "rotX": 0.0,  "rotZ": 0.0, "enabled": true },
     { "file": "micro/urn.vxw", "role": "micro", "name": "urn",  "pos": [12.30, -0.25, 12.20], "rot": 0.0, "rotX": 0.0,  "rotZ": 0.0, "enabled": true },
-    { "file": "micro/alpaca.vxw", "role": "micro", "name": "alpaca",  "pos": [-6.50, -0.25, 18.50], "rot": 0.0, "rotX": 0.0,  "rotZ": 0.0, "enabled": true, "behaviour": "grazer", "pose": [5.000,-25.000,0.000,0.000,6.000,-25.000,0.000,0.000,7.000,-25.000,0.000,0.000] }
+    { "file": "micro/alpaca.vxw", "role": "micro", "name": "alpaca",  "pos": [-6.50, -0.25, 18.50], "rot": 0.0, "rotX": 0.0,  "rotZ": 0.0, "enabled": true, "behaviour": "grazer", "command": "auto", "pose": [5.000,-25.000,0.000,0.000,6.000,-25.000,0.000,0.000,7.000,-25.000,0.000,0.000] }
   ],
   "lights": [
     {
