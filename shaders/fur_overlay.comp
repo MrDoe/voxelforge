@@ -44,6 +44,15 @@ layout(std430, set = 0, binding = 2) readonly buffer FurCellItems { uint fCellIt
 // The per-object table. The layout mirrors the micro overlay's world table
 // (the preview and the rotation preview are the SAME values, so the fur and
 // the body can never drift apart) and adds the card and grid ranges.
+struct FurBone {
+    vec4 a;
+    vec4 b;
+    vec4 joint;
+    vec4 r0;
+    vec4 r1;
+    vec4 r2;
+};
+
 struct FurWorld {
     vec4 cards;   // x = the first card, y = the card count
     vec4 grid;    // xyz = the grid's LOCAL origin, w = the cell size (m)
@@ -70,6 +79,8 @@ struct FurWorld {
     vec4 arot1;
     vec4 arot2;
     vec4 apivot;
+    vec4 bones;
+    FurBone bone[12];
 };
 layout(std140, set = 0, binding = 30) readonly uniform FurTable {
     FurWorld uWorlds[16];
@@ -140,6 +151,76 @@ vec3 furDirUnanimate(int w, vec3 d)
     return transpose(mat3(W.arot0.xyz, W.arot1.xyz, W.arot2.xyz)) * d;
 }
 
+int furBoneAt(int w, vec3 p)
+{
+    const FurWorld W = ft.uWorlds[w];
+    const int count = int(W.bones.x);
+    if (count <= 0)
+        return -1;
+    int best = -1;
+    float bestD = 1e30;
+    for (int i = 0; i < count; ++i) {
+        const FurBone mb = W.bone[i];
+        const mat3 R = mat3(mb.r0.xyz, mb.r1.xyz, mb.r2.xyz);
+        const vec3 q = transpose(R) * (p - mb.joint.xyz);
+        const vec3 a = mb.a.xyz;
+        const vec3 ab = mb.b.xyz - a;
+        const float t = clamp(dot(q - a, ab) / max(dot(ab, ab), 1e-12), 0.0, 1.0);
+        const float d = max(0.0, length(q - (a + ab * t)) - mb.a.w);
+        if (d < bestD) {
+            bestD = d;
+            best = i;
+        }
+    }
+    return best;
+}
+
+vec3 furUnbone(int w, vec3 p, int bone)
+{
+    if (bone < 0)
+        return p;
+    const FurWorld W = ft.uWorlds[w];
+    if (bone >= int(W.bones.x))
+        return p;
+    const FurBone mb = W.bone[bone];
+    const mat3 R = mat3(mb.r0.xyz, mb.r1.xyz, mb.r2.xyz);
+    return transpose(R) * (p - mb.joint.xyz);
+}
+
+vec3 furRebone(int w, vec3 p, int bone)
+{
+    if (bone < 0)
+        return p;
+    const FurWorld W = ft.uWorlds[w];
+    if (bone >= int(W.bones.x))
+        return p;
+    const FurBone mb = W.bone[bone];
+    const mat3 R = mat3(mb.r0.xyz, mb.r1.xyz, mb.r2.xyz);
+    return R * p + mb.joint.xyz;
+}
+
+vec3 furDirUnbone(int w, vec3 d, int bone)
+{
+    if (bone < 0)
+        return d;
+    const FurWorld W = ft.uWorlds[w];
+    if (bone >= int(W.bones.x))
+        return d;
+    const FurBone mb = W.bone[bone];
+    return transpose(mat3(mb.r0.xyz, mb.r1.xyz, mb.r2.xyz)) * d;
+}
+
+vec3 furDirRebone(int w, vec3 d, int bone)
+{
+    if (bone < 0)
+        return d;
+    const FurWorld W = ft.uWorlds[w];
+    if (bone >= int(W.bones.x))
+        return d;
+    const FurBone mb = W.bone[bone];
+    return mat3(mb.r0.xyz, mb.r1.xyz, mb.r2.xyz) * d;
+}
+
 // A WORLD point -> the object's LOCAL frame (the field's frame). The
 // behaviour's transform is undone FIRST (it is the outermost one) and the
 // live rotation preview second, exactly as the micro overlay does it.
@@ -205,7 +286,11 @@ float cardHit(int w, uint ci, vec3 roL, vec3 rdL, float tMax, vec3 rd,
     const vec4 shade = fCard[ci * 6u + 4u];
     const vec4 curl = fCard[ci * 6u + 5u];
 
-
+    const int boneIdx = int(shade.w);
+    if (boneIdx >= 0) {
+        roL = furUnbone(w, roL, boneIdx);
+        rdL = normalize(furDirUnbone(w, rdL, boneIdx));
+    }
 
     const vec3 root = rootLen.xyz;
     const vec3 dir = dirWidth.xyz;
@@ -315,10 +400,17 @@ float cardHit(int w, uint ci, vec3 roL, vec3 rdL, float tMax, vec3 rd,
 
     // The shading normal: the surface normal at the root, turned toward the
     // camera (a card is two-sided) and taken out of the local frame.
-    vec3 nWorld = normalize(furDirToWorld(w, n));
+    const vec3 restPos = root + dir * (sAlong * len);
+    vec3 animPos = restPos;
+    vec3 animN = n;
+    if (boneIdx >= 0) {
+        animPos = furRebone(w, restPos, boneIdx);
+        animN = furDirRebone(w, n, boneIdx);
+    }
+    vec3 nWorld = normalize(furDirToWorld(w, animN));
     if (dot(nWorld, rd) > 0.0)
         nWorld = -nWorld;
-    const vec3 pWorld = furToWorld(w, root + dir * (sAlong * len));
+    const vec3 pWorld = furToWorld(w, animPos);
 
     // The sun term, with the card's baked shadow. The AO is accumulated
     // separately, because the sky ambient is evaluated ONCE per pixel (see
@@ -339,7 +431,7 @@ float cardHit(int w, uint ci, vec3 roL, vec3 rdL, float tMax, vec3 rd,
     // keeps the record's colour.
     const uint mId = uint(shade.z + 0.5);
     vec3 alb = kPalette[clamp(mId, 0u, 21u)];
-    const vec3 tex = sampleTex(pWorld, nWorld, mId);
+    const vec3 tex = sampleTex(restPos, n, mId);
     if (tex.r >= 0.0)
         alb = tex;
     else
@@ -483,8 +575,10 @@ void accumulateWorld(int w, vec3 ro, vec3 rd, float sceneT, inout float sumA,
 
 void main()
 {
-    const ivec2 pix = ivec2(gl_GlobalInvocationID.xy);
+    const ivec2 pix = ivec2(gl_GlobalInvocationID.xy) + ivec2(int(pc.b.z + 0.5), int(pc.b.w + 0.5));
     if (pix.x >= int(pc.a.z) || pix.y >= int(pc.a.w))
+        return;
+    if (pix.x < 0 || pix.y < 0)
         return;
     if (ft.uInfo.x <= 0)
         return;

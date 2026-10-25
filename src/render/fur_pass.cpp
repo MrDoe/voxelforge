@@ -29,6 +29,14 @@ std::vector<uint8_t> loadSpirv(const std::string& path)
 // The per-object row of the shader's table. It mirrors the FurWorld struct in
 // fur_overlay.comp: ten vec4s.
 constexpr int kFurMaxWorlds = 16;
+struct alignas(16) FurBoneRow {
+    float a[4];
+    float b[4];
+    float xform[4];
+    float r0[4];
+    float r1[4];
+    float r2[4];
+};
 struct alignas(16) FurWorldRow {
     float cards[4];   // x = the first card, y = the card count
     float grid[4];    // xyz = the grid's local origin, w = the cell size
@@ -48,8 +56,10 @@ struct alignas(16) FurWorldRow {
     float arot1[4];
     float arot2[4];
     float apivot[4];
+    float bones[4];
+    FurBoneRow bone[12];
 };
-static_assert(sizeof(FurWorldRow) == 240, "std140 slot size");
+static_assert(sizeof(FurWorldRow) == 1408, "std140 slot size");
 
 }  // namespace
 
@@ -154,6 +164,27 @@ bool FurPass::setObjects(const std::vector<voxel::FurObject>& objects)
             row.rot0[0] = row.rot1[1] = row.rot2[2] = 1.0f;
             row.pivot[3] = 0.0f;
         }
+        // The skeleton: segments and count are static (the rig is fixed per
+        // field); the animated rotations/xforms are uploaded per frame by
+        // setBoneRotations.
+        row.bones[0] = float(o.boneCount);
+        for (int bi = 0; bi < o.boneCount && bi < 12; ++bi) {
+            row.bone[bi].a[0] = o.boneSegA[size_t(bi)].x;
+            row.bone[bi].a[1] = o.boneSegA[size_t(bi)].y;
+            row.bone[bi].a[2] = o.boneSegA[size_t(bi)].z;
+            row.bone[bi].a[3] = (bi < (int)o.boneRadius.size()) ? o.boneRadius[size_t(bi)] : 0.f;
+            row.bone[bi].b[0] = o.boneSegB[size_t(bi)].x;
+            row.bone[bi].b[1] = o.boneSegB[size_t(bi)].y;
+            row.bone[bi].b[2] = o.boneSegB[size_t(bi)].z;
+            row.bone[bi].b[3] = 0.f;
+            row.bone[bi].xform[0] = 0.f;
+            row.bone[bi].xform[1] = 0.f;
+            row.bone[bi].xform[2] = 0.f;
+            row.bone[bi].xform[3] = 0.f;
+            row.bone[bi].r0[0] = 1.f; row.bone[bi].r0[1] = 0.f; row.bone[bi].r0[2] = 0.f; row.bone[bi].r0[3] = 0.f;
+            row.bone[bi].r1[0] = 0.f; row.bone[bi].r1[1] = 1.f; row.bone[bi].r1[2] = 0.f; row.bone[bi].r1[3] = 0.f;
+            row.bone[bi].r2[0] = 0.f; row.bone[bi].r2[1] = 0.f; row.bone[bi].r2[2] = 1.f; row.bone[bi].r2[3] = 0.f;
+        }
         // The behaviour's transform starts inactive: the identity rotation
         // and no offset, so a coat that is not animated sits exactly where
         // the field does.
@@ -257,6 +288,31 @@ void FurPass::setWorldAnimation(size_t worldIndex, glm::vec3 offset, glm::mat3 R
     vmaFlushAllocation(m_ctx->allocator(), m_table.alloc, 0, VK_WHOLE_SIZE);
 }
 
+void FurPass::setBoneRotations(size_t worldIndex,
+                              const std::vector<glm::mat3>& rot,
+                              const std::vector<glm::vec3>& xform)
+{
+    if (!m_table.mapped || worldIndex >= size_t(m_objectCount))
+        return;
+    auto* rows = reinterpret_cast<FurWorldRow*>(m_table.mapped);
+    FurWorldRow& row = rows[worldIndex];
+    const int count = int(row.bones[0]);
+    if (count <= 0 || int(rot.size()) < count)
+        return;
+    for (int i = 0; i < count; ++i) {
+        const glm::mat3& R = rot[size_t(i)];
+        FurBoneRow& br = row.bone[i];
+        br.r0[0] = R[0][0]; br.r0[1] = R[0][1]; br.r0[2] = R[0][2];
+        br.r1[0] = R[1][0]; br.r1[1] = R[1][1]; br.r1[2] = R[1][2];
+        br.r2[0] = R[2][0]; br.r2[1] = R[2][1]; br.r2[2] = R[2][2];
+        if (size_t(i) < xform.size()) {
+            br.xform[0] = xform[size_t(i)].x;
+            br.xform[1] = xform[size_t(i)].y;
+            br.xform[2] = xform[size_t(i)].z;
+        }
+    }
+    vmaFlushAllocation(m_ctx->allocator(), m_table.alloc, 0, VK_WHOLE_SIZE);
+}
 size_t FurPass::gpuBytes() const
 {
     return m_cards.bytes + m_cellStart.bytes + m_cellItems.bytes;
@@ -557,6 +613,57 @@ void FurPass::record(VkCommandBuffer cmd, const RaymarchPush& push)
     // frame without it.
     if (m_objectCount == 0 || m_cardCount == 0 || !m_pipeline || !m_set)
         return;
+    // Frustum cull + bounding rect: skip the pass entirely when no fur
+    // object is visible, and otherwise dispatch only over the screen-space
+    // bounding box of the visible objects (a full-screen dispatch reading the
+    // G-buffer for nothing is the dominant cost when the camera is near).
+    int rectMinX = INT_MAX, rectMinY = INT_MAX, rectMaxX = 0, rectMaxY = 0;
+    {
+        const float tanHalf = push.a.x;
+        const float aspect = push.a.y;
+        const uint32_t W = (uint32_t)push.a.z;
+        const uint32_t H = (uint32_t)push.a.w;
+        bool anyVisible = false;
+        auto* rows = reinterpret_cast<FurWorldRow*>(m_table.mapped);
+        for (int i = 0; i < m_objectCount; ++i) {
+            const FurWorldRow& r = rows[i];
+            if (r.cards[1] <= 0.0f)
+                continue;
+            glm::vec3 c(r.world[0] + 1.0f, r.world[1] + 0.7f, r.world[2] + 0.6f);
+            glm::vec3 d = c - glm::vec3(push.camPos);
+            float z = glm::dot(d, glm::vec3(push.camFwd));
+            if (z < -2.0f)
+                continue; // behind
+            if (z > 60.0f)
+                continue; // too far (sub-pixel fur)
+            float x = glm::dot(d, glm::vec3(push.camRight));
+            float y = glm::dot(d, glm::vec3(push.camUp));
+            const float halfX = tanHalf * aspect * std::max(z, 0.1f) + 2.0f;
+            const float halfY = tanHalf * std::max(z, 0.1f) + 2.0f;
+            if (std::fabs(x) > halfX || std::fabs(y) > halfY)
+                continue;
+            anyVisible = true;
+            // Project the centre +/- the padding to screen space.
+            for (int s = 0; s < 4; ++s) {
+                float px = x + (s & 1 ? halfX : -halfX);
+                float py = y + (s & 2 ? halfY : -halfY);
+                int sx = (int)((px / (tanHalf * aspect * std::max(z, 0.1f)) * 0.5f + 0.5f) * (float)W);
+                int sy = (int)((-py / (tanHalf * std::max(z, 0.1f)) * 0.5f + 0.5f) * (float)H);
+                sx -= 16; sy -= 16;
+                int sx2 = sx + 32; int sy2 = sy + 32;
+                rectMinX = std::min(rectMinX, sx);
+                rectMinY = std::min(rectMinY, sy);
+                rectMaxX = std::max(rectMaxX, sx2);
+                rectMaxY = std::max(rectMaxY, sy2);
+            }
+        }
+        if (!anyVisible)
+            return;
+        rectMinX = std::max(0, std::min(rectMinX, (int)push.a.z - 1));
+        rectMinY = std::max(0, std::min(rectMinY, (int)H - 1));
+        rectMaxX = std::max(rectMinX + 1, std::min(rectMaxX, (int)push.a.z));
+        rectMaxY = std::max(rectMinY + 1, std::min(rectMaxY, (int)H));
+    }
     // The host-written table has to reach the device: the buffer is
     // host-visible but not host-coherent, so a plain memcpy into the mapped
     // range does not become visible without a flush.
@@ -565,8 +672,12 @@ void FurPass::record(VkCommandBuffer cmd, const RaymarchPush& push)
     vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, m_pipeline);
     vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, m_layout, 0, 1, &m_set, 0,
                             nullptr);
-    vkCmdPushConstants(cmd, m_layout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(push), &push);
-    vkCmdDispatch(cmd, uint32_t(push.a.z + 7) / 8, uint32_t(push.a.w + 7) / 8, 1);
+    RaymarchPush pushData = push;
+    pushData.b.z = (float)rectMinX;
+    pushData.b.w = (float)rectMinY;
+    vkCmdPushConstants(cmd, m_layout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(pushData), &pushData);
+    vkCmdDispatch(cmd, uint32_t(rectMaxX - rectMinX + 7) / 8,
+                  uint32_t(rectMaxY - rectMinY + 7) / 8, 1);
 }
 
 void FurPass::destroy()
