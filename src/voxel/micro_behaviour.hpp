@@ -65,6 +65,12 @@ struct MicroBehaviour {
     float headTurn = 0.f;      // target (radians, relative to body)
     float headTurnCur = 0.f;   // smoothed current (radians)
 
+    // A STATIC POSE: per-bone rotations (in the bone's own frame) that
+    // override the gait. Empty = the gait drives the bones. Set from the
+    // manifest's "pose" field or by an MCP pose command.
+    std::vector<glm::mat3> poseRot;
+    bool poseActive = false;
+
     // The runtime state.
     State state = State::Walk;
     float stateT = 0.f;       // the seconds in the current state
@@ -76,6 +82,28 @@ struct MicroBehaviour {
     // obstacle is still there, and the animal spins in place.
     float headingTarget = 0.f;
     bool hasHeadingTarget = false;
+
+    // THE ESCAPE-SCAN CACHE. When the footprint probe reports a collision,
+    // the response samples 16 directions x 4 substeps - 64 more footprint
+    // probes, each of them a store lookup plus a transform stack plus a
+    // trilinear SDF fetch per micro object. Measured: ~0.19 ms a run, which
+    // was ~90 % of this behaviour's whole per-frame cost (it ran on every
+    // blocked frame, and a blocked animal sits still, so that is most of the
+    // frames it is stuck for).
+    //
+    // The scan only picks a DIRECTION, so its answer goes stale exactly when
+    // one of these changes: the pose moved, the body swung far enough that
+    // the cached direction no longer means where it points, the cached
+    // direction was reached (ask again), or time passed (the world can move
+    // under a stationary animal). Nothing else is cached - the animation
+    // itself is 0.006 ms a frame and is not worth pre-recording.
+    bool scanValid = false;
+    float scanAngle = 0.f;      // the cached escape heading (absolute rad)
+    float scanClear = 0.f;      // its clearance in substeps; <= 0 = "graze"
+    float scanAge = 1e9f;       // seconds since the scan was taken
+    glm::vec3 scanOffset { 0.f }; // the pose it was taken at
+    float scanHeading = 0.f;    // the heading it was taken at
+
     float wander = 0.f;       // the wander phase (drives the heading)
     float seed = 0.f;         // the per-object phase offset
     glm::vec3 anchor { 0.f }; // the home position (the placed position)

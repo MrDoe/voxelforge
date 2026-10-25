@@ -6629,3 +6629,15 @@ out of the profile: the dispatch rect projected `centre +- (frustum half-width
 
 Result: `geo` 182-211 ms -> **5.5 ms** (coat ~0.1 ms; 5.44 ms with the fur
 off). See [[concepts/fur-raster-parity]].
+
+## [2026-10-26] fix | the coat's per-bone transform indexed the wrong object
+Symptom: with the walk cycle rendered, the fur was "floating around to the sky
+and left and right" and did not follow the legs, while the body animated fine.
+Cause: the fur pass has its OWN table (one row per object that grows a coat),
+but the per-bone translation conversion read `m_microFields[fi]` - the MICRO
+world index space - where `fi` is the FUR row. The shipped scene has vase=0,
+urn=1, alpaca=2 as micro worlds and the alpaca as fur row 0, so the conversion
+used the VASE's frame and threw the coat ~18 m off. Fixed by indexing the
+fields with `i` (the micro index) and using `fi` only for the fur-pass calls.
+Verified by rendering five gait phases + grazing: the coat now follows the
+bones (user-confirmed).

@@ -140,8 +140,59 @@ glm::vec3 App::resolveCameraMove(glm::vec3 from, glm::vec3 delta)
     return vf::voxel::moveSphere(solid, from, delta, vf::voxel::kCameraRadius).pos;
 }
 
-bool App::microFootprintBlocked(int index, glm::vec3 offset)
+bool App::microWorldBounds(size_t j, glm::vec3& outLo, glm::vec3& outHi) const
 {
+    outLo = glm::vec3(0.f);
+    outHi = glm::vec3(0.f);
+    if (j >= m_microFields.size() || j >= m_microOccluders.size())
+        return false;
+    const vf::voxel::MicroField& f = m_microFields[j];
+    if (f.solidMax.x < f.solidMin.x || f.size3() == 0)
+        return false; // a rejected/empty field has no body to collide
+    const vf::voxel::MicroOccluder& o = m_microOccluders[j];
+
+    // The rest pose: the record cells (indexed by their far face, hence +1)
+    // plus the grid origin. Two cells of pad, because the trilinear stencil
+    // reaches one cell past the sample point and can interpolate to a
+    // negative distance just OUTSIDE this box - the filter must never drop a
+    // point the full test would have called solid.
+    const glm::vec3 grid = o.worldOffset + f.origin;
+    const float pad = 2.0f * f.voxel;
+    glm::vec3 lo = grid + glm::vec3(f.solidMin) * f.voxel - pad;
+    glm::vec3 hi = grid + glm::vec3(f.solidMax + 1) * f.voxel + pad;
+
+    const bool behaviourHeld = m_moveStaged || m_rotationStaged;
+    if (!behaviourHeld && j < m_microBehaviours.size() &&
+        m_microBehaviours[j].active) {
+        // A rigid transform about the pivot (MicroBehaviour::toWorld): the
+        // centre follows it, and the extents become the |R| row sums of the
+        // rest half-extents - the EXACT AABB of a rotated box, so this is
+        // conservative by construction, not by a fudge margin.
+        const vf::voxel::MicroBehaviour& b = m_microBehaviours[j];
+        const glm::vec3 c = 0.5f * (lo + hi);
+        const glm::vec3 e = 0.5f * (hi - lo);
+        glm::vec3 he(0.f);
+        for (int r = 0; r < 3; ++r)
+            for (int k = 0; k < 3; ++k)
+                he[r] += std::abs(b.rot[k][r]) * e[k];
+        const glm::vec3 cw = b.pivot + b.rot * (c - b.pivot) + b.offset;
+        lo = cw - he;
+        hi = cw + he;
+    }
+    outLo = lo;
+    outHi = hi;
+    return true;
+}
+
+bool App::microFootprintBlocked(int index, glm::vec3 offset, int* why)
+{
+    // Trace only: `why` says which of the three tests refused the step -
+    // 1 water, 2 a world object cell, 3 another micro object - so a stuck
+    // animal can be told apart from one standing in the lake. It costs
+    // nothing when the caller does not ask (the default), and it never
+    // changes the verdict.
+    if (why)
+        *why = 0;
     if (index < 0 || index >= int(m_microFields.size()))
         return false;
     const vf::voxel::MicroField& f = m_microFields[size_t(index)];
@@ -164,8 +215,11 @@ bool App::microFootprintBlocked(int index, glm::vec3 offset)
     const float ground = terrainTopAt(cx, cz);
     // A walker has no buoyancy: do not stroll into the lake. The water plane
     // is world-wide, so this is cheaper and more honest than a swim state.
-    if (ground > -1e8f && ground < vf::voxel::WATER_LEVEL + 0.01f)
+    if (ground > -1e8f && ground < vf::voxel::WATER_LEVEL + 0.01f) {
+        if (why)
+            *why = 1;
         return true;
+    }
 
     // Test just above the object's own base: low enough to catch a fence or
     // the foot of a wall, high enough that the heightfield it stands on is
@@ -174,6 +228,41 @@ bool App::microFootprintBlocked(int index, glm::vec3 offset)
     const float y0 = base + 0.02f;
     const float y1 = y0 + std::max(0.10f, std::min(0.45f, (hi.y - lo.y) * 0.6f));
 
+    // BROAD PHASE: WHICH other micro objects can this footprint even reach?
+    // Computed ONCE per probe rather than once per sample point: the probe
+    // runs 33 times per footprint test and ~2100 times per escape-scan frame,
+    // and the per-field loop inside it (a full transform stack plus an
+    // 8-tap trilinear SDF fetch each) was the second largest term in perf.
+    //
+    // Any staged Move/Rotate preview switches the filter OFF, because
+    // microFieldSolidAt then applies a transform this box does not model -
+    // and a preview only exists during a drag, where the extra tests cost
+    // nothing that matters. Over 16 micro objects the filter also gives up
+    // (the sample array is fixed) rather than silently dropping one.
+    constexpr size_t kMaxCand = 16;
+    size_t cand[kMaxCand];
+    int candN = 0;
+    const bool preview = m_moveStaged || m_moving || m_rotating ||
+                         m_rotationStaged || m_rotationPreviewPending;
+    const bool filter = !preview && m_microFields.size() <= kMaxCand;
+    if (filter) {
+        // The cylinder's own AABB - every sample point lies inside it, so
+        // rejecting on it can miss a point only if the box were wrong.
+        const float cLoX = cx - radius, cHiX = cx + radius;
+        const float cLoZ = cz - radius, cHiZ = cz + radius;
+        for (size_t j = 0; j < m_microFields.size(); ++j) {
+            if (int(j) == index)
+                continue;
+            glm::vec3 blo, bhi;
+            if (!microWorldBounds(j, blo, bhi))
+                continue;
+            if (bhi.x < cLoX || blo.x > cHiX || bhi.y < y0 || blo.y > y1 ||
+                bhi.z < cLoZ || blo.z > cHiZ)
+                continue;
+            cand[size_t(candN++)] = j;
+        }
+    }
+
     vf::voxel::SolidTest blocked = [&](const glm::vec3& p) {
         // World objects only. Terrain is excluded BY DESIGN: the walker is
         // clamped to the heightfield, so a raised terrain cell is ground it
@@ -181,18 +270,26 @@ bool App::microFootprintBlocked(int index, glm::vec3 offset)
         // block.
         const glm::ivec3 c = worldCell(p);
         if (c.x >= 0) {
-            const vf::voxel::StoreCell cell = m_layers.store().cellAt(c.x, c.y, c.z);
-            if (cell.solid && cell.obj)
+            if (m_layers.store().solidObjAt(c.x, c.y, c.z)) {
+                if (why)
+                    *why = 2;
                 return true;
+            }
         }
         // Every OTHER micro object, through the same transform stack the
         // camera uses (behaviour + a staged Move/Rotate preview), so a preview
-        // cannot collide with a pose that is not on screen.
-        for (size_t j = 0; j < m_microFields.size(); ++j) {
+        // cannot collide with a pose that is not on screen - narrowed to the
+        // candidates the AABB above could not rule out.
+        const int n = filter ? candN : int(m_microFields.size());
+        for (int t = 0; t < n; ++t) {
+            const size_t j = filter ? cand[size_t(t)] : size_t(t);
             if (int(j) == index || m_microFields[j].size3() == 0)
                 continue;
-            if (microFieldSolidAt(j, p))
+            if (microFieldSolidAt(j, p)) {
+                if (why)
+                    *why = 3;
                 return true;
+            }
         }
         return false;
     };

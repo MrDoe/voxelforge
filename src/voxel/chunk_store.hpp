@@ -99,6 +99,10 @@ public:
 
     // --- queries ------------------------------------------------------------
     StoreCell cellAt(int x, int y, int z) const;
+    // The collision probe's question and nothing else: is this cell a SOLID
+    // OBJECT cell? cellAt answers the same thing but also decodes the brick's
+    // colour and runs paletteOf for the render path, which the probe discards.
+    bool solidObjAt(int x, int y, int z) const;
     // Same convention as VoxelField::sample: metres, negative inside solid.
     // Cells outside the explicit band read +kFar (3.2 m) / their Solid box.
     VoxelField::Sample sample(int x, int y, int z) const;

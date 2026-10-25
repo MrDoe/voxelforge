@@ -323,7 +323,7 @@ int microBoneAt(int w, vec3 p)
         const vec3 a = mb.a.xyz;
         const vec3 ab = mb.b.xyz - a;
         const float t = clamp(dot(q - a, ab) / max(dot(ab, ab), 1e-12), 0.0, 1.0);
-        const float d = length(q - (a + ab * t));
+        const float d = max(0.0, length(q - (a + ab * t)) - mb.a.w);
         if (d < bestD) {
             bestD = d;
             best = i;
@@ -981,8 +981,8 @@ vec3 shadeMicro(vec3 p, vec3 rd, int w)
 
 void main()
 {
-    ivec2 pix = ivec2(gl_GlobalInvocationID.xy);
-    if (pix.x >= int(pc.a.z) || pix.y >= int(pc.a.w))
+    ivec2 pix = ivec2(gl_GlobalInvocationID.xy) + ivec2(int(pc.b.z + 0.5), int(pc.b.w + 0.5));
+    if (pix.x < 0 || pix.y < 0 || pix.x >= int(pc.a.z) || pix.y >= int(pc.a.w))
         return;
     if (wt.uWorldInfo.x <= 0)
         return;

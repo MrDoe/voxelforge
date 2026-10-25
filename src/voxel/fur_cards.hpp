@@ -94,6 +94,7 @@ struct FurObject {
     int boneCount = 0;
     std::vector<glm::vec3> boneSegA;
     std::vector<glm::vec3> boneSegB;
+    std::vector<float> boneRadius;
 };
 
 // How the fur grows.

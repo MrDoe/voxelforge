@@ -52,6 +52,13 @@ struct MicroBone {
     // corner - the frame the records use).
     glm::vec3 a { 0.f };
     glm::vec3 b { 0.f };
+    // Capsule radius: the median distance of the surface cells this bone
+    // owns to the bone's segment. Used by the shader's bone-ownership test
+    // (microBoneAt / furBoneAt) to subtract a per-bone thickness, so a point
+    // is attributed to the bone whose capsule it lies inside rather than the
+    // geometrically nearest segment. Per-bone (NOT uniform) - a uniform
+    // radius made flips worse.
+    float radius = 0.f;
     BoneRole role = BoneRole::Spine;
     // Which leg of the pair (0..3), so the gait can pair them diagonally. A
     // non-leg bone keeps it at -1.

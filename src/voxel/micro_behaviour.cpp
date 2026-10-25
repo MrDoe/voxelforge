@@ -62,6 +62,12 @@ void MicroBehaviour::reset(glm::vec3 pos, float seedIn)
     heading = hash01(seedIn + 3.7f) * 6.28f;
     offset = glm::vec3(0.f);
     rot = glm::mat3(1.f);
+    // A reset RE-ANCHORS the animal and zeroes its offset, so the cached
+    // escape direction and the pose it was measured from both describe the
+    // old anchor - every staleness test would be comparing against a pose that
+    // no longer exists. Drop it and let the next collision ask again.
+    scanValid = false;
+    scanAge = 1e9f;
 }
 
 void MicroBehaviour::update(float dt)
@@ -292,20 +298,35 @@ void MicroBehaviour::animateBones()
         bool isNeckHead = false;
         switch (b.role) {
         case BoneRole::Leg: {
-            // The diagonal pairs: the first and the last of the sorted legs
-            // swing together, the middle two together.
+            // Lateral sequence (alpaca gait): same-side limbs swing together,
+            // not diagonal pairs (a trot). Alpacas are camelids and use a
+            // lateral sequence walk (Pfau et al. 2011): left-hind, left-front,
+            // right-hind, right-front, with the hind leg leading the front on
+            // each side. Pairing same-side legs (ranks 0&2, 1&3) instead of
+            // diagonal ones gives that lateral coupling.
             size_t rank = 0;
             for (size_t k = 0; k < legs.size(); ++k)
                 if (legs[k] == i)
                     rank = k;
-            const bool phase0 = (rank == 0) || (rank + 1 == legs.size());
+            const bool phase0 = (rank % 2 == 0);
             const float ph = phase0 ? 0.f : 3.14159265f;
-            // The swing is about the leg's own axis across the body, and it
-            // is larger for the leg that is BEHIND (it has to catch up).
+            // The swing is about the leg's own axis across the body.
             angle = std::sin(stride + ph) * 0.22f;
-            // A grazing animal STANDS on four feet: it does not freeze
-            // mid-stride. Ease the leg swing out as the graze blends in, so
-            // all four hooves plant while the head lowers.
+            // TURNING: when the animal swings round toward a target, the legs
+            // on the inside of the turn shorten their step and the outside
+            // legs lengthen, so the hooves plant and push off instead of
+            // pivoting in place (which reads as sliding feet).
+            if (hasHeadingTarget) {
+                float td = headingTarget - heading;
+                while (td > 3.14159265f) td -= 6.28318531f;
+                while (td < -3.14159265f) td += 6.28318531f;
+                const float sideSign = (glm::dot(rig.bones[i].a, side) >
+                                        glm::dot(rig.center, side))
+                                           ? 1.f
+                                           : -1.f;
+                angle += td * 0.15f * sideSign;
+            }
+            // A grazing animal STANDS on four feet.
             angle *= (1.f - grazeBlend);
             break;
         }

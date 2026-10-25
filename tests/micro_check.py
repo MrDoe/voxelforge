@@ -311,6 +311,20 @@ def luma(buf: bytes, i: int) -> int:
     return (buf[i] * 299 + buf[i + 1] * 587 + buf[i + 2] * 114) // 1000
 
 
+# 511 minus bit 1 (Shadows): a footprint diff must be the OBJECT's
+# silhouette, not the object plus its baked cast shadow. The shadow points
+# with the SUN, so a yaw cannot turn it - and it was most of the mask
+# (8913 px with it vs 4528 without, measured from 4 m), so it pinned the
+# aspect near square. Measured on the gate's own shot: with the shadow in,
+# the aspect is 0.945 -> 0.484 (both below 1, so "did it turn" never
+# fires) and the mask's principal axis turns only 16.8 deg under a 90 deg
+# yaw; with it out, the same two renders give 1.291 -> 0.493 at 2.1 m and
+# 2.28 -> 0.43 at 4 m, with the axis turning 97.7 deg. The object always
+# turned - the gate was measuring the shadow. (Bit 1 = Shadows: 510 clears
+# bit 0, not this.)
+SUN_OFF = "509"
+
+
 def main() -> int:
     tmpdir = tempfile.mkdtemp(prefix="vf-micro-check-")
     env = os.environ.copy()
@@ -473,7 +487,11 @@ def main() -> int:
         #    be a world x/z and would measure nothing.
         # STRAIGHT DOWN: the footprint is then the animal's true x/z extent,
         # and a 90 degree yaw swaps the two axes.
-        top_cam = micro_cam("alpaca", 0.0, 2.10, 0.0, 0.0, 0.0, 0.0)
+        # dy is 4 m, not 2.10: at 2.10 m the animal's long axis reached past
+        # the frame (the diff mask touched x=0 AND y=559), and the aspect of
+        # a CLIPPED bbox is not the object's aspect - which is how the check
+        # reported 0.99 -> 0.48 for an object that does turn.
+        top_cam = micro_cam("alpaca", 0.0, 4.0, 0.0, 0.0, 0.0, 0.0)
         side_cam = alpaca_cam()
 
         def footprint(rot_deg: float, cam: str) -> tuple[int, int, int, int, int] | None:
@@ -482,11 +500,13 @@ def main() -> int:
             off = os.path.join(tmpdir, "rot%s_off.ppm" % tag)
             set_micro({"micro/vase.vxw": False, "micro/urn.vxw": False,
                        "micro/alpaca.vxw": False})
-            render(off, cam, 560, 560)
+            # SUN_OFF for BOTH frames: the object's cast shadow lies on the
+            # terrain and never rotates, so leaving it in measures the sun.
+            render(off, cam, 560, 560, flags=SUN_OFF)
             set_micro({"micro/vase.vxw": True, "micro/urn.vxw": True,
                        "micro/alpaca.vxw": True},
                       {"micro/alpaca.vxw": rot_deg})
-            render(on, cam, 560, 560)
+            render(on, cam, 560, 560, flags=SUN_OFF)
             _, _, oa = read_ppm(on)
             _, _, ob = read_ppm(off)
             pxs = differing(oa, ob, 14)
@@ -629,8 +649,22 @@ def main() -> int:
         drag_env = os.environ.copy()
         drag_env["VF_TEST_MOVE_DRAG"] = "1"
         drag_env["VF_OVERLAY_PATH"] = os.path.join(tmpdir, "overlay.vxw")
+        # FRAME the target. Without --cam the reference camera sees the
+        # vase/urn as a ~2 px blob 15 m away (their pos.y is -0.25, so only
+        # their tops clear the ground), and the drag's step-3 scan cannot
+        # land on 2 px: its rows are 510/513 where the object's pixels are
+        # 511/512, so the grab finds nothing and every later step is
+        # skipped - the same frame's step-4 click scan hits (632,512)
+        # because 512 IS on its grid. Measured with this camera: "grabbed
+        # micro/vase.vxw on axis X", gizmo (461.1,300.4) r=46.0, "drag
+        # ended with delta (+2.000,+0.000,+0.000)". The camera is built
+        # from the manifest (micro_cam), like every other camera here, so
+        # it follows the layer instead of going stale; what the gate tests -
+        # grab -> axis handle -> drag -> non-zero delta, through the real
+        # pointer path - is untouched.
         proc = run_app(
-            [APP, "--smoke", "200", "--width", "900", "--height", "600"],
+            [APP, "--smoke", "200", "--width", "900", "--height", "600",
+             "--cam", micro_cam("vase", 0.0, 1.7, 1.3, 0.0, 0.1, 0.0)],
             drag_env, "the move drag")
         out = proc.stdout + proc.stderr
         grabbed = "move: grabbed micro/" in out

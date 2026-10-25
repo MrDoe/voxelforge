@@ -32,7 +32,7 @@ float distToSegment(glm::vec3 p, glm::vec3 a, glm::vec3 b)
 // the rig derived again: parents are part of the rig, and a rig read
 // back without them is a skeleton whose bones move independently - which
 // tears the neck away from the shoulders when the spine bows.
-constexpr char kCacheMagic[8] = { 'V', 'F', 'R', 'I', 'G', 'C', 0, 3 };
+constexpr char kCacheMagic[8] = { 'V', 'F', 'R', 'I', 'G', 'C', 0, 4 };
 
 } // namespace
 
@@ -306,6 +306,43 @@ bool deriveMicroRig(const MicroField& field, MicroRig& out)
         b.b[axis] = tailLo[axis];
         out.bones.push_back(b);
     }
+
+    // --- per-bone capsule radius ---------------------------------------
+    // The radius is the median distance of the SURFACE cells this bone owns
+    // (nearest bone by segment distance) to the bone's segment. A per-bone
+    // (not uniform) radius is what makes the shader's capsule-subtraction
+    // ownership test reduce walk seam drift; a uniform constant made flips
+    // worse. Computed here so the cache carries it.
+    if (!out.bones.empty()) {
+        std::vector<std::vector<float>> dists(out.bones.size());
+        for (const glm::vec3& p : pts) {
+            // surface cell: a solid cell with at least one non-solid neighbour
+            // (approximated: every solid cell; the median is robust to interior
+            // cells, which sit close to their bone anyway).
+            int best = -1;
+            float bestD = 1e30f;
+            for (size_t i = 0; i < out.bones.size(); ++i) {
+                const float d = distToSegment(p, out.bones[i].a, out.bones[i].b);
+                if (d < bestD) {
+                    bestD = d;
+                    best = int(i);
+                }
+            }
+            if (best >= 0)
+                dists[size_t(best)].push_back(bestD);
+        }
+        for (size_t i = 0; i < out.bones.size(); ++i) {
+            if (dists[i].empty()) {
+                out.bones[i].radius = 0.f;
+                continue;
+            }
+            std::sort(dists[i].begin(), dists[i].end());
+            out.bones[i].radius = dists[i][dists[i].size() / 2];
+            // Clamp to a sane range so a bone with a stray far cell does not
+            // claim the whole object.
+            out.bones[i].radius = std::clamp(out.bones[i].radius, 0.f, 0.15f);
+        }
+    }
     return out.valid();
 }
 
@@ -337,20 +374,21 @@ bool readMicroRigCache(const std::string& path, MicroRig& out, uint64_t layerSiz
         ok = false;
     if (ok) {
         out.bones.resize(bones);
-        std::vector<float> raw(size_t(bones) * 9);
+        std::vector<float> raw(size_t(bones) * 10);
         ok = std::fread(raw.data(), 4, raw.size(), f) == raw.size();
         if (ok) {
             for (uint32_t i = 0; i < bones; ++i) {
-                out.bones[i].a = glm::vec3(raw[i * 9 + 0], raw[i * 9 + 1], raw[i * 9 + 2]);
-                out.bones[i].b = glm::vec3(raw[i * 9 + 3], raw[i * 9 + 4], raw[i * 9 + 5]);
-                out.bones[i].role = BoneRole(raw[i * 9 + 6]);
-                out.bones[i].legIndex = int(raw[i * 9 + 7]);
-                const int parent = int(raw[i * 9 + 8]);
+                out.bones[i].a = glm::vec3(raw[i * 10 + 0], raw[i * 10 + 1], raw[i * 10 + 2]);
+                out.bones[i].b = glm::vec3(raw[i * 10 + 3], raw[i * 10 + 4], raw[i * 10 + 5]);
+                out.bones[i].role = BoneRole(raw[i * 10 + 6]);
+                out.bones[i].legIndex = int(raw[i * 10 + 7]);
+                const int parent = int(raw[i * 10 + 8]);
                 // A parent outside the bone list is a corrupt cache, not a
                 // root: the chain walk would read a bone that is not there.
                 if (parent < -1 || parent >= int(bones))
                     ok = false;
                 out.bones[i].parent = parent;
+                out.bones[i].radius = raw[i * 10 + 9];
                 // The ORDER is part of the format: a bone's parent must come
                 // BEFORE it, because the chain is composed in one forward
                 // pass - animateBones reads the parent's already-composed
@@ -399,19 +437,21 @@ bool writeMicroRigCache(const std::string& path, const MicroRig& rig, uint64_t l
     const uint32_t bones = uint32_t(rig.bones.size());
     if (ok)
         ok = std::fwrite(&bones, 4, 1, f) == 1;
-    std::vector<float> raw(size_t(bones) * 9, 0.f);
+    std::vector<float> raw(size_t(bones) * 10, 0.f);
     for (size_t i = 0; i < rig.bones.size(); ++i) {
-        raw[i * 9 + 0] = rig.bones[i].a.x;
-        raw[i * 9 + 1] = rig.bones[i].a.y;
-        raw[i * 9 + 2] = rig.bones[i].a.z;
-        raw[i * 9 + 3] = rig.bones[i].b.x;
-        raw[i * 9 + 4] = rig.bones[i].b.y;
-        raw[i * 9 + 5] = rig.bones[i].b.z;
-        raw[i * 9 + 6] = float(int(rig.bones[i].role));
-        raw[i * 9 + 7] = float(rig.bones[i].legIndex);
+        raw[i * 10 + 0] = rig.bones[i].a.x;
+        raw[i * 10 + 1] = rig.bones[i].a.y;
+        raw[i * 10 + 2] = rig.bones[i].a.z;
+        raw[i * 10 + 3] = rig.bones[i].b.x;
+        raw[i * 10 + 4] = rig.bones[i].b.y;
+        raw[i * 10 + 5] = rig.bones[i].b.z;
+        raw[i * 10 + 6] = float(int(rig.bones[i].role));
+        raw[i * 10 + 7] = float(rig.bones[i].legIndex);
         // The PARENT is part of the rig: a cache that drops it hands back a
         // parentless skeleton on the next run, and the neck tears again.
-        raw[i * 9 + 8] = float(rig.bones[i].parent);
+        raw[i * 10 + 8] = float(rig.bones[i].parent);
+        // Per-bone capsule radius: median distance of owned surface cells.
+        raw[i * 10 + 9] = rig.bones[i].radius;
     }
     if (ok)
         ok = std::fwrite(raw.data(), 4, raw.size(), f) == raw.size();

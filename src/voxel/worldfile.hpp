@@ -111,6 +111,14 @@ struct WorldLayer {
     // stops to graze. The behaviour drives a per-frame transform, so the
     // object is not a static prop in the scene any more.
     std::string behaviour;
+    // A one-shot COMMAND issued to a micro object's behaviour (mirrors the
+    // chat tool's set_behaviour): "" = auto, "walk"/"run"/"graze"/"stop".
+    // Applied at load time; the app can still override it at runtime.
+    std::string command;
+    // A static POSE: flat list of (boneIndex, rx, ry, rz) in degrees, applied
+    // to the skeleton at load time. Lets an AI pose a rigged animal without
+    // re-running the gait. Empty = rest pose (gait drives the bones).
+    std::vector<float> pose;
 };
 
 bool loadManifest(const std::string& path, std::vector<WorldLayer>& out);

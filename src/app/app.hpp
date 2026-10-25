@@ -263,8 +263,17 @@ private:
     glm::vec3 resolveCameraMove(glm::vec3 from, glm::vec3 delta);
     // A walker's obstacle test: world OBJECTS and every OTHER micro field.
     // Terrain is deliberately excluded (the walker is clamped to the
-    // heightfield separately) and so is its own field.
-    bool microFootprintBlocked(int microIndex, glm::vec3 offset);
+    // heightfield separately) and so is its own field. `why` (optional) gets
+    // the reason: 1 = water, 2 = a world object cell, 3 = another micro
+    // object - a trace only, the verdict is identical without it.
+    bool microFootprintBlocked(int microIndex, glm::vec3 offset,
+                               int* why = nullptr);
+    // A conservative world AABB for ONE micro object at the transform
+    // microFieldSolidAt applies to it (behaviour offset + rotation about the
+    // pivot; a staged Move/Rotate preview is NOT included - the footprint
+    // probe turns its broad phase off while one is active). false = no body.
+    bool microWorldBounds(size_t microIndex, glm::vec3& outLo,
+                          glm::vec3& outHi) const;
     // The terrain top at a world xz, from the CPU mirror of the SHADED height
     // texture (kept in sync after every live stamp, so an added mound is
     // ground a walker climbs). Returns -1e9 outside the landscape.
@@ -309,7 +318,8 @@ private:
     void rebuildFurCards();
     // Grow the cards for ONE micro field and append them to m_furObjects.
     // Returns the new object's fur index, or -1 when it grows no coat.
-    int growFurCards(const vf::voxel::MicroField& field, glm::vec3 worldOffset);
+    int growFurCards(const vf::voxel::MicroField& field, glm::vec3 worldOffset,
+                     const vf::voxel::MicroRig& rig);
     // Sun: m_sunDir is the single source of truth for where the sun is (it
     // rides the per-frame push constant), so every control that moves the sun
     // funnels through setSunAngles and nothing keeps parallel angle floats.
@@ -508,6 +518,14 @@ private:
     vf::voxel::LayeredWorld m_layers;
     float m_layerPollT = 0.f;
     bool m_pendingWorldReload = false;
+    // Separate manifest watcher for micro-voxel objects: they are not part
+    // of the world record set, so a manifest-only change (e.g. an MCP
+    // set_layer_transform on a micro layer) never triggers applyWorldReload
+    // and loadMicroObjects() would not run. Track the manifest mtime/size
+    // here so such edits hot-reload the micro objects within ~0.5 s.
+    unsigned long long m_microManifestMtime = 0;
+    unsigned long long m_microManifestSize = 0;
+    bool m_microManifestSeeded = false;
     // texture picker state: the live binding table + the files found in
     // assets/textures/ (paths relative to the manifest dir, e.g. "textures/x.png")
     std::vector<vf::voxel::worldfile::TextureBinding> m_texBindings;

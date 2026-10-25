@@ -265,6 +265,44 @@ StoreCell ChunkStore::cellAt(int x, int y, int z) const
     return out;
 }
 
+// Exact mirror of `cellAt(x,y,z).solid && cellAt(x,y,z).obj` for the live-edit
+// collision probe, which asks only that and calls this ~2k times per escape
+// scan: cellAt decodes the brick's RGB and runs paletteOf for the render path,
+// and the probe throws all of it away. Every branch below must return the same
+// verdict cellAt would produce for solid && obj.
+bool ChunkStore::solidObjAt(int x, int y, int z) const
+{
+    if (x < 0 || y < 0 || z < 0 || x >= m_latN || y >= m_latN || z >= m_latN)
+        return false;
+    const int ci = chunkIndexOfCell(x, y, z);
+    if (ci < 0 || ci >= int(m_chunks.size()))
+        return false;
+    const Chunk& c = m_chunks[size_t(ci)];
+    if (c.state == Chunk::State::Empty)
+        return false; // cellAt returns the default StoreCell: obj == false
+    if (c.state == Chunk::State::Solid) {
+        // Safe ONLY because nothing but decodeCell ever sets obj on a cell
+        // cellAt returns: apply() writes StoreCell::obj only to encode it back
+        // into a brick word, and cellAt's Solid branch sets solid/sdfRaw/mat
+        // and leaves obj at its default of false. A future change that tags a
+        // Solid chunk's cells as object-owned must come back and update this
+        // method.
+        return false;
+    }
+    const int lx = x & (CHUNK_N - 1), ly = y & (CHUNK_N - 1), lz = z & (CHUNK_N - 1);
+    const uint32_t slot = c.slotOf[blockKeyOf(lx, ly, lz)];
+    if (slot == kNoBrick)
+        // Safe for the same reason: cellAt falls through to the box loop, and
+        // the boxes only ever write `solid` (never `obj`), so solid && obj is
+        // false there too. A future change setting obj on a SolidBox must come
+        // back and update this method.
+        return false;
+    const uint32_t* w = c.bricks.data() + size_t(slot) * BRICK_WORDS +
+                        size_t(cellIndexInBrick(lx, ly, lz)) * 2;
+    const int8_t raw = int8_t((w[0] >> 24) & 0xFFu);
+    return raw <= 0 && ((w[1] >> 24) & 0x80u) != 0;
+}
+
 void ChunkStore::emitChunkEmitters(int ci,
                                     const std::vector<glm::vec3>& matEmission,
                                     std::vector<EmissiveCell>& cells) const

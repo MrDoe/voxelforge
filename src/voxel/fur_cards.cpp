@@ -112,8 +112,9 @@ float bakedSunShadow(const MicroField& f, glm::vec3 root, glm::vec3 n,
 }  // namespace
 
 bool buildFurCards(const MicroField& field, const FurParams& params, FurObject& out,
-                   std::string* err)
+                   std::string* err, const MicroRig* rig, glm::vec3 worldOffset)
 {
+    (void)rig; (void)worldOffset;
     out = FurObject {};
     if (field.size3() == 0 || !(field.voxel > 0.0f)) {
         if (err)
@@ -222,6 +223,7 @@ bool buildFurCards(const MicroField& field, const FurParams& params, FurObject& 
         // is tilted out of the surface by 25..60 degrees.
         const float ao = bakedAo(field, r.p, r.t1, r.t2);
         const float sh = bakedSunShadow(field, r.p, r.n, sun, maxShadowDist);
+        const int bn = rig ? rig->boneAt(r.p + field.origin + worldOffset) : -1;
         for (int k = 0; k < params.perCell; ++k) {
             const int slot = k * 7;
             // The root wanders inside the cell, so the coat is not a lattice
@@ -268,7 +270,7 @@ bool buildFurCards(const MicroField& field, const FurParams& params, FurObject& 
             // The amplitude scales with the length, so a short clump curls
             // less in metres and a long one curls more.
             c.tint = glm::vec4(r.col, hashSigned(x, y, z, slot + 8) * 0.9f);
-            c.shade = glm::vec4(ao, sh, float(r.mat), 0.f);
+            c.shade = glm::vec4(ao, sh, float(r.mat), float(bn));
             c.curl = glm::vec4(len * params.curlAmp *
                                    (0.55f + 0.90f * hash01(x, y, z, slot + 9)),
                                params.curlCycles *
@@ -344,7 +346,20 @@ bool buildFurCards(const MicroField& field, const FurParams& params, FurObject& 
                     out.cellItems[cursor[cell]++] = uint32_t(ci);
                 }
     }
+    if (rig) {
+        out.boneCount = int(rig->bones.size());
+        out.boneSegA.assign(size_t(out.boneCount), glm::vec3(0.f));
+        out.boneSegB.assign(size_t(out.boneCount), glm::vec3(0.f));
+        const glm::vec3 frame = field.origin + worldOffset;
+        for (int i = 0; i < out.boneCount; ++i) {
+            out.boneSegA[size_t(i)] = rig->bones[size_t(i)].a - frame;
+            out.boneSegB[size_t(i)] = rig->bones[size_t(i)].b - frame;
+            out.boneRadius.push_back(rig->bones[size_t(i)].radius);
+        }
+    } else {
+        out.boneCount = 0;
+    }
     return true;
-}
+}  // buildFurCards
 
 }  // namespace vf::voxel
