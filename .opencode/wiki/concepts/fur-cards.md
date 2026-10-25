@@ -1,7 +1,7 @@
 ---
 title: Fur cards — a translucent hair layer over the micro objects
 tags: [rendering, micro-voxel, fur, translucency, splats, alpaca]
-sourceRefs: [src/voxel/fur_cards.hpp, src/voxel/fur_cards.cpp, src/render/fur_pass.hpp, src/render/fur_pass.cpp, shaders/fur_overlay.comp, src/app/world/micro_objects.cpp, src/app/frame/record_interactive.cpp, tests/fur_check.py, tests/test_micro.cpp, AGENTS.md, docs/rendering.md]
+sourceRefs: [src/voxel/fur_cards.hpp, src/voxel/fur_cards.cpp, src/render/fur_pass.hpp, src/render/fur_pass.cpp, shaders/fur.vert, shaders/fur.frag, shaders/fur_composite.comp, shaders/common_fur.glsl, src/app/world/micro_objects.cpp, src/app/frame/record_interactive.cpp, tests/fur_check.py, tests/test_micro.cpp, AGENTS.md, docs/rendering.md]
 lastReviewed: 2026-10-21
 ---
 
@@ -32,11 +32,14 @@ The fur is a **separate, translucent layer of hair cards**:
 - the cards are **generated on the CPU** at load from the field's *surface
   cells* (a solid cell with a non-solid neighbour) whose material grows fur —
   **21 `fleece`**. The vase and the urn (20 plaster) grow nothing.
-- they are drawn by a **compute pass** (`shaders/fur_overlay.comp`) that runs
-  after the micro overlay and composites into the **same HDR image**. The
-  G-buffer's world position is the depth reference, so a card behind the body
-  or behind the world is dropped with no depth attachment and no change to
-  any opaque pass.
+- they are drawn by a **raster pass** (`shaders/fur.vert` + `fur.frag`, one
+  instanced quad per card) plus a small composite dispatch
+  (`shaders/fur_composite.comp`) that runs after the micro overlay and
+  composites into the **same HDR image**. The G-buffer's world position is the
+  depth reference, so a card behind the body or behind the world is discarded
+  with no depth attachment and no change to any opaque pass. The raster form
+  replaced a per-pixel ray march that cost 98 % of the frame whenever the
+  alpaca was on screen — see [[concepts/fur-raster-parity]].
 
 **Why not do it with the world's splats?** A surfel is a disk lying *in* the
 tangent plane, and the opaque **base seal** (the nearest fragment written at

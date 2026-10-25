@@ -652,7 +652,7 @@ surfel count and the depth test rejects the dry cells before shading.
   backend has no equivalent per-surfel tint; the tile path (`VF_TILE=1`)
   does not implement it yet.
 
-## Fur cards over the micro objects (`fur_overlay.comp`)
+## Fur cards over the micro objects (`fur.vert` + `fur.frag` + `fur_composite.comp`)
 
 A micro object is a sphere-traced solid: exact, opaque, hard-edged. That is
 right for a ceramic vase and wrong for an animal, whose coat is fuzz and
@@ -676,14 +676,23 @@ silhouette.
 |---|---|---|
 | generate | `src/voxel/fur_cards.cpp` (CPU, at load) | one card per surface cell per slot, for the materials that grow fur (21 `fleece`) |
 | upload | `src/render/fur_pass.cpp` | the cards, the bucket grid and the per-object table |
-| draw | `shaders/fur_overlay.comp` (compute) | a DDA through the bucket grid, composited into the HDR the micro overlay wrote |
+| draw | `shaders/fur.vert` + `fur.frag` (raster) | one instanced quad per card into four additive rgba16f accumulation targets |
+| composite | `shaders/fur_composite.comp` | the alpha-weighted sums -> the lit pixel, mixed into the HDR the micro overlay wrote |
 
 The pass runs **after** the micro overlay (it reads the G-buffer the overlay
 wrote) and **before** the post pass. The G-buffer's world position is the
-depth reference, so a card behind the body or behind the world is dropped
+depth reference, so a card behind the body or behind the world is discarded
 without a depth attachment and without touching any opaque pass. With no
-object carrying fur the dispatch is skipped and the frame is byte-identical
-(`VF_FUR=0` is the escape hatch).
+object carrying fur the draw and the composite are skipped and the frame is
+byte-identical (`VF_FUR=0` is the escape hatch).
+
+**Why raster and not a ray march.** The first version walked the card bucket
+grid per pixel and blind-tested every card in every cell the ray crossed: a
+few hundred 96-byte record fetches plus two `mat3` multiplies per card, per
+pixel. On a view where the alpaca covered a tenth of a 640×360 frame that
+pass measured **183-211 ms - 98 % of the whole frame**. A quad per card costs
+the card's *covered pixels* instead (a few hundred thousand fragments), which
+is what the hardware is for: the same view is now ~0.1 ms of fur.
 
 **The three decisions that decide whether the coat reads**
 

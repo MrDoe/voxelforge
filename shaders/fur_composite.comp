@@ -1,0 +1,119 @@
+#version 460
+#extension GL_GOOGLE_include_directive : require
+// Fur cards, RASTER path (composite stage).
+//
+// The raster pass accumulated the six alpha-weighted terms into four additive
+// targets; this pass turns them into the same pixel the ray-marched version
+// produced, with the lighting model evaluated ONCE per pixel:
+//
+//   coverage = 1 - exp(-sumA)
+//   normal   = normalize(sum a*n)         position = sum a*p / sumA
+//   light    = sunCol * (sum a*ndl*shadow)/sumA
+//            + skyIrradiance(normal) * (0.28 + 0.30*aoAvg)
+//   colour   = albedo(sum a*alb / sumA) * light
+//   out      = mix(before, colour, coverage)
+//
+// This is the standard many-layer approximation the ray version used, so the
+// composite is unchanged - only the way the terms are gathered is. The
+// albedo's per-material accents (mottling / grain / detailAlbedo) run here,
+// per pixel, exactly as before.
+//
+// Dispatched over the same screen rectangle as the draw, so a fur-free frame
+// costs nothing at all.
+
+layout(local_size_x = 8, local_size_y = 8, local_size_z = 1) in;
+
+layout(set = 0, binding = 13, rgba16f) uniform highp image2D uOutHdr;
+layout(set = 0, binding = 40, rgba16f) uniform readonly highp image2D uAccA;
+layout(set = 0, binding = 41, rgba16f) uniform readonly highp image2D uAccB;
+layout(set = 0, binding = 42, rgba16f) uniform readonly highp image2D uAccC;
+layout(set = 0, binding = 43, rgba16f) uniform readonly highp image2D uAccD;
+layout(set = 0, binding = 44, rgba16f) uniform readonly highp image2D uAccE;
+
+layout(push_constant) uniform PC {
+    vec4 camPos;
+    vec4 camRight;
+    vec4 camUp;
+    vec4 camFwd;
+    vec4 a; // tanHalfFov, aspect, extentX, extentY
+    vec4 b; // worldSize, voxelSize, rectMinX, rectMinY
+    vec4 sunDir;
+    vec4 misc; // x=renderFlags, y=animTime, z=tonemapLook, w=exposure
+} pc;
+
+// The shared model declares uHeight/uObjVol itself via these two names.
+layout(set = 0, binding = 8, rg32f) uniform readonly highp image2D uHeight;
+layout(set = 0, binding = 9, r8_snorm) uniform readonly highp image3D uObjVol;
+
+const float kWaterLevel = -0.9;
+
+#include "common_base.glsl"
+
+void main()
+{
+    const ivec2 pix = ivec2(gl_GlobalInvocationID.xy) +
+                      ivec2(int(pc.b.z + 0.5), int(pc.b.w + 0.5));
+    if (pix.x >= int(pc.a.z) || pix.y >= int(pc.a.w))
+        return;
+    if (pix.x < 0 || pix.y < 0)
+        return;
+
+    kSunDir = normalize(pc.sunDir.xyz);
+    gRenderFlags = int(pc.misc.x + 0.5);
+    gTexOv = 0.0;
+    gUnderwater = false;
+
+    const vec4 A = imageLoad(uAccA, pix);
+    const float sumA = A.x;
+    if (sumA < 0.003)
+        return; // no card covered this pixel
+
+    const vec4 B = imageLoad(uAccB, pix);
+    const vec4 C = imageLoad(uAccC, pix);
+    const vec4 D = imageLoad(uAccD, pix);
+    const vec4 E = imageLoad(uAccE, pix);
+
+    vec3 nAvg = normalize(C.xyz);
+    const vec3 pAvg = B.xyz / sumA;
+    const vec3 pRest = E.xyz / sumA;
+    const float aoAvg = (gRenderFlags & 1) != 0 ? (A.z / sumA) : 1.0;
+    const uint matId = uint(clamp(A.w / sumA + 0.5, 0.0, 21.0));
+
+    // The detail normal, evaluated ONCE PER PIXEL at the coat's own rest
+    // position. The raster fragments run it per card, but a pixel sees a
+    // dozen cards, so the per-card relief averages out; at pixel scale it
+    // survives. `detailNormal` is a no-op when the feature is off or the
+    // material is untextured, so the bit-7-off frame is unchanged.
+    nAvg = detailNormal(nAvg, pRest, matId);
+
+    // The lighting, evaluated ONCE per pixel: the sun term is the average of
+    // the cards' own, and the sky ambient is a function of the average
+    // normal.
+    vec3 light = sunCol() * (A.y / sumA);
+    light += skyIrradiance(nAvg) * (0.28 + 0.30 * aoAvg);
+
+    // The albedo: the alpha-weighted average of the CARDS' own colours, so
+    // the coat keeps the fleece's variation instead of one flat tone.
+    vec3 alb = D.xyz / sumA;
+    if (uTex.matTex[matId].x >= 0.0) {
+        // A TEXTURED material: the universal mottling and grain only (the
+        // photo carries its own accents). This is detailAlbedo's textured
+        // path, spelled out because the texture itself was already sampled
+        // per fragment. It has to run PER PIXEL: evaluated per fragment the
+        // mottling is smooth across a card, so it adds no pixel-scale detail
+        // (measured: fractionally WORSE than the averaged form).
+        alb *= 0.86 + 0.28 * fbm(pRest.xz * 1.7 + pRest.y * 1.3);
+        alb *= 0.93 + 0.10 * vnoise(pRest.xz * 23.0 + pRest.y * 17.0);
+    } else {
+        // An untextured material keeps its record's colour and gets the
+        // per-material accents.
+        alb = detailAlbedo(alb, pAvg, nAvg, matId);
+    }
+
+    // The coverage: the standard many-layer approximation, exact for the
+    // small alphas a coat is made of.
+    const float coverage = 1.0 - exp(-sumA);
+    const vec3 furCol = alb * light;
+    const vec3 before = imageLoad(uOutHdr, pix).rgb;
+    imageStore(uOutHdr, pix, vec4(mix(before, furCol, coverage), 1.0));
+}

@@ -6524,3 +6524,108 @@ and the thing it measures can be a bug rather than a parameter.
 
 See [[concepts/fur-cards]].
 
+
+## [2026-10-24] feat | Obstacle avoidance + head turning for the alpaca
+
+Improved the walker response: replaced six fixed turn angles with a 16-direction clearance scan (pick the direction with the most free steps), faster rate-limited turn (2.0 rad/s), gait keeps moving during a blocked step (no frozen spin), and the head leads the turn (headTurn smoothed toward the turn direction, applied as a yaw on the Neck/Head chain). New field `headTurn`/`headTurnCur` in MicroBehaviour.
+
+
+## [2026-10-25] ingest | The animation is not the cost — the escape scan is
+
+A report that "animation takes way too much CPU, move it to the GPU" was
+measured before answering. `App::updateMicroBehaviours` now carries four
+cumulative buckets behind `VF_TRACE_BEHAVIOUR` (probe / escape-scan /
+animate+clamp / gpu-upload, printed every 600 frames). Over 2400 frames at
+avg 6.30 ms: animation + clamp 0.0055-0.0058 ms/f, upload 0.0024-0.0026,
+probe 0.0084-0.0103 (one call/frame), **escape-scan 0.065-0.130** (832 runs
+of 2400 frames), TOTAL 0.084-0.147 ms/f = 1.3-2.3 % of the frame.
+
+So the bone maths is 0.1 % of a frame and moving it to the GPU would buy
+nothing — while the behaviour and the pose-aware ground clamp need
+CPU-side terrain/store data, so a GPU move would cost a readback. The
+answer is to optimize the collision probing.
+
+The scan is 90 % of the path because a blocked frame runs a 16x4 clearance
+scan (up to 64 more `microFootprintBlocked` calls) and each call is
+`cylinderBlocked` at 10 sides x 3 layers = 33 points, every point paying a
+FULL `ChunkStore::cellAt` decode (brick unpack + `paletteOf`) for a
+`solid && obj` question plus a loop over ALL micro fields doing the whole
+transform stack and an 8-tap `sampleSdf`. ~2112 store queries and ~6300 SDF
+fetches on a scan frame, ~0.19 ms per run.
+
+Two measurement traps cost turns first: world load swamps any run shorter
+than ~25 s (VoxelField::build 37.5 %, sampleWorld 22.6 % — profile with
+`perf record -D 25000`), and **the stack unwinding in this binary names no
+caller**: `microFootprintBlocked` reported 4.54 % inclusive while 0 of its
+stacks contained `updateMicroBehaviours`, its own caller, because frames
+unwind to raw stack addresses. Percentages that contradict each other are
+not evidence; the in-app counters are. Also `getenv` alone measured 1.01 %
+of cycles for four per-frame, per-object env lookups.
+
+The levers are deliberately generic (any object carrying `behaviour`):
+throttle the rescan behind a cached escape direction, hoist the
+micro-field AABB test out of the per-sample lambda, cache `getenv`, add a
+solid/obj-only store query, and only last consider shrinking N/substeps
+(10 sides on a 0.35 m radius is already ~0.215 m chord against a 0.1 m
+lattice).
+
+See [[concepts/micro-animation-cpu-cost]].
+
+## [2026-10-25] ingest | 13x on the animation path — and the deadlock that caused it
+
+The four levers were built and measured, then the throttle was instrumented
+when it turned out NOT to be firing: rescan-reason counters read
+`arrive 784` of 786, `never 1, move 0, swing 2, age 1`. Two cache-invalidation
+traps were behind that (keying "arrived" off `hasHeadingTarget`, which the
+unblocked branch clears every free frame; and dropping `scanValid` on free
+frames) — both fixed by expiring only on pose, swing and age.
+
+That led to the actual finding. Adding an optional `int* why` reason code to
+`microFootprintBlocked` and probing the STANDING position as well as the
+stepped one gave, on every rescan:
+`hereBlocked=false`, `stepWhy=2`, `clears=4444444000000000`. The animal stood
+in free space, the step 3 mm ahead was inside a world object, and the scan —
+whose first ladder rung sat at `step*s*0.5` = 0.275 m — called that direction
+clear for 1.1 m. So k=0 always won, the heading target equalled the heading,
+`update()` turned nothing, the refused step was withdrawn every frame, and the
+offset froze at `(-0.025,-0.000,-0.239)` until the state machine happened to
+choose Graze. **913 blocked frames and 832 scans out of 2400**, all of it spent
+re-deciding a decision that could not take effect. Pre-existing, not a
+regression.
+
+Making the ladder's first rung the frame's own step (`fstep =
+b.speed*min(dt,0.1)`) makes k=0's verdict identical to the probe's verdict, so
+a refused step always loses: blocked frames 913 -> 105, scans 832 -> 5,
+escape-scan 0.0244 -> 0.0003 ms/f, TOTAL 0.147 -> **0.0111 ms/f** (13x),
+avg frame 6.30 -> 5.65 ms. The offset moves again.
+
+Levers, all generic: `ChunkStore::solidObjAt` (exact `cellAt` mirror, doctest
+pinned), `App::microWorldBounds` AABB broad-phase per probe (|R| row sums;
+off during any Move/Rotate preview and above 16 fields), per-process cached
+`getenv`, and the cached escape direction.
+
+On baking the movements: buys ~0. The bone maths is 0.005 ms/f, the caches
+already are the "don't recompute what hasn't changed", and the collision probe
+reads live store/terrain state that no recording could stay current with.
+
+See [[concepts/micro-animation-cpu-cost]].
+
+## [2026-10-25] ingest | code review: stale/unused functions and undocumented parts
+
+## [2026-10-25] ingest | fur raster: 183 ms of ray marching -> ~0.1 ms of quads
+Profiled the "slow when looking at the alpaca" report with the GPU timestamp
+marks. On the worst camera (640x360, alpaca 3.6 m away) `geo` was **182-211 ms**
+with the coat on and **4.2 ms** with `VF_FUR=0` - the fur pass was 98 % of the
+frame. `VF_FUR_NOANIM` changed nothing, so the skeleton was never the cost.
+
+The pass was a compute ray march: per pixel it walked a 4 cm card grid and
+blind-tested every card in every cell the ray crossed (~300 card tests/pixel,
+each a 96 B record fetch + two mat3 multiplies). Replaced with a raster pass
+(one instanced quad per card, four additive rgba16f accumulation targets, a
+composite dispatch that keeps the per-pixel lighting model). Two defects fell
+out of the profile: the dispatch rect projected `centre +- (frustum half-width
++ 2 m)` (always the whole screen), and every transform helper copied the
+1.4 KB `FurWorld` row - `furWorldOf()` once per loop iteration per vertex.
+
+Result: `geo` 182-211 ms -> **5.5 ms** (coat ~0.1 ms; 5.44 ms with the fur
+off). See [[concepts/fur-raster-parity]].

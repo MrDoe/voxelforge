@@ -29,6 +29,32 @@
   names a line that is not in the file you just edited, the object is stale —
   `touch` the file and rebuild. Do not "fix" code that the file says is right.
 
+## Code navigation (OpenCodeRAG) — use FIRST, before any code task
+- **Search before you read.** `search_semantic(query)` replaces blind grep/glob. Call it before
+  planning, editing, or answering any code question. Use `pathHints`/`languageHints` to focus.
+- **Skeleton before read.** `get_file_skeleton(filePath)` before `read` on any file.
+- **Usages before edit.** `find_usages(symbolName)` before modifying any function/class/variable.
+- **Images via describe.** `describe_image(filePath)` — never read raw image bytes.
+- **Quirks.** `recall_quirks(query)` when you hit an error or need a known pitfall;
+  `add_quirk(content)` when you discover a non-obvious fact, gotcha, or workaround;
+  `update_quirk`/`delete_quirk` when a stored quirk is outdated or wrong.
+  **Plan phase / start of new work:** run `recall_quirks` for the area you're about to touch
+  and `search_semantic` for the relevant symbols before writing any code. This prevents
+  repeating known mistakes and surfaces conventions you'd otherwise miss.
+
+## Crosstalk (multi-session coordination)
+- **Declare yourself early.** Call `crosstalk_status` with a unique human `name` (e.g. "Fur Fixer")
+  so peers and the user can address you. Set `role`, `goal`, `summary`, and `workingOn`.
+- **Check peers before editing shared code.** `crosstalk_peers` shows active sessions and their
+  leases. Work that does not overlap theirs needs no coordination.
+- **Talk before you collide.** `crosstalk_send` a short ask; replies are injected into live turns.
+  Never force a claim.
+- **Lease what you edit.** `crosstalk_claim` on exact paths (no globs). Renew if long, release when done.
+- **Shared surfaces:** GPU/display, `build/` tree, `shaders/*.glsl`, `assets/runtime_edits.vxw`,
+  `assets/*.vxw`/`world.json`. Use `VF_OVERLAY_PATH=/tmp/…` for scratch renders.
+- **Don't destroy what you didn't create.** Never `ninja clean`, never `rm` globs near peer files,
+  never kill processes you didn't start.
+
 ## Tooling conventions
 Failures here are almost always **harness** mistakes, not code bugs — and each
 one costs a whole turn, because the bad call is rejected before any work runs.
@@ -421,7 +447,7 @@ one costs a whole turn, because the bad call is rejected before any work runs.
   `--mode splat|svo` (default `splat`; SVO is the pixel reference).
 - Splat perf knobs (all env, default tuned): `VF_LOD=0` disables the baked
   merged-terrain LOD rings (surfelize 2x2x2 / 4x4x4, draw-time selection
-  `VF_LOD1`/`VF_LOD2` = 30/90 m, material-split blocks keep shore/rock
+  `VF_LOD1`/`VF_LOD2` = 20/60 m, material-split blocks keep shore/rock
   boundaries readable; `VF_LOD_SPLIT=0` restores the single-majority disk;
   objects ride along unmerged — trees must
   never vanish), `VF_NO_GPU_CULL=1` disables the GPU per-surfel
@@ -842,8 +868,9 @@ one costs a whole turn, because the bad call is rejected before any work runs.
   server (`vf_mcp`: authoring — add_box/cylinder/ellipsoid/stamp, add_voxels,
   write_object, read_object, delete_object, import_mesh, clear_edits; inspection
   — list_layers, get_layer, inspect_layer, layer_stats, list_micro, list_materials,
-  list_textures, list_models, list_lights, world_info, probe, probe_region, ground;
-  placement — set_layer_transform, set_layer_behaviour, enable_layer,
+  list_textures, list_models, list_lights, world_info, probe, probe_region, ground,
+  inspect_rig;
+  placement — set_layer_transform, set_layer_behaviour, set_pose, enable_layer,
   duplicate_layer, rename_layer, delete_layer; textures/lights — set_texture,
   add_light, remove_light; control — reload_world, render_shot). See the
   voxel-object skill for how to author arbitrary objects via these tools (the
@@ -1175,13 +1202,31 @@ one costs a whole turn, because the bad call is rejected before any work runs.
   **122 772 cards, 15.7 MB**, **~200 ms** at load. The cards live in the field's LOCAL frame, so the
   layer's placement and the live rotation preview are applied by the shader
   exactly as the micro overlay applies them to the field.
-- **The pass is a COMPUTE pass** (`shaders/fur_overlay.comp`,
-  `src/render/fur_pass.*`) that runs right after the micro overlay and
-  composites into the SAME HDR image. The G-buffer's world position is the
-  depth reference (a card behind the body or behind the world is dropped), so
-  it needs no depth attachment and touches no opaque pass. It is INERT when
-  no object carries fur: the dispatch is skipped and the frame is
-  byte-identical. `VF_FUR=0` is the escape hatch.
+- **The pass is a RASTER pass** (`shaders/fur.vert`, `fur.frag`,
+  `fur_composite.comp`, `src/render/fur_pass.*`) that runs right after the
+  micro overlay and composites into the SAME HDR image: one instanced quad per
+  card, four vertices, no vertex buffer, ONE draw call for every object. The
+  cards accumulate six alpha-weighted terms into four additive rgba16f
+  targets (`sum a`, `sum a*ndl*shadow`, `sum a*ao`, `sum a*mat` | `sum a*p` |
+  `sum a*n` | `sum a*alb`), and a small composite dispatch over the same
+  screen rect evaluates the per-pixel lighting model and the
+  `1-exp(-sumA)` coverage. The G-buffer's world position is the depth
+  reference (a card behind the body or behind the world is discarded in the
+  fragment shader), so it needs no depth attachment and touches no opaque
+  pass. It is INERT when no object carries fur: the draw and the composite are
+  skipped and the frame is byte-identical. `VF_FUR=0` is the escape hatch.
+  **Measured 2026-10-25: the coat went from 183-211 ms to ~0.1 ms of GPU
+  time** on the camera that used to be the worst case (640x360, alpaca
+  3.6 m away) - see `.opencode/wiki/concepts/fur-raster-parity.md`. The
+  previous version was a compute ray marcher: every pixel walked the bucket
+  grid and blind-tested every card in every cell it crossed (~300 card tests
+  per pixel, each a 96 B record fetch plus two `mat3` multiplies), so the
+  cost scaled with the card POPULATION instead of the pixels a card covers.
+  Two rules carried over and must not be dropped: the quad is WIDENED by the
+  curl amplitude (the strand's centre line wanders inside the ribbon's plane,
+  so the geometry has to contain the wave), and the fragment reads the card's
+  REST position/normal for the texture and the detail normal before re-boning
+  - sampling in the animated frame makes the fleece crawl over the body.
 - **Four things decide whether the coat reads at all**, and all four are
   measured, not argued:
   1. **The ribbon must be BILLBOARDED about the strand** (its width axis
