@@ -8,6 +8,11 @@ namespace vf::voxel {
 
 namespace {
 
+// How long the graze takes to lean down and to straighten up (seconds), and
+// how long it stays down before it wanders off again.
+constexpr float kGrazeEase = 2.5f;
+constexpr float kGrazeHold = 3.0f;
+
 // A deterministic 0..1 value from a seed, so a behaviour is reproducible:
 // the same animal grazes at the same moments on every run (a gate that
 // measures the motion needs that).
@@ -57,6 +62,12 @@ void MicroBehaviour::reset(glm::vec3 pos, float seedIn)
     heading = hash01(seedIn + 3.7f) * 6.28f;
     offset = glm::vec3(0.f);
     rot = glm::mat3(1.f);
+    // A reset RE-ANCHORS the animal and zeroes its offset, so the cached
+    // escape direction and the pose it was measured from both describe the
+    // old anchor - every staleness test would be comparing against a pose that
+    // no longer exists. Drop it and let the next collision ask again.
+    scanValid = false;
+    scanAge = 1e9f;
 }
 
 void MicroBehaviour::update(float dt)
@@ -65,12 +76,22 @@ void MicroBehaviour::update(float dt)
     // step is clamped, so a 5 s hitch advances the walk by one frame's
     // worth, not by five seconds'.
     dt = std::min(dt, 0.1f);
+    const float prevHeading = heading;
     stateT += dt;
     wander += dt;
 
     // The state machine. The durations come from the seed, so two alpacas
-    // do not graze in lockstep.
-    if (state == State::Walk) {
+    // do not graze in lockstep. A COMMAND overrides it: the animal keeps
+    // walking when it is told to, and keeps grazing when it is told to
+    // (the AI can say "let the alpaca run" and it runs).
+    if (command == Command::Walk) {
+        state = State::Walk;
+    } else if (command == Command::Graze) {
+        state = State::Graze;
+    } else if (command == Command::Stop) {
+        state = State::Graze;
+        stateT = 0.f;
+    } else if (state == State::Walk) {
         if (stateT > 5.0f + 6.0f * hash01(seed + 1.0f)) {
             state = State::Graze;
             stateT = 0.f;
@@ -96,28 +117,76 @@ void MicroBehaviour::update(float dt)
         while (d < -3.14159265f) d += 6.28318531f;
         pull = std::clamp(d, -1.2f, 1.2f);
     }
-    heading += (0.45f * std::sin(wander * 0.6f + seed) + 1.1f * pull) * dt;
+    // A pending target (the collision response) wins over the wander, and
+    // the turn is RATE LIMITED: the animal swings its body round instead of
+    // snapping, and the wander resumes when it has arrived.
+    if (hasHeadingTarget) {
+        float d = headingTarget - heading;
+        while (d > 3.14159265f) d -= 6.28318531f;
+        while (d < -3.14159265f) d += 6.28318531f;
+        const float maxTurn = 2.0f * dt;   // rad/s (faster turn, less spinning)
+        if (std::abs(d) <= maxTurn) {
+            heading = headingTarget;
+            hasHeadingTarget = false;
+        } else {
+            heading += (d > 0.f ? maxTurn : -maxTurn);
+        }
+    } else {
+        heading += (0.45f * std::sin(wander * 0.6f + seed) + 1.1f * pull) * dt;
+    }
     if (heading > 3.14159265f) heading -= 6.28318531f;
     if (heading < -3.14159265f) heading += 6.28318531f;
 
+    // Smooth the head turn toward its target so the head eases rather than
+    // snapping. When there is no target it eases back to centre.
+    {
+        float d = headTurn - headTurnCur;
+        const float maxH = 3.0f * dt;
+        if (std::abs(d) <= maxH)
+            headTurnCur = headTurn;
+        else
+            headTurnCur += (d > 0.f ? maxH : -maxH);
+        // Ease the target back to zero when not turning.
+        if (!hasHeadingTarget)
+            headTurn *= 0.92f;
+        // The head does not turn independently of the body: a turning alpaca
+        // looks where it is going through its whole body, not by craning its
+        // neck, so the head stays aligned with the spine.
+        headTurn = 0.f;
+        headTurnCur = 0.f;
+    }
+
     // The walk: the offset advances along the heading. The gait phase is
     // driven by the DISTANCE travelled, not by the time, so the feet keep
-    // their rhythm when the animal turns or slows.
-    if (walking) {
+    // their rhythm when the animal turns or slows. A STOP freezes it (the
+    // animal stands, it does not skate).
+    if (walking && command != Command::Stop) {
         const float step = speed * dt;
         offset.x += std::sin(heading) * step;
         offset.z += std::cos(heading) * step;
-        gait += (step / std::max(0.05f, stride)) * 6.28318531f;
+        // Gait advances with DISTANCE (so feet keep rhythm). A turn is also
+        // a step: when the animal spins in place the gait must still advance,
+        // otherwise the legs freeze and the body slides. Add a contribution
+        // proportional to the yaw change, so a turn looks like stepping
+        // around rather than pivoting on frozen feet.
+        float turnDelta = heading - prevHeading;
+        while (turnDelta > 3.14159265f) turnDelta -= 6.28318531f;
+        while (turnDelta < -3.14159265f) turnDelta += 6.28318531f;
+        const float turnStep = std::abs(turnDelta) * 0.35f; // metres-equivalent
+        gait += ((step + turnStep) / std::max(0.05f, stride)) * 6.28318531f;
     }
 
     // The graze: a bow that eases in over the first second and out over the
     // last. The blend is the smoothstep, so the animal leans down and
     // straightens up rather than jerking.
+    // The graze eases IN and OUT over a couple of seconds each: an animal
+    // that snaps its head down reads as a glitch, one that leans down
+    // slowly reads as an animal deciding to eat.
     float graze = 0.f;
     if (state == State::Graze) {
-        const float inT = smoothstep01(stateT / 1.0f);
-        const float outT = smoothstep01((3.0f + 5.0f * hash01(seed + 2.0f) -
-                                         stateT) / 1.0f);
+        const float inT = smoothstep01(stateT / kGrazeEase);
+        const float outT = smoothstep01((kGrazeHold + 5.0f * hash01(seed + 2.0f) -
+                                         stateT) / kGrazeEase);
         graze = std::min(inT, outT);
     }
 
@@ -133,6 +202,193 @@ void MicroBehaviour::update(float dt)
     const glm::mat3 tilt = axisRotation(glm::vec3(1, 0, 0), pitch);
     rot = yaw * roll * tilt;
     offset.y = bob;
+}
+
+void MicroBehaviour::pinPose(glm::vec3 offsetIn, float headingDeg,
+                              float gaitPhase, float grazeBlend)
+{
+    state = State::Walk;
+    offset = offsetIn;
+    heading = glm::radians(headingDeg);
+    gait = gaitPhase;
+    grazeOverride = glm::clamp(grazeBlend, 0.f, 1.f);
+    headTurn = 0.f;
+    headTurnCur = 0.f;
+    // The same yaw the walk applies; the sway/bob are gait-driven and are
+    // deliberately left out - a pinned pose must be exactly reproducible.
+    rot = axisRotation(glm::vec3(0, 1, 0), heading);
+    animateBones();
+}
+
+void MicroBehaviour::animateBones()
+{
+    // The GAIT, driven by the rig's roles.
+    //
+    // The legs swing about their joints, in DIAGONAL pairs (a walk, not a
+    // trot): the pairs come from the rig's own leg order, which the
+    // derivation sorted along the spine, so the front-left swings with the
+    // back-right. The head nods with the stride and dips further when the
+    // animal grazes; the tail sways.
+    if (rig.bones.empty())
+        return;
+    const size_t n = rig.bones.size();
+    if (boneRot.size() != n) {
+        boneRot.assign(n, glm::mat3(1.f));
+        boneXform.assign(n, glm::vec3(0.f));
+        boneJoint.resize(n);
+        for (size_t i = 0; i < n; ++i)
+            boneJoint[i] = rig.bones[i].a;
+    }
+    // The frame: up and forward come from the derivation, and the side axis
+    // (across the body) is their cross product.
+    const glm::vec3 up = rig.up;
+    glm::vec3 fwd = rig.forward;
+    glm::vec3 side = glm::cross(up, fwd);
+    if (glm::length(side) < 1e-5f)
+        side = glm::vec3(1.f, 0.f, 0.f);
+    side = glm::normalize(side);
+    fwd = glm::normalize(glm::cross(side, up));
+
+    // The legs, sorted along the spine, so the pairs are diagonal.
+    std::vector<size_t> legs;
+    for (size_t i = 0; i < n; ++i)
+        if (rig.bones[i].role == BoneRole::Leg)
+            legs.push_back(i);
+    std::sort(legs.begin(), legs.end(), [&](size_t a, size_t b) {
+        const float fa = glm::dot(rig.bones[a].a, fwd);
+        const float fb = glm::dot(rig.bones[b].a, fwd);
+        if (std::abs(fa - fb) > 1e-3f)
+            return fa > fb; // the front legs first
+        return glm::dot(rig.bones[a].a, side) > glm::dot(rig.bones[b].a, side);
+    });
+
+    // How many links the front extension is made of (Neck links + the Head
+    // tip). The bend is spread over them, so a three-link neck curves instead
+    // of hinging at the shoulder; a rig with one Head bone divides by one and
+    // behaves exactly as before.
+    int neckLinks = 0;
+    for (size_t i = 0; i < n; ++i)
+        if (rig.bones[i].role == BoneRole::Neck ||
+            rig.bones[i].role == BoneRole::Head)
+            ++neckLinks;
+    const float stride = gait;
+    // How far down the animal is leaning (0 = standing, 1 = fully bowed).
+    // A pinned pose overrides it, so a screenshot of the graze is exact.
+    const float grazeBlend =
+        (grazeOverride >= 0.f)
+            ? grazeOverride
+            : ((state == State::Graze)
+                   ? std::min(smoothstep01(stateT / kGrazeEase),
+                              smoothstep01((kGrazeHold +
+                                            5.0f * hash01(seed + 2.0f) -
+                                            stateT) /
+                                           kGrazeEase))
+                   : 0.f);
+    // The head/neck chain's TOTAL tip angle. The links share it, so the neck
+    // curves; see the Neck/Head case below.
+    const float headTotal = grazeBlend * 1.60f; // no walk nod: a real walk
+                                               // keeps the head steady; only
+                                               // the graze bows it down. 1.6 rad
+                                               // reaches the ground (3 links
+                                               // x ~30 deg each)
+    for (size_t i = 0; i < n; ++i) {
+        const MicroBone& b = rig.bones[i];
+        float angle = 0.f;
+        glm::vec3 axis = side;
+        bool isNeckHead = false;
+        switch (b.role) {
+        case BoneRole::Leg: {
+            // Lateral sequence (alpaca gait): same-side limbs swing together,
+            // not diagonal pairs (a trot). Alpacas are camelids and use a
+            // lateral sequence walk (Pfau et al. 2011): left-hind, left-front,
+            // right-hind, right-front, with the hind leg leading the front on
+            // each side. Pairing same-side legs (ranks 0&2, 1&3) instead of
+            // diagonal ones gives that lateral coupling.
+            size_t rank = 0;
+            for (size_t k = 0; k < legs.size(); ++k)
+                if (legs[k] == i)
+                    rank = k;
+            const bool phase0 = (rank % 2 == 0);
+            const float ph = phase0 ? 0.f : 3.14159265f;
+            // The swing is about the leg's own axis across the body.
+            angle = std::sin(stride + ph) * 0.22f;
+            // TURNING: when the animal swings round toward a target, the legs
+            // on the inside of the turn shorten their step and the outside
+            // legs lengthen, so the hooves plant and push off instead of
+            // pivoting in place (which reads as sliding feet).
+            if (hasHeadingTarget) {
+                float td = headingTarget - heading;
+                while (td > 3.14159265f) td -= 6.28318531f;
+                while (td < -3.14159265f) td += 6.28318531f;
+                const float sideSign = (glm::dot(rig.bones[i].a, side) >
+                                        glm::dot(rig.center, side))
+                                           ? 1.f
+                                           : -1.f;
+                angle += td * 0.15f * sideSign;
+            }
+            // A grazing animal STANDS on four feet.
+            angle *= (1.f - grazeBlend);
+            break;
+        }
+        case BoneRole::Spine: {
+            // The BOW. The spine's segment starts at the body's BACK, so a
+            // pitch about it drops the FRONT - the animal leans over its
+            // front legs to reach the grass, the way a grazing quadruped
+            // does. Without it the head can only dip by the length of its
+            // neck (0.32 m on the alpaca), which is nowhere near the ground.
+            // The body stays LEVEL while grazing: a spine bow tips the body and
+            // lifts the back feet off the ground (rigid legs cannot extend), so
+            // the animal would no longer stand on four feet. The head reaches
+            // down through the neck instead.
+            angle = grazeBlend * 0.15f;
+            axis = side;
+            break;
+        }
+        case BoneRole::Neck:
+        case BoneRole::Head: {
+            // The neck reaches down and forward, on top of the bow. The angle
+            // is SHARED by the chain's links (the tip's total is their sum),
+            // so the bend is a curve along the neck, not a hinge at its base.
+            // The head also TURNS (a yaw relative to the body) so it can look
+            // where the animal is going - shared across the links like the
+            // pitch, so the neck curves rather than kinking.
+            angle = headTotal / float(std::max(1, neckLinks));
+            axis = side;
+            isNeckHead = true;
+            break;
+        }
+        case BoneRole::Tail: {
+            angle = 0.22f * std::sin(stride + 1.1f);
+            axis = up;
+            break;
+        }
+        default:
+            angle = 0.f;
+            break;
+        }
+        boneJoint[i] = b.a;
+        // The LOCAL transform: a rotation about the bone's own joint, in the
+        // rest frame.
+        const glm::mat3 R = isNeckHead
+            ? axisRotation(side, angle) *
+              axisRotation(up, headTurnCur / float(std::max(1, neckLinks)))
+            : axisRotation(axis, angle);
+        glm::vec3 t = b.a - R * b.a;
+        // CHAIN it: the bone's world transform is its parent's composed with
+        // its own. Without this the head keeps turning about its REST joint
+        // while the body bows under it - the neck visibly tears away from
+        // the shoulders (which is what the user saw).
+        const int parent = b.parent;
+        if (parent >= 0 && size_t(parent) < n) {
+            const glm::mat3 Rp = boneRot[size_t(parent)];
+            const glm::vec3 tp = boneXform[size_t(parent)];
+            boneRot[i] = Rp * R;
+            boneXform[i] = Rp * t + tp;
+        } else {
+            boneRot[i] = R;
+            boneXform[i] = t;
+        }
+    }
 }
 
 glm::vec3 MicroBehaviour::toLocal(glm::vec3 p) const

@@ -21,13 +21,19 @@ PRIMITIVES available to the code that executes your tool calls:
 
 When generating objects, prefer simple boxes/cylinders/ellipsoids via the tools. Do not emit C++ code; emit only tool calls.
 
-TOOLS - the names are EXACTLY these six strings, never invent or modify them:
+TOOLS - the names are EXACTLY these seven strings, never invent or modify them:
 1. create_box { "name": str, "size": [sx,sy,sz] voxels (int, 1m = 10 voxels), "material": int, "anchor": [x,y,z] optional }
 2. create_cylinder { "name": str, "radius": meters, "height": meters, "material": int, "anchor" optional }
 3. create_ellipsoid { "name": str, "radius": [rx,ry,rz] meters, "material": int, "anchor" optional }
 4. create_stamp { "name": str, "cells": [{"dx","dy","dz","mat"}...] } -> literal voxel art relative to anchor
 5. list_world {} -> lists existing layers
 6. probe { "x", "y", "z" } -> signed distance at a world point
+7. set_behaviour { "name": str, "command": "run"|"walk"|"graze"|"stop"|"auto", "speed": meters/s optional } -> tells a HIGH-DETAIL ANIMAL what to do (it has its own skeleton and walks on its own). "let the alpaca run" -> {"name":"alpaca","command":"run"}; "make it eat grass" -> command "graze".
+
+A high-detail animal (an alpaca, a cat) is a MICRO LAYER: it has its own
+fine lattice, its own skeleton, and it moves by itself. To change what it
+does, use set_behaviour with the animal's NAME (the layer's name, e.g.
+"alpaca") - not a create_* tool, which would make a new object instead.
 
 NEVER call tools named like "add_rock", "rock_1", "place_tree" - those do not exist.
 To add a rock use create_ellipsoid with material 4. To add wood use material 6.

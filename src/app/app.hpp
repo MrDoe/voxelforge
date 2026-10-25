@@ -235,8 +235,49 @@ private:
     void clearMicroRotatePreview();
     // Advance the AUTONOMOUS BEHAVIOURS (a micro layer with a "behaviour"
     // in the manifest walks on its own) and push their transforms to the
-    // micro pass. Called once per frame.
+    // micro pass. Called once per frame. A walker is GROUND-CLAMPED to the
+    // terrain and refuses a step into an object; see world/collision.cpp.
     void updateMicroBehaviours(float dt);
+    // Tell a micro object what to do: "run", "walk", "graze", "stop",
+    // "auto". `file` is a manifest file ("micro/alpaca.vxw") or a layer
+    // NAME ("alpaca"). This is how the AI drives an animal ("let the alpaca
+    // run") and how a user would do it.
+    bool setMicroBehaviour(const std::string& file, const std::string& command,
+                           float speed = 0.f);
+
+    // ---- collision (world/collision.cpp) -----------------------------------
+    // ONE solidity oracle shared by the fly camera and every autonomous
+    // walker. World reads use the live ChunkStore (terrain + objects + runtime
+    // edits); micro reads sample each field at its CURRENT transform (the
+    // behaviour offset/rotation and a staged move/rotate preview), so a
+    // collision cannot lag the geometry the user is standing next to.
+    bool worldSolidAt(glm::vec3 p); // store cell solid (sdfRaw <= 0)
+    bool microSolidAt(glm::vec3 p); // inside any micro object
+    // ONE micro field at its current transform (behaviour + staged preview).
+    // microSolidAt is the union over these; the headless check targets one so
+    // a nearby object cannot answer for it.
+    bool microFieldSolidAt(size_t index, glm::vec3 p);
+    bool solidAt(glm::vec3 p);      // world OR micro
+    // Move the camera sphere, sliding along walls. A camera that is already
+    // embedded is allowed to move freely (escape hatch).
+    glm::vec3 resolveCameraMove(glm::vec3 from, glm::vec3 delta);
+    // A walker's obstacle test: world OBJECTS and every OTHER micro field.
+    // Terrain is deliberately excluded (the walker is clamped to the
+    // heightfield separately) and so is its own field. `why` (optional) gets
+    // the reason: 1 = water, 2 = a world object cell, 3 = another micro
+    // object - a trace only, the verdict is identical without it.
+    bool microFootprintBlocked(int microIndex, glm::vec3 offset,
+                               int* why = nullptr);
+    // A conservative world AABB for ONE micro object at the transform
+    // microFieldSolidAt applies to it (behaviour offset + rotation about the
+    // pivot; a staged Move/Rotate preview is NOT included - the footprint
+    // probe turns its broad phase off while one is active). false = no body.
+    bool microWorldBounds(size_t microIndex, glm::vec3& outLo,
+                          glm::vec3& outHi) const;
+    // The terrain top at a world xz, from the CPU mirror of the SHADED height
+    // texture (kept in sync after every live stamp, so an added mound is
+    // ground a walker climbs). Returns -1e9 outside the landscape.
+    float terrainTopAt(float x, float z);
     // The micro objects as SUN-SHADOW OCCLUDERS for the world's baked surfel
     // shadow. Filled by loadMicroObjects and consumed by rebuildSurfels, which
     // is why a world reload loads the micro objects FIRST.
@@ -277,7 +318,8 @@ private:
     void rebuildFurCards();
     // Grow the cards for ONE micro field and append them to m_furObjects.
     // Returns the new object's fur index, or -1 when it grows no coat.
-    int growFurCards(const vf::voxel::MicroField& field, glm::vec3 worldOffset);
+    int growFurCards(const vf::voxel::MicroField& field, glm::vec3 worldOffset,
+                     const vf::voxel::MicroRig& rig);
     // Sun: m_sunDir is the single source of truth for where the sun is (it
     // rides the per-frame push constant), so every control that moves the sun
     // funnels through setSunAngles and nothing keeps parallel angle floats.
@@ -323,6 +365,11 @@ private:
     void setupCameraAndShots();
     // The one-shot env overrides (render flags, photorealism, SSAO, TAA).
     void applyStartupEnvOverrides(FrameInputs& fx);
+    // VF_TEST_COLLISION=1: drive the SHIPPING camera sweep and the walker
+    // response headlessly and log what they did (PASS/FAIL), so a script can
+    // assert that the camera stops and no walker sinks or overlaps. See
+    // frame/run_startup.cpp.
+    void runCollisionSelfCheck();
     // ImGui context, theme, backends, fonts, and the HUD's linear sampler.
     void initImGui();
     // One step of the frame loop (frame/run_*.cpp).
@@ -471,6 +518,14 @@ private:
     vf::voxel::LayeredWorld m_layers;
     float m_layerPollT = 0.f;
     bool m_pendingWorldReload = false;
+    // Separate manifest watcher for micro-voxel objects: they are not part
+    // of the world record set, so a manifest-only change (e.g. an MCP
+    // set_layer_transform on a micro layer) never triggers applyWorldReload
+    // and loadMicroObjects() would not run. Track the manifest mtime/size
+    // here so such edits hot-reload the micro objects within ~0.5 s.
+    unsigned long long m_microManifestMtime = 0;
+    unsigned long long m_microManifestSize = 0;
+    bool m_microManifestSeeded = false;
     // texture picker state: the live binding table + the files found in
     // assets/textures/ (paths relative to the manifest dir, e.g. "textures/x.png")
     std::vector<vf::voxel::worldfile::TextureBinding> m_texBindings;
@@ -507,6 +562,11 @@ private:
     std::vector<VkSemaphore> m_acquireSems; // one per swapchain image
 
     vf::Camera m_camera;
+    // The camera is a collision sphere in interactive flight (VF_NO_COLLIDE=1
+    // disables it, e.g. to inspect a sealed interior). Camera placement from
+    // --cam/--shot is never collided: a test that pins a camera inside a wall
+    // must still be able to render it.
+    bool m_collisionEnabled = true;
     float m_lastFrameMs = 16.7f;
     double m_avgMs = 16.7f;
     float m_minMs = 1e9f, m_maxMs = 0.0f;

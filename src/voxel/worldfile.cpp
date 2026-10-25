@@ -483,6 +483,17 @@ bool loadManifest(const std::string& path, std::vector<WorldLayer>& out)
                         j.num(layer.scale);
                     else if (k == "behaviour")
                         j.str(layer.behaviour);
+                    else if (k == "command")
+                        j.str(layer.command);
+                    else if (k == "pose" && j.eat('[')) {
+                        float v = 0.f;
+                        while (j.num(v)) {
+                            layer.pose.push_back(v);
+                            if (!j.eat(','))
+                                break;
+                        }
+                        j.eat(']');
+                    }
                     else if (k == "pos") {
                         if (!j.eat('['))
                             return false;
@@ -994,6 +1005,20 @@ bool writeManifest(const std::string& path, const std::vector<WorldLayer>& layer
         // scale stays absent (identity) for byte-identical manifests
         if (l.scale != 1.0f)
             std::fprintf(f, ", \"scale\": %.3f", l.scale);
+        // `behaviour` is LOADED by parseWorldLayer but was not written here, so
+        // the app's own rewrite (which builds world.json from this struct)
+        // silently erased the alpaca's walker on the next run. Emit it only
+        // when set, so manifests that never used the key round-trip unchanged.
+        if (!l.behaviour.empty())
+            std::fprintf(f, ", \"behaviour\": \"%s\"", l.behaviour.c_str());
+        if (!l.command.empty())
+            std::fprintf(f, ", \"command\": \"%s\"", l.command.c_str());
+        if (!l.pose.empty()) {
+            std::fprintf(f, ", \"pose\": [");
+            for (size_t i = 0; i < l.pose.size(); ++i)
+                std::fprintf(f, "%s%.3f", i ? "," : "", l.pose[i]);
+            std::fprintf(f, "]");
+        }
         std::fprintf(f, " }%s\n", i + 1 < layers.size() ? "," : "");
     }
     std::fprintf(f, "  ]");

@@ -31,6 +31,19 @@ std::vector<uint8_t> loadSpirv(const std::string& path)
 // Mirrors the std140 MicroWorld struct in micro_overlay.comp: geo, base, lo, hi
 // - four 16-byte slots per world. kMicroMaxWorlds is the shader's table size.
 constexpr int kMicroMaxWorlds = 16;
+// One bone: the segment it occupies, and its CHAINED transform - a rigid
+// one (R*p + t), because the composition of two pivot-rotations is not a
+// pivot-rotation, and a child that turns about a rest joint while the parent
+// moves tears at the seam.
+struct alignas(16) MicroBoneRow {
+    float a[4];       // the segment's start
+    float b[4];       // the segment's end
+    float xform[4];   // the chained transform's translation (xyz)
+    float r0[4];      // the chained transform's rotation (row-major)
+    float r1[4];
+    float r2[4];
+};
+
 struct alignas(16) MicroWorldRow {
     // geo  = voxel, gridN, chunkM, dimY
     // base = gridBase, chunkInfoBase, dimX, dimZ   <- authored cell dims
@@ -70,8 +83,17 @@ struct alignas(16) MicroWorldRow {
     float arot1[4];
     float arot2[4];
     float apivot[4];
+    // bones = the SKELETON: x = the bone count. The bones follow: their
+    // SEGMENT and JOINT never change, and the gait rewrites only their
+    // rotations.
+    float bones[4];
+    // 12 slots, not 8: a quadruped rig is already 7 bones (spine, 4 legs,
+    // tail, head) and the neck is a CHAIN of three, so 8 would silently drop
+    // the head - and every bone index above the cut, including the parents
+    // the shader composes, would name the wrong bone.
+    MicroBoneRow bone[12];
 };
-static_assert(sizeof(MicroWorldRow) == 224, "std140 slot size");
+static_assert(sizeof(MicroWorldRow) == 1392, "std140 slot size");
 
 } // namespace
 
@@ -184,6 +206,29 @@ bool MicroSvoPass::setMicroWorlds(const std::vector<voxel::MicroWorld>& worlds)
             row.hi[i] = s.worldMax[i];
         }
         row.preview[3] = 0.0f; // no live preview until one is set
+        // The bones: their segments and joints (static) and the identity
+        // rotation, which the gait then drives.
+        const size_t kMaxBones = sizeof(row.bone) / sizeof(row.bone[0]);
+        row.bones[0] = float(std::min(s.rig.bones.size(), kMaxBones));
+        for (size_t bi = 0; bi < s.rig.bones.size() && bi < kMaxBones; ++bi) {
+            const auto& b = s.rig.bones[bi];
+            MicroBoneRow& br = row.bone[bi];
+            br.a[0] = b.a.x; br.a[1] = b.a.y; br.a[2] = b.a.z;
+            br.a[3] = b.radius; // per-bone capsule radius (for microBoneAt)
+            br.b[0] = b.b.x; br.b[1] = b.b.y; br.b[2] = b.b.z;
+            br.b[3] = 0.f;
+            // The transform starts as the IDENTITY (no rotation, no
+            // translation). It must NOT start as "the joint": the slot is
+            // the transform's TRANSLATION, and a joint is a world position -
+            // putting one there translated every object by metres (the vase
+            // and the urn vanished from the scene). The behaviour pushes the
+            // real transform every frame, and an object with no behaviour
+            // keeps the identity.
+            br.xform[0] = 0.f; br.xform[1] = 0.f; br.xform[2] = 0.f;
+            br.r0[0] = 1.f;
+            br.r1[1] = 1.f;
+            br.r2[2] = 1.f;
+        }
         // The rotation preview starts as the identity, inactive: pivot.w = 0
         // is what tells the shader there is nothing to rotate.
         row.rot0[0] = row.rot1[1] = row.rot2[2] = 1.0f;
@@ -270,6 +315,35 @@ void MicroSvoPass::setWorldRotation(size_t worldIndex, glm::mat3 R, glm::vec3 pi
     row.pivot[1] = pivot.y;
     row.pivot[2] = pivot.z;
     row.pivot[3] = active ? 1.0f : 0.0f;
+    vmaFlushAllocation(m_ctx->allocator(), m_worldTable.alloc, 0, VK_WHOLE_SIZE);
+}
+
+void MicroSvoPass::setBoneRotations(size_t worldIndex,
+                                    const std::vector<glm::mat3>& rot,
+                                    const std::vector<glm::vec3>& xform)
+{
+    // The gait rewrites the bones' rotations every frame. Only the matrix
+    // part of each bone changes, so the world table is edited in place (the
+    // segments and the joints stay as they were uploaded).
+    if (!m_worldTable.mapped || worldIndex >= size_t(m_worldCount))
+        return;
+    auto* rows = reinterpret_cast<MicroWorldRow*>(m_worldTable.mapped);
+    MicroWorldRow& row = rows[worldIndex];
+    const int count = int(row.bones[0]);
+    if (count <= 0 || int(rot.size()) < count)
+        return;
+    for (int i = 0; i < count; ++i) {
+        const glm::mat3& R = rot[size_t(i)];
+        MicroBoneRow& br = row.bone[i];
+        br.r0[0] = R[0][0]; br.r0[1] = R[0][1]; br.r0[2] = R[0][2];
+        br.r1[0] = R[1][0]; br.r1[1] = R[1][1]; br.r1[2] = R[1][2];
+        br.r2[0] = R[2][0]; br.r2[1] = R[2][1]; br.r2[2] = R[2][2];
+        if (size_t(i) < xform.size()) {
+            br.xform[0] = xform[size_t(i)].x;
+            br.xform[1] = xform[size_t(i)].y;
+            br.xform[2] = xform[size_t(i)].z;
+        }
+    }
     vmaFlushAllocation(m_ctx->allocator(), m_worldTable.alloc, 0, VK_WHOLE_SIZE);
 }
 
@@ -515,6 +589,69 @@ void MicroSvoPass::record(VkCommandBuffer cmd, const RaymarchPush& push)
     // byte-identical to before.
     if (m_worldCount == 0 || !m_pipeline || !m_set)
         return;
+    // Frustum cull: skip the pass if no micro world's AABB intersects the view.
+    // Also compute a screen-space bounding rectangle so the dispatch only
+    // covers the pixels that can possibly contain a micro object (a full-screen
+    // dispatch wastes ~95% of its threads on empty sky for a small vase).
+    int rectMinX = (int)push.a.z, rectMinY = (int)push.a.w;
+    int rectMaxX = 0, rectMaxY = 0;
+    bool anyVisible = false;
+    {
+        const float tanHalf = push.a.x;
+        const float aspect = push.a.y;
+        const uint32_t W = (uint32_t)push.a.z;
+        const uint32_t H = (uint32_t)push.a.w;
+        auto* rows = reinterpret_cast<MicroWorldRow*>(m_worldTable.mapped);
+        for (int i = 0; i < m_worldCount; ++i) {
+            const MicroWorldRow& r = rows[i];
+            glm::vec3 mn(r.lo[0], r.lo[1], r.lo[2]);
+            glm::vec3 mx(r.hi[0], r.hi[1], r.hi[2]);
+            glm::vec3 c = 0.5f * (mn + mx);
+            glm::vec3 d = c - glm::vec3(push.camPos);
+            float zc = glm::dot(d, glm::vec3(push.camFwd));
+            if (zc < -2.0f)
+                continue;
+            if (zc > 60.0f)
+                continue;
+            float xc = glm::dot(d, glm::vec3(push.camRight));
+            float yc = glm::dot(d, glm::vec3(push.camUp));
+            const float radius = 0.5f * glm::length(mx - mn) + 1.0f;
+            const float halfX = tanHalf * aspect * std::max(zc, 0.1f) + radius;
+            const float halfY = tanHalf * std::max(zc, 0.1f) + radius;
+            if (std::fabs(xc) > halfX || std::fabs(yc) > halfY)
+                continue;
+            anyVisible = true;
+            // Project the 8 corners to screen space.
+            for (int ci = 0; ci < 8; ++ci) {
+                glm::vec3 corner(
+                    (ci & 1) ? mx.x : mn.x,
+                    (ci & 2) ? mx.y : mn.y,
+                    (ci & 4) ? mx.z : mn.z);
+                glm::vec3 dd = corner - glm::vec3(push.camPos);
+                float zz = glm::dot(dd, glm::vec3(push.camFwd));
+                if (zz < 0.1f)
+                    zz = 0.1f;
+                float xx = glm::dot(dd, glm::vec3(push.camRight));
+                float yy = glm::dot(dd, glm::vec3(push.camUp));
+                int sx = (int)((xx / (tanHalf * aspect * zz) * 0.5f + 0.5f) * (float)W);
+                int sy = (int)((-yy / (tanHalf * zz) * 0.5f + 0.5f) * (float)H);
+                // padding
+                sx -= 16; sy -= 16;
+                int sx2 = sx + 32; int sy2 = sy + 32;
+                rectMinX = std::min(rectMinX, sx);
+                rectMinY = std::min(rectMinY, sy);
+                rectMaxX = std::max(rectMaxX, sx2);
+                rectMaxY = std::max(rectMaxY, sy2);
+            }
+        }
+        if (!anyVisible)
+            return;
+        // clamp
+        rectMinX = std::max(0, std::min(rectMinX, (int)W - 1));
+        rectMinY = std::max(0, std::min(rectMinY, (int)H - 1));
+        rectMaxX = std::max(rectMinX + 1, std::min(rectMaxX, (int)W));
+        rectMaxY = std::max(rectMinY + 1, std::min(rectMaxY, (int)H));
+    }
     // Flush the host-written world table before the GPU reads it. makeBuffer
     // allocates with VMA_ALLOCATION_CREATE_HOST_ACCESS_SEQUENTIAL_WRITE_BIT,
     // which on a discrete GPU is host-visible but NOT host-coherent, so a
@@ -527,8 +664,12 @@ void MicroSvoPass::record(VkCommandBuffer cmd, const RaymarchPush& push)
     vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, m_pipeline);
     vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, m_layout, 0, 1, &m_set, 0,
                             nullptr);
-    vkCmdPushConstants(cmd, m_layout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(push), &push);
-    vkCmdDispatch(cmd, uint32_t(push.a.z + 7) / 8, uint32_t(push.a.w + 7) / 8, 1);
+    RaymarchPush pushData = push;
+    pushData.b.z = (float)rectMinX;
+    pushData.b.w = (float)rectMinY;
+    vkCmdPushConstants(cmd, m_layout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(pushData), &pushData);
+    vkCmdDispatch(cmd, uint32_t(rectMaxX - rectMinX + 7) / 8,
+                  uint32_t(rectMaxY - rectMinY + 7) / 8, 1);
 }
 
 void MicroSvoPass::destroy()

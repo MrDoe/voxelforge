@@ -23,6 +23,7 @@
 // preview are applied by the shader exactly as the micro overlay applies them
 // to the field. The two therefore never drift apart.
 #include "voxel/micro_field.hpp"
+#include "voxel/micro_rig.hpp"
 
 #include <cstdint>
 #include <string>
@@ -87,6 +88,13 @@ struct FurObject {
     bool rotActive = false;
     glm::vec3 preview { 0.f };
     bool previewActive = false;
+    // The SKELETON the coat hangs off (per-bone animation). The segments are
+    // in the field's local (rest) frame; the animated transforms are uploaded
+    // per frame. Empty when the object has no rig (a vase, or no behaviour).
+    int boneCount = 0;
+    std::vector<glm::vec3> boneSegA;
+    std::vector<glm::vec3> boneSegB;
+    std::vector<float> boneRadius;
 };
 
 // How the fur grows.
@@ -99,7 +107,7 @@ struct FurParams {
     // gaps (the coat was sparse at close range), and the extra cards bought
     // very little beyond that. Six, with the wider clumps above, is what the
     // softest measured coat used.
-    int perCell = 5;
+    int perCell = 4;
     // A card's peak alpha.
     float alpha = 0.34f;
     // The strand's TILT out of the surface (degrees). A steep strand reads
@@ -140,6 +148,7 @@ struct FurParams {
 // Returns false with `err` when the field is empty or carries no fur
 // material at all.
 bool buildFurCards(const MicroField& field, const FurParams& params, FurObject& out,
-                   std::string* err);
+                   std::string* err, const MicroRig* rig = nullptr,
+                   glm::vec3 worldOffset = glm::vec3(0.0f));
 
 }  // namespace vf::voxel

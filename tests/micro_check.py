@@ -48,6 +48,7 @@ Usage:  python3 tests/micro_check.py [path/to/voxelforge]
 """
 from __future__ import annotations
 
+import copy
 import json
 import os
 import re
@@ -67,7 +68,13 @@ APP = sys.argv[1] if len(sys.argv) > 1 else os.path.join(ROOT, "build", "voxelfo
 # 34 deg / 238 deg, so shadows are thrown toward (0.85, 0.53) in xz).
 MICRO_CAM = "11.45,0.30,11.45,12.22,-0.20,12.14"
 # A camera that fills the frame with the ALPACA (the third micro object).
-ALPACA_CAM = "10.95,0.85,11.45,11.75,0.52,12.55"
+# The alpaca's view is BUILT from the manifest (see micro_cam): the animal
+# is moved around by hand and by its own behaviour, so a hardcoded camera
+# slowly starts measuring empty ground. It is a FUNCTION, not a constant:
+# the manifest is read at run time, and the module-level constants are
+# evaluated at import - before the helper below exists.
+def alpaca_cam() -> str:
+    return micro_cam("alpaca", -0.60, 0.40, -0.55, 0.20, 0.07, 0.05)
 # A view with no micro object in it: the house.
 HOUSE_CAM = "2.5,1.3,6.0,6.8,1.0,12.2"
 W, H = 900, 600
@@ -91,14 +98,23 @@ def render(out: str, cam: str, w: int = W, h: int = H, mode: str = "",
         env["VF_RENDER_FLAGS"] = flags
     if extra_env:
         env.update(extra_env)
-    subprocess.run(
+    # The output is CAPTURED, not discarded: a render that fails must say
+    # why (a gate that fails with "returned non-zero exit status 1" and no
+    # output is a gate that cannot be diagnosed).
+    proc = subprocess.run(
         cmd,
-        check=True,
+        check=False,
         cwd=ROOT,
         env=env,
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
     )
+    if proc.returncode != 0:
+        print("FAIL: the render failed (%d):" % proc.returncode)
+        for line in (proc.stdout or "").splitlines()[-12:]:
+            print("    " + line)
+        raise SystemExit(proc.returncode)
 
 
 def read_ppm(path: str) -> tuple[int, int, bytes]:
@@ -125,8 +141,17 @@ def _write_manifest(doc: dict) -> None:
     os.replace(tmp, MANIFEST)
 
 
-def set_micro(enabled: dict[str, bool], rot: dict[str, float] | None = None) -> None:
-    """Toggle the micro layers in the manifest (and optionally set a rotation)."""
+def set_micro(enabled: dict[str, bool], rot: dict[str, float] | None = None,
+              behaviour: dict[str, str] | None = None) -> None:
+    """Toggle the micro layers in the manifest (and optionally set a rotation
+    or a behaviour).
+
+    The BEHAVIOUR is off unless a check asks for it: a layer with
+    "behaviour": "grazer" WALKS, and every check that measures a still scene
+    (the footprint of a 90 degree yaw, the pick's reach, the house view) then
+    measures an animal that has moved since the last frame. The behaviour
+    check turns it on for itself.
+    """
     with open(MANIFEST) as f:
         doc = json.load(f)
     for layer in doc["layers"]:
@@ -135,6 +160,19 @@ def set_micro(enabled: dict[str, bool], rot: dict[str, float] | None = None) -> 
             layer["enabled"] = bool(enabled.get(name, True))
             if rot is not None and name in rot:
                 layer["rot"] = rot[name]
+            # A still-scene check needs the animal to hold still, but the
+            # field is never REMOVED. The manifest is tracked, and a removed
+            # key is restored only if the snapshot still had it - so one run
+            # that took its snapshot after an earlier run (or an app write)
+            # had already dropped the field loses the grazer for good.
+            # Measured 2026-10-21: `set_micro` popped "behaviour" on its
+            # FIRST call, a crashed run snapshotted the popped state, and the
+            # shipped scene came back without it - the alpaca never walked
+            # again. "stop" is a real command, so a leftover is harmless.
+            if behaviour is not None and name in behaviour:
+                layer["behaviour"] = behaviour[name]
+            elif layer.get("behaviour"):
+                layer["behaviour"] = "stop"
     _write_manifest(doc)
 
 
@@ -142,21 +180,37 @@ def set_micro(enabled: dict[str, bool], rot: dict[str, float] | None = None) -> 
 # back EXACTLY. A restore that only re-enables the layers leaves a rotation
 # behind (measured: the gate turned the shipped alpaca 90 degrees and left it
 # that way).
-_MICRO_SAVED: list[tuple[str, bool, float]] = []
+_MICRO_SAVED: list[dict] = []
 
 
 def save_micro() -> None:
-    """Snapshot the micro entries' VALUES (not their dicts: the manifest is
-    re-read on every write, so a saved dict reference would be stale)."""
+    """Snapshot the micro entries WHOLE (deep copies: the manifest is
+    re-read and rewritten on every toggle, so a saved reference would be
+    stale or already mutated).
+
+    A whole entry, not a few fields: the gate toggles layers and rotates the
+    alpaca, and a restore that only knows about `enabled`/`rot` leaves
+    anything else a check touches behind. The BEHAVIOUR is part of it - the
+    alpaca walks because the manifest says "grazer", and a manifest without
+    that field is an alpaca that never moves again (measured: one app run
+    rewrote world.json without it and the alpaca froze).
+
+    The snapshot is PRINTED, because it also answers a different question: if
+    it is already missing a behaviour, the manifest was damaged BEFORE this
+    run, and the restore will faithfully preserve the damage. Say so now
+    rather than discovering it in `git diff assets/` later."""
     with open(MANIFEST) as f:
         doc = json.load(f)
     _MICRO_SAVED.clear()
     for layer in doc["layers"]:
         if layer.get("role") == "micro":
-            _MICRO_SAVED.append(
-                (layer.get("file", ""), layer.get("enabled", True),
-                 float(layer.get("rot", 0.0)))
-            )
+            _MICRO_SAVED.append(copy.deepcopy(layer))
+    if _MICRO_SAVED:
+        print("[micro] manifest snapshot: " + ", ".join(
+            "%s en=%d rot=%.1f behaviour=%s"
+            % (l.get("file", "?"), 1 if l.get("enabled", True) else 0,
+               float(l.get("rot", 0.0)), l.get("behaviour") or "-")
+            for l in _MICRO_SAVED))
 
 
 def restore_micro() -> None:
@@ -172,37 +226,77 @@ def restore_micro() -> None:
     """
     if not _MICRO_SAVED:
         return
+    saved = {l.get("file", ""): l for l in _MICRO_SAVED}
     for attempt in range(4):
         with open(MANIFEST) as f:
             doc = json.load(f)
-        saved = {name: (enabled, rot) for name, enabled, rot in _MICRO_SAVED}
-        for layer in doc["layers"]:
+        # Replace each micro entry WHOLE. Editing the fields by name is what
+        # let a damaged field survive: a restore that does not know about a
+        # key cannot put it back (an older run wrote "rotDeg", and a missing
+        # "behaviour" was silently restored as missing).
+        for i, layer in enumerate(doc["layers"]):
             if layer.get("role") != "micro":
                 continue
-            entry = saved.get(layer.get("file", ""))
-            if entry:
-                layer["enabled"] = entry[0]
-                layer["rot"] = entry[1]
-            # A key the gate may have introduced (an older run wrote "rotDeg")
-            # would otherwise survive into the shipped manifest.
-            layer.pop("rotDeg", None)
+            want = saved.get(layer.get("file", ""))
+            if want is not None:
+                doc["layers"][i] = copy.deepcopy(want)
         _write_manifest(doc)
-        # Verify: re-read and compare the values we care about.
+        # Verify: every micro entry must equal the snapshot, WHOLE.
         with open(MANIFEST) as f:
             check = json.load(f)
-        ok = True
-        for layer in check["layers"]:
-            if layer.get("role") != "micro":
-                continue
-            entry = saved.get(layer.get("file", ""))
-            if entry and (layer.get("enabled", True) != entry[0]
-                          or float(layer.get("rot", 0.0)) != entry[1]):
-                ok = False
-        if ok:
+        got = {l.get("file", ""): l for l in check["layers"]
+               if l.get("role") == "micro"}
+        if all(got.get(name) == want for name, want in saved.items()):
+            print("[micro] manifest restored (%d micro entries)" % len(saved))
             return
         time.sleep(0.4)
     print("FAIL: the manifest's micro layers could not be restored - "
           "check `git diff assets/world.json`")
+
+
+def micro_pos(name: str) -> tuple[float, float, float]:
+    """The world position of a micro layer, from the manifest. The gate has
+    to follow it: the alpaca is moved around by hand (and by the behaviour),
+    and a hardcoded camera would measure empty ground."""
+    with open(MANIFEST) as f:
+        doc = json.load(f)
+    for layer in doc.get("layers", []):
+        if layer.get("role") == "micro" and layer.get("name") == name:
+            p = layer["pos"]
+            return float(p[0]), float(p[1]), float(p[2])
+    return (0.0, 0.0, 0.0)
+
+
+def micro_cam(name: str, dx: float, dy: float, dz: float,
+              tx: float, ty: float, tz: float) -> str:
+    """A camera around a micro layer, built from where the layer IS.
+
+    The gate's cameras used to be hardcoded, and the alpaca is moved around by
+    hand (and by the behaviour), so a hardcoded camera slowly starts measuring
+    empty ground: the 90 degree yaw's footprint stopped changing because the
+    camera was no longer looking at the animal at all (1.27 -> 1.27).
+    """
+    x, y, z = micro_pos(name)
+    return "%.2f,%.2f,%.2f,%.2f,%.2f,%.2f" % (x + dx, y + dy, z + dz,
+                                              x + tx, y + ty, z + tz)
+
+
+def run_app(cmd: list[str], env: dict[str, str], what: str):
+    """Run the app and REQUIRE success, printing its own last lines if not.
+
+    "returned non-zero exit status 1" with no output is a failure that cannot
+    be diagnosed - and a LOST GPU DEVICE (vkCreateDevice: VkResult -4) looks
+    exactly like it. The render path already captures; these direct app runs
+    (the pick scan, the click scan, the drag, the behaviour command) must too.
+    """
+    proc = subprocess.run(cmd, cwd=ROOT, env=env,
+                          capture_output=True, text=True)
+    if proc.returncode != 0:
+        print("FAIL: %s failed (%d):" % (what, proc.returncode))
+        for line in (proc.stdout + proc.stderr).splitlines()[-12:]:
+            print("    " + line)
+        raise SystemExit(proc.returncode)
+    return proc
 
 
 def differing(a: bytes, b: bytes, thr: int = 16) -> list[int]:
@@ -215,6 +309,20 @@ def differing(a: bytes, b: bytes, thr: int = 16) -> list[int]:
 
 def luma(buf: bytes, i: int) -> int:
     return (buf[i] * 299 + buf[i + 1] * 587 + buf[i + 2] * 114) // 1000
+
+
+# 511 minus bit 1 (Shadows): a footprint diff must be the OBJECT's
+# silhouette, not the object plus its baked cast shadow. The shadow points
+# with the SUN, so a yaw cannot turn it - and it was most of the mask
+# (8913 px with it vs 4528 without, measured from 4 m), so it pinned the
+# aspect near square. Measured on the gate's own shot: with the shadow in,
+# the aspect is 0.945 -> 0.484 (both below 1, so "did it turn" never
+# fires) and the mask's principal axis turns only 16.8 deg under a 90 deg
+# yaw; with it out, the same two renders give 1.291 -> 0.493 at 2.1 m and
+# 2.28 -> 0.43 at 4 m, with the axis turning 97.7 deg. The object always
+# turned - the gate was measuring the shadow. (Bit 1 = Shadows: 510 clears
+# bit 0, not this.)
+SUN_OFF = "509"
 
 
 def main() -> int:
@@ -322,12 +430,10 @@ def main() -> int:
         #    (b) CAST: the world bake must report surfels darkened by the
         #        micro fields. A "cast shadow" that darkens nothing is the
         #        failure mode to watch for, and it is silent.
-        proc = subprocess.run(
+        proc = run_app(
             [APP, "--shot", os.path.join(tmpdir, "bake.ppm"), "--cam", MICRO_CAM,
              "--width", "320", "--height", "200"],
-            cwd=ROOT, env=os.environ.copy(), capture_output=True, text=True,
-            check=True,
-        )
+            os.environ.copy(), "the cast-shadow bake")
         m = re.search(r"micro cast shadow darkened (\d+) surfel", proc.stdout + proc.stderr)
         note(
             m is not None and int(m.group(1)) >= 5,
@@ -345,10 +451,10 @@ def main() -> int:
         fur_off = os.path.join(tmpdir, "fur_off.ppm")
         set_micro({"micro/vase.vxw": True, "micro/urn.vxw": True,
                    "micro/alpaca.vxw": True})
-        render(fur_on, ALPACA_CAM, 700, 700)
+        render(fur_on, alpaca_cam(), 700, 700)
         set_micro({"micro/vase.vxw": False, "micro/urn.vxw": False,
                    "micro/alpaca.vxw": False})
-        render(fur_off, ALPACA_CAM, 700, 700)
+        render(fur_off, alpaca_cam(), 700, 700)
         _, _, fa = read_ppm(fur_on)
         _, _, fb = read_ppm(fur_off)
         apx = differing(fa, fb, 14)
@@ -379,8 +485,14 @@ def main() -> int:
         #    silhouette's base row IS the pivot's projection - that is the
         #    "did it stay put" measure. From directly above the base row would
         #    be a world x/z and would measure nothing.
-        top_cam = "11.72,1.85,12.32,11.78,-0.25,12.30"
-        side_cam = ALPACA_CAM
+        # STRAIGHT DOWN: the footprint is then the animal's true x/z extent,
+        # and a 90 degree yaw swaps the two axes.
+        # dy is 4 m, not 2.10: at 2.10 m the animal's long axis reached past
+        # the frame (the diff mask touched x=0 AND y=559), and the aspect of
+        # a CLIPPED bbox is not the object's aspect - which is how the check
+        # reported 0.99 -> 0.48 for an object that does turn.
+        top_cam = micro_cam("alpaca", 0.0, 4.0, 0.0, 0.0, 0.0, 0.0)
+        side_cam = alpaca_cam()
 
         def footprint(rot_deg: float, cam: str) -> tuple[int, int, int, int, int] | None:
             tag = "%d_%s" % (rot_deg, "top" if cam is top_cam else "side")
@@ -388,11 +500,13 @@ def main() -> int:
             off = os.path.join(tmpdir, "rot%s_off.ppm" % tag)
             set_micro({"micro/vase.vxw": False, "micro/urn.vxw": False,
                        "micro/alpaca.vxw": False})
-            render(off, cam, 560, 560)
+            # SUN_OFF for BOTH frames: the object's cast shadow lies on the
+            # terrain and never rotates, so leaving it in measures the sun.
+            render(off, cam, 560, 560, flags=SUN_OFF)
             set_micro({"micro/vase.vxw": True, "micro/urn.vxw": True,
                        "micro/alpaca.vxw": True},
                       {"micro/alpaca.vxw": rot_deg})
-            render(on, cam, 560, 560)
+            render(on, cam, 560, 560, flags=SUN_OFF)
             _, _, oa = read_ppm(on)
             _, _, ob = read_ppm(off)
             pxs = differing(oa, ob, 14)
@@ -416,8 +530,10 @@ def main() -> int:
             # flips.
             a0 = (t0[2] - t0[0]) / max(1, t0[3] - t0[1])
             a90 = (t90[2] - t90[0]) / max(1, t90[3] - t90[1])
+            # The aspect must CROSS 1: the yaw swaps the animal's long and
+            # short axes, so it flips whichever way round the camera looks.
             note(
-                a0 > 1.0 > a90,
+                (a0 - 1.0) * (a90 - 1.0) < 0.0,
                 "a 90 degree yaw turns the object (footprint aspect %.2f -> %.2f)"
                 % (a0, a90),
             )
@@ -446,11 +562,10 @@ def main() -> int:
         pick_env = os.environ.copy()
         pick_env["VF_TEST_MICRO_PICK"] = "1"
         pick_env["VF_OVERLAY_PATH"] = os.path.join(tmpdir, "overlay.vxw")
-        proc = subprocess.run(
+        proc = run_app(
             [APP, "--shot", os.path.join(tmpdir, "pick.ppm"), "--cam", MICRO_CAM,
              "--width", "320", "--height", "200"],
-            cwd=ROOT, env=pick_env, capture_output=True, text=True, check=True,
-        )
+            pick_env, "the pick scan")
         m = re.search(r"VF_TEST_MICRO_PICK: (\d+)/(\d+) micro objects selectable",
                       proc.stdout + proc.stderr)
         note(
@@ -474,13 +589,13 @@ def main() -> int:
         rot_bg = os.path.join(tmpdir, "rot_preview_bg.ppm")
         set_micro({"micro/vase.vxw": False, "micro/urn.vxw": False,
                    "micro/alpaca.vxw": True})
-        render(rot_off, ALPACA_CAM, 600, 600)
-        render(rot_on, ALPACA_CAM, 600, 600,
+        render(rot_off, alpaca_cam(), 600, 600)
+        render(rot_on, alpaca_cam(), 600, 600,
                extra_env={"VF_TEST_ROTATE_LIVE": "90,0,0",
                           "VF_ROTATE_LAYER": "micro/alpaca.vxw"})
         set_micro({"micro/vase.vxw": False, "micro/urn.vxw": False,
                    "micro/alpaca.vxw": False})
-        render(rot_bg, ALPACA_CAM, 600, 600)
+        render(rot_bg, alpaca_cam(), 600, 600)
         _, _, ra = read_ppm(rot_on)
         _, _, rb = read_ppm(rot_off)
         _, _, rbg = read_ppm(rot_bg)
@@ -514,10 +629,9 @@ def main() -> int:
         click_env = os.environ.copy()
         click_env["VF_TEST_CLICK_SCAN"] = "1"
         click_env["VF_OVERLAY_PATH"] = os.path.join(tmpdir, "overlay.vxw")
-        proc = subprocess.run(
+        proc = run_app(
             [APP, "--smoke", "240", "--width", "900", "--height", "600"],
-            cwd=ROOT, env=click_env, capture_output=True, text=True, check=True,
-        )
+            click_env, "the click scan")
         out = proc.stdout + proc.stderr
         picked = len(re.findall(r"pick selected .* layer micro/", out))
         activated = len(re.findall(r"rotate: activated micro/", out))
@@ -525,6 +639,75 @@ def main() -> int:
              "the Ctrl+LMB pick selects a micro object (%d picks)" % picked)
         note(activated > 0,
              "a plain click activates a micro object (%d activations)" % activated)
+
+        # 5d. THE MOVE DRAG. Dragging a micro object with the pointer is
+        #     what a user actually does ("moving microvoxel objects does not
+        #     work"), and it is the only path that exercises the whole Move
+        #     lane: the grab, the axis handle, the drag and the staged delta.
+        #     VF_TEST_MOVE_DRAG drives it through the app's pointer seam.
+        print("[micro] checking the move drag ...")
+        drag_env = os.environ.copy()
+        drag_env["VF_TEST_MOVE_DRAG"] = "1"
+        drag_env["VF_OVERLAY_PATH"] = os.path.join(tmpdir, "overlay.vxw")
+        # FRAME the target. Without --cam the reference camera sees the
+        # vase/urn as a ~2 px blob 15 m away (their pos.y is -0.25, so only
+        # their tops clear the ground), and the drag's step-3 scan cannot
+        # land on 2 px: its rows are 510/513 where the object's pixels are
+        # 511/512, so the grab finds nothing and every later step is
+        # skipped - the same frame's step-4 click scan hits (632,512)
+        # because 512 IS on its grid. Measured with this camera: "grabbed
+        # micro/vase.vxw on axis X", gizmo (461.1,300.4) r=46.0, "drag
+        # ended with delta (+2.000,+0.000,+0.000)". The camera is built
+        # from the manifest (micro_cam), like every other camera here, so
+        # it follows the layer instead of going stale; what the gate tests -
+        # grab -> axis handle -> drag -> non-zero delta, through the real
+        # pointer path - is untouched.
+        proc = run_app(
+            [APP, "--smoke", "200", "--width", "900", "--height", "600",
+             "--cam", micro_cam("vase", 0.0, 1.7, 1.3, 0.0, 0.1, 0.0)],
+            drag_env, "the move drag")
+        out = proc.stdout + proc.stderr
+        grabbed = "move: grabbed micro/" in out
+        m = re.search(r"the drag ended with delta \(([-+0-9.]+),([-+0-9.]+),"
+                      r"([-+0-9.]+)\)", out)
+        moved = m is not None and any(abs(float(m.group(i))) > 0.05 for i in (1, 2, 3))
+        note(grabbed, "a micro object can be grabbed for a move")
+        note(moved, "the drag moves the micro object (%s)"
+             % (("delta %s,%s,%s m" % m.groups()) if m else "no delta"))
+
+        # 5e. THE AUTONOMOUS BEHAVIOUR. The animal walks on its own, and
+        #     the AI can tell it what to do ("let the alpaca run").
+        print("[micro] checking the autonomous behaviour ...")
+        set_micro({"micro/vase.vxw": True, "micro/urn.vxw": True,
+                   "micro/alpaca.vxw": True},
+                  behaviour={"micro/alpaca.vxw": "grazer"})
+        ap = micro_pos("alpaca")
+        bcam = "%.2f,%.2f,%.2f,%.2f,%.2f,%.2f" % (
+            ap[0] - 0.6, ap[1] + 1.2, ap[2] - 1.1,
+            ap[0], ap[1] + 0.45, ap[2])
+        walk0 = os.path.join(tmpdir, "walk0.ppm")
+        walk1 = os.path.join(tmpdir, "walk1.ppm")
+        render(walk0, bcam, 600, 500,
+               extra_env={"VF_TEST_MICRO_BEHAVIOUR": "0"})
+        render(walk1, bcam, 600, 500,
+               extra_env={"VF_TEST_MICRO_BEHAVIOUR": "1.2"})
+        _, _, wa = read_ppm(walk0)
+        _, _, wb = read_ppm(walk1)
+        wpx = differing(wa, wb)
+        note(len(wpx) > 500,
+             "the animal moves on its own (%d px changed)" % len(wpx))
+        # The AI's command: the same path the chat's "set_behaviour" tool
+        # takes, driven headlessly.
+        cmd_env = os.environ.copy()
+        cmd_env["VF_TEST_BEHAVIOUR_CMD"] = "alpaca:run:0.6"
+        cmd_env["VF_OVERLAY_PATH"] = os.path.join(tmpdir, "overlay.vxw")
+        proc = run_app(
+            [APP, "--smoke", "60", "--width", "480", "--height", "320"],
+            cmd_env, "the behaviour command")
+        out = proc.stdout + proc.stderr
+        note("-> run" in out,
+             "the AI can tell the animal what to do (%s)"
+             % ("ok" if "-> run" in out else "no command in the log"))
 
         # 6. NO WORLD REGRESSION: the house view is untouched.
         print("[micro] rendering the house view (no micro object in it) ...")

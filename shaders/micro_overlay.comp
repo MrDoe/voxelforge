@@ -59,6 +59,19 @@ layout(std430, set = 0, binding = 10) readonly buffer MField { uint uMField[]; }
 //          lo.w = this world's offset into uMField, in cells
 // The node/child/brick bases are NOT here: they are folded into each world's
 // chunkInfo entries at upload time, so one flat index serves every world.
+// One bone: the segment it occupies (a start and an end), the joint it
+// turns about, and the animated rotation matrix (row-major). A bone is a
+// rigid rotation about its joint, so the field can be sampled through it.
+struct MicroBone {
+    vec4 a;
+    vec4 b;
+    // The CHAINED transform's translation (xyz) - the bone's rigid transform
+    // is R*p + t, and the inverse is R^T*(p - t).
+    vec4 joint;
+    vec4 r0;
+    vec4 r1;
+    vec4 r2;
+};
 struct MicroWorld {
     vec4 geo;
     uvec4 base;
@@ -89,6 +102,11 @@ struct MicroWorld {
     vec4 arot1;
     vec4 arot2;
     vec4 apivot;
+    // The SKELETON: x = the bone count. The bones themselves follow, in the
+    // world table - their segments and joints never change, and the gait
+    // rewrites only their rotations.
+    vec4 bones;
+    MicroBone bone[12];
 };
 layout(std140, set = 0, binding = 7) readonly uniform WorldTable {
     MicroWorld uWorlds[16];
@@ -243,8 +261,8 @@ vec3 microAnimate(int w, vec3 p)
         return p;
     const mat3 R = mat3(wt.uWorlds[w].arot0.xyz, wt.uWorlds[w].arot1.xyz,
                         wt.uWorlds[w].arot2.xyz);
-    p -= wt.uWorlds[w].anim.xyz;
-    return wt.uWorlds[w].apivot.xyz + R * (p - wt.uWorlds[w].apivot.xyz);
+    p = wt.uWorlds[w].apivot.xyz + R * (p - wt.uWorlds[w].apivot.xyz);
+    return p + wt.uWorlds[w].anim.xyz;
 }
 
 // The inverse: a world point back into the object's baked frame.
@@ -254,7 +272,7 @@ vec3 microUnanimate(int w, vec3 p)
         return p;
     const mat3 R = mat3(wt.uWorlds[w].arot0.xyz, wt.uWorlds[w].arot1.xyz,
                         wt.uWorlds[w].arot2.xyz);
-    p += wt.uWorlds[w].anim.xyz;
+    p -= wt.uWorlds[w].anim.xyz;
     return wt.uWorlds[w].apivot.xyz + transpose(R) * (p - wt.uWorlds[w].apivot.xyz);
 }
 
@@ -265,6 +283,81 @@ vec3 microDirUnanimate(int w, vec3 d)
         return d;
     return transpose(mat3(wt.uWorlds[w].arot0.xyz, wt.uWorlds[w].arot1.xyz,
                            wt.uWorlds[w].arot2.xyz)) * d;
+}
+
+// The SKELETON. A bone is a SEGMENT in the object's own REST frame (the rig is
+// DERIVED from the object's voxels, so a newly imported model has one too),
+// and a point belongs to the bone whose rest pose it lies nearest. The seams
+// fall where two bones meet INSIDE the body, so they never show on the
+// silhouette.
+//
+// WHICH BONE IS THE WHOLE PROBLEM, and it has to be answered in the REST
+// frame. The segments are stored in the rest pose, so testing the POSED point
+// against them (the old rule) reclassifies whatever the pose has moved: the
+// moment the spine bows 35 deg to graze, the whole front of the torso stops
+// being nearest its own segment and is handed to the HEAD or a LEG. Two things
+// break at once and both are visible on screen:
+//   * the surface is un-boned through the WRONG transform, so the neck and
+//     torso deform as if they belonged to the head - the neck then bends
+//     against the body instead of with it;
+//   * its texture is sampled at the WRONG rest point, so the fleece slides
+//     over the body as the animal moves.
+//
+// So ask each candidate the question that HAS an answer: un-bone the point
+// with THAT bone's own transform and measure the distance to THAT bone's own
+// segment. For the right bone the point lands back on its rest pose, at the
+// distance the skin sits from the bone axis; a wrong transform throws it off.
+// At rest every candidate returns the same point, so this reduces exactly to
+// the plain nearest-segment rule.
+int microBoneAt(int w, vec3 p)
+{
+    const int count = int(wt.uWorlds[w].bones.x);
+    if (count <= 0)
+        return -1;
+    int best = -1;
+    float bestD = 1e30;
+    for (int i = 0; i < count; ++i) {
+        const MicroBone mb = wt.uWorlds[w].bone[i];
+        const mat3 R = mat3(mb.r0.xyz, mb.r1.xyz, mb.r2.xyz);
+        const vec3 q = transpose(R) * (p - mb.joint.xyz);
+        const vec3 a = mb.a.xyz;
+        const vec3 ab = mb.b.xyz - a;
+        const float t = clamp(dot(q - a, ab) / max(dot(ab, ab), 1e-12), 0.0, 1.0);
+        const float d = max(0.0, length(q - (a + ab * t)) - mb.a.w);
+        if (d < bestD) {
+            bestD = d;
+            best = i;
+        }
+    }
+    return best;
+}
+
+// A bone's transform is a RIGID one (R*p + t), CHAINED: it is the parent's
+// composed with the bone's own rotation. The inverse is R^T*(p - t).
+//
+// It has to be a general rigid transform and not a rotation about a pivot:
+// the composition of two pivot-rotations is not a pivot-rotation, and a child
+// that turns about a REST joint while the parent moves tears at the seam -
+// which is exactly what the neck did (the user saw a broken neck when the
+// animal bowed).
+vec3 microUnbone(int w, vec3 p, int bone)
+{
+    if (bone < 0)
+        return p;
+    const MicroBone mb = wt.uWorlds[w].bone[bone];
+    const mat3 R = mat3(mb.r0.xyz, mb.r1.xyz, mb.r2.xyz);
+    return transpose(R) * (p - mb.joint.xyz);
+}
+
+// The bone's transform, applied to a point: the animated position of a rest
+// pose point.
+vec3 microRebone(int w, vec3 p, int bone)
+{
+    if (bone < 0)
+        return p;
+    const MicroBone mb = wt.uWorlds[w].bone[bone];
+    const mat3 R = mat3(mb.r0.xyz, mb.r1.xyz, mb.r2.xyz);
+    return R * p + mb.joint.xyz;
 }
 
 // A WORLD point -> the object's BAKED frame (the field's frame). The
@@ -279,6 +372,70 @@ vec3 microToBaked(int w, vec3 p)
     return wt.uWorlds[w].pivot.xyz +
            transpose(microRot(w)) * (p - wt.uWorlds[w].pivot.xyz);
 }
+
+// The RENDERED point -> the BAKED frame. THE one frame mapping: the field
+// trace uses it (microMapWorld) and so does every surface lookup - texture,
+// material cell, octree, normal, AO.
+//
+// It differs from microToBaked() by the staged Move preview, which is a FIELD
+// TRANSFORM like the behaviour and the rotation preview, not a display offset.
+// It used to be applied in main() AFTER the trace, which meant the trace saw
+// the object where it was baked while the display moved the surface: the
+// covered pixels were the old silhouette, the depth was the old depth, and
+// shading sampled the object beside the one on screen. As part of this mapping
+// the trace, the depth test and the shading agree while the object is dragged,
+// and nothing downstream has to un-shift anything.
+vec3 microShadeToBaked(int w, vec3 p)
+{
+    const vec4 pv = wt.uWorlds[w].preview;
+    if (pv.w > 0.5)
+        p -= pv.xyz;
+    return microToBaked(w, p);
+}
+
+// The point in the object's OWN frame (the rest pose). It is where the
+// object's TEXTURE lives: a world-space sample slides over the animal as it
+// walks and as its bones swing, because the texture is bound to the surface,
+// not to the world.
+vec3 microRestPoint(int w, vec3 p)
+{
+    const vec3 rest = microShadeToBaked(w, p);
+    return microUnbone(w, rest, microBoneAt(w, rest));
+}
+
+// A DIRECTION through a bone's transform (rotations only; a direction has no
+// translation). The fur's projection axes have to travel with the skin, so the
+// texture is sampled in the REST frame with the REST normal - projecting with
+// the ANIMATED normal makes the pattern crawl over the body whenever a bone
+// turns (the graze bows the spine 35 degrees, which is plainly visible).
+vec3 microDirUnbone(int w, vec3 d, int bone)
+{
+    if (bone < 0)
+        return d;
+    const MicroBone mb = wt.uWorlds[w].bone[bone];
+    return transpose(mat3(mb.r0.xyz, mb.r1.xyz, mb.r2.xyz)) * d;
+}
+
+vec3 microDirRebone(int w, vec3 d, int bone)
+{
+    if (bone < 0)
+        return d;
+    const MicroBone mb = wt.uWorlds[w].bone[bone];
+    return mat3(mb.r0.xyz, mb.r1.xyz, mb.r2.xyz) * d;
+}
+
+// A direction from the baked frame back into the world: the inverse of
+// microDirToBaked (the preview's rotation, then the behaviour's).
+vec3 microDirFromBaked(int w, vec3 d)
+{
+    if (microRotOn(w))
+        d = microRot(w) * d;
+    if (wt.uWorlds[w].anim.w >= 0.5)
+        d = mat3(wt.uWorlds[w].arot0.xyz, wt.uWorlds[w].arot1.xyz,
+                 wt.uWorlds[w].arot2.xyz) * d;
+    return d;
+}
+
 
 // A direction (no translation) into the baked frame.
 vec3 microDirToBaked(int w, vec3 d)
@@ -321,10 +478,23 @@ vec3 microDirToBaked(int w, vec3 d)
 // conservative step instead.
 float microMapWorld(int w, vec3 p, float voxel, int gridN, uint gridBase)
 {
-    // The field lives in the BAKED frame, so a live rotation preview maps the
-    // world point into it first (see microToBaked). The distance that comes
-    // back is a distance in the world frame - a rotation preserves them.
-    p = microToBaked(w, p);
+    // The field lives in the BAKED frame, so the live transform previews map
+    // the world point into it first (see microShadeToBaked: the rotation,
+    // then the staged Move). The distance that comes back is a distance in the
+    // world frame - a translation and a rotation both preserve them.
+    //
+    // The Move preview belongs HERE, not in main(). It used to shift the hit
+    // point after the trace, which meant the TRACE saw the object where it was
+    // BAKED while the display moved the surface: the pixels the object covered
+    // were its old silhouette, its depth was the old depth, and the shading
+    // sampled the object BESIDE the one on screen. As a field transform the
+    // trace, the depth test and every surface lookup agree, which is the same
+    // rule the behaviour and the rotation preview already follow.
+    p = microShadeToBaked(w, p);
+    // The SKELETON: the field is the REST POSE, so the animated surface is
+    // found by sampling through the bone's INVERSE rotation. The bone of a
+    // point is the bone whose segment is nearest it.
+    p = microUnbone(w, p, microBoneAt(w, p));
     vec3 wmin = wt.uWorlds[w].lo.xyz;
     vec3 wsize = wt.uWorlds[w].hi.xyz - wmin;
     vec3 rp = p - wmin;
@@ -379,6 +549,20 @@ float microMap(vec3 p)
     return d;
 }
 
+// The union field as SHADING sees it: the SAME field the trace marches.
+//
+// It used to subtract the staged Move preview here, because main() applied the
+// preview as a DISPLAY-only shift after the trace. The preview is part of the
+// field-sampling frame now (microMapWorld -> microShadeToBaked), so there is
+// nothing left to undo: trace, depth test and every surface lookup agree while
+// an object is dragged - the normal no longer collapses to the bounding box's
+// and the object no longer shades like cardboard mid-drag. It stays a named
+// function because shading must be able to say which field it means.
+float microMapShade(vec3 p)
+{
+    return microMap(p);
+}
+
 // Material + surface response of the micro cell that owns the surface hit.
 //
 // WHICH CELL owns the hit is the whole difficulty, and it is decided by the
@@ -422,8 +606,12 @@ bool microSurface(vec3 p, vec3 rd, out vec3 albedo, out vec2 rr, out uint matId)
         vec3 wsize = wt.uWorlds[w].hi.xyz - wmin;
         float voxel = wt.uWorlds[w].geo.x;
         // A hair inside the solid, along the ray - in the BAKED frame, where
-        // the ray direction is the world one turned by the rotation.
-        vec3 q = microToBaked(w, p) + microDirToBaked(w, rd) * (0.15 * voxel);
+        // the ray direction is the world one turned by the rotation. The
+        // bone matters here too: the material lookup is a lookup in the
+        // REST POSE's grid, so the point has to be unboned as well.
+        vec3 rest = microShadeToBaked(w, p);
+        rest = microUnbone(w, rest, microBoneAt(w, rest));
+        vec3 q = rest + microDirToBaked(w, rd) * (0.15 * voxel);
         // Clamp the query INTO the box rather than rejecting points outside it.
         // The traced hit lies exactly ON the object's boundary by construction
         // (the trace stops where the field crosses zero, and the field is zero
@@ -531,7 +719,7 @@ bool microTrace(vec3 ro, vec3 rd, float tMax, out float tHit, out int outWorld)
             continue; // the camera is inside this world; it cannot be seen
         float t = minStep;
         float prevT = t;
-        for (int i = 0; i < 512; ++i) {
+        for (int i = 0; i < 128; ++i) {
             if (t > bestT)
                 break;
             const float d = microMapWorld(w, ro + rd * t, voxel, gridN, gridBase);
@@ -543,7 +731,7 @@ bool microTrace(vec3 ro, vec3 rd, float tMax, out float tHit, out int outWorld)
             if (d < 0.0) {
                 // bisect between the last outside sample and this inside one
                 float lo = prevT, hi = t;
-                for (int b = 0; b < 16; ++b) {
+                for (int b = 0; b < 8; ++b) {
                     const float mid = 0.5 * (lo + hi);
                     if (microMapWorld(w, ro + rd * mid, voxel, gridN, gridBase) > 0.0)
                         lo = mid;
@@ -671,9 +859,9 @@ float skyVisibilitySvo(vec3 p, vec3 bent)
 
 vec3 microNormal(vec3 p, float e)
 {
-    vec3 g = vec3(microMap(p + vec3(e, 0, 0)) - microMap(p - vec3(e, 0, 0)),
-                  microMap(p + vec3(0, e, 0)) - microMap(p - vec3(0, e, 0)),
-                  microMap(p + vec3(0, 0, e)) - microMap(p - vec3(0, 0, e)));
+    vec3 g = vec3(microMapShade(p + vec3(e, 0, 0)) - microMapShade(p - vec3(e, 0, 0)),
+                  microMapShade(p + vec3(0, e, 0)) - microMapShade(p - vec3(0, e, 0)),
+                  microMapShade(p + vec3(0, 0, e)) - microMapShade(p - vec3(0, 0, e)));
     float gl = length(g);
     if (gl < 1e-9)
         return vec3(0.0, 1.0, 0.0);
@@ -697,7 +885,7 @@ void microAO(vec3 p, vec3 n, out float ao, out vec3 bent)
         for (int a = 0; a < 4; ++a) {
             float ang = float(a) * 1.5708 + float(ring) * 0.785;
             vec3 dir = normalize(n * 0.85 + (cos(ang) * tang + sin(ang) * bitan) * 0.7);
-            float s = microMap(p + dir * r);
+            float s = microMapShade(p + dir * r);
             float fall = clamp(1.0 - s / r, 0.0, 1.0);
             fall = fall * fall * (3.0 - 2.0 * fall);
             float w = 1.0 / (1.0 + fall * fall * 4.0);
@@ -712,7 +900,7 @@ void microAO(vec3 p, vec3 n, out float ao, out vec3 bent)
 
 // Lit colour for a micro surface, using the SAME shared lighting terms the other
 // backends use (so a vase is not secretly lit by a private model).
-vec3 shadeMicro(vec3 p, vec3 rd)
+vec3 shadeMicro(vec3 p, vec3 rd, int w)
 {
     vec3 alb;
     vec2 rr;
@@ -720,8 +908,23 @@ vec3 shadeMicro(vec3 p, vec3 rd)
     if (!microSurface(p, rd, alb, rr, mId))
         return vec3(0.0);
     vec3 n = microNormal(p, 1.0 * microVoxelSize());
-    alb = detailAlbedo(alb, p, n, mId);
-    n = detailNormal(n, p, mId);
+    // The TEXTURE is sampled in the object's own frame (the rest pose), NOT
+    // in the world: a world-space sample slides over the animal as it walks
+    // and as its bones swing, because the texture is bound to the surface and
+    // not to the world. The rest-pose point is the very point the field is
+    // sampled at, so the texture sticks to the surface it belongs to.
+    //
+    // The NORMAL has to be taken into the rest frame as well. detailAlbedo
+    // and detailNormal choose the triplanar projection axes from it, so
+    // handing them the ANIMATED normal turns the fur with every bone rotation
+    // - the pattern crawls over the skin while the animal moves. The bumped
+    // normal is brought back out again for shading.
+    const vec3 baked = microShadeToBaked(w, p);
+    const int rbone = microBoneAt(w, baked);
+    const vec3 rest = microUnbone(w, baked, rbone);
+    const vec3 restN = microDirUnbone(w, microDirToBaked(w, n), rbone);
+    alb = detailAlbedo(alb, rest, restN, mId);
+    n = microDirFromBaked(w, microDirRebone(w, detailNormal(restN, rest, mId), rbone));
     // The sun is occluded by BOTH worlds: the micro worlds (self-shadow and
     // micro-to-micro) and the main world's coarse heightfield + object volume.
     // Two binary contributions multiplied is the same verdict the splat
@@ -778,8 +981,8 @@ vec3 shadeMicro(vec3 p, vec3 rd)
 
 void main()
 {
-    ivec2 pix = ivec2(gl_GlobalInvocationID.xy);
-    if (pix.x >= int(pc.a.z) || pix.y >= int(pc.a.w))
+    ivec2 pix = ivec2(gl_GlobalInvocationID.xy) + ivec2(int(pc.b.z + 0.5), int(pc.b.w + 0.5));
+    if (pix.x < 0 || pix.y < 0 || pix.x >= int(pc.a.z) || pix.y >= int(pc.a.w))
         return;
     if (wt.uWorldInfo.x <= 0)
         return;
@@ -808,29 +1011,14 @@ void main()
     int microTraceWorld = -1;
     if (!microTrace(ro, rd, sceneHasGeometry ? sceneT : 400.0, t, microTraceWorld))
         return;
-    // The depth comparison must use the PREVIEWED position: a previewed
-    // object can be nearer than (or behind) the world geometry it was baked
-    // against.
-    float tShown = t;
-    {
-        const vec4 pv = wt.uWorlds[microTraceWorld].preview;
-        if (pv.w > 0.5) {
-            const vec3 pp = ro + rd * t + pv.xyz;
-            tShown = dot(pp - ro, rd);
-        }
-    }
-    if (sceneHasGeometry && tShown >= sceneT)
+    // t IS the displayed depth: the trace runs in the same frame the surface
+    // is displayed in (microMapWorld applies the previews), so there is no
+    // separate "shown" depth to compare and no hit point to shift.
+    if (sceneHasGeometry && t >= sceneT)
         return; // the main backend already resolved this pixel nearer
 
     vec3 p = ro + rd * t;
-    // The live preview offset (a staged Move delta) shifts the RENDERED
-    // position; the field itself stays where it was baked.
-    {
-        const vec4 pv = wt.uWorlds[microTraceWorld].preview;
-        if (pv.w > 0.5)
-            p += pv.xyz;
-    }
-    vec3 col = shadeMicro(p, rd);
+    vec3 col = shadeMicro(p, rd, microTraceWorld);
     if (any(isnan(col)) || any(isinf(col)))
         return;
 

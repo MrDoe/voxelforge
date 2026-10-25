@@ -73,7 +73,7 @@ void ChatUi::spawnWorker(){
 
 int ChatUi::executeToolCalls(const std::vector<ToolCall>& calls, glm::ivec3 anchor, bool hasAnchor,
                              vf::voxel::EditableWorld& editable, vf::voxel::LayeredWorld& world,
-                             std::function<void()> rebuildFn){
+                             std::function<void()> rebuildFn, BehaviourFn behaviourFn){
     int rejected = 0;
     for(auto &tc: calls){
         spdlog::info("chat tool {} {}", tc.name, tc.argumentsJson);
@@ -141,6 +141,27 @@ int ChatUi::executeToolCalls(const std::vector<ToolCall>& calls, glm::ivec3 anch
             for(auto &c : cells) scs.push_back({ int8_t(c.dx), int8_t(c.dy), int8_t(c.dz), uint8_t(std::clamp(c.mat,0,8)) });
             size_t added = editable.append(editable.makeStamp(anchor, scs));
             if(added && rebuildFn) rebuildFn();
+        } else if(name=="set_behaviour"){
+            // Tell a high-detail animal what to do: "let the alpaca run".
+            std::string who, cmd;
+            jsonGetString(args,"name",who) || jsonGetString(args,"animal",who) ||
+                jsonGetString(args,"target",who);
+            jsonGetString(args,"command",cmd) || jsonGetString(args,"action",cmd) ||
+                jsonGetString(args,"do",cmd);
+            if(who.empty() || cmd.empty()){
+                pushAssistant("set_behaviour needs name (e.g. 'alpaca') and "
+                              "command (run, walk, graze, stop, auto).");
+                ++rejected;
+                continue;
+            }
+            float speed = 0.f;
+            jsonGetFloat(args,"speed",speed);
+            if(!behaviourFn || !behaviourFn(who, cmd, speed)){
+                pushAssistant("No animal called '"+who+"' is in the scene.");
+                ++rejected;
+                continue;
+            }
+            pushAssistant(who+" -> "+cmd);
         } else if(name=="list_world"){
             std::vector<vf::voxel::worldfile::WorldLayer> layers;
             std::string out = "layers:";
@@ -170,7 +191,8 @@ int ChatUi::executeToolCalls(const std::vector<ToolCall>& calls, glm::ivec3 anch
 
 void ChatUi::drawPanel(vf::voxel::EditableWorld& editable, vf::voxel::LayeredWorld& world,
                        const vf::voxel::PickHit* hover, const vf::voxel::PickHit* selection,
-                       bool hasSelection, std::function<void()> rebuildFn){
+                       bool hasSelection, std::function<void()> rebuildFn,
+                       BehaviourFn behaviourFn){
     // poll async results
     {
         std::queue<ChatResult> toProcess;
@@ -191,7 +213,7 @@ void ChatUi::drawPanel(vf::voxel::EditableWorld& editable, vf::voxel::LayeredWor
             if(!r.thinking.empty() && m_showThinking) pushAssistant(r.thinking, true);
             if(!r.content.empty()) pushAssistant(r.content);
             if(!r.toolCalls.empty()){
-                int rejected = executeToolCalls(r.toolCalls, m_pendingAnchor, m_pendingHasAnchor, editable, world, rebuildFn);
+                int rejected = executeToolCalls(r.toolCalls, m_pendingAnchor, m_pendingHasAnchor, editable, world, rebuildFn, behaviourFn);
                 char buf[128]; snprintf(buf,sizeof(buf),"executed %zu tool call(s)", r.toolCalls.size());
                 pushAssistant(buf);
                 m_llmHistory.push_back({"assistant",

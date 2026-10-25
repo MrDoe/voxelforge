@@ -64,7 +64,15 @@ bool App::updateCamera(float dt)
         double _dx, _dy;
         m_window.getMouseDelta(_dx, _dy);
     } else {
+        // The camera is a sphere in flight: fly it, then resolve the delta
+        // against the live world + micro geometry. Resolving the DELTA (not
+        // clamping the result) keeps the camera's own look/roll handling out
+        // of it and lets a blocked diagonal glide along the wall.
+        const glm::vec3 before = m_camera.pos;
         m_camera.update(m_window, dt);
+        if (m_collisionEnabled)
+            m_camera.pos =
+                resolveCameraMove(before, m_camera.pos - before);
     }
     return textCaptures;
 }

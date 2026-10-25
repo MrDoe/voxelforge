@@ -27,6 +27,8 @@
 #include "voxel/mesh_import.hpp"
 #include "voxel/mesh_voxel.hpp"
 #include "voxel/worldfile.hpp"
+#include "voxel/micro_field.hpp"
+#include "voxel/micro_rig.hpp"
 
 #include <spdlog/spdlog.h>
 #include <spdlog/sinks/ansicolor_sink.h>
@@ -37,8 +39,18 @@
 #include <iostream>
 #include <sstream>
 #include <string>
+#include <filesystem>
+#include <fstream>
+#include <unistd.h>
+#include <limits.h>
 
 using namespace vf;
+
+static const char* kMatNames[22] = {
+    "grass dark", "grass light", "soil", "sand", "rock", "light rock", "wood",
+    "roof shingles", "foliage", "lava", "ember", "glow cyan", "glow green",
+    "glow purple", "glow blue", "white-hot", "snow", "bark", "moss", "thatch",
+    "plaster", "fleece"};
 
 // --- tiny JSON writers -------------------------------------------------------
 static std::string jsonEscape(const std::string& s)
@@ -790,6 +802,837 @@ struct Server {
         o << "; the running app hot-reloads within ~1 s";
         return { o.str(), false };
     }
+
+    // ----- query helpers -----------------------------------------------------
+    // Find a layer entry by name or file; returns index or -1.
+    int findLayerIndex(const std::string& nameOrFile)
+    {
+        std::vector<voxel::worldfile::WorldLayer> layers;
+        if (!voxel::worldfile::loadManifest(manifestPath(), layers))
+            return -1;
+        for (size_t i = 0; i < layers.size(); ++i)
+            if (layers[i].name == nameOrFile || layers[i].file == nameOrFile)
+                return int(i);
+        return -1;
+    }
+
+    std::string manifestPath() const { return std::string(VOXELFORGE_ASSET_DIR) + "/world.json"; }
+
+    ToolResult getLayer(const std::string& args)
+    {
+        std::string name = jsonGetString(args, "layer");
+        if (name.empty())
+            name = jsonGetString(args, "name");
+        if (name.empty())
+            name = jsonGetString(args, "file");
+        if (name.empty())
+            return { "get_layer needs a \"layer\" (name or file)", true };
+        std::vector<voxel::worldfile::WorldLayer> layers;
+        if (!voxel::worldfile::loadManifest(manifestPath(), layers))
+            return { "manifest unreadable", true };
+        for (auto& l : layers) {
+            if (l.name != name && l.file != name)
+                continue;
+            std::ostringstream o;
+            o << "file=" << l.file << " role=" << l.role << " name=" << l.name
+              << " enabled=" << (l.enabled ? "true" : "false")
+              << " listed=" << (l.listed ? "true" : "false")
+              << " pos=[" << l.pos[0] << "," << l.pos[1] << "," << l.pos[2] << "]"
+              << " rot=" << l.rotDeg << " rotX=" << l.rotX << " rotZ=" << l.rotZ
+              << " scale=" << l.scale;
+            if (!l.behaviour.empty())
+                o << " behaviour=" << l.behaviour;
+            // voxel count if readable
+            voxel::WorldFileData d;
+            if (voxel::worldfile::read(std::string(VOXELFORGE_ASSET_DIR) + "/" + l.file, d))
+                o << " voxels=" << d.voxels.size();
+            return { o.str(), false };
+        }
+        return { "no such layer: " + name, true };
+    }
+
+    ToolResult setLayerTransform(const std::string& args)
+    {
+        std::string name = jsonGetString(args, "layer");
+        if (name.empty())
+            name = jsonGetString(args, "name");
+        if (name.empty())
+            name = jsonGetString(args, "file");
+        if (name.empty())
+            return { "set_layer_transform needs a \"layer\"", true };
+        std::vector<voxel::worldfile::WorldLayer> layers;
+        if (!voxel::worldfile::loadManifest(manifestPath(), layers))
+            return { "manifest unreadable", true };
+        bool found = false;
+        for (auto& l : layers) {
+            if (l.name != name && l.file != name)
+                continue;
+            std::vector<float> pos;
+            if (ai::jsonGetFloatArray(args, "pos", pos, 3))
+                if (pos.size() == 3) {
+                    l.pos[0] = pos[0];
+                    l.pos[1] = pos[1];
+                    l.pos[2] = pos[2];
+                }
+            float v = 0.f;
+            if (ai::jsonGetFloat(args, "rot", v))
+                l.rotDeg = v;
+            if (ai::jsonGetFloat(args, "rotX", v))
+                l.rotX = v;
+            if (ai::jsonGetFloat(args, "rotZ", v))
+                l.rotZ = v;
+            if (ai::jsonGetFloat(args, "scale", v) && v > 0.f)
+                l.scale = v;
+            // also accept yaw/pitch/roll aliases
+            if (ai::jsonGetFloat(args, "yaw", v))
+                l.rotDeg = v;
+            if (ai::jsonGetFloat(args, "pitch", v))
+                l.rotX = v;
+            if (ai::jsonGetFloat(args, "roll", v))
+                l.rotZ = v;
+            found = true;
+            break;
+        }
+        if (!found)
+            return { "no such layer: " + name, true };
+        if (!voxel::worldfile::writeManifest(manifestPath(), layers))
+            return { "failed to write manifest", true };
+        return { "transform updated for " + name + "; the running app hot-reloads within ~1 s",
+                 false };
+    }
+
+    ToolResult setLayerBehaviour(const std::string& args)
+    {
+        std::string name = jsonGetString(args, "layer");
+        if (name.empty())
+            name = jsonGetString(args, "name");
+        if (name.empty())
+            name = jsonGetString(args, "file");
+        if (name.empty())
+            return { "set_layer_behaviour needs a \"layer\"", true };
+        std::string behaviour = jsonGetString(args, "behaviour");
+        if (behaviour.empty())
+            behaviour = jsonGetString(args, "behavior");
+        std::string command = jsonGetString(args, "command");
+        std::vector<voxel::worldfile::WorldLayer> layers;
+        if (!voxel::worldfile::loadManifest(manifestPath(), layers))
+            return { "manifest unreadable", true };
+        const bool hasBehaviour = args.find("\"behaviour\"") != std::string::npos ||
+                                 args.find("\"behavior\"") != std::string::npos;
+        const bool hasCommand = args.find("\"command\"") != std::string::npos;
+        bool found = false;
+        for (auto& l : layers) {
+            if (l.name != name && l.file != name)
+                continue;
+            if (hasBehaviour)
+                l.behaviour = behaviour;
+            if (hasCommand)
+                l.command = command;
+            found = true;
+            break;
+        }
+        if (!found)
+            return { "no such layer: " + name, true };
+        if (!voxel::worldfile::writeManifest(manifestPath(), layers))
+            return { "failed to write manifest", true };
+        std::string msg = "updated " + name;
+        if (hasBehaviour)
+            msg += " behaviour='" + behaviour + "'";
+        if (hasCommand)
+            msg += " command='" + command + "'";
+        msg += "; the running app hot-reloads within ~1 s";
+        return { msg, false };
+    }
+
+    ToolResult listMaterials()
+    {
+        std::ostringstream o;
+        for (int i = 0; i < voxel::kPaletteN; ++i) {
+            const glm::vec3& c = voxel::kPalette[i];
+            const glm::vec2& rr = voxel::kMaterialReflection[i];
+            const glm::vec3& em = voxel::kEmissive[i];
+            o << i << " " << kMatNames[i]
+              << " rgb(" << int(c.r * 255) << "," << int(c.g * 255) << ","
+              << int(c.b * 255) << ") refl=" << int(rr.x) << " rough=" << int(rr.y);
+            if (em.x > 0 || em.y > 0 || em.z > 0)
+                o << " emissive=" << em.x << "," << em.y << "," << em.z;
+            o << "\\n";
+        }
+        return { o.str(), false };
+    }
+
+    ToolResult listTextures()
+    {
+        std::ostringstream o;
+        std::string dir = std::string(VOXELFORGE_ASSET_DIR) + "/textures";
+        std::error_code ec;
+        std::vector<std::string> files;
+        for (const auto& e : std::filesystem::directory_iterator(dir, ec)) {
+            if (!e.is_regular_file())
+                continue;
+            std::string ext = e.path().extension().string();
+            for (char& c : ext)
+                c = char(std::tolower(static_cast<unsigned char>(c)));
+            if (ext != ".png" && ext != ".jpg" && ext != ".jpeg")
+                continue;
+            files.push_back(e.path().filename().string());
+        }
+        std::sort(files.begin(), files.end());
+        for (auto& f : files)
+            o << f << "\\n";
+        o << files.size() << " texture files";
+        // also list current bindings
+        std::vector<voxel::worldfile::TextureBinding> bindings;
+        if (voxel::worldfile::loadTextureManifest(manifestPath(), bindings)) {
+            o << "\\n--- bindings ---\\n";
+            for (auto& b : bindings)
+                o << "mat " << b.mat << " <- " << b.file << " scale=" << b.scale
+                  << (b.emissive ? " emissive" : "") << "\\n";
+        }
+        return { o.str(), false };
+    }
+
+    ToolResult listModels()
+    {
+        std::ostringstream o;
+        std::string dir = std::string(VOXELFORGE_ASSET_DIR) + "/models";
+        std::error_code ec;
+        std::vector<std::string> files;
+        for (const auto& e : std::filesystem::directory_iterator(dir, ec)) {
+            if (!e.is_regular_file())
+                continue;
+            std::string ext = e.path().extension().string();
+            for (char& c : ext)
+                c = char(std::tolower(static_cast<unsigned char>(c)));
+            if (ext != ".stl" && ext != ".obj")
+                continue;
+            files.push_back(e.path().filename().string());
+        }
+        std::sort(files.begin(), files.end());
+        for (auto& f : files)
+            o << f << "\\n";
+        o << files.size() << " model files";
+        return { o.str(), false };
+    }
+
+    ToolResult listMicro()
+    {
+        std::vector<voxel::worldfile::WorldLayer> layers;
+        if (!voxel::worldfile::loadManifest(manifestPath(), layers))
+            return { "manifest unreadable", true };
+        std::ostringstream o;
+        for (auto& l : layers) {
+            if (l.role != "micro")
+                continue;
+            o << l.name << " (" << l.file << ", " << (l.enabled ? "enabled" : "disabled")
+              << ") pos=[" << l.pos[0] << "," << l.pos[1] << "," << l.pos[2] << "]"
+              << " rot=" << l.rotDeg << " rotX=" << l.rotX << " rotZ=" << l.rotZ;
+            if (!l.behaviour.empty())
+                o << " behaviour=" << l.behaviour;
+            o << "\\n";
+        }
+        return { o.str(), false };
+    }
+
+    ToolResult worldInfo()
+    {
+        std::ostringstream o;
+        o << "worldSize=" << voxel::WORLD << " voxelSize=" << voxel::VOXEL
+          << " waterLevel=" << voxel::WATER_LEVEL
+          << " gridSize=" << voxel::GRID_N << " brickSize=" << voxel::BRICK_N
+          << " latticeN=1024 materials=" << voxel::kPaletteN
+          << " maxLights=" << voxel::kMaxLights;
+        return { o.str(), false };
+    }
+
+    ToolResult layerStats(const std::string& args)
+    {
+        std::string name = jsonGetString(args, "layer");
+        if (name.empty())
+            name = jsonGetString(args, "name");
+        if (name.empty())
+            name = jsonGetString(args, "file");
+        if (name.empty())
+            return { "layer_stats needs a \"layer\" (name or file)", true };
+        // resolve file
+        std::string file = name;
+        std::vector<voxel::worldfile::WorldLayer> layers;
+        if (voxel::worldfile::loadManifest(manifestPath(), layers)) {
+            for (auto& l : layers)
+                if (l.name == name || l.file == name) {
+                    file = l.file;
+                    break;
+                }
+        }
+        if (file.find(".vxw") == std::string::npos)
+            file += ".vxw";
+        voxel::WorldFileData d;
+        if (!voxel::worldfile::read(std::string(VOXELFORGE_ASSET_DIR) + "/" + file, d))
+            return { "cannot read layer file: " + file, true };
+        if (d.voxels.empty())
+            return { file + ": 0 voxels", false };
+        int mn[3] = { 1 << 30, 1 << 30, 1 << 30 };
+        int mx[3] = { -(1 << 30), -(1 << 30), -(1 << 30) };
+        for (const auto& v : d.voxels)
+            for (int a = 0; a < 3; ++a) {
+                int c = a == 0 ? v.x : (a == 1 ? v.y : v.z);
+                mn[a] = std::min(mn[a], c);
+                mx[a] = std::max(mx[a], c);
+            }
+        std::ostringstream o;
+        o << file << ": " << d.voxels.size() << " voxels, bounds x[" << mn[0]
+          << ".." << mx[0] << "] y[" << mn[1] << ".." << mx[1] << "] z["
+          << mn[2] << ".." << mx[2] << "], size " << (mx[0] - mn[0] + 1) << "x"
+          << (mx[1] - mn[1] + 1) << "x" << (mx[2] - mn[2] + 1) << " voxels (~"
+          << ((mx[0] - mn[0] + 1) * 0.1f) << "m x "
+          << ((mx[1] - mn[1] + 1) * 0.1f) << "m x "
+          << ((mx[2] - mn[2] + 1) * 0.1f) << "m)";
+        return { o.str(), false };
+    }
+
+    ToolResult duplicateLayer(const std::string& args)
+    {
+        std::string src = jsonGetString(args, "source");
+        if (src.empty())
+            src = jsonGetString(args, "from");
+        if (src.empty())
+            src = jsonGetString(args, "layer");
+        std::string newName = jsonGetString(args, "name");
+        if (newName.empty())
+            newName = jsonGetString(args, "to");
+        if (src.empty() || newName.empty())
+            return { "duplicate_layer needs \"source\" and \"name\"", true };
+        std::string safe = voxel::EditableWorld::sanitizeLayerName(newName);
+        if (safe.empty())
+            return { "illegal target name", true };
+        // resolve source file
+        std::string srcFile = src;
+        std::vector<voxel::worldfile::WorldLayer> layers;
+        if (voxel::worldfile::loadManifest(manifestPath(), layers))
+            for (auto& l : layers)
+                if (l.name == src || l.file == src) {
+                    srcFile = l.file;
+                    break;
+                }
+        if (srcFile.find(".vxw") == std::string::npos)
+            srcFile += ".vxw";
+        std::string dstFile = safe + ".vxw";
+        std::ifstream in(std::string(VOXELFORGE_ASSET_DIR) + "/" + srcFile, std::ios::binary);
+        if (!in)
+            return { "cannot read source layer: " + srcFile, true };
+        std::ofstream out(std::string(VOXELFORGE_ASSET_DIR) + "/" + dstFile, std::ios::binary);
+        if (!out)
+            return { "cannot write target layer", true };
+        out << in.rdbuf();
+        in.close();
+        out.close();
+        // register in manifest
+        voxel::worldfile::WorldLayer nl;
+        nl.file = dstFile;
+        nl.name = safe;
+        nl.role = "object";
+        nl.enabled = false;
+        nl.listed = true;
+        nl.pos[0] = nl.pos[1] = nl.pos[2] = 0.f;
+        nl.rotDeg = 0.f;
+        layers.clear();
+        voxel::worldfile::loadManifest(manifestPath(), layers);
+        // avoid duplicate file entries
+        bool exists = false;
+        for (auto& l : layers)
+            if (l.file == dstFile) {
+                exists = true;
+                break;
+            }
+        if (!exists) {
+            size_t insertAt = 0;
+            for (size_t i = 0; i < layers.size(); ++i)
+                if (layers[i].role == "landscape") {
+                    insertAt = i;
+                    break;
+                }
+            layers.insert(layers.begin() + insertAt, nl);
+            if (!voxel::worldfile::writeManifest(manifestPath(), layers))
+                return { "copied file but manifest update failed", true };
+        }
+        return { "duplicated " + srcFile + " -> " + dstFile + "; (disabled by default)",
+                 false };
+    }
+
+    ToolResult renameLayer(const std::string& args)
+    {
+        std::string name = jsonGetString(args, "layer");
+        if (name.empty())
+            name = jsonGetString(args, "name");
+        if (name.empty())
+            name = jsonGetString(args, "from");
+        std::string newName = jsonGetString(args, "new_name");
+        if (newName.empty())
+            newName = jsonGetString(args, "to");
+        if (name.empty() || newName.empty())
+            return { "rename_layer needs \"layer\" and \"new_name\"", true };
+        std::string safe = voxel::EditableWorld::sanitizeLayerName(newName);
+        if (safe.empty())
+            return { "illegal new name", true };
+        std::vector<voxel::worldfile::WorldLayer> layers;
+        if (!voxel::worldfile::loadManifest(manifestPath(), layers))
+            return { "manifest unreadable", true };
+        int idx = -1;
+        for (size_t i = 0; i < layers.size(); ++i)
+            if (layers[i].name == name || layers[i].file == name) {
+                idx = int(i);
+                break;
+            }
+        if (idx < 0)
+            return { "no such layer: " + name, true };
+        std::string oldFile = layers[idx].file;
+        std::string newFile = safe + ".vxw";
+        // rename file on disk if present
+        std::string oldPath = std::string(VOXELFORGE_ASSET_DIR) + "/" + oldFile;
+        std::string newPath = std::string(VOXELFORGE_ASSET_DIR) + "/" + newFile;
+        std::error_code ec;
+        if (std::filesystem::exists(oldPath, ec))
+            std::filesystem::rename(oldPath, newPath, ec);
+        layers[idx].file = newFile;
+        layers[idx].name = safe;
+        if (!voxel::worldfile::writeManifest(manifestPath(), layers))
+            return { "renamed file but manifest update failed", true };
+        return { "renamed " + oldFile + " -> " + newFile, false };
+    }
+
+    ToolResult deleteLayer(const std::string& args)
+    {
+        std::string name = jsonGetString(args, "layer");
+        if (name.empty())
+            name = jsonGetString(args, "name");
+        if (name.empty())
+            return { "delete_layer needs a \"layer\"", true };
+        return editable.deleteObjectLayer(name) ? ToolResult{ "deleted layer " + name, false }
+                                                : ToolResult{ "cannot delete (absent/protected/illegal)", true };
+    }
+
+    ToolResult listLights()
+    {
+        std::vector<voxel::worldfile::LightSource> lights;
+        voxel::worldfile::loadLightManifest(manifestPath(), lights);
+        std::ostringstream o;
+        for (size_t i = 0; i < lights.size(); ++i) {
+            const auto& l = lights[i];
+            o << i << ": pos=[" << l.pos.x << "," << l.pos.y << "," << l.pos.z
+              << "] color=[" << l.color.x << "," << l.color.y << "," << l.color.z
+              << "] radius=" << l.radius << " intensity=" << l.intensity;
+            if (!l.follow.empty())
+                o << " follow=" << l.follow;
+            o << "\\n";
+        }
+        o << lights.size() << " lights";
+        return { o.str(), false };
+    }
+
+    ToolResult addLight(const std::string& args)
+    {
+        std::vector<float> pos, col;
+        if (!ai::jsonGetFloatArray(args, "pos", pos, 3))
+            return { "add_light needs pos:[x,y,z]", true };
+        if (pos.size() != 3)
+            return { "pos must be [x,y,z]", true };
+        voxel::worldfile::LightSource l;
+        l.pos = { pos[0], pos[1], pos[2] };
+        if (ai::jsonGetFloatArray(args, "color", col, 3) && col.size() == 3)
+            l.color = { col[0], col[1], col[2] };
+        else if (ai::jsonGetFloatArray(args, "colour", col, 3) && col.size() == 3)
+            l.color = { col[0], col[1], col[2] };
+        float v = 0.f;
+        if (ai::jsonGetFloat(args, "radius", v) && v > 0.f)
+            l.radius = v;
+        else
+            l.radius = 8.f;
+        if (ai::jsonGetFloat(args, "intensity", v) && v > 0.f)
+            l.intensity = v;
+        else
+            l.intensity = 1.5f;
+        std::string follow = jsonGetString(args, "follow");
+        if (!follow.empty())
+            l.follow = follow;
+        // load existing + append
+        std::vector<voxel::worldfile::LightSource> lights;
+        voxel::worldfile::loadLightManifest(manifestPath(), lights);
+        lights.push_back(l);
+        if (!voxel::worldfile::writeLightManifest(manifestPath(), lights))
+            return { "failed to write lights", true };
+        return { "added light at [" + std::to_string(pos[0]) + "," +
+                     std::to_string(pos[1]) + "," + std::to_string(pos[2]) +
+                     "]; running app hot-reloads within ~1 s",
+                 false };
+    }
+
+    ToolResult removeLight(const std::string& args)
+    {
+        int idx = -1;
+        ai::jsonGetInt(args, "index", idx);
+        if (idx < 0)
+            ai::jsonGetInt(args, "id", idx);
+        std::vector<voxel::worldfile::LightSource> lights;
+        if (!voxel::worldfile::loadLightManifest(manifestPath(), lights))
+            return { "no lights / manifest unreadable", true };
+        if (idx < 0 || idx >= int(lights.size()))
+            return { "invalid light index", true };
+        lights.erase(lights.begin() + idx);
+        if (!voxel::worldfile::writeLightManifest(manifestPath(), lights))
+            return { "failed to write lights", true };
+        return { "removed light " + std::to_string(idx), false };
+    }
+
+    ToolResult setTextureBindingTool(const std::string& args)
+    {
+        int mat = -1;
+        ai::jsonGetInt(args, "mat", mat) || ai::jsonGetInt(args, "material", mat);
+        if (mat < 0 || mat >= voxel::kPaletteN)
+            return { "set_texture needs a valid \"mat\" (0.." + std::to_string(voxel::kPaletteN - 1) + ")",
+                     true };
+        std::string file = jsonGetString(args, "file");
+        float scale = 0.f;
+        ai::jsonGetFloat(args, "scale", scale);
+        int em = -1;
+        ai::jsonGetInt(args, "emissive", em);
+        float es = 0.f;
+        ai::jsonGetFloat(args, "emissiveScale", es);
+        std::vector<voxel::worldfile::TextureBinding> bindings;
+        voxel::worldfile::loadTextureManifest(manifestPath(), bindings);
+        // remove existing binding for this mat
+        bindings.erase(std::remove_if(bindings.begin(), bindings.end(),
+                                     [&](const voxel::worldfile::TextureBinding& b) {
+                                         return b.mat == mat;
+                                     }),
+                       bindings.end());
+        if (!file.empty()) {
+            voxel::worldfile::TextureBinding b;
+            b.file = file;
+            b.mat = mat;
+            b.scale = scale > 0.02f ? scale : 0.5f;
+            b.emissive = em > 0;
+            b.emissiveScale = es > 0.f ? es : 1.f;
+            bindings.push_back(b);
+        }
+        if (!voxel::worldfile::writeTextureManifest(manifestPath(), bindings))
+            return { "failed to write textures", true };
+        return { "texture binding updated for material " + std::to_string(mat) +
+                     (file.empty() ? " (palette fallback)" : " <- " + file) +
+                     "; the running app hot-reloads within ~1 s",
+                 false };
+    }
+
+    // ----- reload cached world ----------------------------------------------
+    void reloadWorld() { world().load(manifestPath()); }
+
+    ToolResult reloadWorldTool(const std::string& /*args*/)
+    {
+        reloadWorld();
+        return { "world reloaded from " + manifestPath(), false };
+    }
+
+    // ----- headless render shot ---------------------------------------------
+    ToolResult renderShot(const std::string& args)
+    {
+        // locate the voxelforge binary next to this executable
+        char self[PATH_MAX];
+        ssize_t len = readlink("/proc/self/exe", self, sizeof(self) - 1);
+        if (len == -1)
+            return { "cannot resolve own executable path", true };
+        self[len] = '\0';
+        std::filesystem::path bin = std::filesystem::path(self).parent_path() / "voxelforge";
+        if (!std::filesystem::exists(bin))
+            return { "voxelforge binary not found next to vf_mcp (" + bin.string() + ")", true };
+
+        std::string out = jsonGetString(args, "out");
+        if (out.empty())
+            out = jsonGetString(args, "path");
+        if (out.empty())
+            out = "/tmp/opencode/mcp_shot.ppm";
+
+        std::ostringstream cmd;
+        cmd << bin.string() << " --shot " << out;
+        int w = 0, h = 0;
+        ai::jsonGetInt(args, "width", w);
+        ai::jsonGetInt(args, "height", h);
+        if (w > 0) cmd << " --width " << w;
+        if (h > 0) cmd << " --height " << h;
+        std::string mode = jsonGetString(args, "mode");
+        if (!mode.empty()) cmd << " --mode " << mode;
+        std::vector<float> cam;
+        if (ai::jsonGetFloatArray(args, "cam", cam, 6) && cam.size() == 6) {
+            std::ostringstream c;
+            c << cam[0] << "," << cam[1] << "," << cam[2] << "," << cam[3] << ","
+              << cam[4] << "," << cam[5];
+            cmd << " --cam " << c.str();
+        }
+        float at = 0.f;
+        if (ai::jsonGetFloat(args, "animtime", at))
+            cmd << " --animtime " << at;
+        std::vector<float> sun;
+        if (ai::jsonGetFloatArray(args, "sun", sun, 2) && sun.size() == 2)
+            cmd << " --sun " << sun[0] << " " << sun[1];
+        // isolate overlay so a session's paints don't pollute the shot
+        std::string full = "VF_NO_OVERLAY=1 VF_OVERLAY_PATH=/tmp/opencode/mcp_overlay.vxw " +
+                           cmd.str() + " 2>/tmp/opencode/mcp_shot.err";
+        int rc = std::system(full.c_str());
+        std::ifstream ef("/tmp/opencode/mcp_shot.err");
+        std::string err((std::istreambuf_iterator<char>(ef)),
+                        std::istreambuf_iterator<char>());
+        if (rc != 0)
+            return { "render failed (rc=" + std::to_string(rc) + "): " + err.substr(0, 500),
+                     true };
+        // report output size
+        std::error_code ec;
+        auto sz = std::filesystem::file_size(out, ec);
+        std::ostringstream o;
+        o << "rendered " << out << " (" << (ec ? 0 : sz) << " bytes)";
+        if (!err.empty())
+            o << "\\nstderr: " << err.substr(0, 300);
+        return { o.str(), false };
+    }
+
+    // ----- inspect layer (bbox + count + material histogram) -----------------
+    ToolResult inspectLayer(const std::string& args)
+    {
+        std::string name = jsonGetString(args, "layer");
+        if (name.empty())
+            name = jsonGetString(args, "name");
+        if (name.empty())
+            name = jsonGetString(args, "file");
+        if (name.empty())
+            name = jsonGetString(args, "path");
+        if (name.empty())
+            return { "inspect_layer needs a \"layer\"/\"path\"", true };
+        std::string file = name;
+        std::vector<voxel::worldfile::WorldLayer> layers;
+        if (voxel::worldfile::loadManifest(manifestPath(), layers))
+            for (auto& l : layers)
+                if (l.name == name || l.file == name) {
+                    file = l.file;
+                    break;
+                }
+        if (file.find(".vxw") == std::string::npos)
+            file += ".vxw";
+        voxel::WorldFileData d;
+        if (!voxel::worldfile::read(std::string(VOXELFORGE_ASSET_DIR) + "/" + file, d))
+            return { "cannot read layer file: " + file, true };
+        if (d.voxels.empty())
+            return { file + ": 0 voxels", false };
+        int mn[3] = { 1 << 30, 1 << 30, 1 << 30 };
+        int mx[3] = { -(1 << 30), -(1 << 30), -(1 << 30) };
+        std::vector<int> hist(voxel::kPaletteN, 0);
+        for (const auto& v : d.voxels) {
+            int c[3] = { v.x, v.y, v.z };
+            for (int a = 0; a < 3; ++a) {
+                mn[a] = std::min(mn[a], c[a]);
+                mx[a] = std::max(mx[a], c[a]);
+            }
+            if (v.materialId < voxel::kPaletteN)
+                hist[v.materialId]++;
+        }
+        std::ostringstream o;
+        o << file << ": " << d.voxels.size() << " voxels, bounds x[" << mn[0]
+          << ".." << mx[0] << "] y[" << mn[1] << ".." << mx[1] << "] z["
+          << mn[2] << ".." << mx[2] << "], size " << (mx[0] - mn[0] + 1) << "x"
+          << (mx[1] - mn[1] + 1) << "x" << (mx[2] - mn[2] + 1) << " voxels (~"
+          << ((mx[0] - mn[0] + 1) * 0.1f) << "m x "
+          << ((mx[1] - mn[1] + 1) * 0.1f) << "m x "
+          << ((mx[2] - mn[2] + 1) * 0.1f) << "m)\\nmaterial histogram:";
+        for (int i = 0; i < voxel::kPaletteN; ++i)
+            if (hist[i] > 0)
+                o << " " << i << ":" << hist[i];
+        return { o.str(), false };
+    }
+
+    // ----- probe region: solid/air counts + material histogram ---------------
+    ToolResult probeRegion(const std::string& args)
+    {
+        // accept lattice cell bounds [x0,y0,z0,x1,y1,z1] or world meters via
+        // x0/y0/z0/x1/y1/z1 numbers (metres). Detect: if any value > 1024 treat
+        // as... no, just accept cell coords when all ints. Simpler: accept
+        // "min":[x,y,z], "max":[x,y,z] in lattice cells, defaulting to a
+        // 10-cell cube around origin if absent.
+        std::vector<int> mn, mx;
+        ai::jsonGetIntArray(args, "min", mn, 3);
+        ai::jsonGetIntArray(args, "max", mx, 3);
+        // also accept x0..z1
+        int x0 = 0, y0 = 0, z0 = 0, x1 = 9, y1 = 9, z1 = 9;
+        if (mn.size() == 3 && mx.size() == 3) {
+            x0 = mn[0]; y0 = mn[1]; z0 = mn[2];
+            x1 = mx[0]; y1 = mx[1]; z1 = mx[2];
+        } else {
+            ai::jsonGetInt(args, "x0", x0);
+            ai::jsonGetInt(args, "y0", y0);
+            ai::jsonGetInt(args, "z0", z0);
+            ai::jsonGetInt(args, "x1", x1);
+            ai::jsonGetInt(args, "y1", y1);
+            ai::jsonGetInt(args, "z1", z1);
+        }
+        if (x0 > x1) std::swap(x0, x1);
+        if (y0 > y1) std::swap(y0, y1);
+        if (z0 > z1) std::swap(z0, z1);
+        x0 = std::clamp(x0, 0, 1023);
+        y0 = std::clamp(y0, 0, 1023);
+        z0 = std::clamp(z0, 0, 1023);
+        x1 = std::clamp(x1, 0, 1023);
+        y1 = std::clamp(y1, 0, 1023);
+        z1 = std::clamp(z1, 0, 1023);
+        long solid = 0, air = 0;
+        std::vector<int> hist(voxel::kPaletteN, 0);
+        for (int z = z0; z <= z1; ++z)
+            for (int y = y0; y <= y1; ++y)
+                for (int x = x0; x <= x1; ++x) {
+                    float wx = -0.5f * voxel::WORLD + (x + 0.5f) * voxel::VOXEL;
+                    float wy = -0.5f * voxel::WORLD + (y + 0.5f) * voxel::VOXEL;
+                    float wz = -0.5f * voxel::WORLD + (z + 0.5f) * voxel::VOXEL;
+                    auto s = world().field().sampleWorld({ wx, wy, wz });
+                    if (s.d < 0) {
+                        ++solid;
+                        if (s.mat < voxel::kPaletteN)
+                            hist[s.mat]++;
+                    } else {
+                        ++air;
+                    }
+                }
+        std::ostringstream o;
+        o << "region [" << x0 << "," << y0 << "," << z0 << "]-[" << x1 << "," << y1
+          << "," << z1 << "]: solid=" << solid << " air=" << air
+          << " total=" << (solid + air) << "\\nmaterial histogram:";
+        for (int i = 0; i < voxel::kPaletteN; ++i)
+            if (hist[i] > 0)
+                o << " " << i << ":" << hist[i];
+        return { o.str(), false };
+    }
+    // ----- inspect rig (derive skeleton from a micro layer) -----------------
+    ToolResult inspectRig(const std::string& args)
+    {
+        std::string name = jsonGetString(args, "layer");
+        if (name.empty())
+            name = jsonGetString(args, "name");
+        if (name.empty())
+            name = jsonGetString(args, "file");
+        if (name.empty())
+            return { "inspect_rig needs a \"layer\" (name or file)", true };
+        // resolve file
+        std::string file = name;
+        std::vector<voxel::worldfile::WorldLayer> layers;
+        if (voxel::worldfile::loadManifest(manifestPath(), layers))
+            for (auto& l : layers)
+                if (l.name == name || l.file == name) {
+                    file = l.file;
+                    break;
+                }
+        if (file.find(".vxw") == std::string::npos)
+            file += ".vxw";
+        // micro layers live under micro/ possibly; if not found try as-is
+        std::string fullPath = std::string(VOXELFORGE_ASSET_DIR) + "/" + file;
+        voxel::WorldFileData d;
+        if (!voxel::worldfile::read(fullPath, d))
+            return { "cannot read layer file: " + file, true };
+        if (d.voxels.empty())
+            return { file + ": empty", true };
+        // build field + derive rig
+        voxel::MicroField field;
+        std::string err;
+        if (!voxel::buildMicroField(d.voxels, d.meta, field, &err))
+            return { "buildMicroField failed: " + err, true };
+        voxel::MicroRig rig;
+        if (!voxel::deriveMicroRig(field, rig))
+            return { "deriveMicroRig failed", true };
+        const char* roleNames[] = { "spine", "leg", "head", "tail", "neck" };
+        std::ostringstream o;
+        o << file << ": " << rig.bones.size() << " bones, " << rig.legCount
+          << " legs, spine axis " << (rig.forward.x != 0 ? "X" : "Z")
+          << ", length " << rig.length << " m\\n";
+        for (size_t i = 0; i < rig.bones.size(); ++i) {
+            const auto& b = rig.bones[i];
+            const char* rn = (int(b.role) >= 0 && int(b.role) < 5)
+                                 ? roleNames[int(b.role)]
+                                 : "?";
+            o << i << ": " << rn << " parent=" << b.parent
+              << " a=(" << b.a.x << "," << b.a.y << "," << b.a.z << ")"
+              << " b=(" << b.b.x << "," << b.b.y << "," << b.b.z << ")"
+              << " len=" << glm::length(b.b - b.a) << "\\n";
+        }
+        return { o.str(), false };
+    }
+
+    ToolResult setPose(const std::string& args)
+    {
+        std::string name = jsonGetString(args, "layer");
+        if (name.empty())
+            name = jsonGetString(args, "name");
+        if (name.empty())
+            return { "set_pose needs a \"layer\"", true };
+        std::vector<float> pose;
+        // jsonGetFloatArray demands an exact count, so parse the array manually
+        // for the variable-length pose.
+        {
+            std::string pat = "\"pose\"";
+            size_t p = args.find(pat);
+            if (p != std::string::npos) {
+                size_t a = args.find('[', p);
+                size_t b = args.find(']', a);
+                if (a != std::string::npos && b != std::string::npos) {
+                    std::string inside = args.substr(a + 1, b - a - 1);
+                    std::string tok;
+                    for (size_t i = 0; i <= inside.size(); ++i) {
+                        if (i == inside.size() || inside[i] == ',') {
+                            if (!tok.empty()) {
+                                try {
+                                    pose.push_back(std::stof(tok));
+                                } catch (...) {
+                                }
+                            }
+                            tok.clear();
+                        } else if (!std::isspace((unsigned char)inside[i])) {
+                            tok += inside[i];
+                        }
+                    }
+                }
+            }
+        }
+        if (pose.empty() || pose.size() % 4 != 0)
+            return { "set_pose needs \"pose\":[bone,rx,ry,rz, ...] (degrees, flat)", true };
+        // resolve file
+        std::string file = name;
+        std::vector<voxel::worldfile::WorldLayer> layers;
+        if (!voxel::worldfile::loadManifest(manifestPath(), layers))
+            return { "manifest unreadable", true };
+        bool found = false;
+        for (auto& l : layers) {
+            if (l.name != name && l.file != name)
+                continue;
+            l.pose = pose;
+            found = true;
+            break;
+        }
+        if (!found)
+            return { "no such layer: " + name, true };
+        if (!voxel::worldfile::writeManifest(manifestPath(), layers))
+            return { "failed to write manifest", true };
+        return { "pose set on " + name + " (" + std::to_string(pose.size() / 4) +
+                     " bones); the running app hot-reloads within ~1 s",
+                 false };
+    }
+
+    ToolResult furStats(const std::string& /*args*/)
+    {
+        // Read .opencode/fur_stats.json (written by loadMicroObjects).
+        std::string path = ".opencode/fur_stats.json";
+        std::ifstream f(path);
+        if (!f) {
+            // try relative to asset dir parent
+            path = std::string(VOXELFORGE_ASSET_DIR) + "/../.opencode/fur_stats.json";
+            f.open(path);
+        }
+        if (!f)
+            return { "fur_stats.json not found (run the app first)", true };
+        std::ostringstream buf;
+        buf << f.rdbuf();
+        return { buf.str(), false };
+    }
 };
 
 std::string toolSchemas()
@@ -894,7 +1737,71 @@ std::string toolSchemas()
                   "\"flip\":{\"type\":\"boolean\"},"
                   "\"shell\":{\"type\":\"boolean\"}"),
           false);
-    entry("clear_edits", "Remove all session edits", obj(""), true);
+    entry("clear_edits", "Remove all session edits (clears ai_edits.vxw)", obj(""), false);
+    entry("get_layer", "Detailed info about one layer (file, role, name, enabled, pos, rot, scale, behaviour, voxel count)",
+          obj(jstr("layer") + ":{\"type\":\"string\"}"), false);
+    entry("set_layer_transform",
+          "Set a layer's placement: pos:[x,y,z] (metres), rot/rotX/rotZ (degrees, or yaw/pitch/roll), scale. Only provided fields change.",
+          obj(jstr("layer") + ":{\"type\":\"string\"}," +
+              jstr("pos") + ":{\"type\":\"array\",\"items\":{\"type\":\"number\"}},"
+              "\"rot\":{\"type\":\"number\"},\"rotX\":{\"type\":\"number\"},"
+              "\"rotZ\":{\"type\":\"number\"},\"scale\":{\"type\":\"number\"},"
+              "\"yaw\":{\"type\":\"number\"},\"pitch\":{\"type\":\"number\"},"
+              "\"roll\":{\"type\":\"number\"}"), false);
+    entry("set_layer_behaviour",
+          "Set behaviour (\"\"/\"grazer\") and/or a command (\"walk\"/\"run\"/\"graze\"/\"stop\"/\"auto\") on a micro layer",
+          obj(jstr("layer") + ":{\"type\":\"string\"}," + jstr("behaviour") + ":{\"type\":\"string\"}," +
+              jstr("command") + ":{\"type\":\"string\"}"),
+          false);
+    entry("list_materials", "List the palette materials: id, name, rgb, reflectivity, roughness, emissive", obj(""), false);
+    entry("list_textures", "List texture files in assets/textures and current material bindings", obj(""), false);
+    entry("list_models", "List STL/OBJ mesh files in assets/models", obj(""), false);
+    entry("list_micro", "List micro-voxel object layers (role micro) with placement", obj(""), false);
+    entry("world_info", "World constants: size, voxel size, water level, grid, materials, max lights", obj(""), false);
+    entry("layer_stats", "AABB + voxel count for a layer file",
+          obj(jstr("layer") + ":{\"type\":\"string\"}"), false);
+    entry("duplicate_layer", "Copy a layer .vxw to a new name (registered, disabled by default)",
+          obj(jstr("source") + ":{\"type\":\"string\"}," + jstr("name") + ":{\"type\":\"string\"}"),
+          false);
+    entry("rename_layer", "Rename a layer (file + manifest entry)",
+          obj(jstr("layer") + ":{\"type\":\"string\"}," + jstr("new_name") + ":{\"type\":\"string\"}"),
+          false);
+    entry("delete_layer", "Delete a non-protected layer (file + manifest entry)",
+          obj(jstr("layer") + ":{\"type\":\"string\"}"), false);
+    entry("list_lights", "List authored point lights in world.json", obj(""), false);
+    entry("add_light", "Add a point light (pos, color, radius, intensity, optional follow layer)",
+          obj(jstr("pos") + ":{\"type\":\"array\",\"items\":{\"type\":\"number\"}},"
+              "\"color\":{\"type\":\"array\",\"items\":{\"type\":\"number\"}},"
+              "\"radius\":{\"type\":\"number\"},\"intensity\":{\"type\":\"number\"},"
+              "\"follow\":{\"type\":\"string\"}"), false);
+    entry("remove_light", "Remove a point light by index",
+          obj(jstr("index") + ":{\"type\":\"integer\"}"), false);
+    entry("set_texture", "Bind a texture file to a material (empty file = palette fallback)",
+          obj(jstr("mat") + ":{\"type\":\"integer\"}," + jstr("file") + ":{\"type\":\"string\"},"
+              "\"scale\":{\"type\":\"number\"},\"emissive\":{\"type\":\"integer\"},"
+              "\"emissiveScale\":{\"type\":\"number\"}"), false);
+    entry("inspect_layer", "Detailed layer inspection: bbox, voxel count, material histogram",
+          obj(jstr("layer") + ":{\"type\":\"string\"}"), false);
+    entry("probe_region", "Count solid/air cells + material histogram in a lattice box",
+          obj(jstr("min") + ":{\"type\":\"array\",\"items\":{\"type\":\"integer\"}},"
+              + jstr("max") + ":{\"type\":\"array\",\"items\":{\"type\":\"integer\"}},"
+              "\"x0\":{\"type\":\"integer\"},\"y0\":{\"type\":\"integer\"},"
+              "\"z0\":{\"type\":\"integer\"},\"x1\":{\"type\":\"integer\"},"
+              "\"y1\":{\"type\":\"integer\"},\"z1\":{\"type\":\"integer\"}"), false);
+    entry("reload_world", "Reload the cached world field from world.json", obj(""), false);
+    entry("render_shot",
+          "Headless render: camera + resolution -> image path (PPM). Runs the voxelforge binary.",
+          obj(jstr("out") + ":{\"type\":\"string\"}," +
+              jstr("cam") + ":{\"type\":\"array\",\"items\":{\"type\":\"number\"}},"
+              "\"width\":{\"type\":\"integer\"},\"height\":{\"type\":\"integer\"},"
+              "\"mode\":{\"type\":\"string\"},\"animtime\":{\"type\":\"number\"},"
+              "\"sun\":{\"type\":\"array\",\"items\":{\"type\":\"number\"}}"), false);
+    entry("inspect_rig", "Derive and report the skeleton (bones, roles, parents, segments) of a micro layer",
+          obj(jstr("layer") + ":{\"type\":\"string\"}"), false);
+    entry("set_pose", "Set a static rigged pose on a micro layer: pose:[bone,rx,ry,rz,...] (degrees, flat)",
+          obj(jstr("layer") + ":{\"type\":\"string\"}," + jstr("pose") +
+              ":{\"type\":\"array\",\"items\":{\"type\":\"number\"}}"), false);
+    entry("fur_stats", "Dump fur card counts per micro object (from .opencode/fur_stats.json)", obj(""), true);
     t += "] } ";
     return t;
 }
@@ -907,7 +1814,15 @@ ToolResult callTool(Server& srv, const std::string& name, std::string args)
                                       "ground",        "clear_edits",  "add_box",
                                       "add_cylinder",  "add_ellipsoid", "add_stamp",
                                       "add_voxels",    "write_object", "read_object",
-                                      "delete_object", "import_mesh" };
+                                      "delete_object", "import_mesh",
+                                      "get_layer", "set_layer_transform", "set_layer_behaviour",
+                                      "list_materials", "list_textures", "list_models",
+                                      "list_micro", "world_info", "layer_stats",
+                                      "duplicate_layer", "rename_layer", "delete_layer",
+                                      "list_lights", "add_light", "remove_light",
+                                      "set_texture", "inspect_layer", "probe_region",
+                                      "reload_world", "render_shot", "inspect_rig",
+                                      "set_pose", "fur_stats" };
     std::string canonical = name;
     bool native = false;
     for (const char* n : kNative)
@@ -948,6 +1863,52 @@ ToolResult callTool(Server& srv, const std::string& name, std::string args)
         return srv.deleteObject(args);
     if (canonical == "import_mesh")
         return srv.importMesh(args);
+    if (canonical == "get_layer")
+        return srv.getLayer(args);
+    if (canonical == "set_layer_transform")
+        return srv.setLayerTransform(args);
+    if (canonical == "set_layer_behaviour")
+        return srv.setLayerBehaviour(args);
+    if (canonical == "list_materials")
+        return srv.listMaterials();
+    if (canonical == "list_textures")
+        return srv.listTextures();
+    if (canonical == "list_models")
+        return srv.listModels();
+    if (canonical == "list_micro")
+        return srv.listMicro();
+    if (canonical == "world_info")
+        return srv.worldInfo();
+    if (canonical == "layer_stats")
+        return srv.layerStats(args);
+    if (canonical == "duplicate_layer")
+        return srv.duplicateLayer(args);
+    if (canonical == "rename_layer")
+        return srv.renameLayer(args);
+    if (canonical == "delete_layer")
+        return srv.deleteLayer(args);
+    if (canonical == "list_lights")
+        return srv.listLights();
+    if (canonical == "add_light")
+        return srv.addLight(args);
+    if (canonical == "remove_light")
+        return srv.removeLight(args);
+    if (canonical == "set_texture")
+        return srv.setTextureBindingTool(args);
+    if (canonical == "inspect_layer")
+        return srv.inspectLayer(args);
+    if (canonical == "probe_region")
+        return srv.probeRegion(args);
+    if (canonical == "reload_world")
+        return srv.reloadWorldTool(args);
+    if (canonical == "render_shot")
+        return srv.renderShot(args);
+    if (canonical == "inspect_rig")
+        return srv.inspectRig(args);
+    if (canonical == "set_pose")
+        return srv.setPose(args);
+    if (canonical == "fur_stats")
+        return srv.furStats(args);
     if (canonical.rfind("add_", 0) == 0)
         return srv.addShape(canonical, args);
     return { "unknown tool: " + name, true };

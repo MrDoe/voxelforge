@@ -213,6 +213,89 @@ TEST_CASE("chunk store: synthetic adoption, query and pool validity")
     CHECK(s.stats().bricks == 1);
 }
 
+TEST_CASE("chunk store: solidObjAt mirrors cellAt's solid && obj verdict")
+{
+    // The collision probe asks only "is this a solid OBJECT cell?", ~2k times
+    // per escape-scan frame, and solidObjAt exists to answer it without cellAt's
+    // colour/palette work. It must therefore agree with
+    // cellAt(...).solid && cellAt(...).obj on EVERY cell - including the
+    // Empty/Solid/box branches, which can only ever answer no, and that is
+    // sound only while nothing but decodeCell sets obj on a returned StoreCell.
+    const int ci = chunkIndexOf(2, 1, 3);
+    ChunkStore s = makeSyntheticStore(ci, /*object=*/true);
+    const int gx0 = 2 * CHUNK_N, gy0 = 1 * CHUNK_N, gz0 = 3 * CHUNK_N;
+
+    int truths = 0, falses = 0;
+    // One cell wider than the chunk on each axis: the object brick covers
+    // chunk-local 0..7 (solid below local y 4, air above), the chunk's tail has
+    // no brick at all (box fallthrough), and the halo walks into the
+    // neighbouring (Empty) chunks.
+    for (int z = -1; z <= CHUNK_N; ++z)
+        for (int y = -1; y <= CHUNK_N; ++y)
+            for (int x = -1; x <= CHUNK_N; ++x) {
+                const int gx = gx0 + x, gy = gy0 + y, gz = gz0 + z;
+                const StoreCell c = s.cellAt(gx, gy, gz);
+                CHECK(s.solidObjAt(gx, gy, gz) == (c.solid && c.obj));
+                if (c.solid && c.obj)
+                    ++truths;
+                else
+                    ++falses;
+            }
+    // Both branches must be exercised - a fixture where every cell reads the
+    // same verdict would pass this mirror vacuously.
+    CHECK(truths > 0);
+    CHECK(falses > 0);
+    CHECK(s.solidObjAt(gx0 + 3, gy0 + 2, gz0 + 3));       // object brick, solid
+    CHECK_FALSE(s.solidObjAt(gx0 + 3, gy0 + 5, gz0 + 3)); // same brick, air above
+    CHECK_FALSE(s.solidObjAt(gx0 + 12, gy0 + 2, gz0 + 3)); // same chunk, no brick
+    CHECK_FALSE(s.solidObjAt(-1, gy0, gz0));               // bounds guard
+    CHECK_FALSE(s.solidObjAt(latN(), 0, 0));
+
+    // A Solid chunk: cellAt sets solid but never obj, so the verdict is "no"
+    // for all 16^3 cells - this pins the early-out the mirror relies on.
+    std::vector<std::unique_ptr<ChunkPool>> solidPools(kChunkCount);
+    auto sp = std::make_unique<ChunkPool>();
+    sp->root = int32_t(kSolidHandle);
+    solidPools[size_t(ci)] = std::move(sp);
+    ChunkStore solidStore;
+    const int n = latN();
+    std::vector<int16_t> colTop(size_t(n) * n, 400);
+    std::vector<uint8_t> colMat(size_t(n) * n, 3);
+    solidStore.adopt(solidPools, colTop, colMat);
+    int solidCells = 0, solidBad = 0;
+    for (int z = gz0; z < gz0 + CHUNK_N; ++z)
+        for (int y = gy0; y < gy0 + CHUNK_N; ++y)
+            for (int x = gx0; x < gx0 + CHUNK_N; ++x) {
+                const StoreCell c = solidStore.cellAt(x, y, z);
+                if (solidStore.solidObjAt(x, y, z) != (c.solid && c.obj))
+                    ++solidBad;
+                if (c.solid)
+                    ++solidCells;
+            }
+    CHECK(solidBad == 0);
+    CHECK(solidCells == CHUNK_N * CHUNK_N * CHUNK_N);
+
+    // The shared world adds what the synthetic fixture cannot build: terrain
+    // SolidBoxes (cellAt's box fallthrough) and real object geometry. Read-only
+    // scan: the mirror must hold whatever earlier tests left in the store.
+    ChunkStore& w = testLayeredWorld().store();
+    int wBad = 0, wTrue = 0, wFalse = 0;
+    for (int z = 8 * CHUNK_N; z < 8 * CHUNK_N + 6; ++z)
+        for (int x = 8 * CHUNK_N; x < 8 * CHUNK_N + 6; ++x)
+            for (int y = 0; y < n; ++y) {
+                const StoreCell c = w.cellAt(x, y, z);
+                if (w.solidObjAt(x, y, z) != (c.solid && c.obj))
+                    ++wBad;
+                if (c.solid && c.obj)
+                    ++wTrue;
+                else
+                    ++wFalse;
+            }
+    CHECK(wBad == 0);
+    MESSAGE("world mirror scan: " << wTrue << " solid-object cells vs "
+            << wFalse << " others");
+}
+
 // Minimal octree builder for the terrain fixtures: leaves are BRICK_N^3 cells,
 // an internal node of side S has 8 children of side S/2, and a node is emitted
 // only when it contains at least one non-empty brick. `topAt` returns the

@@ -32,9 +32,15 @@ public:
     // sidebar is the single window, so there is no Begin/End or positioning
     // here. Still called every frame even when the section is not on screen,
     // so an in-flight response keeps polling and the input state stays live.
+    // The callback that tells a high-detail animal what to do (the tool
+    // "set_behaviour"): it takes the layer's name and the command ("run",
+    // "graze", ...) and reports whether it found the animal.
+    using BehaviourFn = std::function<bool(const std::string&, const std::string&,
+                                          float)>;
     void drawPanel(vf::voxel::EditableWorld& editable, vf::voxel::LayeredWorld& world,
                    const vf::voxel::PickHit* hover, const vf::voxel::PickHit* selection,
-                   bool hasSelection, std::function<void()> rebuildFn);
+                   bool hasSelection, std::function<void()> rebuildFn,
+                   BehaviourFn behaviourFn = nullptr);
 
     bool isSending() const { return m_sending; }
     bool wantsCaptureKeyboard() const { return m_inputFocused; }
@@ -42,7 +48,8 @@ public:
     // direct tool execution; returns number of rejected/unknown calls
     int executeToolCalls(const std::vector<ToolCall>& calls, glm::ivec3 anchor, bool hasAnchor,
                          vf::voxel::EditableWorld& editable, vf::voxel::LayeredWorld& world,
-                         std::function<void()> rebuildFn);
+                         std::function<void()> rebuildFn,
+                         BehaviourFn behaviourFn = nullptr);
 
 private:
     void pushUser(const std::string& t);

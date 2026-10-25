@@ -90,11 +90,12 @@ target_link_libraries(vf_platform PUBLIC glfw Vulkan::Vulkan vf_glm spdlog::spdl
 add_library(vf_core STATIC src/core/camera.cpp
                           src/voxel/layered_world.cpp src/voxel/voxel_field.cpp
                           src/voxel/chunk_store.cpp
+                          src/voxel/collision.cpp
                           src/voxel/irradiance_volume.cpp
                           src/voxel/live_editor.cpp
                           src/voxel/surfelize.cpp
                           src/voxel/micro_field.cpp src/voxel/micro_svo.cpp
-                          src/voxel/micro_behaviour.cpp
+                          src/voxel/micro_behaviour.cpp src/voxel/micro_rig.cpp
                           src/voxel/fur_cards.cpp
                           src/voxel/heightmap.cpp src/voxel/worldfile.cpp
                           src/voxel/picking.cpp src/voxel/editable_world.cpp
@@ -182,7 +183,9 @@ set(VF_SHADER_SRCS ${CMAKE_CURRENT_SOURCE_DIR}/shaders/svo_raymarch.comp
     ${CMAKE_CURRENT_SOURCE_DIR}/shaders/splat.vert
     ${CMAKE_CURRENT_SOURCE_DIR}/shaders/splat.frag
     ${CMAKE_CURRENT_SOURCE_DIR}/shaders/micro_overlay.comp
-    ${CMAKE_CURRENT_SOURCE_DIR}/shaders/fur_overlay.comp
+    ${CMAKE_CURRENT_SOURCE_DIR}/shaders/fur.vert
+    ${CMAKE_CURRENT_SOURCE_DIR}/shaders/fur.frag
+    ${CMAKE_CURRENT_SOURCE_DIR}/shaders/fur_composite.comp
     ${CMAKE_CURRENT_SOURCE_DIR}/shaders/splat_cull.comp
     ${CMAKE_CURRENT_SOURCE_DIR}/shaders/splat_hiz.comp
     ${CMAKE_CURRENT_SOURCE_DIR}/shaders/splat_tile_bin.comp
@@ -202,7 +205,7 @@ foreach(src_file ${VF_SHADER_SRCS})
     set(out_file ${CMAKE_CURRENT_BINARY_DIR}/shaders/${name}.spv)
     add_custom_command(OUTPUT ${out_file}
         COMMAND ${GLSLANG_VALIDATOR} -V --target-env vulkan1.3 -I${CMAKE_CURRENT_SOURCE_DIR}/shaders -o ${out_file} ${src_file}
-        DEPENDS ${src_file} ${CMAKE_CURRENT_SOURCE_DIR}/shaders/common_base.glsl ${CMAKE_CURRENT_SOURCE_DIR}/shaders/common_svo.glsl ${CMAKE_CURRENT_SOURCE_DIR}/shaders/common_splat.glsl ${CMAKE_CURRENT_SOURCE_DIR}/shaders/common_surfel.glsl ${CMAKE_CURRENT_SOURCE_DIR}/shaders/common_irradiance.glsl
+        DEPENDS ${src_file} ${CMAKE_CURRENT_SOURCE_DIR}/shaders/common_base.glsl ${CMAKE_CURRENT_SOURCE_DIR}/shaders/common_svo.glsl ${CMAKE_CURRENT_SOURCE_DIR}/shaders/common_splat.glsl ${CMAKE_CURRENT_SOURCE_DIR}/shaders/common_surfel.glsl ${CMAKE_CURRENT_SOURCE_DIR}/shaders/common_irradiance.glsl ${CMAKE_CURRENT_SOURCE_DIR}/shaders/common_fur.glsl
         COMMENT "glslangValidator ${name}")
     list(APPEND VF_SHADER_SPVS ${out_file})
 endforeach()
@@ -218,6 +221,7 @@ add_executable(voxelforge
     src/app/rhi/present_probe.cpp
     src/app/world/world_layers.cpp
     src/app/world/world_textures.cpp
+    src/app/world/collision.cpp
     src/app/world/store_overlay.cpp
     src/app/world/surfel_stream.cpp
     src/app/world/micro_objects.cpp
@@ -264,6 +268,7 @@ add_executable(vf_tests tests/main.cpp tests/test_camera.cpp
                         tests/test_surfelize.cpp tests/test_store.cpp
                         tests/test_app_gizmo.cpp tests/test_app_cli_ui.cpp
                         tests/test_box_select.cpp tests/test_micro.cpp
+                        tests/test_collision.cpp
                         # The app's pure leaf logic, compiled in directly: before
                         # the src/app split these lived in the same translation
                         # unit as main() and could not be reached from a test.

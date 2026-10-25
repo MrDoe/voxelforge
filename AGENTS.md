@@ -29,6 +29,32 @@
   names a line that is not in the file you just edited, the object is stale —
   `touch` the file and rebuild. Do not "fix" code that the file says is right.
 
+## Code navigation (OpenCodeRAG) — use FIRST, before any code task
+- **Search before you read.** `search_semantic(query)` replaces blind grep/glob. Call it before
+  planning, editing, or answering any code question. Use `pathHints`/`languageHints` to focus.
+- **Skeleton before read.** `get_file_skeleton(filePath)` before `read` on any file.
+- **Usages before edit.** `find_usages(symbolName)` before modifying any function/class/variable.
+- **Images via describe.** `describe_image(filePath)` — never read raw image bytes.
+- **Quirks.** `recall_quirks(query)` when you hit an error or need a known pitfall;
+  `add_quirk(content)` when you discover a non-obvious fact, gotcha, or workaround;
+  `update_quirk`/`delete_quirk` when a stored quirk is outdated or wrong.
+  **Plan phase / start of new work:** run `recall_quirks` for the area you're about to touch
+  and `search_semantic` for the relevant symbols before writing any code. This prevents
+  repeating known mistakes and surfaces conventions you'd otherwise miss.
+
+## Crosstalk (multi-session coordination)
+- **Declare yourself early.** Call `crosstalk_status` with a unique human `name` (e.g. "Fur Fixer")
+  so peers and the user can address you. Set `role`, `goal`, `summary`, and `workingOn`.
+- **Check peers before editing shared code.** `crosstalk_peers` shows active sessions and their
+  leases. Work that does not overlap theirs needs no coordination.
+- **Talk before you collide.** `crosstalk_send` a short ask; replies are injected into live turns.
+  Never force a claim.
+- **Lease what you edit.** `crosstalk_claim` on exact paths (no globs). Renew if long, release when done.
+- **Shared surfaces:** GPU/display, `build/` tree, `shaders/*.glsl`, `assets/runtime_edits.vxw`,
+  `assets/*.vxw`/`world.json`. Use `VF_OVERLAY_PATH=/tmp/…` for scratch renders.
+- **Don't destroy what you didn't create.** Never `ninja clean`, never `rm` globs near peer files,
+  never kill processes you didn't start.
+
 ## Tooling conventions
 Failures here are almost always **harness** mistakes, not code bugs — and each
 one costs a whole turn, because the bad call is rejected before any work runs.
@@ -92,6 +118,12 @@ one costs a whole turn, because the bad call is rejected before any work runs.
   conclusions this session came from images: a "hole" that was really the
   world-wide water plane showing through a 0.2 m grid, and a "bug" that was
   another session's render contending for the GPU.
+- **Screenshots go in `tests/screenshots/`** — the local gallery, next to the
+  tracked reference shots (`wip/` is for work in progress). Never write them
+  to `.opencode/tmp/`, `/tmp`, or the repo root: the gallery is where a human
+  looks for them, and a shot outside it is one nobody finds. Scratch renders
+  and PPM intermediates can stay in `/tmp/opencode`, but the PNG a person is
+  meant to look at belongs in the gallery.
 - **Measure, don't theorise.** A failing numeric/geometry assertion: print the
   values (throwaway `g++` binary, `--probe`, `vf_slice`) before proposing a
   cause. Two rounds of float-behaviour guessing on `makeDome` were both wrong;
@@ -114,10 +146,18 @@ one costs a whole turn, because the bad call is rejected before any work runs.
   writes that toggle back — and a write can land AFTER a test restored the
   file. Measured 2026-10-21: `tests/micro_check.py` left all three micro
   layers disabled and `git diff assets/` was not empty, because the app's
-  write beat the gate's restore. Two rules follow: a test that toggles
+  write beat the gate's restore. Three rules follow: a test that toggles
   manifest layers must **verify** the restore (re-read the file, retry, and
-  say so loudly if it cannot), and `git diff assets/` is the check that the
-  shipped scene survived.
+  say so loudly if it cannot); `git diff assets/` is the check that the
+  shipped scene survived; and a test must **never suppress a feature by
+  deleting its manifest key** — write a real no-op value instead (the gate
+  writes `"behaviour": "stop"`). A deleted key comes back only if the
+  snapshot still had it, so one run that snapshots after the deletion (or
+  after an app write) loses the field for good. Measured 2026-10-21: the gate
+  popped `behaviour` on its first toggle, a crashed run snapshotted that
+  state, and the shipped manifest came back without the grazer — the alpaca
+  never walked again. The gate now snapshots whole entries, prints the
+  snapshot, and replaces entries whole on restore.
 - **Five ways to destroy data here, and every one of them is silent.** The
   overlay is gitignored and the manifests are tracked, so damage is invisible
   in `git status`; check there before blaming a build.
@@ -407,7 +447,7 @@ one costs a whole turn, because the bad call is rejected before any work runs.
   `--mode splat|svo` (default `splat`; SVO is the pixel reference).
 - Splat perf knobs (all env, default tuned): `VF_LOD=0` disables the baked
   merged-terrain LOD rings (surfelize 2x2x2 / 4x4x4, draw-time selection
-  `VF_LOD1`/`VF_LOD2` = 30/90 m, material-split blocks keep shore/rock
+  `VF_LOD1`/`VF_LOD2` = 20/60 m, material-split blocks keep shore/rock
   boundaries readable; `VF_LOD_SPLIT=0` restores the single-majority disk;
   objects ride along unmerged — trees must
   never vanish), `VF_NO_GPU_CULL=1` disables the GPU per-surfel
@@ -619,6 +659,30 @@ one costs a whole turn, because the bad call is rejected before any work runs.
   `App::ensureAcquireSemaphores()`, consumed in
   `App::recordInteractiveFrame()` — all in `src/app/rhi/surface.cpp` and
   `src/app/frame/record_interactive.cpp`).
+- **Collision = one oracle, two shapes.** `src/voxel/collision.{hpp,cpp}` is
+  pure geometry (a 27-sample sphere sweep, half-radius substeps, axis sliding,
+  embedded-start escape; a cylinder footprint), unit-pinned by
+  `tests/test_collision.cpp`. The App binding
+  (`src/app/world/collision.cpp`) reads the **LIVE `ChunkStore`** (terrain +
+  objects + edits), not `VoxelField`, plus every micro field at its current
+  transform — undo the staged Move, the behaviour, the staged rotation, then
+  `worldOffset`; that order must match the renderer. The fly camera is a
+  0.25 m sphere and `updateCamera` resolves its input DELTA only: spawn /
+  `--cam` / `--shot` placement is never collided. `VF_NO_COLLIDE=1` disables
+  it. A walking micro object is a **circumscribed** cylinder (the behaviour
+  turns it about its base) that ignores terrain (it is ground-clamped to it)
+  but blocks world `cell.obj` cells, other micro fields and water below
+  `WATER_LEVEL + 0.01`; a blocked step is withdrawn and retried at
+  `{1.2,-1.2,2.2,-2.2,3.0,-3.0}` rad, then grazes, and the body is lifted to
+  the max terrain (the CPU mirror of the SHADED height texture, patched after
+  every live stamp, so an added mound lifts it) under the footprint's four
+  corners + 0.002 m (lift-only, so an authored platform height survives). The
+  response lives in
+  `App::updateMicroBehaviours`, not `MicroBehaviour` (a pure transform).
+  `VF_TEST_COLLISION=1` drives the shipping paths headlessly and logs
+  `PASS`/`FAIL` (600 walker steps; `VF_TEST_COLLISION_STEPS=N` overrides).
+  Not covered: static placement/Move-Apply overlap, and a walker placed inside
+  geometry grazes instead of escaping. See `.opencode/wiki/concepts/collision.md`.
 
 ## Tests & verification — group-only
 - Build first with `ninja -C build`, then run only the focused group(s) that
@@ -801,11 +865,17 @@ one costs a whole turn, because the bad call is rejected before any work runs.
   point only. CMakeLists lists every `.cpp` explicitly — a new file that is not
   listed there does not build.
 - `src/app/chat_ui.cpp`, `src/ai/*` — chat UI, LLM client/tool parsing, MCP
-  server (`vf_mcp`: add_box/cylinder/ellipsoid/stamp, add_voxels, write_object,
-  read_object, delete_object, list_layers, enable_layer, probe, ground,
-  clear_edits). See the voxel-object skill for how to author arbitrary objects
-  via these tools (the `.vxw` file is produced by `write_object`/`add_voxels`,
-  never hand-written binary).
+  server (`vf_mcp`: authoring — add_box/cylinder/ellipsoid/stamp, add_voxels,
+  write_object, read_object, delete_object, import_mesh, clear_edits; inspection
+  — list_layers, get_layer, inspect_layer, layer_stats, list_micro, list_materials,
+  list_textures, list_models, list_lights, world_info, probe, probe_region, ground,
+  inspect_rig;
+  placement — set_layer_transform, set_layer_behaviour, set_pose, enable_layer,
+  duplicate_layer, rename_layer, delete_layer; textures/lights — set_texture,
+  add_light, remove_light; control — reload_world, render_shot). See the
+  voxel-object skill for how to author arbitrary objects via these tools (the
+  `.vxw` file is produced by `write_object`/`add_voxels`, never hand-written
+  binary).
 - `tools/heightmap_gen.cpp` — offline baker; classifies terrain materials
   against lattice geometry (`latSlope`) so baked materials match what the GPU
   renders. `tools/scene_slice.cpp` — ASCII cross-sections of the field.
@@ -966,6 +1036,142 @@ one costs a whole turn, because the bad call is rejected before any work runs.
   matrix is the app's own: the old pose to the new pose, about the same
   pivot. Headless check: `VF_TEST_ROTATE_LIVE="90,0,0"` with
   `VF_ROTATE_LAYER=micro/alpaca.vxw`.
+- **A micro object can MOVE ITSELF, and its skeleton is DERIVED, not
+  authored.** A micro layer with `"behaviour": "grazer"` in the manifest walks
+  around on its own and stops to graze. Nothing in the code knows what an
+  alpaca is: `src/voxel/micro_rig.cpp` finds the bones in the object's own
+  voxels, so a **newly imported model animates the moment it is loaded** — no
+  per-object code, no per-object asset. Three rules that cost a session each:
+  - the **spine** is the longer of the two *horizontal* axes, NOT the longest
+    axis: an animal is usually TALLER than it is long (the alpaca is 1.3 m
+    tall and 1.1 m long), so the longest axis is the vertical one and the
+    derivation finds **no legs at all** (measured: 3 bones, 0 legs);
+  - the **belly** is a *percentile* of the spine band's cell heights, not the
+    band's minimum: a quadruped's front legs stand INSIDE that band, so the
+    minimum is the hooves, nothing is "below the core", and the legs become
+    part of the body;
+  - a **leg reaches the ground**. The alpaca's coarse coat hangs BELOW the
+    belly, and the drop test alone read two fleece locks as limbs: the rig came
+    back with 9 bones / 6 legs instead of 7 / 4, and the phantom pair swung
+    about the belly on every step — with every number in the log plausible. A
+    cluster counts as a leg only if its bottom is within
+    `max(2 cells, 6% of height)` of the object's own bottom. That stays
+    generic: a model whose limbs never touch its base has no legs to animate.
+  A bone is a **segment** plus a role, and the gait is driven by the ROLES
+  (the legs swing in diagonal pairs, the head nods, the tail sways), so a cat
+  animates the way a horse does. The rig is **calculated once and saved** — a
+  cache next to the layer (`micro/alpaca.rig`) carrying the layer's signature,
+  so an edited layer invalidates it and a missing one just means the rig is
+  derived in memory. The cache is derived, so it is gitignored.
+  - A skeleton is a **CHAIN**: a bone is a rigid transform (`R·p + t`), and
+    its transform is its **parent's composed with its own** (`R_w = R_p·R_l`,
+    `t_w = R_p·t_l + t_p`). The legs, head and tail hang off the spine. The
+    bones used to be independent — each turned about its own joint in the
+    REST frame — so when the spine bowed, the head kept turning about a joint
+    that had already moved with the body and **the neck tore away from the
+    shoulders** (what the user saw). It must be a general rigid transform,
+    not "a rotation about a pivot": the composition of two pivot-rotations is
+    not one. The field is the REST POSE, so the animated surface is found by
+    sampling the field through the bone's **inverse** transform (`Rᵀ·(p−t)`);
+    the shader applies the forward where the material is looked up, so the
+    union field, the gradient (and so the normal), the AO and the self-shadow
+    keep working in the world frame untouched. A bone's transform starts as
+    the **identity** — the upload once wrote the bone's *joint* into the
+    translation slot and transported every object by metres (the vase and urn
+    vanished).
+  - **The rig's points are in the FIELD's frame but the shader looks them up
+    in the object's ANCHORED frame** (the field's frame plus the placement).
+    Out of step, the nearest bone is garbage, the field is sampled through a
+    wrong rotation, and **the animal does not move at all** — with every
+    number in the log correct. The rig is shifted into the anchored frame
+    when it is handed to the GPU.
+  - **The head is a CHAIN of three links, not one bone.** A single
+    `Head` bone turns the whole neck about its base: one hard crease at the
+    shoulder, a rigid pole above it, and a wedge opens on the outside of the
+    bend — the neck "loses volume" and reads as a hinged prop. The front
+    extension is emitted as `Neck`, `Neck`, `Head`, each a child of the
+    previous, and `animateBones` gives each link `headTotal / linkCount`, so
+    the neck CURVES while the tip still turns by the full angle (the links
+    compose). A rig with one `Head` bone divides by one and behaves exactly as
+    before. The count is fixed and the geometry comes from the object's own
+    voxels, so a newly imported model gets the same chain. Raising the shader's
+  - **Grazing keeps all four feet on the ground.** The spine no longer bows
+    during a graze (the body stays level) and the gait swing is neutralised as
+    the graze blends in, so rigid legs — which cannot extend — stay planted;
+    the head reaches down through the neck alone (`headTotal` 0.50 → 0.70).
+    A spine bow tipped the body and lifted the back feet off the ground.
+    bone capacity 8 → 12 (`MicroWorldRow` 1392 B) is what makes room for it: an
+    alpaca rig is 7 bones without the chain, and a silently truncated bone list
+    makes every parent index above the cut name the wrong bone.
+    `VF_TRACE_RIG=1` logs the roles, parents and posed tips at frame 0.
+  - **A headless shot of a walking animal is NOT deterministic** — the
+    behaviour advances with the frame clock, so two runs of the same binary
+    differ by tens of thousands of pixels and a shader A/B is noise.
+    `VF_TEST_BEHAVIOUR_FREEZE="name:dx,dy,dz:headingDeg:gait[:graze][;…]"`
+    pins the transform, gait phase and graze blend (`MicroBehaviour::pinPose`)
+    while keeping the ground clamp, and every A/B render then also passes a
+    fixed `--animtime`.
+- **The fur must not SLIDE.** The texture is bound to the SURFACE, not to
+  the world, so the micro shader samples the atlas at the point's REST-POSE
+  position — the very point the field is sampled at. A world-space sample
+  slides over the animal as it walks and as its bones swing.
+  **The NORMAL has to travel with the skin too**: `detailAlbedo`/`detailNormal`
+  pick their triplanar axes from the normal they are handed, so passing the
+  ANIMATED normal makes the fur pattern crawl over the body on every bone
+  rotation (the graze bows the spine 35°). The shader un-bones the normal into
+  the rest frame, samples there, and re-bones the bumped normal for shading
+  (`microDirUnbone`/`microDirRebone`/`microDirFromBaked`). **Which bone owns a
+  point is decided in the REST frame, and getting that wrong is what made the
+  fur slide.** `microBoneAt` must un-bone the POSED point with EACH candidate
+  bone's own transform and measure the result against THAT bone's own rest
+  segment, then take the nearest; asking which REST segment is nearest the
+  POSED point (the old rule) reclassifies whatever the pose moved. The
+  diagnostic (`VF_TEST_FUR_STAT=1`) poses each exposed rest cell by its
+  rest-pose owner before evaluating either rule, so it measures a configuration
+  the renderer actually visits. Measured on the alpaca at a full graze: the new
+  rule misclassifies 1.4 % of surface cells (0.3/51.4 mm mean/max shift;
+  neck/head 0.2 %) while the old rule misclassifies 65.7 % (16.6/186.8 mm) —
+  the fleece sampled a point up to 0.19 m away and the neck deformed as if it
+  belonged to the head. At rest every candidate returns the same point, so the
+  rule reduces to plain nearest-segment.
+  `VF_TEST_FUR_STAT=1` prints per-object shader-vs-rest, old-rule, and
+  walk-pose-A->B drift at frame 0; read it, not the picture.
+  The walk leaves a small residual seam drift at the hip/belly: between gait
+  phases 4-5 % of surface cells change bone with ~3 mm mean texture drift
+  (max 160 mm, dominated by leg<->leg and leg<->spine flips near the hips and
+  tail sway). Rendered walk sweeps (gait 0/pi/2/pi/3pi/2, close camera) show
+  continuous fleece with no visible sliding or seams — the residual is confined
+  to fleece-covered hip cells and is below visibility.
+  **The staged Move preview is a FIELD TRANSFORM, not a display offset.**
+  `microMapWorld` applies it through `microShadeToBaked` (move, then rotation,
+  then the behaviour), so trace, depth test and every surface lookup share one
+  frame; `main()` no longer shifts the hit point and `microMapShade` is just
+  `microMap`. It used to be a display-only shift applied AFTER the trace,
+  which meant the covered pixels were the old silhouette, the depth was the
+  old depth, and shading sampled the object beside the one on screen.
+  Verified headlessly: `VF_TEST_MOVE_LIVE="0.5,0,0,micro/alpaca.vxw"` and a
+  frozen pose offset by the same 0.5 m are pixel-identical (mean |d| 0.01,
+  0 px > 10).
+  **The fleece is GEOMETRY, not just the fur photo.** `tools/micro_voxel.cpp`
+  displaces the fleece surface by a per-region staple length (back/neck 5 cm,
+  head 4, legs 2.6–2.8, ears 0.8; the muzzle, eyes and hooves get none). A
+  smooth 5 cm wave at an 8 mm lattice is INVISIBLE — measured, the alpaca read
+  as "no fur visible except for the texture" — so the noise is stretched along
+  Y (the strands hang) and its finest octave sits AT the lattice pitch, which
+  breaks the silhouette into tufts. Regenerate with
+  `vf_microvox --alpaca --voxel 0.008 --out alpaca`; it writes into
+  `VOXELFORGE_ASSET_DIR/assets/micro/`, NOT the working directory.
+- **The AI can tell an animal what to do.** `set_behaviour` is a chat tool:
+  "let the alpaca run" becomes `{"name":"alpaca","command":"run"}` and
+  `App::setMicroBehaviour` puts the animal into that command. The commands
+  (run, walk, graze, stop, auto) are the same set the behaviour's own state
+  machine uses, so an instruction and the animal's choice are one mechanism.
+  The behaviour is a pure transform, so the instruction is just a field on it;
+  the collision response stays in the app.
+  - **A manifest field the app's writer does not emit is a silent trap**:
+    `writeManifest` dropped `behaviour` until it was fixed, so one app run
+    rewrote world.json without it and the alpaca stopped walking. A field
+    added to `WorldLayer` must be added to the writer too.
 - Coverage: `tests/test_micro.cpp` (9 cases) pins the SDF's sign convention and
   half-cell offset, the eighth-voxel quantisation, the margin, the dense field
   against the CPU field, the brick packing, a CPU replica of the shader's
@@ -996,13 +1202,31 @@ one costs a whole turn, because the bad call is rejected before any work runs.
   **122 772 cards, 15.7 MB**, **~200 ms** at load. The cards live in the field's LOCAL frame, so the
   layer's placement and the live rotation preview are applied by the shader
   exactly as the micro overlay applies them to the field.
-- **The pass is a COMPUTE pass** (`shaders/fur_overlay.comp`,
-  `src/render/fur_pass.*`) that runs right after the micro overlay and
-  composites into the SAME HDR image. The G-buffer's world position is the
-  depth reference (a card behind the body or behind the world is dropped), so
-  it needs no depth attachment and touches no opaque pass. It is INERT when
-  no object carries fur: the dispatch is skipped and the frame is
-  byte-identical. `VF_FUR=0` is the escape hatch.
+- **The pass is a RASTER pass** (`shaders/fur.vert`, `fur.frag`,
+  `fur_composite.comp`, `src/render/fur_pass.*`) that runs right after the
+  micro overlay and composites into the SAME HDR image: one instanced quad per
+  card, four vertices, no vertex buffer, ONE draw call for every object. The
+  cards accumulate six alpha-weighted terms into four additive rgba16f
+  targets (`sum a`, `sum a*ndl*shadow`, `sum a*ao`, `sum a*mat` | `sum a*p` |
+  `sum a*n` | `sum a*alb`), and a small composite dispatch over the same
+  screen rect evaluates the per-pixel lighting model and the
+  `1-exp(-sumA)` coverage. The G-buffer's world position is the depth
+  reference (a card behind the body or behind the world is discarded in the
+  fragment shader), so it needs no depth attachment and touches no opaque
+  pass. It is INERT when no object carries fur: the draw and the composite are
+  skipped and the frame is byte-identical. `VF_FUR=0` is the escape hatch.
+  **Measured 2026-10-25: the coat went from 183-211 ms to ~0.1 ms of GPU
+  time** on the camera that used to be the worst case (640x360, alpaca
+  3.6 m away) - see `.opencode/wiki/concepts/fur-raster-parity.md`. The
+  previous version was a compute ray marcher: every pixel walked the bucket
+  grid and blind-tested every card in every cell it crossed (~300 card tests
+  per pixel, each a 96 B record fetch plus two `mat3` multiplies), so the
+  cost scaled with the card POPULATION instead of the pixels a card covers.
+  Two rules carried over and must not be dropped: the quad is WIDENED by the
+  curl amplitude (the strand's centre line wanders inside the ribbon's plane,
+  so the geometry has to contain the wave), and the fragment reads the card's
+  REST position/normal for the texture and the detail normal before re-boning
+  - sampling in the animated frame makes the fleece crawl over the body.
 - **Four things decide whether the coat reads at all**, and all four are
   measured, not argued:
   1. **The ribbon must be BILLBOARDED about the strand** (its width axis
@@ -1046,6 +1270,22 @@ one costs a whole turn, because the bad call is rejected before any work runs.
   straight out of the surface** (measured: the strand's angle to the normal
   ranged 8.6°–89.8° instead of the intended 12°–38°). Expressing the groom
   in the surface's tangent frame and rotating THAT keeps the length at one.
+- **The coat FOLLOWS the object it belongs to**, and there are three
+  transforms in that chain, in the micro overlay's order: the **behaviour**
+  (the animal's walk — the OUTERMOST transform, undone first into the
+  field's frame), the user's **rotation preview**, and the **Move preview**
+  (the innermost, a rendered-position offset). The fur's table carries the
+  behaviour's offset/rotation/pivot and the app mirrors them from the micro
+  pass every frame, exactly as it mirrors the rotation preview.
+  **The walk is not optional**: the alpaca is a grazer, so a coat left in
+  the rest pose would hang in the air where the animal used to be.
+  **The PER-BONE animation is still missing** (the legs swing inside the
+  body): the overlay animates the body by mapping an animated point back to
+  the REST pose before sampling the field, so the field's cells never move,
+  while the cards are drawn in that rest frame. The fix is small (the card
+  carries its bone index, the fur's table carries the bone base, the shader
+  applies the bone's forward rotation) and was left undone while the rig's
+  API was still moving.
 - **The coat is configurable in the GUI**: the Rendering section carries its
   SHAPE (density, strand length, clump width, curl amplitude and cycles, and
   how far a strand stands off the surface) and the Textures section carries

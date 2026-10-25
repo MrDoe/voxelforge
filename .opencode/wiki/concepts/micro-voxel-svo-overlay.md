@@ -2,7 +2,7 @@
 title: Micro-voxel objects as separate SVO worlds (2026-10-20)
 tags: [micro-voxel, svo, sdf, encoding, shader, separate-lattice, overlay]
 sourceRefs: [src/voxel/micro_field.hpp, src/voxel/micro_field.cpp, src/voxel/micro_svo.hpp, src/voxel/micro_svo.cpp, src/render/micro_svo_pass.hpp, src/render/micro_svo_pass.cpp, src/app/world/micro_objects.cpp, src/voxel/surfelize.cpp, src/voxel/surfelize.hpp, shaders/micro_overlay.comp, tools/micro_voxel.cpp, tests/test_micro.cpp, tests/micro_check.py]
-lastReviewed: 2026-10-20
+lastReviewed: 2026-10-24
 ---
 
 # Micro-voxel objects as separate SVO worlds
@@ -445,6 +445,292 @@ layer, so the selection "does nothing". Up close the same object is 580 px ✓.
 **A micro object is selectable; it is small** — and the app's default camera
 is a house view, not an object view ✓.
 
+### The rig is DERIVED, cached, and generic
+
+The skeleton is **not authored**. Nothing in the code knows what an alpaca is:
+the bones are found in the object's own voxels, so a **newly imported model
+animates the moment it is loaded** — no per-object code, no per-object asset.
+
+The derivation (`src/voxel/micro_rig.cpp`) is generic and geometric:
+
+- the **spine** is the longer of the two *horizontal* axes — and it must not be
+  "the longest axis": an animal is usually **taller** than it is long (the
+  alpaca is 1.3 m tall and 1.1 m long), so the longest axis is the vertical
+  one and the whole derivation finds no legs at all (measured: 3 bones, 0 legs);
+- the **belly** is a *percentile* of the band's cell heights, not the band's
+  minimum: a quadruped's front legs stand *inside* the spine's band, so the
+  minimum is the hooves and nothing is "below the core" (the legs would be
+  part of the body);
+- the **legs** are the vertical clusters below the belly, merged by their
+  column size, **and they must reach the ground**: a cluster counts only if its
+  bottom is within `max(2 cells, 6% of height)` of the object's own bottom.
+  Without that test the alpaca's new coarse coat broke the rig — its fleece
+  locks hang below the belly, two were read as limbs, and the rig came back
+  with **9 bones / 6 legs instead of 7 / 4**, with the phantom pair swinging
+  about the belly on every step while every number in the log looked right.
+  The ground reference is the object's own bottom, so the rule stays generic:
+  a model whose limbs never touch its base has no legs to animate;
+- the **head** and the **tail** are the mass beyond the core's two ends.
+
+A bone is a **segment** plus its role, and the **gait is driven by the
+roles** — the legs swing in diagonal pairs, the head nods, the tail sways — so
+a cat animates the way a horse does.
+
+**The rig is calculated once and saved.** Deriving it is a pass over the
+object's voxels, so the result is cached next to the layer
+(`micro/alpaca.rig`) and read back on every later load. The cache carries the
+layer's signature (size + mtime), so an edited or re-imported layer
+invalidates it. A missing or stale cache just means the rig is derived in
+memory.
+
+**A frame bug worth remembering**: the rig's points come from the **field's**
+frame (the cells the object is made of), but the shader looks the bones up in
+the object's **anchored** frame (the field's frame plus the placement). With
+the two out of step, the nearest bone was garbage, the field was sampled
+through a wrong rotation, and **the animal did not move at all** — the walk
+looked broken with every number in the log correct. The rig is now shifted
+into the anchored frame when it is handed to the GPU.
+
+**A skeleton is a CHAIN, and a bone is a rigid transform `R·p + t`.** The
+bones are not independent: each one has a parent (the legs, head and tail hang
+off the spine), and the behaviour composes the child's transform with the
+parent's (`R_world = R_parent · R_local`, `t_world = R_parent · t_local +
+t_parent`). The user saw the failure this prevents: **a broken neck when the
+animal bowed** — every bone rotated about its own joint *in the rest frame*,
+so when the spine pitched, the head kept turning about a joint that had
+already moved with the body, and the neck tore away from the shoulders.
+
+The transform must be a general rigid one and **not** "a rotation about a
+pivot": the composition of two pivot-rotations is not a pivot-rotation. So the
+bone row carries a **translation** (not a joint), and the shader applies
+`R·p + t` — with its inverse `Rᵀ·(p − t)` where the field is sampled, and the
+forward where the material is looked up. The union field, the gradient (and so
+the normal), the AO and the self-shadow then keep working in the world frame
+untouched. The field is the REST POSE.
+
+**Two traps in that change, both measured:**
+- the upload used to write the bone's **joint** into what is now the
+  translation slot, and a joint is a world position — so every object was
+  translated by metres on the first frame: the vase and the urn vanished from
+  the scene and the alpaca measured 76 px instead of 81 000. A bone's
+  transform starts as the **identity**; the behaviour pushes the real one
+  every frame, and an object with no behaviour keeps the identity.
+- a half-applied edit still looks fixed. The first version of the chain fix
+  committed the app side, but its **shader** edit silently failed an assertion
+  (the file was never written), and the visual check passed anyway because the
+  old pivot formula was close enough for the composed matrix. Verify the file,
+  not just the picture.
+
+### The animal span in place, and the graze is a BOW
+
+The user saw the alpaca "wildly flickering", "moving way too fast" and "stuck
+behind a stone". All three were **one** bug, in the collision response, and
+the measurement that found it was a per-frame trace of the behaviour's state
+(`VF_TRACE_BEHAVIOUR=1`): **the heading advanced +1.2 rad every frame**.
+
+Two causes, both in the retry:
+
+- `b.heading = prevHeading + turn` was applied on **every** frame while the
+  obstacle was still there, so the turns **compounded** — the animal span in
+  place, which is the flicker and the "too fast";
+- the retry step was the **frame's** step (a fraction of a millimetre in a
+  headless run), so a candidate a hair away was still inside the obstacle and
+  **no turn ever looked clear**.
+
+The response now sets a heading **target**, which the behaviour turns toward
+at a limited rate (1.1 rad/s) and the wander resumes on arrival — the animal
+swings round and walks off instead of snapping. The retry step is the animal's
+own footprint, so a candidate really *leaves* the blocked spot.
+
+**The graze is a BOW, not a head dip.** A head on a 0.32 m neck can only dip
+0.3 m, and the alpaca's muzzle is 1.3 m up — nowhere near the ground. So the
+graze pitches the **spine** about the body's **back** (the front drops, the
+front legs stay put) and the head and neck reach down and forward on top of
+it. The ease is 2.5 s in and 2.5 s out: an animal that snaps its head down
+reads as a glitch, one that leans down slowly reads as an animal deciding to
+eat.
+
+Verified headlessly: head **up** at t=0, a quarter of the way down at
+t=1.2 s, muzzle in the grass at t=3 s.
+
+**A gate has to pin the scene it measures.** The walking animal broke three
+of the micro gate's own checks — the footprint of a 90° yaw, the pick's reach,
+the house view — because each of them measures a *still* scene. The gate now
+turns the behaviour **off** by default and the behaviour check turns it on
+for itself.
+
+**...and it must not destroy what it suppresses.** The gate turns the
+behaviour off by rewriting the manifest, and the first version did it by
+**deleting** the `behaviour` key. That is self-poisoning: the gate snapshots
+the micro entries at startup and restores them at the end, so a run that
+snapshots *after* an earlier run (or an app write) had already removed the key
+restores the removal — and the shipped scene loses the grazer permanently.
+Measured 2026-10-21: `set_micro` popped the key on its very first call, a
+crashed run took its snapshot in that state, and `assets/world.json` came back
+without it; the alpaca never walked again. The gate now writes a real no-op
+command (`"behaviour": "stop"`), snapshots whole layer entries, prints the
+snapshot (so a pre-existing loss is visible in the log), and replaces each
+entry whole on restore, verifying by equality.
+
+### The neck is a chain, not a hinge
+
+The head used to be **one** `Head` bone, so a graze turned the whole neck about
+its base: one hard crease at the shoulder, a rigid pole above it, and a wedge
+opened on the **outside** of the bend. The head swept an arc and the neck read
+as a hinged prop — the user's "the neck loses volume and looks unnatural".
+Rotating the single bone cannot fix this: any one-bone bend is a hinge.
+
+The front extension is now a **chain**: `Neck`, `Neck`, `Head`, each a child of
+the previous, and `animateBones` gives each link `headTotal / linkCount`. The
+links compose, so the tip still turns by the full angle while the curve is
+spread along the neck and every crease is a third as deep. A rig with one
+`Head` bone divides by one and behaves exactly as before, so this is a property
+of the rig *shape*, not a special case for the alpaca.
+
+Two things had to move with it:
+- **the shader's bone capacity, 8 → 12** (`MicroWorldRow` 1008 → 1392 B). An
+  alpaca rig is 7 bones *without* the chain; three links make 9, and a silently
+  truncated list makes every parent index above the cut name the wrong bone —
+  the neck would compose against a leg. The host clamps to the slot count and
+  writes the *clamped* count, so the shader never walks past the array.
+- **the rig cache magic, v2 → v3.** A cached v2 rig has one head bone and no
+  `Neck` role; loading it would animate the old hinge with the new code, and
+  the cache is keyed by the layer's signature, not by the rig format.
+
+Verified: `VF_TRACE_RIG=1` shows bones 5/6 role `Neck` and 7 role `Head`,
+chained, and a full graze drops the head tip 0.61 m with z held — a curve, not
+a swing.
+
+**The neck fix has a rendered number too.** The old-vs-new neck pair
+(`alpaca_fix_neck_{before,after}.png`, same camera, same crop, the 3-link chain
+present in BOTH — only the classification rule differs) shows the same bug the
+fur stat measures: in the 820×560 crop the old rule leaves **10.1 %**
+background (blue-dominant water/sky) pixels in the band above the
+shoulder-to-head line — 3705 px of see-through where the neck's upper surface
+belongs — against **1.0 %** (359 px) with the rest-frame rule; mean luma rises
+53.9 → 62.7 and pixels below luma 40 fall 35.3 % → 23.7 %. The deformation and
+the fur slide are one bug, not two.
+
+**The residual is a reach limit, not a skinning bug.** At a full graze the
+muzzle still sits ≈0.30 m above the base plane: a real ground reach needs a
+total neck angle of ≈1.6 rad, which at three links is 25–32° per joint and
+opens a ≈2.4 cm notch on the outside of the bend at a 5 mm voxel (the current
+9.5°/joint opens ≈7 mm, below voxel size). The graze constants (`grazePitch`
+spine bow 0.62, `headTotal` 0.50) were therefore left as they were: the honest
+levers are a longer derived neck, smooth-blend skinning, or two-segment legs —
+not a bigger angle through rigid skin.
+
+### The fur must not slide
+
+The texture is bound to the **surface**, not to the world. A world-space
+sample slides over the animal as it walks and as its bones swing, so the micro
+shader samples the atlas at the point's **rest-pose** position — the very
+point the field is sampled at. The texture then sticks to the surface it
+belongs to, and follows its bone.
+
+**The fleece is GEOMETRY, not only the photo.** The first alpaca had a fur
+photo bound to material 21 and a smooth 5 cm noise displacement in
+`tools/micro_voxel.cpp` — and it read as *"there is no fur visible except for
+the texture"*: at an 8 mm lattice a smooth 5 cm wave is averaged into a wavy
+**body**, and the silhouette stays stepped. The fleece is now a per-region
+**staple**: the noise is stretched along Y (the strands hang), its finest
+octave sits *at* the lattice pitch so the surface breaks into one-cell tufts,
+and each region carries its own length — back/neck 5 cm, head 4, legs
+2.6–2.8, ears 0.8, with the muzzle, eyes and hooves excluded. Measured: the
+voxel count goes 149 554 → 157 700, the animal still reads as an alpaca with a
+ragged fleece edge, and the dark-pixel count in the body core is unchanged
+(141 → 123), i.e. the tufts are not holes. Regenerate with
+`vf_microvox --alpaca --voxel 0.008 --out alpaca` — note the tool writes into
+`VOXELFORGE_ASSET_DIR/assets/micro/`, **not** the working directory, so a
+throwaway `--out` name still lands in the tracked tree.
+
+Three details are load-bearing, and two of them were reported as "the fur
+moves with the alpaca":
+
+- **Which bone owns a point must be decided in the REST frame.** This is the
+  root cause of the slide, and it is subtler than the normal. `microBoneAt`
+  used to ask which *rest* segment was nearest the *posed* point — but the
+  segments live in the rest pose and the pose has moved the point, so the
+  answer follows the pose instead of the body. Under the alpaca's 35° graze
+  bow the whole front of the torso stopped being nearest its own segment and
+  was handed to the `Head` or a `Leg`: **65.7 % of all surface cells** were
+  misclassified (16.6 mm mean, 186.8 mm max) and **90.5 % of the neck/head**
+  — the fleece sampled a rest point up to 0.19 m away and the neck deformed as
+  if it belonged to the head. Two things broke at once — the fleece slid, and
+  the surface was un-boned through the wrong transform. The rule now un-bones
+  the **POSED** point with **each candidate bone's own transform** and measures
+  it against **that bone's own segment**: for the right bone the point lands
+  back on its rest pose at the distance the skin sits from the bone axis, and
+  a wrong transform throws it off. At rest every candidate returns the same
+  point, so it reduces exactly to nearest-segment.
+  `VF_TEST_FUR_STAT=1` poses each exposed rest cell by its rest-pose owner
+  (the configuration the renderer actually visits) and prints per-object
+  shader-vs-rest, old-rule, and walk-pose-A->B drift at frame 0: the new rule
+  misclassifies 1.4 % of surface cells at graze (0.3/51.4 mm mean/max; neck/
+  head 0.2 %) vs 65.7 % for the old rule; at rest 1.0 % (0.2/39.2 mm).
+- **The normal must be taken into the rest frame as well.** `detailAlbedo`
+  and `detailNormal` (in `common_base.glsl`) choose their triplanar
+  projection axes from the normal argument (`pow(abs(n), 8)`), so sampling
+  the *position* in the rest frame while passing the *animated* normal makes
+  the pattern crawl over the skin whenever a bone turns — a 35° spine bow in
+  the graze is plainly visible. The shader un-bones the normal
+  (`microDirUnbone`), samples albedo and bump there, and re-bones the bumped
+  normal for shading (`microDirRebone` → `microDirFromBaked`). At a rest pose
+  the round trip is an exact identity: the vase (no skeleton) differs from
+  the pre-fix shader by max 3/255, i.e. float noise.
+- **The staged Move preview is a FIELD TRANSFORM, not a display offset.**
+  It used to be applied in `main()` *after* the trace: the hit point was
+  shifted by `preview.xyz` so the object appeared dragged, while the field was
+  traced in the baked frame. The consequence is exactly what the user saw
+  during a drag — the covered pixels were the object's old silhouette, the
+  depth was its old depth, and shading sampled the field *beside* the object
+  (the material cell fell back to the filler, the normal collapsed to the
+  bounding box's, and the speckled alpaca shaded like cardboard). The preview
+  now belongs to `microMapWorld`, through `microShadeToBaked` (staged Move,
+  then rotation, then the behaviour), so the trace, the depth test and every
+  surface lookup share one frame. `main()` no longer shifts anything and
+  `microMapShade` is plain `microMap`. The trace must *include* the preview —
+  that is what makes the object follow the pointer. Proof:
+  `VF_TEST_MOVE_LIVE="0.5,0,0,micro/alpaca.vxw"` against a frozen pose offset
+  by the same 0.5 m is **pixel-identical** (mean |d| 0.01, 0 px > 10), which a
+  display-only shift can never be.
+
+Verification: a headless `--shot` of an **animated** micro object is *not*
+deterministic — the behaviour advances during the frames before the shot
+(`run.cpp` clamps the step to 0.1 s), so two identical runs of the alpaca
+differ by ~34 k px and any shader A/B on the animal is pose noise.
+`VF_TEST_BEHAVIOUR_FREEZE="alpaca:dx,dy,dz:headingDeg:gait[:graze]"`
+pinPose()s the transform, the gait phase and the graze blend (the ground clamp
+still runs, and it is deterministic for a fixed offset); every A/B render also
+passes a fixed `--animtime`. That is what made the old-vs-new neck renders
+comparable pixel for pixel. `VF_TRACE_RIG=1` logs the bone roles, parents and
+posed tips at frame 0. The walk leaves a small residual seam drift at the
+hip/belly: between gait phases 4-5 % of surface cells change bone with ~3 mm
+mean texture drift (max 160 mm, dominated by leg<->leg and leg<->spine flips
+near the hips and tail sway). Rendered walk sweeps (gait 0/pi/2/pi/3pi/2 at
+the close camera) show continuous fleece with no visible sliding or seams —
+the residual is confined to fleece-covered hip cells and is below visibility,
+so no shader/rig change was made; `VF_TEST_FUR_STAT` watches it on every
+change to the bone rule. The screenshots of this work are
+`tests/screenshots/alpaca_fix_body_{rest,graze}.png`,
+`alpaca_fix_neck_{before,after}.png` (the `before` pair is the old
+classification rule rendered from the same camera), and
+`alpaca_walk_gait_{0,1.5708,3.1416,4.7124}.png` plus
+`alpaca_walk_graze.png` at the close camera (`11.55,1.0,16.8 -> 11.55,0.6,14.9`).
+
+### The AI can tell an animal what to do
+
+`set_behaviour` is a chat tool: *"let the alpaca run"* becomes
+`{"name":"alpaca","command":"run"}`, and the app's
+`App::setMicroBehaviour` puts the animal into that command. The commands
+are `run`, `walk`, `graze` (eat grass), `stop` and `auto` (the animal
+decides for itself) — the same set the behaviour's own state machine uses, so
+the AI's instruction and the animal's choice are the same mechanism.
+
+The behaviour is a pure transform (`MicroBehaviour`), so the instruction is
+just a field on it; the collision response stays in the app.
+
+
 ### The crash that never reproduced: what ASAN ruled out
 
 The user's session died with **"double free or corruption (out)"** right after
@@ -487,7 +773,7 @@ signature is fixed, and the fix is pinned by the world-lattice rule above.
 | check | result |
 |---|---|
 | `test_micro.cpp` (13 cases) | pass — incl. a negative control for the continuity check, the cast-shadow verdict, and the **15 m pick** that the 0.30 m one missed |
-| `micro_check.py` (16 checks) | pass — visibility, material, silhouette, micro-to-micro shadow, RECEIVE, CAST, alpaca visible, fleece texture, **selectable**, **live rotation preview**, world untouched, SVO backend |
+| `micro_check.py` (20 checks) | pass — visibility, material, silhouette, micro-to-micro shadow, RECEIVE, CAST, alpaca visible, fleece texture, **selectable**, **live rotation preview**, **the interactive selection path** (a Ctrl+LMB pick and a plain click, through the real input path), **the MOVE DRAG** (grab → the X handle → a 2 m drag), **the autonomous behaviour** and **the AI's command**, world untouched, SVO backend |
 | `VF_TEST_MICRO_PICK=1` (headless) | **3/3** micro objects selectable through the app's own `pickMicroObjects` |
 | `test-unit` group | 8/8 pass |
 | `visual_check.py` | only the pre-existing `house: sky probe not blue-dominant` failure; every other metric is **bit-identical** to before the micro layers existed (coverage 70.8 / 94.6 / 96.2 %), because the objects are not in those views |
@@ -499,4 +785,7 @@ signature is fixed, and the fix is pinned by the world-lattice rule above.
 | CAST (micro → world) | the bake reports 7 surfels darkened |
 | micro → micro | 349 urn pixels darkened by a mean of 41 luma |
 | the alpaca | visible (86 k px), fleece luma spread 24.7 (a flat fill would be ~2) |
+| the rig | derived: 7 bones (spine, 4 legs, head, tail) from the object's own voxels, cached next to the layer |
+| the gait | the head up at t=0, a quarter down at t=1.2 s, the muzzle in the grass at t=3 s (2.5 s of easing) |
+| the move drag | `move: grabbed micro/alpaca.vxw on axis X` → the X handle at (349, 300) → the drag ends with delta (+2.000, 0, 0) m |
 | shadow reaches the LEGS | ratio 0.87 → 0.57 after the 0.35 m step cap |

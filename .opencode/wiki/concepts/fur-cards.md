@@ -1,7 +1,7 @@
 ---
 title: Fur cards — a translucent hair layer over the micro objects
 tags: [rendering, micro-voxel, fur, translucency, splats, alpaca]
-sourceRefs: [src/voxel/fur_cards.hpp, src/voxel/fur_cards.cpp, src/render/fur_pass.hpp, src/render/fur_pass.cpp, shaders/fur_overlay.comp, src/app/world/micro_objects.cpp, src/app/frame/record_interactive.cpp, tests/fur_check.py, tests/test_micro.cpp, AGENTS.md, docs/rendering.md]
+sourceRefs: [src/voxel/fur_cards.hpp, src/voxel/fur_cards.cpp, src/render/fur_pass.hpp, src/render/fur_pass.cpp, shaders/fur.vert, shaders/fur.frag, shaders/fur_composite.comp, shaders/common_fur.glsl, src/app/world/micro_objects.cpp, src/app/frame/record_interactive.cpp, tests/fur_check.py, tests/test_micro.cpp, AGENTS.md, docs/rendering.md]
 lastReviewed: 2026-10-21
 ---
 
@@ -32,11 +32,14 @@ The fur is a **separate, translucent layer of hair cards**:
 - the cards are **generated on the CPU** at load from the field's *surface
   cells* (a solid cell with a non-solid neighbour) whose material grows fur —
   **21 `fleece`**. The vase and the urn (20 plaster) grow nothing.
-- they are drawn by a **compute pass** (`shaders/fur_overlay.comp`) that runs
-  after the micro overlay and composites into the **same HDR image**. The
-  G-buffer's world position is the depth reference, so a card behind the body
-  or behind the world is dropped with no depth attachment and no change to
-  any opaque pass.
+- they are drawn by a **raster pass** (`shaders/fur.vert` + `fur.frag`, one
+  instanced quad per card) plus a small composite dispatch
+  (`shaders/fur_composite.comp`) that runs after the micro overlay and
+  composites into the **same HDR image**. The G-buffer's world position is the
+  depth reference, so a card behind the body or behind the world is discarded
+  with no depth attachment and no change to any opaque pass. The raster form
+  replaced a per-pixel ray march that cost 98 % of the frame whenever the
+  alpaca was on screen — see [[concepts/fur-raster-parity]].
 
 **Why not do it with the world's splats?** A surfel is a disk lying *in* the
 tangent plane, and the opaque **base seal** (the nearest fragment written at
@@ -132,12 +135,27 @@ changing something else. A visual complaint is a measurement request.
 | the coat's luma spread | **36.98** against the bare body's 28.82 (the texture survives) |
 | the fur's effect at 8 m | the alpaca's pixels change; the house view does not |
 
-## The coat does NOT follow a per-bone animation (known, 2026-10-21)
+## The coat follows the walk, but not yet the legs
 
-The rig that makes the alpaca walk animates the body **per bone**: the micro
-overlay carries a bone table (the segment, the joint, the animated rotation)
-and maps an *animated* point back to the *rest* pose before sampling the
-field, so **the field's cells never move**.
+**The walk is handled.** The alpaca is a **grazer**: it wanders around its
+anchor, so the coat has to move with it or it hangs in the air where the
+animal used to be. The fur's per-object table therefore carries the
+behaviour's transform (the offset, the rotation matrix and the pivot) and
+the app mirrors it from the micro overlay every frame — the same way it
+mirrors the rotation preview.
+
+The order is the micro overlay's, and it matters: the **behaviour** is the
+outermost transform (the object walks, and the user's staged rotation rides
+on top of it), so it is undone FIRST on the way into the field's frame and
+applied LAST on the way out; the **rotation preview** is next; the **Move
+preview** is the innermost (a rendered-position offset).
+
+**The per-bone animation is still missing**, and that is the known gap.
+
+The rig that makes the alpaca walk ALSO animates the body **per bone**: the
+micro overlay carries a bone table (the segment, the joint, the animated
+rotation) and maps an *animated* point back to the *rest* pose before
+sampling the field, so **the field's cells never move**.
 
 The fur's cards are generated from the field's surface cells and are drawn in
 that same rest frame, with only the whole-object preview transform applied. So
