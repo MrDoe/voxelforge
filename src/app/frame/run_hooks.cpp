@@ -684,13 +684,25 @@ void App::runPostInputTestHooks(const char* testRotateLive)
         if (!logged) {
             logged = true;
             int aimed = 0, hit = 0;
-            for (const auto& o : m_microOccluders) {
+            for (size_t i = 0; i < m_microOccluders.size(); ++i) {
+                const auto& o = m_microOccluders[i];
                 if (!o.field)
                     continue;
                 ++aimed;
-                // Aim at the object's own box centre, from the camera.
-                const glm::vec3 centre = 0.5f * (o.aabbMin + o.aabbMax);
-                const glm::vec3 toCentre = centre - m_camera.pos;
+                // Aim at the object's own box centre, from the camera. An
+                // ANIMATED object is DRAWN turned and lifted about its pivot,
+                // so the baked box centre is not where the object is: the aim
+                // point goes forward through the same behaviour transform the
+                // pick will undo, or the un-posed ray lands beside a body that
+                // is much narrower than its box (measured 2026-10-26: the
+                // alpaca's 0.37 m torso plus a starting heading put the baked
+                // centre outside it, and the probe read 2/3 for a scene where
+                // every object is clickable; `toWorld` makes the answer
+                // independent of the heading and of the gait).
+                glm::vec3 aim = 0.5f * (o.aabbMin + o.aabbMax);
+                if (i < m_microBehaviours.size() && m_microBehaviours[i].active)
+                    aim = m_microBehaviours[i].toWorld(aim);
+                const glm::vec3 toCentre = aim - m_camera.pos;
                 if (glm::length(toCentre) < 1e-4f)
                     continue;
                 const glm::vec3 rd = glm::normalize(toCentre);
