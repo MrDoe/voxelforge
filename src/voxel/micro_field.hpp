@@ -126,6 +126,17 @@ bool buildMicroField(const std::vector<VoxelRecord>& records,
                      const WorldFileMeta& meta, MicroField& out,
                      std::string* err);
 
+// Derive the signed-distance band from `out.solid` alone (occupancy already
+// filled; dim/voxel/origin set). This is the SAME rule buildMicroField uses,
+// exposed separately because a MESH-driven field fills its occupancy from the
+// posed triangles and must not grow a second distance convention: a field
+// built without the -0.5-cell offset puts the zero crossing one cell inside
+// the object, and every tracer step then lands past the surface.
+//
+// Also refreshes solidMin/solidMax, which the walkers' footprint and the
+// ground clamp read.
+void buildMicroSdf(MicroField& out);
+
 // Pack one BRICK_N^3 brick of `f` starting at cell (bx0,by0,bz0) into `data`
 // using the world's brick word layout, so micro objects use the identical
 // packing the SVO raymarcher already decodes:

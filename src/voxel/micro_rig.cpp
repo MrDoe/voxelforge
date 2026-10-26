@@ -8,7 +8,9 @@
 #include <cmath>
 #include <cstdio>
 #include <cstring>
+#include <fstream>
 #include <map>
+#include <sstream>
 
 namespace vf::voxel {
 
@@ -32,7 +34,7 @@ float distToSegment(glm::vec3 p, glm::vec3 a, glm::vec3 b)
 // the rig derived again: parents are part of the rig, and a rig read
 // back without them is a skeleton whose bones move independently - which
 // tears the neck away from the shoulders when the spine bows.
-constexpr char kCacheMagic[8] = { 'V', 'F', 'R', 'I', 'G', 'C', 0, 4 };
+constexpr char kCacheMagic[8] = { 'V', 'F', 'R', 'I', 'G', 'C', 0, 5 };
 
 } // namespace
 
@@ -307,6 +309,22 @@ bool deriveMicroRig(const MicroField& field, MicroRig& out)
         out.bones.push_back(b);
     }
 
+    // --- assign stable ids + names ------------------------------------
+    // Ids are index+1 so they survive a re-derive of the same layer; the
+    // override JSON preserves them across insert/delete/reparent. Names are
+    // human-facing only (the policy reads ids).
+    for (size_t i = 0; i < out.bones.size(); ++i) {
+        out.bones[i].id = (uint32_t)(i + 1);
+        const auto& b = out.bones[i];
+        switch (b.role) {
+            case BoneRole::Spine: out.bones[i].name = "spine"; break;
+            case BoneRole::Head:  out.bones[i].name = "head";  break;
+            case BoneRole::Tail:  out.bones[i].name = "tail";  break;
+            case BoneRole::Neck:  out.bones[i].name = "neck" + std::to_string(b.parent); break;
+            case BoneRole::Leg:   out.bones[i].name = "leg" + std::to_string(b.legIndex); break;
+        }
+    }
+
     // --- per-bone capsule radius ---------------------------------------
     // The radius is the median distance of the SURFACE cells this bone owns
     // (nearest bone by segment distance) to the bone's segment. A per-bone
@@ -389,6 +407,14 @@ bool readMicroRigCache(const std::string& path, MicroRig& out, uint64_t layerSiz
                     ok = false;
                 out.bones[i].parent = parent;
                 out.bones[i].radius = raw[i * 10 + 9];
+                out.bones[i].id = i + 1;
+                switch (out.bones[i].role) {
+                    case BoneRole::Spine: out.bones[i].name = "spine"; break;
+                    case BoneRole::Head:  out.bones[i].name = "head";  break;
+                    case BoneRole::Tail:  out.bones[i].name = "tail";  break;
+                    case BoneRole::Neck:  out.bones[i].name = "neck";  break;
+                    case BoneRole::Leg:   out.bones[i].name = "leg" + std::to_string(out.bones[i].legIndex); break;
+                }
                 // The ORDER is part of the format: a bone's parent must come
                 // BEFORE it, because the chain is composed in one forward
                 // pass - animateBones reads the parent's already-composed
@@ -462,6 +488,265 @@ bool writeMicroRigCache(const std::string& path, const MicroRig& rig, uint64_t l
         ok = std::fwrite(frame, 4, 9, f) == 9;
     std::fclose(f);
     return ok;
+}
+
+// ---- rig override (JSON) ---------------------------------------------------
+namespace {
+
+struct RigJson {
+    const std::string& s;
+    size_t i = 0;
+    void skipWs() { while (i < s.size() && std::isspace(unsigned(s[i]))) ++i; }
+    bool eat(char c) { skipWs(); if (i < s.size() && s[i] == c) { ++i; return true; } return false; }
+    bool peek(char c) { skipWs(); return i < s.size() && s[i] == c; }
+    bool str(std::string& out) {
+        skipWs();
+        if (i >= s.size() || s[i] != '"') return false;
+        ++i; out.clear();
+        while (i < s.size() && s[i] != '"') { if (s[i] == '\\' && i+1 < s.size()) ++i; out.push_back(s[i++]); }
+        return i < s.size() && s[i++] == '"';
+    }
+    bool num(float& v) {
+        skipWs();
+        char* end = nullptr; const char* begin = s.c_str() + i;
+        v = std::strtof(begin, &end);
+        if (end == begin) return false;
+        i += size_t(end - begin);
+        return true;
+    }
+    bool numU64(uint64_t& v) {
+        skipWs();
+        char* end = nullptr; const char* begin = s.c_str() + i;
+        unsigned long long x = std::strtoull(begin, &end, 10);
+        if (end == begin) return false;
+        i += size_t(end - begin);
+        v = x;
+        return true;
+    }
+    bool skipValue() {
+        skipWs();
+        if (i >= s.size()) return false;
+        if (s[i] == '"') { std::string t; return str(t); }
+        if (s[i] == '[' || s[i] == '{') {
+            char open = s[i], close = s[i] == '[' ? ']' : '}';
+            int d = 0;
+            while (i < s.size()) {
+                char c = s[i++];
+                if (c == open) ++d; else if (c == close) { if (--d == 0) return true; }
+                else if (c == '"') { while (i < s.size() && s[i] != '"') { if (s[i]=='\\' && i+1<s.size()) ++i; ++i; } if (i < s.size()) ++i; }
+            }
+            return false;
+        }
+        char* end = nullptr; const char* begin = s.c_str() + i;
+        std::strtof(begin, &end);
+        if (end != begin) { i += size_t(end - begin); return true; }
+        return false;
+    }
+    bool numVec3(glm::vec3& v) {
+        if (!eat('[')) return false;
+        for (int c = 0; c < 3; ++c) { if (!num(v[c])) return false; if (c < 2) eat(','); }
+        return eat(']');
+    }
+};
+
+BoneRole parseRole(const std::string& s) {
+    if (s == "spine") return BoneRole::Spine;
+    if (s == "leg") return BoneRole::Leg;
+    if (s == "head") return BoneRole::Head;
+    if (s == "tail") return BoneRole::Tail;
+    if (s == "neck") return BoneRole::Neck;
+    return BoneRole::Spine;
+}
+
+const char* roleName(BoneRole r) {
+    switch (r) {
+        case BoneRole::Spine: return "spine";
+        case BoneRole::Leg:   return "leg";
+        case BoneRole::Head:  return "head";
+        case BoneRole::Tail:  return "tail";
+        case BoneRole::Neck:  return "neck";
+    }
+    return "spine";
+}
+
+} // namespace
+
+bool readMicroRigOverride(const std::string& path, MicroRig& out,
+                          uint64_t layerSize, uint64_t layerMtime)
+{
+    out = MicroRig();
+    std::ifstream f(path);
+    if (!f) return false;
+    std::ostringstream buf;
+    buf << f.rdbuf();
+    const std::string text = buf.str();
+
+    RigJson j { text };
+    if (!j.eat('{')) return false;
+
+    uint64_t size = 0, mtime = 0;
+    bool hasSize = false, hasMtime = false, hasFrame = false;
+    std::string k;
+    while (j.str(k)) {
+        if (k == "layerSize") { if (!j.numU64(size)) return false; hasSize = true; }
+        else if (k == "layerMtime") { if (!j.numU64(mtime)) return false; hasMtime = true; }
+        else if (k == "legCount") { float v = 0; if (!j.num(v)) return false; out.legCount = int(v); }
+        else if (k == "frame" && j.eat('[')) {
+            // [center, up, forward]: the gait's frame (and the MCP's report)
+            // reads these, so an override that dropped them silently changed
+            // which axis the legs swing about.
+            glm::vec3 c, u, f;
+            if (!j.numVec3(c)) return false;
+            j.eat(',');
+            if (!j.numVec3(u)) return false;
+            j.eat(',');
+            if (!j.numVec3(f)) return false;
+            j.eat(']');
+            out.center = c;
+            out.up = u;
+            out.forward = f;
+            hasFrame = true;
+        }
+        else if (k == "bones" && j.eat('[')) {
+            while (j.eat('{') || j.peek('{')) {
+                if (!j.peek('{')) break;
+                j.eat('{');
+                MicroBone b;
+                std::string bk;
+                while (j.str(bk)) {
+                    if (bk == "id") { float v = 0; if (!j.num(v)) return false; b.id = (uint32_t)v; }
+                    else if (bk == "name") { if (!j.str(b.name)) return false; }
+                    else if (bk == "role") { std::string v; if (!j.str(v)) return false; b.role = parseRole(v); }
+                    else if (bk == "parent") { float v = 0; if (!j.num(v)) return false; b.parent = (int)v; }
+                    else if (bk == "leg") { float v = 0; if (!j.num(v)) return false; b.legIndex = (int)v; }
+                    else if (bk == "radius") { if (!j.num(b.radius)) return false; }
+                    else if (bk == "a") { if (!j.numVec3(b.a)) return false; }
+                    else if (bk == "b") { if (!j.numVec3(b.b)) return false; }
+                    else { if (!j.skipValue()) return false; }
+                    if (!j.eat(',')) break;
+                }
+                j.eat('}');
+                out.bones.push_back(b);
+                if (!j.eat(',')) break;
+            }
+            j.eat(']');
+        } else {
+            j.skipValue();
+        }
+        if (!j.eat(',')) break;
+    }
+    j.eat('}');
+
+    // signature check
+    if (hasSize && size != layerSize) return false;
+    if (hasMtime && mtime != layerMtime) return false;
+    if (out.bones.empty()) return false;
+
+    // A v1 override carried no frame. Keep the struct's defaults (the
+    // sensible up/forward axes) rather than inventing a centre; the caller
+    // logs the mismatch so it is not mistaken for a derived frame.
+    (void)hasFrame;
+
+    // assign ids if missing
+    for (size_t i = 0; i < out.bones.size(); ++i) {
+        if (out.bones[i].id == 0) out.bones[i].id = (uint32_t)(i + 1);
+        if (out.bones[i].name.empty()) {
+            switch (out.bones[i].role) {
+                case BoneRole::Spine: out.bones[i].name = "spine"; break;
+                case BoneRole::Head:  out.bones[i].name = "head";  break;
+                case BoneRole::Tail:  out.bones[i].name = "tail";  break;
+                case BoneRole::Neck:  out.bones[i].name = "neck";  break;
+                case BoneRole::Leg:   out.bones[i].name = "leg" + std::to_string(out.bones[i].legIndex); break;
+            }
+        }
+    }
+    return true;
+}
+
+bool writeMicroRigOverride(const std::string& path, const MicroRig& rig,
+                           uint64_t layerSize, uint64_t layerMtime)
+{
+    const std::string tmp = path + ".tmp";
+    std::FILE* f = std::fopen(tmp.c_str(), "wb");
+    if (!f) return false;
+    std::fprintf(f, "{\n  \"format\": \"vf-rig/1\",\n");
+    std::fprintf(f, "  \"layerSize\": %llu,\n", (unsigned long long)layerSize);
+    std::fprintf(f, "  \"layerMtime\": %llu,\n", (unsigned long long)layerMtime);
+    // The gait reads the frame (up/forward decide which way the legs swing
+    // and where the head reaches); dropping it made an overridden rig animate
+    // about the wrong axes.
+    std::fprintf(f, "  \"legCount\": %d,\n", rig.legCount);
+    std::fprintf(f, "  \"frame\": [[%.4f, %.4f, %.4f], [%.4f, %.4f, %.4f], "
+                 "[%.4f, %.4f, %.4f]],\n",
+                 rig.center.x, rig.center.y, rig.center.z,
+                 rig.up.x, rig.up.y, rig.up.z,
+                 rig.forward.x, rig.forward.y, rig.forward.z);
+    std::fprintf(f, "  \"bones\": [\n");
+    for (size_t i = 0; i < rig.bones.size(); ++i) {
+        const MicroBone& b = rig.bones[i];
+        std::fprintf(f, "    { \"id\": %u, \"name\": \"%s\", \"role\": \"%s\", "
+                     "\"parent\": %d, \"leg\": %d, \"radius\": %.4f, "
+                     "\"a\": [%.4f, %.4f, %.4f], \"b\": [%.4f, %.4f, %.4f] }%s\n",
+                     b.id, b.name.c_str(), roleName(b.role), b.parent, b.legIndex,
+                     b.radius, b.a.x, b.a.y, b.a.z, b.b.x, b.b.y, b.b.z,
+                     i + 1 < rig.bones.size() ? "," : "");
+    }
+    std::fprintf(f, "  ]\n}\n");
+    std::fclose(f);
+    std::remove(path.c_str());
+    if (std::rename(tmp.c_str(), path.c_str()) != 0) {
+        std::remove(tmp.c_str());
+        return false;
+    }
+    return true;
+}
+
+std::vector<std::string> validateRig(const MicroRig& rig)
+{
+    std::vector<std::string> issues;
+    if (rig.bones.empty()) { issues.push_back("rig has no bones"); return issues; }
+    if (rig.bones.size() > 12) issues.push_back("bone count " + std::to_string(rig.bones.size()) + " exceeds shader cap of 12");
+    for (size_t i = 0; i < rig.bones.size(); ++i) {
+        const auto& b = rig.bones[i];
+        if (b.parent >= (int)i && b.parent != -1) issues.push_back("bone " + std::to_string(i) + " has parent >= index (must come before)");
+        if (b.parent < -1 || b.parent >= (int)rig.bones.size()) issues.push_back("bone " + std::to_string(i) + " has invalid parent");
+        const float len = glm::length(b.b - b.a);
+        if (len < 1e-4f) issues.push_back("bone " + std::to_string(i) + " has zero-length segment");
+        // role validity is implicit (enum)
+    }
+    // check for duplicate ids
+    for (size_t i = 0; i < rig.bones.size(); ++i)
+        for (size_t j = i + 1; j < rig.bones.size(); ++j)
+            if (rig.bones[i].id != 0 && rig.bones[i].id == rig.bones[j].id)
+                issues.push_back("duplicate bone id " + std::to_string(rig.bones[i].id));
+    return issues;
+}
+
+void composeBoneChain(const MicroRig& rig,
+                      const std::vector<glm::mat3>& localRot,
+                      std::vector<glm::mat3>& rot,
+                      std::vector<glm::vec3>& xform)
+{
+    const size_t n = rig.bones.size();
+    rot.assign(n, glm::mat3(1.f));
+    xform.assign(n, glm::vec3(0.f));
+    for (size_t i = 0; i < n; ++i) {
+        const MicroBone& b = rig.bones[i];
+        const glm::mat3 R = (i < localRot.size()) ? localRot[i] : glm::mat3(1.f);
+        // The local transform turns the bone about its OWN joint, so the
+        // point `a` is a fixed point: R*a + t = a.
+        const glm::vec3 t = b.a - R * b.a;
+        const int parent = b.parent;
+        if (parent >= 0 && size_t(parent) < n) {
+            const glm::mat3 Rp = rot[size_t(parent)];
+            const glm::vec3 tp = xform[size_t(parent)];
+            rot[i] = Rp * R;
+            xform[i] = Rp * t + tp;
+        } else {
+            rot[i] = R;
+            xform[i] = t;
+        }
+    }
 }
 
 } // namespace vf::voxel

@@ -96,6 +96,8 @@ add_library(vf_core STATIC src/core/camera.cpp
                           src/voxel/surfelize.cpp
                           src/voxel/micro_field.cpp src/voxel/micro_svo.cpp
                           src/voxel/micro_behaviour.cpp src/voxel/micro_rig.cpp
+                          src/voxel/micro_clip.cpp
+                          src/voxel/micro_mesh.cpp
                           src/voxel/fur_cards.cpp
                           src/voxel/heightmap.cpp src/voxel/worldfile.cpp
                           src/voxel/picking.cpp src/voxel/editable_world.cpp
@@ -132,6 +134,13 @@ target_link_libraries(vf_mesh2vox PRIVATE vf_core)
 add_executable(vf_microvox tools/micro_voxel.cpp)
 target_include_directories(vf_microvox PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
 target_link_libraries(vf_microvox PRIVATE vf_core)
+
+# Offline proof for the MESH-driven micro deformation (skin -> pose -> voxelize
+# -> delta). Explicit tool: never wired into the default build or the tests; run
+# it to measure the rest round-trip and the per-pose delta budget.
+add_executable(vf_micro_mesh_check tools/micro_mesh_check.cpp)
+target_include_directories(vf_micro_mesh_check PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
+target_link_libraries(vf_micro_mesh_check PRIVATE vf_core)
 
 # ---- MCP server -----------------------------------------------------------------
 add_executable(vf_mcp src/ai/mcp_server.cpp)

@@ -150,6 +150,78 @@ struct BfsDist {
 
 } // namespace
 
+void buildMicroSdf(MicroField& out)
+{
+    const size_t n = out.size3();
+    if (n == 0) {
+        out.sdf.clear();
+        out.solidMin = glm::ivec3(0);
+        out.solidMax = glm::ivec3(-1);
+        return;
+    }
+
+    // The SOLID cell range, inclusive. Every caller that asks "where is the
+    // body" (footprint, ground clamp, union grid) reads these, and a
+    // MESH-built field has no record list to derive them from - so the band
+    // builder owns them for both paths, and the two can never disagree.
+    out.solidMin = glm::ivec3(out.dim);
+    out.solidMax = glm::ivec3(-1);
+    for (int z = 0; z < out.dim.z; ++z)
+        for (int y = 0; y < out.dim.y; ++y)
+            for (int x = 0; x < out.dim.x; ++x)
+                if (out.solid[out.idx(x, y, z)]) {
+                    out.solidMin = glm::min(out.solidMin, glm::ivec3(x, y, z));
+                    out.solidMax = glm::max(out.solidMax, glm::ivec3(x, y, z));
+                }
+
+    // Signed distance: BFS from the solid set (distance to surface from air)
+    // and from the air set (depth from a solid cell), combined by the cell's
+    // own occupancy. Padded by a one-cell air ring so surface distances are
+    // measured to the object, not to the grid border.
+    {
+        const glm::ivec3 pd = out.dim + glm::ivec3(2);
+        std::vector<uint8_t> pad(size_t(pd.x) * size_t(pd.y) * size_t(pd.z), 0);
+        auto pidx = [&](int x, int y, int z) {
+            return (size_t(z) * size_t(pd.y) + size_t(y)) * size_t(pd.x) +
+                   size_t(x);
+        };
+        for (int z = 0; z < out.dim.z; ++z)
+            for (int y = 0; y < out.dim.y; ++y)
+                for (int x = 0; x < out.dim.x; ++x)
+                    pad[pidx(x + 1, y + 1, z + 1)] = out.solid[out.idx(x, y, z)];
+
+        BfsDist fromSolid, fromAir;
+        fromSolid.run(pad, pd, true);   // 0 on solid, grows into air
+        fromAir.run(pad, pd, false);    // 0 on air, grows into solid
+
+        out.sdf.assign(n, 0.0f);
+        for (int z = 0; z < out.dim.z; ++z)
+            for (int y = 0; y < out.dim.y; ++y)
+                for (int x = 0; x < out.dim.x; ++x) {
+                    const size_t i = out.idx(x, y, z);
+                    // Signed distance: air cells hold the distance to the surface
+                // (positive), solid cells the depth below it (negative). The
+                // -0.5 offsets the half-cell so the zero crossing lands on the
+                // object's real boundary rather than one cell inside, which is
+                // what keeps the brick's trilinear field continuous across the
+                // surface. Getting the sign wrong here is invisible in a
+                // screenshot but makes every tracer step straight through the
+                // object, so it is asserted in tests/test_micro_surfel.cpp.
+                //
+                // The depth is capped at kMicroSdfMaxSteps BFS STEPS (not
+                // metres): (steps - 0.5) * quantum has to fit the int8 byte.
+                if (out.solid[i])
+                    out.sdf[i] = -(std::min(fromAir.dist[pidx(x + 1, y + 1, z + 1)],
+                                            float(kMicroSdfMaxSteps)) - 0.5f) *
+                                 out.voxel;
+                else
+                    out.sdf[i] = (std::min(fromSolid.dist[pidx(x + 1, y + 1, z + 1)],
+                                           float(kMicroSdfMaxSteps)) - 0.5f) *
+                                 out.voxel;
+                }
+    }
+}
+
 bool buildMicroField(const std::vector<VoxelRecord>& records,
                      const WorldFileMeta& meta, MicroField& out,
                      std::string* err)
@@ -234,52 +306,7 @@ bool buildMicroField(const std::vector<VoxelRecord>& records,
         out.tex[i] = rec.reserved;
     }
 
-    // Signed distance: BFS from the solid set (distance to surface from air)
-    // and from the air set (depth from a solid cell), combined by the cell's
-    // own occupancy. Padded by a one-cell air ring so surface distances are
-    // measured to the object, not to the grid border.
-    {
-        const glm::ivec3 pd = out.dim + glm::ivec3(2);
-        std::vector<uint8_t> pad(size_t(pd.x) * size_t(pd.y) * size_t(pd.z), 0);
-        auto pidx = [&](int x, int y, int z) {
-            return (size_t(z) * size_t(pd.y) + size_t(y)) * size_t(pd.x) +
-                   size_t(x);
-        };
-        for (int z = 0; z < out.dim.z; ++z)
-            for (int y = 0; y < out.dim.y; ++y)
-                for (int x = 0; x < out.dim.x; ++x)
-                    pad[pidx(x + 1, y + 1, z + 1)] = out.solid[out.idx(x, y, z)];
-
-        BfsDist fromSolid, fromAir;
-        fromSolid.run(pad, pd, true);   // 0 on solid, grows into air
-        fromAir.run(pad, pd, false);    // 0 on air, grows into solid
-
-        out.sdf.assign(n, 0.0f);
-        for (int z = 0; z < out.dim.z; ++z)
-            for (int y = 0; y < out.dim.y; ++y)
-                for (int x = 0; x < out.dim.x; ++x) {
-                    const size_t i = out.idx(x, y, z);
-                    // Signed distance: air cells hold the distance to the surface
-                // (positive), solid cells the depth below it (negative). The
-                // -0.5 offsets the half-cell so the zero crossing lands on the
-                // object's real boundary rather than one cell inside, which is
-                // what keeps the brick's trilinear field continuous across the
-                // surface. Getting the sign wrong here is invisible in a
-                // screenshot but makes every tracer step straight through the
-                // object, so it is asserted in tests/test_micro_surfel.cpp.
-                //
-                // The depth is capped at kMicroSdfMaxSteps BFS STEPS (not
-                // metres): (steps - 0.5) * quantum has to fit the int8 byte.
-                if (out.solid[i])
-                    out.sdf[i] = -(std::min(fromAir.dist[pidx(x + 1, y + 1, z + 1)],
-                                            float(kMicroSdfMaxSteps)) - 0.5f) *
-                                 out.voxel;
-                else
-                    out.sdf[i] = (std::min(fromSolid.dist[pidx(x + 1, y + 1, z + 1)],
-                                           float(kMicroSdfMaxSteps)) - 0.5f) *
-                                 out.voxel;
-                }
-    }
+    buildMicroSdf(out);
     return true;
 }
 

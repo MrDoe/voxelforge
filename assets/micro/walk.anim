@@ -1,0 +1,212 @@
+{
+  "format": "vf-anim/1",
+  "name": "walk",
+  "description": "In-place walk cycle: diagonal leg pairs swing, body bobs.",
+  "layer": "micro/alpaca.vxw",
+  "length": 1.0,
+  "fps": 30.0,
+  "loop": true,
+  "clock": "time",
+  "speed": 0.2,
+  "stride": 0.9,
+  "blendIn": 0.2,
+  "body": [
+    {
+      "t": 0.0,
+      "offset": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "heading": 0.0,
+      "ease": "smooth"
+    },
+    {
+      "t": 0.5,
+      "offset": [
+        0.0,
+        0.02,
+        0.0
+      ],
+      "heading": 0.0,
+      "ease": "smooth"
+    },
+    {
+      "t": 1.0,
+      "offset": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "heading": 0.0,
+      "ease": "smooth"
+    }
+  ],
+  "tracks": [
+    {
+      "bone": 3,
+      "name": "leg1",
+      "keys": [
+        {
+          "t": 0.0,
+          "rot": [
+            25.0,
+            0.0,
+            0.0
+          ],
+          "ease": "smooth"
+        },
+        {
+          "t": 0.5,
+          "rot": [
+            -25.0,
+            0.0,
+            0.0
+          ],
+          "ease": "smooth"
+        },
+        {
+          "t": 1.0,
+          "rot": [
+            25.0,
+            0.0,
+            0.0
+          ],
+          "ease": "smooth"
+        }
+      ]
+    },
+    {
+      "bone": 5,
+      "name": "leg3",
+      "keys": [
+        {
+          "t": 0.0,
+          "rot": [
+            25.0,
+            0.0,
+            0.0
+          ],
+          "ease": "smooth"
+        },
+        {
+          "t": 0.5,
+          "rot": [
+            -25.0,
+            0.0,
+            0.0
+          ],
+          "ease": "smooth"
+        },
+        {
+          "t": 1.0,
+          "rot": [
+            25.0,
+            0.0,
+            0.0
+          ],
+          "ease": "smooth"
+        }
+      ]
+    },
+    {
+      "bone": 4,
+      "name": "leg2",
+      "keys": [
+        {
+          "t": 0.0,
+          "rot": [
+            -25.0,
+            0.0,
+            0.0
+          ],
+          "ease": "smooth"
+        },
+        {
+          "t": 0.5,
+          "rot": [
+            25.0,
+            0.0,
+            0.0
+          ],
+          "ease": "smooth"
+        },
+        {
+          "t": 1.0,
+          "rot": [
+            -25.0,
+            0.0,
+            0.0
+          ],
+          "ease": "smooth"
+        }
+      ]
+    },
+    {
+      "bone": 5,
+      "name": "leg4",
+      "keys": [
+        {
+          "t": 0.0,
+          "rot": [
+            -25.0,
+            0.0,
+            0.0
+          ],
+          "ease": "smooth"
+        },
+        {
+          "t": 0.5,
+          "rot": [
+            25.0,
+            0.0,
+            0.0
+          ],
+          "ease": "smooth"
+        },
+        {
+          "t": 1.0,
+          "rot": [
+            -25.0,
+            0.0,
+            0.0
+          ],
+          "ease": "smooth"
+        }
+      ]
+    },
+    {
+      "bone": 9,
+      "name": "tail",
+      "keys": [
+        {
+          "t": 0.0,
+          "rot": [
+            0.0,
+            0.0,
+            10.0
+          ],
+          "ease": "smooth"
+        },
+        {
+          "t": 0.5,
+          "rot": [
+            0.0,
+            0.0,
+            -10.0
+          ],
+          "ease": "smooth"
+        },
+        {
+          "t": 1.0,
+          "rot": [
+            0.0,
+            0.0,
+            10.0
+          ],
+          "ease": "smooth"
+        }
+      ]
+    }
+  ]
+}

@@ -48,6 +48,13 @@ enum class BoneRole {
 };
 
 struct MicroBone {
+    // Stable id, assigned at derivation (index + 1) and preserved across
+    // rig edits (insert/delete/reparent). Clip tracks reference this.
+    // 0 means "unset" (derived rigs from old caches); M1 assigns on derive.
+    uint32_t id = 0;
+    // Human-readable name (e.g. "leg0", "head"). Written to the override
+    // JSON for readability; never used for lookup.
+    std::string name;
     // The segment, in the object's own frame (metres, from the layer's min
     // corner - the frame the records use).
     glm::vec3 a { 0.f };
@@ -101,5 +108,36 @@ bool readMicroRigCache(const std::string& path, MicroRig& out,
                        uint64_t layerSize, uint64_t layerMtime);
 bool writeMicroRigCache(const std::string& path, const MicroRig& rig,
                         uint64_t layerSize, uint64_t layerMtime);
+
+// The rig OVERRIDE. An author-owned JSON file ("micro/alpaca.rig.json") that
+// wins over the derived cache when its layer signature matches. The binary
+// cache stays a convenience; the override is the authored truth.
+bool readMicroRigOverride(const std::string& path, MicroRig& out,
+                          uint64_t layerSize, uint64_t layerMtime);
+bool writeMicroRigOverride(const std::string& path, const MicroRig& rig,
+                           uint64_t layerSize, uint64_t layerMtime);
+
+// Validate a rig: bone count <= 12, parent < index, no zero-length segments,
+// known roles. Returns a list of human-readable issues (empty = clean).
+std::vector<std::string> validateRig(const MicroRig& rig);
+
+// Compose LOCAL bone rotations into rigid transforms along the parent chain.
+//
+// A skeleton is a CHAIN, not a bag of pivots: a bone's transform is its
+// parent's composed with its own, `R_w = R_p * R_l` and
+// `t_w = R_p * t_l + t_p`, where the local transform turns the bone about its
+// own joint (`t_l = a - R_l * a`). The composition of two pivot rotations is
+// not itself a pivot rotation, which is why the pair (R, t) is carried
+// explicitly instead of "a pivot and an angle": the old per-bone independent
+// rotation left the head turning about a joint the body had already moved,
+// and the neck tore off the shoulders.
+//
+// `localRot` may be shorter than the bone list (a missing entry = identity).
+// `rot`/`xform` are resized to the bone count. This is the ONLY implementation
+// of the chain rule - the behaviour and the offline proof tool both call it.
+void composeBoneChain(const MicroRig& rig,
+                      const std::vector<glm::mat3>& localRot,
+                      std::vector<glm::mat3>& rot,
+                      std::vector<glm::vec3>& xform);
 
 } // namespace vf::voxel

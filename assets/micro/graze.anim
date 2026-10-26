@@ -1,0 +1,126 @@
+{
+  "format": "vf-anim/1",
+  "name": "graze",
+  "description": "In-place graze: neck bows down and back up over 2 s.",
+  "layer": "micro/alpaca.vxw",
+  "length": 2.0,
+  "fps": 30.0,
+  "loop": true,
+  "clock": "time",
+  "speed": 0.2,
+  "stride": 0.9,
+  "blendIn": 0.2,
+  "body": [
+    {
+      "t": 0.0,
+      "offset": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "heading": 0.0,
+      "ease": "smooth"
+    }
+  ],
+  "tracks": [
+    {
+      "bone": 7,
+      "name": "neck5",
+      "keys": [
+        {
+          "t": 0.0,
+          "rot": [
+            0.0,
+            0.0,
+            0.0
+          ],
+          "ease": "smooth"
+        },
+        {
+          "t": 1.0,
+          "rot": [
+            40.0,
+            0.0,
+            0.0
+          ],
+          "ease": "smooth"
+        },
+        {
+          "t": 2.0,
+          "rot": [
+            0.0,
+            0.0,
+            0.0
+          ],
+          "ease": "smooth"
+        }
+      ]
+    },
+    {
+      "bone": 6,
+      "name": "neck0",
+      "keys": [
+        {
+          "t": 0.0,
+          "rot": [
+            0.0,
+            0.0,
+            0.0
+          ],
+          "ease": "smooth"
+        },
+        {
+          "t": 1.0,
+          "rot": [
+            30.0,
+            0.0,
+            0.0
+          ],
+          "ease": "smooth"
+        },
+        {
+          "t": 2.0,
+          "rot": [
+            0.0,
+            0.0,
+            0.0
+          ],
+          "ease": "smooth"
+        }
+      ]
+    },
+    {
+      "bone": 8,
+      "name": "head",
+      "keys": [
+        {
+          "t": 0.0,
+          "rot": [
+            0.0,
+            0.0,
+            0.0
+          ],
+          "ease": "smooth"
+        },
+        {
+          "t": 1.0,
+          "rot": [
+            20.0,
+            0.0,
+            0.0
+          ],
+          "ease": "smooth"
+        },
+        {
+          "t": 2.0,
+          "rot": [
+            0.0,
+            0.0,
+            0.0
+          ],
+          "ease": "smooth"
+        }
+      ]
+    }
+  ]
+}
