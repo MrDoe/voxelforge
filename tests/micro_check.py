@@ -492,7 +492,17 @@ def main() -> int:
         # a CLIPPED bbox is not the object's aspect - which is how the check
         # reported 0.99 -> 0.48 for an object that does turn.
         top_cam = micro_cam("alpaca", 0.0, 4.0, 0.0, 0.0, 0.0, 0.0)
-        side_cam = alpaca_cam()
+        # The side view must be WIDE enough for BOTH angles. The pivot is the
+        # bottom-centre, so a 90 degree yaw swings the animal's long axis
+        # across the frame: the old 1.05 m close-up put the yawed animal
+        # outside the 30 degree half-FOV, its diff came back EMPTY, and
+        # "the alpaca is measurable at both angles" failed for a FRAMING
+        # reason, not a render one (measured 2026-10-26: side rot=90 -> 0 px,
+        # while the top view measured the turn correctly). ~2.5 m back and
+        # aimed at the body's middle holds either orientation with margin,
+        # and the base row stays well inside the frame (that is the number
+        # the "stays put" check compares).
+        side_cam = micro_cam("alpaca", -1.40, 0.75, -1.40, 0.18, 0.45, 0.50)
 
         def footprint(rot_deg: float, cam: str) -> tuple[int, int, int, int, int] | None:
             tag = "%d_%s" % (rot_deg, "top" if cam is top_cam else "side")

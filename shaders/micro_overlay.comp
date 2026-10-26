@@ -738,6 +738,24 @@ bool microTrace(vec3 ro, vec3 rd, float tMax, out float tHit, out int outWorld)
                     else
                         hi = mid;
                 }
+                // DISCONTINUITY GUARD. The field is the minimum over the
+                // claims of RIGID bone transforms, so it can JUMP from
+                // positive to several voxels negative with no zero crossing
+                // between (a point whose bone territory flips is mapped to a
+                // different place in rest space). The bisection above then
+                // converges onto the JUMP, not onto a surface: the octree
+                // descent lands in a solid terminal with no brick and the
+                // pixel shades black. A genuine crossing lands within a
+                // fraction of a voxel of zero; a jump reads at least a voxel
+                // deep. Reject it and march on, stepping by the depth the
+                // field claims we are inside so the next sample is outside
+                // that claimed solid.
+                const float dfs = microMapWorld(w, ro + rd * hi, voxel, gridN, gridBase);
+                if (dfs < -0.5 * voxel) {
+                    prevT = hi;
+                    t = hi + clamp(-dfs * 0.85, minStep, 0.25);
+                    continue;
+                }
                 if (hi < bestT) {
                     bestT = hi;
                     bestW = w;

@@ -515,6 +515,11 @@ vf_add_test_group(live-edit vf_tests voxelforge)
 # Brush preview only (no unit binary needed - it is all rendered frames).
 vf_add_test_group(preview voxelforge)
 vf_add_test_group(visual voxelforge)
+# The micro-voxel overlay gate (micro_check.py) and the fur cards over it
+# (fur_check.py, also labelled `fur`). AGENTS.md documents this entry point as
+# `test-micro`, so it has to exist: without the group target the documented
+# command failed with "unknown target 'test-micro'".
+vf_add_test_group(micro voxelforge)
 # The fur cards over the micro objects.
 vf_add_test_group(fur voxelforge)
 vf_add_test_group(effects voxelforge)
