@@ -5,6 +5,7 @@
 
 #include <algorithm>
 #include <cstring>
+#include <cstdlib>
 #include <fstream>
 #include <spdlog/spdlog.h>
 
@@ -602,46 +603,80 @@ void MicroSvoPass::record(VkCommandBuffer cmd, const RaymarchPush& push)
         const uint32_t W = (uint32_t)push.a.z;
         const uint32_t H = (uint32_t)push.a.w;
         auto* rows = reinterpret_cast<MicroWorldRow*>(m_worldTable.mapped);
+        // THE RENDERED OBJECT IS NOT AT ITS BAKED AABB. The behaviour (the
+        // alpaca's walk) and the live Move/Rotate previews are applied when the
+        // FIELD IS SAMPLED, so the object moves while its box stays put. This
+        // rectangle CLIPS the dispatch and `anyVisible` can skip the pass
+        // entirely, so both must follow the same forward chain the shader
+        // applies in microShadeToBaked - rotation preview, then the behaviour
+        // (pivot rotation, then offset), then the Move translation.
+        //
+        // Measured: the box alone put a walking alpaca outside the rectangle,
+        // and those pixels were simply never dispatched - the animal went fully
+        // or partly transparent while it walked, while the fur pass (which
+        // already mirrored this chain) still drew its coat.
+        auto rowMat = [](const float* a, const float* b2, const float* c2) {
+            glm::mat3 M;
+            M[0] = glm::vec3(a[0], a[1], a[2]);
+            M[1] = glm::vec3(b2[0], b2[1], b2[2]);
+            M[2] = glm::vec3(c2[0], c2[1], c2[2]);
+            return M;
+        };
+        auto posedCentre = [&rowMat](const MicroWorldRow& r) {
+            glm::vec3 c(0.5f * (r.lo[0] + r.hi[0]), 0.5f * (r.lo[1] + r.hi[1]),
+                        0.5f * (r.lo[2] + r.hi[2]));
+            if (r.pivot[3] > 0.5f) {
+                const glm::vec3 pv(r.pivot[0], r.pivot[1], r.pivot[2]);
+                c = pv + rowMat(r.rot0, r.rot1, r.rot2) * (c - pv);
+            }
+            if (r.anim[3] > 0.5f) {
+                const glm::vec3 pv(r.apivot[0], r.apivot[1], r.apivot[2]);
+                c = pv + rowMat(r.arot0, r.arot1, r.arot2) * (c - pv) +
+                    glm::vec3(r.anim[0], r.anim[1], r.anim[2]);
+            }
+            if (r.preview[3] > 0.5f)
+                c += glm::vec3(r.preview[0], r.preview[1], r.preview[2]);
+            return c;
+        };
         for (int i = 0; i < m_worldCount; ++i) {
             const MicroWorldRow& r = rows[i];
             glm::vec3 mn(r.lo[0], r.lo[1], r.lo[2]);
             glm::vec3 mx(r.hi[0], r.hi[1], r.hi[2]);
-            glm::vec3 c = 0.5f * (mn + mx);
-            glm::vec3 d = c - glm::vec3(push.camPos);
-            float zc = glm::dot(d, glm::vec3(push.camFwd));
-            if (zc < -2.0f)
-                continue;
-            if (zc > 60.0f)
-                continue;
-            float xc = glm::dot(d, glm::vec3(push.camRight));
-            float yc = glm::dot(d, glm::vec3(push.camUp));
-            const float radius = 0.5f * glm::length(mx - mn) + 1.0f;
+            const glm::vec3 c = posedCentre(r);
+            const glm::vec3 d = c - glm::vec3(push.camPos);
+            const float zc = glm::dot(d, glm::vec3(push.camFwd));
+            // The rest AABB's half-diagonal, plus the reach of one BONE: a
+            // swinging limb carries the surface outside the box it was baked
+            // in, and the shader's field answers for it (the field is the rest
+            // pose, sampled through the bone's inverse).
+            const float radius = 0.5f * glm::length(mx - mn) + 0.30f;
+            if (zc < -radius)
+                continue; // fully behind the camera
+            if (zc > 60.0f + radius)
+                continue; // too far (sub-pixel)
+            const float xc = glm::dot(d, glm::vec3(push.camRight));
+            const float yc = glm::dot(d, glm::vec3(push.camUp));
             const float halfX = tanHalf * aspect * std::max(zc, 0.1f) + radius;
             const float halfY = tanHalf * std::max(zc, 0.1f) + radius;
             if (std::fabs(xc) > halfX || std::fabs(yc) > halfY)
                 continue;
             anyVisible = true;
-            // Project the 8 corners to screen space.
-            for (int ci = 0; ci < 8; ++ci) {
-                glm::vec3 corner(
-                    (ci & 1) ? mx.x : mn.x,
-                    (ci & 2) ? mx.y : mn.y,
-                    (ci & 4) ? mx.z : mn.z);
-                glm::vec3 dd = corner - glm::vec3(push.camPos);
-                float zz = glm::dot(dd, glm::vec3(push.camFwd));
-                if (zz < 0.1f)
-                    zz = 0.1f;
-                float xx = glm::dot(dd, glm::vec3(push.camRight));
-                float yy = glm::dot(dd, glm::vec3(push.camUp));
-                int sx = (int)((xx / (tanHalf * aspect * zz) * 0.5f + 0.5f) * (float)W);
-                int sy = (int)((-yy / (tanHalf * zz) * 0.5f + 0.5f) * (float)H);
-                // padding
-                sx -= 16; sy -= 16;
-                int sx2 = sx + 32; int sy2 = sy + 32;
-                rectMinX = std::min(rectMinX, sx);
-                rectMinY = std::min(rectMinY, sy);
-                rectMaxX = std::max(rectMaxX, sx2);
-                rectMaxY = std::max(rectMaxY, sy2);
+            // Project the bounding sphere's four screen extremes; the NEAREST
+            // depth it can reach is used, so a sphere that straddles the camera
+            // does not collapse the rectangle. This mirrors the fur pass, so
+            // the coat and the body it covers always agree on the screen area.
+            const float zn = std::max(zc - radius, 0.1f);
+            for (int s = 0; s < 4; ++s) {
+                const float px = xc + ((s & 1) ? radius : -radius);
+                const float py = yc + ((s & 2) ? radius : -radius);
+                const int sx =
+                    (int)((px / (tanHalf * aspect * zn) * 0.5f + 0.5f) * float(W));
+                const int sy =
+                    (int)((-py / (tanHalf * zn) * 0.5f + 0.5f) * float(H));
+                rectMinX = std::min(rectMinX, sx - 16);
+                rectMinY = std::min(rectMinY, sy - 16);
+                rectMaxX = std::max(rectMaxX, sx + 16);
+                rectMaxY = std::max(rectMaxY, sy + 16);
             }
         }
         if (!anyVisible)
@@ -651,6 +686,26 @@ void MicroSvoPass::record(VkCommandBuffer cmd, const RaymarchPush& push)
         rectMinY = std::max(0, std::min(rectMinY, (int)H - 1));
         rectMaxX = std::max(rectMinX + 1, std::min(rectMaxX, (int)W));
         rectMaxY = std::max(rectMinY + 1, std::min(rectMaxY, (int)H));
+        if (const char* dbg = std::getenv("VF_TRACE_MICRO_RECT"); dbg && *dbg) {
+            for (int i = 0; i < m_worldCount; ++i) {
+                const MicroWorldRow& r = rows[i];
+                const glm::vec3 c = posedCentre(r);
+                const glm::vec3 d = c - glm::vec3(push.camPos);
+                const float z = glm::dot(d, glm::vec3(push.camFwd));
+                const float x = glm::dot(d, glm::vec3(push.camRight));
+                const float y = glm::dot(d, glm::vec3(push.camUp));
+                const float zn = std::max(z, 0.1f);
+                const int sx = (int)((x / (tanHalf * aspect * zn) * 0.5f + 0.5f) * float(W));
+                const int sy = (int)((-y / (tanHalf * zn) * 0.5f + 0.5f) * float(H));
+                spdlog::info("microrect world {} baked ({:.2f},{:.2f},{:.2f}) "
+                             "anim ({:.2f},{:.2f},{:.2f}) on {} posed ({:.2f},{:.2f},{:.2f}) "
+                             "screen ({},{}) z {:.2f} rect [{},{}..{},{}]",
+                             i, 0.5f * (r.lo[0] + r.hi[0]), 0.5f * (r.lo[1] + r.hi[1]),
+                             0.5f * (r.lo[2] + r.hi[2]), r.anim[0], r.anim[1], r.anim[2],
+                             r.anim[3] > 0.5f ? 1 : 0, c.x, c.y, c.z, sx, sy, z,
+                             rectMinX, rectMinY, rectMaxX, rectMaxY);
+            }
+        }
     }
     // Flush the host-written world table before the GPU reads it. makeBuffer
     // allocates with VMA_ALLOCATION_CREATE_HOST_ACCESS_SEQUENTIAL_WRITE_BIT,

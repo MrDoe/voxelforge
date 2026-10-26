@@ -6666,3 +6666,18 @@ used the VASE's frame and threw the coat ~18 m off. Fixed by indexing the
 fields with `i` (the micro index) and using `fi` only for the fur-pass calls.
 Verified by rendering five gait phases + grazing: the coat now follows the
 bones (user-confirmed).
+
+## [2026-10-26] fix | a moving micro object was clipped by its own baked screen rect
+The alpaca went fully or partly transparent while walking. Cause: the micro
+overlay's compute dispatch rectangle and its pass-level frustum cull were
+computed from the BAKED world AABB, while `microMapWorld` samples the field
+through the behaviour transform (and the Move/Rotate previews). Pixels outside
+the rect are never dispatched. Measured with a frozen walk: rect
+[17,7..429,200] while the posed centre was (516,209) at a 2 m offset, and at
+3 m the head crossed the rect's top edge. The fur pass already followed the
+pose, so the coat kept drawing where the body was missing. Fix: pose the centre
+through the shader's exact chain (rotation preview, behaviour pivot+offset,
+Move), radius = half-diagonal + one bone's reach, sphere projection at the
+nearest depth; empty rect only when the posed object is off-screen. New
+`VF_TRACE_MICRO_RECT` diagnostic. Silhouette vs an animal-free baseline over
+six frozen positions: 9387/7282/5554/4195/3337/2809 px, all complete.
