@@ -6681,3 +6681,28 @@ Move), radius = half-diagonal + one bone's reach, sphere projection at the
 nearest depth; empty rect only when the posed object is off-screen. New
 `VF_TRACE_MICRO_RECT` diagnostic. Silhouette vs an animal-free baseline over
 six frozen positions: 9387/7282/5554/4195/3337/2809 px, all complete.
+
+## [2026-10-26] ingest | Micro overlay bone claim rule and the deep-hit material retry
+Why the grazing alpaca's neck tore, and what shipped: `microClaimField`'s
+territory test fails for EVERY bone in a thin shell near the posed neck (the
+un-boned point is 0.0022 m nearer another bone's segment — a 0.27-voxel flip),
+so the fallback returns a flat 6-voxel step, and the tracer either jumps over
+the thin negative band (hole) or lands deep where the octree has a solid
+terminal and no brick (`microSurface` false -> black). The reject step
+(`kRejectDeep`) traded one for the other and is now off; `microMaterialAt` was
+split out of `microSurface` so a deep hit retries the lookup walking back along
+the ray (in the owner's rest frame — the ray DIRECTION has to be un-boned too).
+Eroded posed-GT measurement, 640x360 graze, (core holes / ghost px / near-black):
+HEAD 95/80/101 -> claim+reject 217/3/99 -> claim, no reject 96/3/243 -> shipped
+96/3/84. Cell-centre ownership and smaller no-claimer caps both measured as no-ops.
+Page: .opencode/wiki/concepts/micro-bone-claim-rule.md
+
+## [2026-10-26] concept | Preserving the surface when deforming a micro voxel object
+Principle recorded from the neck fix: a deformed (walked/grazed/rotated/moved)
+micro object must keep a continuous surface (no holes, cuts, ghosts, black
+pixels) AND the coat must follow the deformed surface (sampled in the rest
+frame, behaviour transform applied at field-sampling time). Two traps: the reject
+step traded holes for black (off + deep-hit retry is the shipped answer); the
+coat crawls if sampled in the animated frame. Verify with the eroded posed-GT
+metric + fur_check, not screenshots.
+Page: .opencode/wiki/concepts/micro-deformation-surface.md
