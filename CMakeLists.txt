@@ -214,7 +214,7 @@ foreach(src_file ${VF_SHADER_SRCS})
     set(out_file ${CMAKE_CURRENT_BINARY_DIR}/shaders/${name}.spv)
     add_custom_command(OUTPUT ${out_file}
         COMMAND ${GLSLANG_VALIDATOR} -V --target-env vulkan1.3 -I${CMAKE_CURRENT_SOURCE_DIR}/shaders -o ${out_file} ${src_file}
-        DEPENDS ${src_file} ${CMAKE_CURRENT_SOURCE_DIR}/shaders/common_base.glsl ${CMAKE_CURRENT_SOURCE_DIR}/shaders/common_svo.glsl ${CMAKE_CURRENT_SOURCE_DIR}/shaders/common_splat.glsl ${CMAKE_CURRENT_SOURCE_DIR}/shaders/common_surfel.glsl ${CMAKE_CURRENT_SOURCE_DIR}/shaders/common_irradiance.glsl ${CMAKE_CURRENT_SOURCE_DIR}/shaders/common_fur.glsl
+        DEPENDS ${src_file} ${CMAKE_CURRENT_SOURCE_DIR}/shaders/common_base.glsl ${CMAKE_CURRENT_SOURCE_DIR}/shaders/common_svo.glsl ${CMAKE_CURRENT_SOURCE_DIR}/shaders/common_splat.glsl ${CMAKE_CURRENT_SOURCE_DIR}/shaders/common_surfel.glsl ${CMAKE_CURRENT_SOURCE_DIR}/shaders/common_irradiance.glsl ${CMAKE_CURRENT_SOURCE_DIR}/shaders/common_fur.glsl ${CMAKE_CURRENT_SOURCE_DIR}/shaders/micro_shade.glsl
         COMMENT "glslangValidator ${name}")
     list(APPEND VF_SHADER_SPVS ${out_file})
 endforeach()
