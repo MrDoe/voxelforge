@@ -1338,3 +1338,36 @@ TEST_CASE("micro clip: a bone key at the playhead is the pose the rig samples")
         CHECK(near(sampleAt(clip, 1.f).z, -1.f));
     }
 }
+
+TEST_CASE("micro clip: sampleTrackEuler is the ONE blend rule")
+{
+    // The studio's pose readout and `MicroClip::sample` must never be two
+    // opinions about the curve: the rig is posed from this function, and the
+    // panel displays this function. Pin it directly - clamp at both ends
+    // (never extrapolate), and each ease mode.
+    CHECK(sampleTrackEuler({}, 0.5f) == glm::vec3(0.f));
+
+    const BoneKey a { 0.f, glm::vec3(0.f), ClipEase::Smooth };
+    const BoneKey b { 1.f, glm::vec3(0.f, 90.f, 0.f), ClipEase::Smooth };
+    CHECK(sampleTrackEuler({ a }, 0.7f) == glm::vec3(0.f)); // lone key holds
+    CHECK(sampleTrackEuler({ a, b }, -1.f) == a.rotDeg);    // clamp low
+    CHECK(sampleTrackEuler({ a, b }, 4.f) == b.rotDeg);     // clamp high
+
+    // Smooth: u = 0.5 -> 0.5, so the midpoint is exactly half the travel.
+    CHECK(sampleTrackEuler({ a, b }, 0.5f).y == doctest::Approx(45.f));
+    // Linear: u = t.
+    BoneKey lin0 = a; lin0.ease = ClipEase::Linear;
+    CHECK(sampleTrackEuler({ lin0, b }, 0.25f).y == doctest::Approx(22.5f));
+    // Step: the FIRST key's value holds for the whole span.
+    BoneKey step0 = a; step0.ease = ClipEase::Step;
+    CHECK(sampleTrackEuler({ step0, b }, 0.999f).y == doctest::Approx(0.f));
+    CHECK(sampleTrackEuler({ step0, b }, 1.f).y == doctest::Approx(90.f));
+
+    // Three keys: the bracketing pair decides, not the first two.
+    const BoneKey c { 2.f, glm::vec3(0.f), ClipEase::Smooth };
+    CHECK(sampleTrackEuler({ a, b, c }, 1.5f).y == doctest::Approx(45.f));
+    CHECK(sampleTrackEuler({ a, b, c }, 0.5f).y == doctest::Approx(45.f));
+    // ... and the ease belongs to the key the span STARTS from.
+    BoneKey stepMid = b; stepMid.ease = ClipEase::Step;
+    CHECK(sampleTrackEuler({ a, stepMid, c }, 1.99f).y == doctest::Approx(90.f));
+}

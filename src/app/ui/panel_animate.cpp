@@ -240,11 +240,15 @@ void App::drawPanelAnimate()
             ImGui::TextColored(ImVec4(0.4f, 1, 0.4f, 1), "Rig OK (%d bones)", (int)rig.bones.size());
         }
 
-        // ---- the key at the playhead -------------------------------------
-        // The gizmo writes here; these fields show WHAT it wrote and allow a
-        // precise nudge. Editing an axis AUTO-KEYS: it creates or updates the
-        // key at the playhead, the same rule a ring drag follows, so there is
-        // one answer to "how does a pose become data".
+        // ---- the pose at the playhead, INTERPOLATED ----------------------
+        // The playhead is almost never exactly ON a key, so this shows the
+        // BLEND and lets it be edited; editing writes a key at the playhead
+        // (auto-key), the same rule a ring drag follows. It used to print "no
+        // key at t=..." between keys, so the interpolation the rig was
+        // actually using was invisible - and the only way to see it was to
+        // guess. The value comes from `sampleTrackEuler`, the SAME function
+        // `MicroClip::sample` poses the rig with, so the readout cannot hold a
+        // second opinion about the curve.
         //
         // Read-only until a clip exists - the panel must NOT create one just
         // because it was opened, or looking at the studio would switch the
@@ -255,27 +259,33 @@ void App::drawPanelAnimate()
             auto* clip = target->clip
                              ? const_cast<vf::voxel::MicroClip*>(target->clip)
                              : nullptr;
-            vf::voxel::BoneKey* key = nullptr;
-            if (clip) {
+            ImGui::Separator();
+            if (!clip) {
+                ImGui::TextDisabled("No clip: drag a ring to author the first key.");
+            } else {
                 const float step = (clip->fps > 1e-3f) ? 1.f / clip->fps : 1.f / 30.f;
                 const float tq = std::round(m_studio.time / step) * step;
+                vf::voxel::BoneTrack* track = nullptr;
+                vf::voxel::BoneKey* key = nullptr;
                 for (auto& tr : clip->tracks) {
                     if (tr.boneId != selId)
                         continue;
+                    track = &tr;
                     for (auto& k : tr.keys)
                         if (std::abs(k.t - tq) < 0.5f * step) { key = &k; break; }
                     break;
                 }
-            }
-            ImGui::Separator();
-            if (!clip) {
-                ImGui::TextDisabled("No clip: drag a ring to author the first key.");
-            } else if (!key) {
-                ImGui::TextDisabled("No key at t=%.3f: drag a ring to add one.",
-                                    m_studio.time);
-            } else {
-                ImGui::Text("Key at t=%.3f", key->t);
-                glm::vec3 r = key->rotDeg;
+                glm::vec3 shown(0.f);
+                const bool haveCurve = studioBoneEulerAt(selId, tq, shown);
+                if (key) {
+                    ImGui::Text("Key at t=%.3f", key->t);
+                } else if (haveCurve) {
+                    ImGui::Text("Interpolated at t=%.3f (no key here)", tq);
+                } else {
+                    ImGui::TextDisabled("No keys on this bone yet.");
+                }
+
+                glm::vec3 r = shown;
                 bool edited = false;
                 edited |= ImGui::DragFloat("Rot X (deg)", &r.x, 0.4f, -360.f, 360.f,
                                            "%.1f");
@@ -284,14 +294,45 @@ void App::drawPanelAnimate()
                 edited |= ImGui::DragFloat("Rot Z (deg)", &r.z, 0.4f, -360.f, 360.f,
                                            "%.1f");
                 if (edited) {
-                    key->rotDeg = r;
-                    // Same path the gizmo uses: re-sample now so the viewport
-                    // and the stored data cannot disagree for a frame.
-                    if (auto* bb = studioBehaviour()) {
-                        bb->clipTime = m_studio.time;
-                        bb->animateBones();
+                    // AUTO-KEY, seeded from the blend just displayed, so the
+                    // curve keeps its shape up to this instant instead of
+                    // jumping to a fresh value.
+                    key = studioKeyAt(*clip, selId, m_studio.time);
+                    if (key) {
+                        key->rotDeg = r;
+                        if (auto* bb = studioBehaviour()) {
+                            bb->clipTime = m_studio.time;
+                            bb->animateBones();
+                        }
+                        m_taaFirstFrame = true;
                     }
-                    m_taaFirstFrame = true;
+                }
+
+                // The easing ON this key shapes the blend from here to the
+                // NEXT key, so it is the one control that changes the curve
+                // between keys rather than a pose.
+                if (key) {
+                    int ease = int(key->ease);
+                    const char* kEaseNames[] = { "Step", "Linear", "Smooth" };
+                    if (ImGui::Combo("Ease out", &ease, kEaseNames, 3)) {
+                        key->ease = vf::voxel::ClipEase(ease);
+                        if (auto* bb = studioBehaviour()) {
+                            bb->clipTime = m_studio.time;
+                            bb->animateBones();
+                        }
+                        m_taaFirstFrame = true;
+                    }
+                    ImGui::TextDisabled("Shapes the blend from this key to the next.");
+                }
+                if (track) {
+                    // The neighbouring keys, so a curve can be read without
+                    // hunting for it in the timeline.
+                    std::string times;
+                    for (const auto& k : track->keys)
+                        times += (times.empty() ? "" : " ") +
+                                 (std::to_string(k.t).substr(0, 4));
+                    ImGui::TextDisabled("%d key(s): %s", int(track->keys.size()),
+                                        times.c_str());
                 }
             }
         }

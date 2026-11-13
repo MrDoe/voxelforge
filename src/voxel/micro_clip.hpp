@@ -75,6 +75,12 @@ std::string serializeMicroClip(const MicroClip& clip);
 
 float wrapClipTime(float t, float length, bool loop);
 glm::vec3 interpEuler(const BoneKey& a, const BoneKey& b, float t);
+// THE bone-track blend at time `t`: clamp at both ends (a lone key holds for
+// the whole clip) and interpolate between the bracketing pair with the FIRST
+// key's easing. `MicroClip::sample` and the studio's pose readout both call
+// this, so what the editor shows at the playhead is exactly what the rig
+// poses from.
+glm::vec3 sampleTrackEuler(const std::vector<BoneKey>& keys, float t);
 void interpBody(const BodyKey& a, const BodyKey& b, float t,
                 glm::vec3& outOffset, float& outHeadingDeg);
 

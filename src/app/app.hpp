@@ -384,6 +384,11 @@ private:
     // writing hundreds.
     vf::voxel::BoneKey* studioKeyAt(vf::voxel::MicroClip& clip, uint32_t boneId,
                                     float t);
+    // The selected bone's authored pose at `t`, INTERPOLATED by the same rule
+    // the rig samples (`sampleTrackEuler`). False when the bone has no track.
+    // The playhead is almost never exactly ON a key, so a panel that only read
+    // keys would show nothing for most of the timeline.
+    bool studioBoneEulerAt(uint32_t boneId, float t, glm::vec3& out);
     // Begin a bone drag on `handle` (screen bookkeeping, plus the key the drag
     // writes into), and apply one pointer DELTA to the active drag. Split out
     // of the frame loop so a headless hook drives the SAME code the mouse

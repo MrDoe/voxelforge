@@ -92,11 +92,20 @@ What it does:
     already authored there, so touching a ring never snaps the bone to rest.
   - Keys are quantised to the clip's frame grid (`1/fps`), so one drag updates
     one key instead of writing hundreds.
-  - A numeric **Key at t=…** readout shows the stored Euler and allows a
-    precise nudge, with the same auto-key rule.
+  - A numeric **pose readout** is INTERPOLATED, not key-only: the playhead is
+    almost never exactly on a key, so it shows the blend the rig is actually
+    using, and editing it auto-keys at the playhead. An **Ease out** control
+    (Step / Linear / Smooth) shapes the segment that STARTS at that key.
   - No clip exists yet? The first drag creates one (`studio`) and selects it —
     a key needs somewhere to live, and "make a clip first" is a step that
     exists only because of the file format.
+
+**One interpolation rule.** `sampleTrackEuler` (micro_clip.cpp) is the only
+implementation of "the bone pose at time t": `MicroClip::sample` poses the rig
+with it and the studio's readout displays it, so what the editor shows at the
+playhead cannot disagree with the pose on screen. It clamps at both ends
+(a lone key holds for the whole clip, never extrapolates) and applies the
+starting key's easing across each span.
 - **Influence radius.** A per-bone slider (0–0.15 m) for the capsule test that
   decides bone OWNERSHIP. *Save rig (override)* writes
   `assets/micro/<name>.rig.json` stamped with the layer's size+mtime; *Reload

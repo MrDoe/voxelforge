@@ -362,6 +362,30 @@ void interpBody(const BodyKey& a, const BodyKey& b, float t,
     outHeadingDeg = a.headingDeg + (b.headingDeg - a.headingDeg) * u;
 }
 
+glm::vec3 sampleTrackEuler(const std::vector<BoneKey>& keys, float t)
+{
+    // THE blend rule for a bone track, in ONE place. `MicroClip::sample` (what
+    // the rig poses from) and the studio's pose readout both call this, so the
+    // value the editor SHOWS at the playhead cannot be a second opinion about
+    // the interpolation.
+    if (keys.empty())
+        return glm::vec3(0.f);
+    // A lone key holds for the whole clip, and so does the first/last key
+    // outside its own span: clamp, never extrapolate.
+    if (keys.size() == 1 || t <= keys.front().t)
+        return keys.front().rotDeg;
+    if (t >= keys.back().t)
+        return keys.back().rotDeg;
+    for (size_t i = 0; i + 1 < keys.size(); ++i) {
+        if (t >= keys[i].t && t <= keys[i + 1].t) {
+            const float span = keys[i + 1].t - keys[i].t;
+            const float u = (span > 1e-6f) ? (t - keys[i].t) / span : 0.f;
+            return interpEuler(keys[i], keys[i + 1], u);
+        }
+    }
+    return keys.back().rotDeg;
+}
+
 void MicroClip::sample(float t, const MicroRig& rig,
                       std::vector<glm::mat3>& localRot,
                       glm::vec3& bodyOffset, float& bodyHeadingDeg) const
@@ -407,33 +431,8 @@ void MicroClip::sample(float t, const MicroRig& rig,
         }
         if (bi < 0 || tr.keys.empty()) continue;
 
-        const BoneKey* k0 = nullptr;
-        const BoneKey* k1 = nullptr;
-        if (tr.keys.size() == 1 || t <= tr.keys.front().t) {
-            k0 = &tr.keys.front();
-            k1 = &tr.keys.front();
-        } else if (t >= tr.keys.back().t) {
-            k0 = &tr.keys.back();
-            k1 = &tr.keys.back();
-        } else {
-            for (size_t i = 0; i + 1 < tr.keys.size(); ++i) {
-                if (t >= tr.keys[i].t && t <= tr.keys[i + 1].t) {
-                    k0 = &tr.keys[i];
-                    k1 = &tr.keys[i + 1];
-                    break;
-                }
-            }
-        }
-        if (!k0) continue;
-
-        glm::vec3 euler;
-        if (k0 == k1) {
-            euler = k0->rotDeg;
-        } else {
-            const float span = k1->t - k0->t;
-            const float u = (span > 1e-6f) ? (t - k0->t) / span : 0.f;
-            euler = interpEuler(*k0, *k1, u);
-        }
+        // ONE interpolation rule, shared with the studio's readout.
+        const glm::vec3 euler = sampleTrackEuler(tr.keys, t);
 
         const float rx = glm::radians(euler.x);
         const float ry = glm::radians(euler.y);

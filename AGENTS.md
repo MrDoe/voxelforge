@@ -1200,8 +1200,13 @@ one costs a whole turn, because the bad call is rejected before any work runs.
   quantised to `1/fps`, so one drag updates ONE key instead of hundreds; and
   the first drag with no clip creates and selects one (`studio`), because a key
   needs somewhere to live. Bones are a CHAIN, so the UI only ever authors
-  per-bone LOCAL `rotDeg` — never a world matrix. A numeric **Key at t=…**
-  readout shows the stored Euler and nudges it with the same auto-key rule.
+  per-bone LOCAL `rotDeg` — never a world matrix. The panel's pose readout is
+  **interpolated**: the playhead is almost never exactly ON a key, so it shows
+  the blend the rig is actually using and edits it with the same auto-key rule,
+  plus an **Ease out** control (Step/Linear/Smooth) for the segment starting at
+  that key. The blend lives in ONE function — `sampleTrackEuler` — which
+  `MicroClip::sample` poses the rig with AND the panel displays, so the editor
+  cannot hold a second opinion about the curve.
   `VF_TEST_BONE_DRAG="<bone>:<yaw|pitch|roll>:dx,dy"` drives the SAME
   `studioBeginBoneDrag`/`studioApplyBoneDrag` path with no mouse and logs the
   stored key plus the posed tip — a UI feature only a mouse can reach cannot

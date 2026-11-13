@@ -32,26 +32,12 @@ namespace app {
 
 namespace {
 
-// The authored Euler at `t`, mirroring `MicroClip::sample` exactly: a single
-// key holds for the whole clip, and between two keys the FIRST key's easing
-// shapes the blend. Kept next to the writer so the two cannot disagree about
+// The authored Euler at `t`, via the ONE blend rule the rig uses. Kept as a
+// thin wrapper so the writer and `MicroClip::sample` cannot disagree about
 // what "the pose there" means.
 glm::vec3 eulerAt(const std::vector<vf::voxel::BoneKey>& keys, float t)
 {
-    if (keys.empty())
-        return glm::vec3(0.f);
-    if (keys.size() == 1 || t <= keys.front().t)
-        return keys.front().rotDeg;
-    if (t >= keys.back().t)
-        return keys.back().rotDeg;
-    for (size_t i = 0; i + 1 < keys.size(); ++i) {
-        if (t >= keys[i].t && t <= keys[i + 1].t) {
-            const float span = keys[i + 1].t - keys[i].t;
-            const float u = (span > 1e-6f) ? (t - keys[i].t) / span : 0.f;
-            return vf::voxel::interpEuler(keys[i], keys[i + 1], u);
-        }
-    }
-    return keys.back().rotDeg;
+    return vf::voxel::sampleTrackEuler(keys, t);
 }
 
 } // namespace
@@ -176,6 +162,22 @@ vf::voxel::BoneKey* App::studioKeyAt(vf::voxel::MicroClip& clip,
             return &kk;
     }
     return nullptr;
+}
+
+bool App::studioBoneEulerAt(uint32_t boneId, float t, glm::vec3& out)
+{
+    auto* b = studioBehaviour();
+    if (!b || !b->clip)
+        return false;
+    for (const auto& tr : b->clip->tracks) {
+        if (tr.boneId != boneId)
+            continue;
+        if (tr.keys.empty())
+            return false;
+        out = vf::voxel::sampleTrackEuler(tr.keys, t);
+        return true;
+    }
+    return false;
 }
 
 bool App::studioBeginBoneDrag(int boneIndex, TrackballHandle handle,

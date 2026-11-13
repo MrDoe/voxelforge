@@ -92,6 +92,14 @@ void App::runPreInputTestHooks()
                                  "{:.2f},{:.2f}) keys={} radius={:.1f}",
                                  boneName, axis, keyRot.x, keyRot.y, keyRot.z,
                                  keys, gr);
+                    // The panel's READOUT, through the same function: it must
+                    // report the key it just wrote.
+                    glm::vec3 shown(0.f);
+                    if (studioBoneEulerAt(b->rig.bones[size_t(idx)].id,
+                                          m_studio.time, shown))
+                        spdlog::info("studio bone drag: readout at t={:.3f} = "
+                                     "({:.2f},{:.2f},{:.2f})", m_studio.time,
+                                     shown.x, shown.y, shown.z);
                     if (b && size_t(idx) < b->boneRot.size()) {
                         const glm::vec3 tip =
                             b->boneRot[size_t(idx)] * b->rig.bones[size_t(idx)].b +
