@@ -6706,3 +6706,359 @@ step traded holes for black (off + deep-hit retry is the shipped answer); the
 coat crawls if sampled in the animated frame. Verify with the eroded posed-GT
 metric + fur_check, not screenshots.
 Page: .opencode/wiki/concepts/micro-deformation-surface.md
+
+## [2026-10-28] concept | Voxels or meshes — the geometry format policy
+Recorded the split the alpaca swap forced: the deciding axis is RIGID vs
+RELATIVE motion, not static vs animated (a traced micro object may be moved and
+turned as a whole; any part that moves relative to another needs a mesh). Also
+the decisions that cost a session each: the up axis is a manifest key with a
+PROPER rotation (never mesh_import's mirroring swapYz), verified numerically by
+occupancy Jaccard (0.828 correct vs 0.156/0.158 wrong); a parsed manifest key
+must be added to writeManifest in the same change; `.skin` is derived, not
+authored; a mesh carries no materials, so the field stays the shading source
+until per-corner material lands. Includes the A–F phase table and the gate that
+B must pass (zero neutral-grey pixels in silhouette), plus the current actor
+mesh's measured delta (18,046 tris / 54,138 verts / 423 KB skin).
+Page: .opencode/wiki/concepts/geometry-format-policy.md
+
+## [2026-10-28] ingest | Phase B measured: per-vertex appearance, rest agreement, mesh tint
+Measured the Phase B/C inputs on `assets/models/alpaca_mesh.stl` with the
+extended `vf_micro_mesh_check`. (1) Per-vertex appearance: 54,138/54,138
+vertices resolve a rest solid within 2 cells, 0 missed — so the packed material
+lane is complete, not a heuristic. (2) The records carry NO per-cell tint: cell
+colour / palette luminance is 1.009 at p1, p50 and p99 (98.2% within 2%), so a
+material id reproduces the look and Phase E needs no colour lane.
+(3) `REST_AGREEMENT=96.12%` (151,579 agree / 2,064 mesh-only / 6,121 field-only
+of 157,700) — the tool's bound is now provenance-aware (99% only for a mesh
+derived from the field, 95% for an authored actor mesh), and the residual is
+why the coat's roots must come from the MESH.
+Also completed Phase B's CPU half (`assignMicroMeshAppearance`,
+`meshVertexWord`/`meshVertexRecord` in `src/voxel/micro_mesh.{hpp,cpp}`, the
+load-time lane fill on both `loadMicroMesh` exits, the packed upload +
+appearance pass in `micro_objects.cpp`) and the vertex shader's decode
+(`floatBitsToUint`, `flat out uint vWord`, interpolated `vAo`). The fragment
+half waits on the gpos-snapshot flicker fix (peer session owns
+`micro_mesh.frag`): the 42,628 px "noise floor" that failed `fur_check` was a
+fragment reading the gpos image its own pass writes, i.e. sibling completion
+order.
+Pages: concepts/geometry-format-policy.md, concepts/micro-deformation-surface.md
+
+## [2026-11-12] concept | Localising a run-to-run render difference
+
+Filed the instruments and the class the mesh-alpaca flicker ended in. What was
+measured, in order: four identical views inside ONE process (`--shotlist`)
+differ by 3,838-4,957 px, so it is a per-frame race and not process state; the
+uploaded bone table hashes `158910ef5c2166c9` on every frame, so the rig and the
+freeze hook are exonerated; `VF_RENDER_FLAGS=415` (SSAO+SSR off) still differs by
+4,024 px, so the post chain only amplifies; `VF_FUR=0` differs by nearly the
+same amount as fur on, so the coat is not the author.
+
+The class: `kMaxFramesInFlight` is 3 and the frame loop's fence proves only the
+submission THREE frames back complete, so a resource a frame DESTROYS (a
+`LOAD_OP_CLEAR` depth attachment) while an earlier frame reads it is unordered —
+and no pipeline barrier can order across submissions. The same-layout
+`transitionImage` that sat in front of the mesh depth clear claimed to do that
+and did nothing. A fragment whose depth test was cleared mid-frame passes,
+writes its colour, and the later correct frame does not overwrite it because the
+true surface is in front: a stale fragment persists as a flickering pixel. The
+fix is structural — the mesh depth attachment is now `Image3D
+m_meshDepth[kMeshSlots]` indexed by `m_frameIdx % kMaxFramesInFlight`, and
+`MicroSvoPass::record` takes the slot. The barrier fixes around the micro pass
+(its raster half writes the G-buffer from FRAGMENT while every barrier named
+COMPUTE) were necessary but NOT sufficient: 4,322 px on one side of that change,
+4,533 px on the other — the same spread. The confirming pair (arm A = per-slot
+fix with frames overlapping normally, arm B = same binary with the queue drained
+per submit) is queued behind a peer's gate, so the fix is recorded as
+UNCONFIRMED until that number lands.
+
+Three pairs in this session were void for non-code reasons, and the page records
+the checks: a peer's `ninja` recompiling `build/shaders/*.spv` between render 0
+and render 1 of a pair, and a SIGKILLed gate leaving `assets/world.json` with
+all three micro layers disabled (repaired semantically, verified against HEAD by
+JSON compare, independently confirmed by the peer who killed it).
+
+Pages: concepts/render-nondeterminism.md (new)
+
+## [2026-11-12] ingest | Phase B fragment half: the packed material becomes primary
+`shaders/micro_mesh.frag` now takes byte 1 of the packed vertex lane as the
+PRIMARY material (`kPalette`/`kMatRefl`, range-checked against a new
+`kPaletteN` in `common_base.glsl` — the GLSL side had no name for the palette
+length while `common.hpp` did), with the octree lookup demoted to the fallback
+for an unresolved vertex. `microMesh`'s AO byte is uploaded and interpolated but
+deliberately NOT consumed: the lighting AO is still the shader's `microAO`
+march, and swapping them is a look change needing its own measurement. Unit
+side: `vf_tests --test-case="*micro*"` = 15 cases / 7,882 assertions / 0 failed,
+including the two new lane + appearance cases.
+Gate status: `test-micro` is NOT yet green on this change — two runs were void.
+(1) 15:13–15:14: a peer yielded the GPU with `pkill -f "build/[v]oxelforge"`,
+which matched my gate's render subprocesses; the bracket defeats self-match and
+still hits a peer. (2) 15:19:01: `vkCreateDevice ... VkResult -4`
+(DEVICE_LOST), 39 s before the peer's queue could fire — a killed submit leaves
+the driver refusing new devices for a while. Both runs also wrecked
+`assets/world.json` the same way (a killed gate skips its restore; micro_check
+leaves `behaviour: "stop"`), repaired and verified semantically against HEAD
+twice, and independently by the peer's manifest guard.
+Good partials from the second run before the driver died: shadow receive 116 vs
+53 luma, cast 87 surfels, alpaca visible 195,968 px, fleece texture mean 75 /
+spread 19.7 (bound >8).
+Open number: the material-SEAM census (how many of 18,046 triangles span a
+material boundary) — the only way a `flat` per-vertex material is worse than the
+per-fragment lookup it replaces. Needs a few lines in `vf_micro_mesh_check`, so
+a relink, so it waits for a quiet tree.
+Pages: concepts/geometry-format-policy.md, AGENTS.md (new "Mesh actors" section)
+
+## [2026-11-12] ingest | Reaching DLSS-5-class photorealism
+
+Answered "how do we look photorealistic like with DLSS 5?". DLSS 5 (GA 2026-09-01, NBA 2K27)
+is 3D-Guided Neural Rendering: a deterministic, one-frame-in/one-frame-out network as the
+FINAL pipeline stage, conditioned on colour + surface albedo + lighting + normals + engine
+motion vectors, with Structure/Tone Intensity and semantic masking. RTX 50-series only,
+integrated via NVIDIA Streamline or the UE5 plugin, closed weights, tuned per title — so
+there is no path to it from a bespoke Vulkan renderer.
+
+Checked our own inputs before agreeing it is just a licensing problem, and the answer is
+worse: we could not condition any neural pass today. `splat.frag` writes only oHdr/oGPos/
+oGNorm — albedo and roughness arrive in `vMat`/`vTex` and are multiplied into the lighting
+integral and gone — and there is no velocity buffer anywhere: `motion_blur.comp` and
+`taa_resolve.comp` rebuild velocity analytically by reprojecting gpos with `m_prevCam`, i.e.
+correct for camera motion and ZERO for object motion (walker, live rotation, edited chunk,
+dragged selection). Also found an ordering defect: `recordPhotorealism` runs the whole SSR/
+SSAO/fog/blur/DoF chain IN PLACE on `m_offscreen` AFTER `post.comp` has tonemapped, so
+contact shadows cannot deepen and highlights cannot brighten — the headroom is already gone.
+
+Filed the sequencing (tonemap-last fix → albedo/roughness MRT → velocity buffer →
+auto-exposure; none of them optional for any ML route, and NVIDIA's own stated
+"output scales with input fidelity" applies harder to a self-trained model) and the
+classical DLSS-5-look list, ranked by the yardstick our own
+[[concepts/texture-resolution]] measurement set (+4.8% for 2x atlas resolution vs +40% for
+detail normals — sharpening is NOT the lever): foliage/fleece transmission first, then one
+real GI bounce (the 1m emissive bucket grid is already there to hang irradiance on), then
+roughness variation sampled from the photo textures, then distance-growing contact shadows,
+then camera grade, then TAA actually on for frames meant to be looked at.
+
+On the real neural options: DLSS-SR/RR/FG via the DLSS SDK does work from Vulkan but needs
+the jittered matrix + velocity buffer and is RTX-only, and gives resolution/denoise, not the
+DLSS 5 lighting look; XeSS (open, Vulkan plugin, DP4a fallback) and FSR 3.1+ are likewise
+upscalers; offline depth+normal-conditioned diffusion over our own G-buffer is genuinely
+DLSS-5-shaped for a single still but fails determinism and every pixel gate, so not
+interactive. Flagged the training-data trap: our pixel reference is `--mode svo`, so
+fine-tuning on it teaches a model to reproduce the same material simplification rather than
+exceed it.
+
+## [2026-11-12] correction | the 42,628 px number is not a before/after for the gpos snapshot
+My 2026-10-28 entry reads as if the 42,628 px noise floor WAS the gpos read/write
+hazard. It was a real hazard and the snapshot clearly helped, but the two numbers
+are not comparable: 42,628 px was `fur_check`'s floor at its own camera at
+900x600 WITH fur; the 2026-11-14-arm numbers (~4,518–4,966 px, four arms: splat,
+`--mode svo`, `VF_NO_GPU_CULL`, `VF_NO_OCCL`) are a hand-pinned camera at
+900x700 with `VF_FUR=0` and the behaviour frozen. So do not quote "89 % removed"
+as a measured ratio. What IS measured: the residual is inside the micro/mesh
+stage (world backend, GPU cull and Hi-Z occlusion all excluded) and it survives
+`VF_TEST_SERIAL_SUBMIT=1`, so it is not the frames-in-flight class either.
+The citable instrument is one binary and one camera with ONLY the binding-41 read
+flipped — that is `micro_mesh.frag`, which this session holds, so the A/B is
+owned here. Until it runs, treat the snapshot's contribution as unquantified.
+Pages: concepts/render-nondeterminism.md (peer-owned), concepts/geometry-format-policy.md
+
+## [2026-11-12] fix | The mesh flicker is imageStore side effects under late fragment tests
+
+Correction of the entry above, which named the frames-in-flight class: that class
+is EXCLUDED by measurement, and the real cause is inside one draw call.
+
+The mesh fragment writes hdr/gpos/gnorm with `imageStore`, not framebuffer
+outputs. A fragment shader with storage-image writes cannot be depth-tested
+early, so both walls of a closed surface drawn with culling OFF execute, both
+store, and the depth test does not un-store the loser — the surviving pixel is
+whichever fragment stored last, in an order Vulkan leaves undefined. No barrier,
+snapshot or queue drain can touch that, which is why six environment arms all
+came back at 4.5-5 k px: splat 4,792, `--mode svo` 4,892, `VF_NO_GPU_CULL=1`
+4,641, `VF_NO_OCCL=1` 4,966, queue drained per submit 4,518, per-slot depth
+attachment 4,843. The arm that cracked it forked the PIPELINE instead of the
+environment: `VF_MESH=0` draws the same alpaca at the same camera and pinned
+pose from its traced field, and that pair reads **0 px / max 0** against
+**4,278 px / max 141** for the raster path, one binary, one session, state
+hashes identical.
+
+Fix: `layout(early_fragment_tests) in;` in `shaders/micro_mesh.frag` (verified
+`OpExecutionMode %main EarlyFragmentTests` via spirv-dis, glslangValidator
+clean). Diagnostic added with it: `VF_MESH=0`, the traced-vs-raster switch, so
+this fork is one env var and not a manifest edit the app would rewrite.
+
+What survives from the dead theory, as hygiene rather than as the fix: the mesh
+depth attachment is now indexed by the in-flight slot (a frame's destructive
+CLEAR was genuinely unordered against an earlier frame, and the same-layout
+`transitionImage` that claimed to order it did nothing), and every barrier
+around the micro pass now names FRAGMENT (a real WAW against the world's
+colour-attachment stores). Both were necessary; neither was sufficient.
+Pages: concepts/render-nondeterminism.md
+
+## [2026-11-12] correction | early_fragment_tests did NOT fix the mesh flicker — cure refuted, attribution stands
+I wrote the AGENTS rule as "must declare `early_fragment_tests`" on the strength
+of a sound mechanism plus `spirv-dis` plus a passing `--selftest`. The peer's
+confirmation pair refuted the CURE, not the attribution: with the mode compiled
+in and accepted, the raster `VF_FUR=0` pair measured **4,653 px against its own
+4,278 px baseline** (fur-ON 3,980 vs 4,533). Same binary, same camera, arms in
+one session, animal verified present. The line is inert on this driver, exactly
+as a mode with no device feature bit invites.
+What is still measured and safe: traced (`VF_MESH=0`) 0 px vs raster ~4 k px, so
+the raster pass owns it; six environment arms flat at 4.5-5 k px, so the race is
+inside one draw call. Two CPU audits reshape the ladder: winding is NOT the
+obstacle to culling (18,046/18,046 triangles agree with the stored normal -
+which retires the pipeline comment's stated reason for `VK_CULL_MODE_NONE`), but
+the surface is NOT closed (7,165 unpaired half-edges, multiplicity
+{1:39849, 2:7008, 3:71, 4:15}), and there are 0 duplicate/coplanar triangles, so
+the tie variant is dead. Open fork: `VF_MESH_CULL=1`. Structural fix if the
+double-wall theory survives: G-buffer as colour attachments, not `imageStore`.
+Kept the shader line with a comment that says inert, with numbers, and "do not
+read as the fix / do not delete as dead code". My own error pattern worth naming:
+I published a rule from mechanism + local signals before the confirmation
+measurement existed - the lesson generalizes to any driver-observed behaviour
+with no feature bit to query.
+Pages: concepts/geometry-format-policy.md, AGENTS.md
+
+## [2026-11-12] ingest | The cull fork halved the mesh flicker — first arm that moved the number
+
+`VF_MESH_CULL=1` (env-gated `VK_CULL_MODE_BACK_BIT`, diagnostic only, image wrong
+by design because the surface is open) gives one wall per pixel where the double
+cover was a front/back pair. Same binary 7077a2fb, same camera, same session,
+animal verified present in all four arms, STATE_STABLE: unculled pair 4,955 px /
+max 143, culled pair **2,345 px / max 141 — 47 % remains**. Removing about half the
+double-covering removed about half the nondeterminism: the first causal evidence
+in an investigation whose previous six arms all measured the same number.
+
+Self-correction recorded because the probe was wrong, not the result: only 6 % of
+the culled residual sits within 2 px of a sharp image edge against a 5 % base
+rate, which looks like it contradicts the overlap theory — but a limb in front of
+a belly is an AREA overlap, so edge-proximity was the wrong instrument. The
+residual is consistent with front-face-on-front-face overlaps that culling cannot
+remove, and it does kill the tie/silhouette variants, which would be edge-pinned.
+Mechanism status: supported, not proven.
+
+Next step is correct regardless of the residual's authorship: colour attachments
+instead of `imageStore`, because a failing fragment's framebuffer writes are
+suppressed whether the depth test runs early or late, while storage-image side
+effects are not. That immunity is the whole point after `early_fragment_tests`
+measured inert. The open-surface boundary loops become load-bearing there, and
+`vf_micro_mesh_check` does not yet count them.
+Pages: concepts/render-nondeterminism.md
+
+## [2026-11-12] correction | my "open surface" audit was a directed-keying artifact
+
+The entry two above states the mesh is an open surface with 7,165 unpaired
+half-edges and draws consequences from it (culling exposes the interior, Phase C
+grows a fringe at boundary loops). The claim is WRONG and the reasoning was a
+textbook error: I keyed half-edges by DIRECTION, which counts the two traversals
+of one welded edge as two separate edges, so a closed manifold mesh reports almost
+everything unpaired. Independent recount in this session after Mesher's census:
+directed `{1: 39849, 2: 7008, 3: 71, 4: 15}` (reproduces my false figure exactly),
+undirected `{2: 26897, 4: 86}` with 26897·2 + 86·4 = 54,138 = every half-edge →
+**closed, 0 boundary loops**. The 86 multiplicity-4 edges are non-manifold edges
+with four incident faces; there are **0 exactly duplicated triangles**, so the
+coincident-triangle/tie revival does not survive the recount either.
+
+What replaced it, and it is the fact that matters: the surface is closed but
+**26.1 % of shared edges (7,008 / 26,897) are traversed same-direction by both
+neighbours**, i.e. those patches face inward. So (a) the pipeline's culling-OFF
+decision is right, now for a measured reason instead of hand-waving; (b) my
+"per-triangle winding agrees 18,046/18,046, so the comment's premise is false"
+claim was itself wrong — that test compares a triangle against the normal the
+exporter derived FROM that triangle's winding, so it is structurally incapable of
+detecting an orientation-inconsistent surface; and (c) the most likely author of
+the 47 % cull residual is exactly those inverted patches, which culling cannot
+de-couple because on them the outer wall IS the back face.
+
+Corrected in: this page's audit list, index.md, the stored quirk, and the
+`VK_CULL_MODE_NONE` comment in `src/render/micro_svo_pass.cpp` (comment-only
+edit; the binary hashes identical at 7077a2fb, so no peer render was disturbed by
+the rebuild).
+Pages: concepts/render-nondeterminism.md
+
+## [2026-11-12] ingest | The pose sweep and the near-tie census: the view is everything, and no geometric count explains the size
+
+Two instruments built to confirm the double-cover mechanism, both of which
+disagreed with it, recorded because they are the most useful result of the day.
+
+**Pose sweep, 8 pairs, one session, one binary, 16/16 arms carrying the animal,
+STATE_STABLE.** At the flk camera: gait0/clip.32 5,147 px, gait0/clip0 3,891, gait90
+4,341, gait180 4,195, gait270 4,160, graze0.5 4,169, gait45+graze1 4,527 — a ±15 %
+band whose extremes track `clipTime`, not gait. Same spec at fur_check's camera:
+**15 px**. So pose is nearly irrelevant and the view is essentially everything. This
+corrects the claim I made mid-session that gait moves the number second-order: the
+pose spread is inside the control's own run-to-run scatter.
+
+**CPU near-tie census, exact plane/ray intersection at both cameras.** Ratios
+flk/furcheck against a pair-diff ratio of 343: body area 2.19, double-covered area
+1.31, near-tie<1mm 10.0, <5mm 2.4, <50mm 4.7. The near-tie story has the right
+shape (the ratio grows as the gap tightens, which is what edge-on wall convergence
+predicts) and the wrong size by two orders of magnitude.
+
+Consequence held in the page: the mechanism stays *qualitatively* supported
+(traced 0 px, cull halves it) and *quantitatively* unexplained, and the structural
+fix proceeds on the construction argument alone. Anyone reading 4,278/4,955/5,147 as
+a predicted law has gone beyond the data; a post-fix result of 3 k px would be
+consistent with everything measured here. Also recorded so the next reader does not
+repeat it: two of my own instruments were wrong before these were — half-edge keys
+by direction (false "open surface") and a per-triangle normal test that cannot see
+orientation inconsistency because the exporter derived the normal from the winding
+under test. The census that would have prevented all three is same-direction shared
+edges, and `vf_micro_mesh_check` now reports it.
+Pages: concepts/render-nondeterminism.md
+
+## [2026-11-12] ingest | The set test: stable count, unstable set, so it is a race
+
+The best instrument of the day needed no renders at all, and a peer session thought
+of it. A race repeats the COUNT and reshuffles the SET; a deterministic cause
+reshuffles neither. Three fully independent pairs already on disk at the flk camera
+(same pose spec, same `VF_FUR=0`, differing only by binary) measured 4,653 / 4,955 /
+5,147 px — a ±5 % count — and the Jaccard of their changed-pixel masks inside the
+bbox came out **0.237 / 0.231 / 0.229**. Against a random-mask baseline of ≈0.084
+for ~4.8 k px in a ~31 k px body, and ≈1.0 for a deterministic cause, that reads:
+partially structured, definitely not fixed. Secondary probes across pose (gait0 vs
+control 0.151, gait0 vs gait180 0.225) show the set about equally scattered across
+half a stride, so execution order, not pose, owns the locations.
+
+Why this is the load-bearing result rather than the censuses: the structural fix
+(colour attachments over `imageStore`) works only because a failing fragment's
+framebuffer writes are suppressed, and that is only worth a pipeline change if the
+failing is genuinely unordered. The peer had put the redesign ON HOLD pending exactly
+this test, which is the right reflex — hold a fix until its premise is measured — and
+the hold releases on data rather than on enthusiasm.
+
+What is still open, stated so the next reader does not close it early: the camera
+dependence is now a question about **eligibility** — how many pixels are
+order-sensitive, ~5 k at one viewpoint versus ~15 at another — and area (1.31x),
+near-tie counts (best case 10x) and pose (±15 %) have each been measured against a
+343x split and failed. Nobody should book a mechanism for that gap yet.
+Pages: concepts/render-nondeterminism.md
+
+## [2026-11-13] correction | the third negative: how big the disagreement is does not decide which pixels race
+
+The set test established the mesh flicker is a race; the open question was which
+pixels are *eligible*. The last cheap candidate — that an unordered store only
+matters where the two candidate surfaces differ enough to be visible, so the size
+of the disagreement should select the pixels — was measured on the flicker-camera
+pair and failed: the pixels that changed in BOTH of two independent pairs (the
+race's stable core) have a median luma delta of **27.0**, while the pixels that
+changed in only one arm have **24.0**, a 12 % gap on a scale where the near and
+far walls differ by up to ~140. Selection is not driven by disagreement size.
+
+With that, every quantitative model of the magnitude is dead against the 343x
+camera split: double-cover area (1.31x), near-tie counts (best case 10x) and now
+disagreement magnitude (27.0 vs 24.0); pose spans only 3,891-5,147 px (+-15 %).
+What survives is **eligibility** — which pixels can be written twice at all:
+~5 k at the flicker camera `-4.9 1.25 20.6 -6.32 0.75 19.2`, ~15 at
+`fur_check`'s `alpaca_cam()`, and no geometric count tracks the difference.
+Recorded as the observation any mechanism must explain, explicitly not as a law
+to fit.
+
+The premise is untouched, and that is why the structural work stays on the table:
+`VF_MESH=0` gives 0 px, culling halves the number (4,955 -> 2,345 px), and the set
+test shows the failure is genuinely unordered — so a fragment's G-buffer writes
+being suppressed on a failed depth test is still the right construction argument.
+Only the predicted SIZE was wrong, and the redesign must not be sold on one.
+
+Filed with the material-seam census in the same pass: 17,688 uniform / 358 seam
+(1.98 %, all coat-against-bare) / 0 unresolved of 18,046 triangles, so the flat
+material lane's cost is one triangle-edge shift on 2 % of the surface. The index
+entry for the policy page now carries the measured number instead of "still owed".
+Pages: concepts/render-nondeterminism.md, concepts/geometry-format-policy.md
