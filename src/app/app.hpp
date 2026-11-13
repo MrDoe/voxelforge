@@ -92,6 +92,20 @@ struct FrameSync {
 // recording of the same slot.
 constexpr uint32_t kProfMarks = 6;
 
+// The studio's bone gizmo, in WORLD space. The three rings are the PROJECTED
+// CIRCLES of the bone's own axes, not fixed screen ellipses: a screen ellipse
+// claims a plane the bone does not have, so which ring "was" X depended on the
+// camera rather than on the bone - the first version's rings were misleading
+// for exactly that reason.
+struct BoneGizmo {
+    glm::vec3 centre { 0.f };   // the bone's joint, world (m)
+    glm::vec3 axis[3] { glm::vec3(1.f, 0.f, 0.f), glm::vec3(0.f, 1.f, 0.f),
+                        glm::vec3(0.f, 0.f, 1.f) }; // world dirs of LOCAL X/Y/Z
+    float radius = 0.f;         // ring radius, world (m)
+    glm::vec2 centrePx { 0.f }; // the joint in viewport (logical) pixels
+    float radiusPx = 0.f;       // the ring's screen size, for slop
+};
+
 class App {
 public:
     int run(const Args& args);
@@ -347,13 +361,17 @@ private:
         // (Reload rig, a layer edit), and an index alone would then rotate
         // whichever bone landed in that slot.
         uint32_t gizmoDragBoneId = 0;
-        TrackballHandle gizmoHandle = TrackballHandle::None;
-        glm::vec2 gizmoLastMouse { 0.f };  // last pointer position (px)
-        // The ring radius captured when the drag STARTED. The degrees-per-pixel
-        // law divides by it, and recomputing it mid-drag would change the
-        // sensitivity under the user's hand (and blow up if the gizmo went
-        // behind the camera).
-        float gizmoRadius = 0.f;
+        // Which of the bone's OWN axes (0 = X, 1 = Y, 2 = Z) the drag grabbed.
+        int gizmoDragAxis = -1;
+        // The grabbed ring's plane, frozen at the drag's start: the angle is
+        // measured in it, so the drag cannot jump when the bone turns under
+        // the pointer.
+        glm::vec3 gizmoCentre { 0.f };     // the joint, world
+        glm::vec3 gizmoPlaneN { 0.f, 1.f, 0.f };
+        glm::vec3 gizmoPlaneU { 1.f, 0.f, 0.f };
+        glm::vec3 gizmoPlaneV { 0.f, 0.f, 1.f };
+        float gizmoLastAngle = 0.f;        // radians, in that plane
+        float gizmoRadiusPx = 0.f;         // the ring's screen size (log)
     } m_studio;
 
     // THE STUDIO'S TARGET, resolved. Every studio site (the panel, the
@@ -368,12 +386,30 @@ private:
     // The occluder of the target (nullptr when there is no target).
     vf::voxel::MicroOccluder* studioOccluder();
 
-    // The selected bone's gizmo in SCREEN space, or false when there is
-    // nothing to manipulate. Shared by the overlay (which draws it) and the
-    // frame loop (which hit-tests it), so the ring the user sees is the ring
-    // the pointer is tested against - the same contract `ui/gizmo_math.hpp`
-    // states for the object trackball.
-    bool studioBoneGizmo(glm::vec2& centre, float& radius);
+    // The selected bone's gizmo in WORLD space, or false when there is
+    // nothing to manipulate. Its rings are the projections of the bone's own
+    // axes, so the ring the user sees IS the axis it rotates.
+    bool studioBoneGizmo(BoneGizmo& out);
+    // The viewport in LOGICAL window pixels (ImGui's DisplaySize). Picking and
+    // gizmo projection must use these, not framebufferSize(), on a high-DPI
+    // display.
+    glm::ivec2 viewportLogical() const;
+    // One point of a ring, in viewport pixels (`t` in radians; 0..2pi draws
+    // the whole circle). Shared by the overlay and the hit test, so the drawn
+    // ring and the tested ring cannot disagree.
+    glm::vec2 studioRingPoint(const BoneGizmo& g, int axis, float t);
+    // Which ring the pointer is on: 0/1/2, or -1. Distance is measured to the
+    // PROJECTED polyline, so it works at any bone orientation (including a
+    // ring seen nearly edge-on, where a fixed-shape ellipse test cannot).
+    int studioBoneRingAt(const BoneGizmo& g, glm::vec2 p, float slop = 10.f);
+    // Begin a bone drag on `axis` (screen bookkeeping, plus the key the drag
+    // writes into), and apply the pointer's current position to the active
+    // drag. Split out of the frame loop so a headless hook drives the SAME
+    // code the mouse drives - a UI feature that only a mouse can reach cannot
+    // be gated.
+    bool studioBeginBoneDrag(int boneIndex, int axis, const BoneGizmo& g,
+                             glm::vec2 mouse);
+    void studioApplyBoneDrag(glm::vec2 mouse);
     // The target's editable clip. CREATED and selected when the rig is in
     // gait mode: a bone key has to live somewhere, and "make a clip first" is
     // a step that exists only because of the file format.
@@ -389,13 +425,6 @@ private:
     // The playhead is almost never exactly ON a key, so a panel that only read
     // keys would show nothing for most of the timeline.
     bool studioBoneEulerAt(uint32_t boneId, float t, glm::vec3& out);
-    // Begin a bone drag on `handle` (screen bookkeeping, plus the key the drag
-    // writes into), and apply one pointer DELTA to the active drag. Split out
-    // of the frame loop so a headless hook drives the SAME code the mouse
-    // drives - a UI feature that only a mouse can reach cannot be gated.
-    bool studioBeginBoneDrag(int boneIndex, TrackballHandle handle,
-                             glm::vec2 mouse, float radius);
-    void studioApplyBoneDrag(glm::vec2 delta);
 
     // The fur cards of the micro objects that carry a fur material, and the
     // objects' world AABBs (the cards are generated in the field's local

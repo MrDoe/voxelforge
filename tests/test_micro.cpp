@@ -1371,3 +1371,75 @@ TEST_CASE("micro clip: sampleTrackEuler is the ONE blend rule")
     BoneKey stepMid = b; stepMid.ease = ClipEase::Step;
     CHECK(sampleTrackEuler({ a, stepMid, c }, 1.99f).y == doctest::Approx(90.f));
 }
+
+TEST_CASE("micro clip: the Euler round trip a gizmo drag depends on")
+{
+    // A gizmo works in MATRICES: it composes a rotation about the bone's own
+    // axis onto the current pose and must decompose the result back into the
+    // `rotDeg` the clip stores. If the pair does not round trip, dragging a
+    // ring silently writes a different pose than the one on screen.
+    //
+    // Compare MATRICES, not Euler triples: the decomposition is not unique
+    // (rx/rz trade off at the gimbal), and the matrix is what the rig poses
+    // from.
+    const glm::vec3 cases[] = {
+        { 0.f, 0.f, 0.f },     { 30.f, 0.f, 0.f },   { 0.f, 30.f, 0.f },
+        { 0.f, 0.f, 30.f },    { -25.f, 40.f, -15.f }, { 90.f, 0.f, 0.f },
+        { 0.f, 90.f, 0.f },    { 0.f, -90.f, 0.f },  { 10.f, 89.9f, 20.f },
+        { 170.f, 5.f, -170.f },{ 12.f, -47.f, 133.f },
+    };
+    auto closeM = [](const glm::mat3& a, const glm::mat3& b) {
+        for (int c = 0; c < 3; ++c)
+            for (int r = 0; r < 3; ++r)
+                if (std::abs(a[c][r] - b[c][r]) > 1e-4f)
+                    return false;
+        return true;
+    };
+    for (const glm::vec3& e : cases) {
+        const glm::mat3 m = boneEulerMatrix(e);
+        const glm::vec3 back = boneEulerFromMatrix(m);
+        CHECK(closeM(boneEulerMatrix(back), m));
+    }
+
+    // The axis a drag grabbed must stay FIXED: R' = R * Rot(e, angle) leaves
+    // R * e pointing where it did - which is what makes the ring the axis it
+    // rotates about. Composing on the LEFT would rotate about a different
+    // axis, and is the mistake this pins.
+    for (int axis = 0; axis < 3; ++axis) {
+        glm::vec3 e(0.f);
+        e[axis] = 1.f;
+        for (const glm::vec3& start : cases) {
+            const glm::mat3 R = boneEulerMatrix(start);
+            const glm::mat3 Rn =
+                R * boneAxisRotation(axis, glm::radians(37.f));
+            const glm::vec3 before = R * e;
+            const glm::vec3 after = Rn * e;
+            CHECK(glm::length(after - before) < 1e-4f);
+            // And a full turn about it is the identity.
+            const glm::mat3 full = R * boneAxisRotation(axis, 6.2831853f);
+            CHECK(closeM(full, R));
+        }
+    }
+
+    // `sample` poses from the same construction, so a key holding `e` yields
+    // `boneEulerMatrix(e)`.
+    MicroRig rig;
+    MicroBone b;
+    b.id = 1;
+    b.name = "spine";
+    b.a = glm::vec3(0.f);
+    b.b = glm::vec3(1.f, 0.f, 0.f);
+    b.radius = 0.1f;
+    rig.bones.push_back(b);
+    MicroClip clip;
+    BoneTrack tr;
+    tr.boneId = 1;
+    tr.keys.push_back({ 0.f, glm::vec3(-25.f, 40.f, -15.f), ClipEase::Smooth });
+    clip.tracks.push_back(tr);
+    std::vector<glm::mat3> rot;
+    glm::vec3 bo;
+    float bh = 0.f;
+    clip.sample(0.f, rig, rot, bo, bh);
+    REQUIRE(rot.size() == 1);
+    CHECK(closeM(rot[0], boneEulerMatrix(glm::vec3(-25.f, 40.f, -15.f))));
+}

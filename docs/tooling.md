@@ -78,16 +78,16 @@ What it does:
   `Add bone key` writes a key at the playhead with zero rotation; the pose
   editor below is how a key gets a value.
 - **Posing the selected bone.** Select a bone in the **Skeleton** list; three
-  rings appear at its joint in the viewport (circle = Y, wide/flat = X, tall =
-  Z — the same screen shapes `gizmo_math.hpp` tests for the object
-  trackball). Dragging a ring rotates the bone about that axis and **stores the
-  result as a keyframe at the playhead**: the drag edits the clip's
-  `BoneKey.rotDeg` directly, which is exactly what `MicroClip::sample` hands to
-  `composeBones`, so the pose on screen IS the pose stored. There is no preview
-  transform that could drift from the data.
-  - The drag law is the object trackball's: 120° across a ring radius, and the
-    radius is captured at the drag's start so the sensitivity cannot change
-    under the user's hand.
+  rings appear at its joint in the viewport, and **each ring is the PROJECTED
+  CIRCLE of that bone's own axis** (local X / Y / Z) rather than a fixed
+  screen shape — so a ring always lies in the plane it rotates about, at any
+  bone orientation. Dragging a ring intersects the pointer with the ring's
+  plane and tracks the pointer's ANGLE around the joint; the delta is composed
+  onto the bone's local rotation and **stored as a keyframe at the playhead**
+  (the value `MicroClip::sample` poses from, so the pose on screen IS the pose
+  stored).
+  - The grabbed ring's plane is frozen at the drag's start, so the drag cannot
+    jump as the bone turns under the pointer.
   - The first edit at a time with no key SEEDS the new key from the pose
     already authored there, so touching a ring never snaps the bone to rest.
   - Keys are quantised to the clip's frame grid (`1/fps`), so one drag updates

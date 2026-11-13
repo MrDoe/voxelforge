@@ -1,25 +1,36 @@
-// The studio's BONE GIZMO: three rings at the selected bone's joint, and the
-// keyframe a drag writes.
+// The studio's BONE GIZMO: three rings that are the projected circles of the
+// selected bone's OWN axes, and the keyframe a drag writes.
 //
 // WHY A GIZMO AND NOT JUST FIELDS. Posing a skeleton by typing Euler angles is
 // guesswork: the user cannot see which way +20 degrees of X bends the neck.
-// Dragging a ring is the same interaction the object trackball already uses
-// (`ui/gizmo_math.hpp`), so there is ONE ring vocabulary in the app.
 //
-// WHAT A DRAG WRITES. A keyframe, at the playhead, into the target's clip -
-// the same `BoneKey { t, rotDeg }` that `MicroClip::sample` hands to
-// `composeBones`. The Euler is edited in place, so the pose on screen IS the
-// pose stored: there is no separate "preview" transform to drift from the
-// data (the object trackball needs one because a world layer's pose lives in
-// the manifest; a bone's lives in the clip).
+// WHY THE FIRST VERSION'S RINGS WERE WRONG. It reused the object trackball's
+// three FIXED screen shapes (a circle, a wide flat ellipse, a tall ellipse).
+// Those encode "yaw / pitch / roll" for an object whose pose is authored in the
+// WORLD frame, where a screen-space metaphor is at least arguable. A bone is
+// arbitrarily oriented, so a fixed screen ellipse claims a plane the bone does
+// not have: which ring "was" X depended on where the camera stood, and dragging
+// it rotated about a different axis than the one drawn. Now each ring is the
+// projection of the real circle - centre at the joint, normal along the bone's
+// own axis, radius a fraction of the bone's length - so the ring the user sees
+// IS the axis it rotates. Hit-testing is therefore point-to-projected-polyline,
+// which also works when a ring is nearly edge-on (a fixed-shape test cannot).
+//
+// WHAT A DRAG WRITES. The pointer is intersected with the grabbed ring's PLANE
+// and its angle around the joint is tracked; the delta is composed onto the
+// bone's local rotation as `R * axisRotation(localAxis, dAngle)` - rotating
+// about the bone's own axis, exactly as drawn - and decomposed back into the
+// clip's Euler with `boneEulerFromMatrix`. The result is stored as a
+// `BoneKey` at the playhead, the same value `MicroClip::sample` poses from, so
+// the pose on screen IS the pose stored.
 //
 // THE SEEDING RULE. The first edit at a time with no key seeds the new key
-// from the pose already authored there (`eulerAt`, which mirrors sample()'s
-// clamp/interpolate rule). Seeding from zero instead would SNAP the bone to
-// rest the moment the user touched a ring, which reads as a bug.
+// from the pose already authored there (`sampleTrackEuler`). Seeding from zero
+// would SNAP the bone to rest the moment the user touched a ring.
 #include "app/app.hpp"
 
 #include "app/ui/gizmo_math.hpp"
+#include "voxel/micro_clip.hpp"
 
 #include <imgui.h>
 #include <spdlog/spdlog.h>
@@ -27,22 +38,81 @@
 #include <algorithm>
 #include <cmath>
 
+#include <glm/gtc/matrix_transform.hpp>
+
 namespace vf {
 namespace app {
 
 namespace {
 
-// The authored Euler at `t`, via the ONE blend rule the rig uses. Kept as a
-// thin wrapper so the writer and `MicroClip::sample` cannot disagree about
-// what "the pose there" means.
-glm::vec3 eulerAt(const std::vector<vf::voxel::BoneKey>& keys, float t)
+constexpr int kRingSegments = 64;
+
+
+// A right-handed rotation about a world axis. glm's `rotate` is right-handed,
+// which is what the rings' angle convention assumes; the clip's Euler
+// convention (`boneEulerMatrix`) is NOT (rx enters negated), so using the
+// matrix form here keeps the two independent.
+glm::mat3 axisRotationRH(glm::vec3 axis, float radians)
 {
-    return vf::voxel::sampleTrackEuler(keys, t);
+    return glm::mat3(glm::rotate(glm::mat4(1.f), radians, axis));
+}
+
+// The pointer's ray, the same construction splat.vert and the fur shader use.
+glm::vec3 pointerRay(glm::vec2 px, const vf::Camera& cam, float tanHalf,
+                     const glm::ivec2& fb, glm::vec3& origin)
+{
+    const float x = (fb.x > 0) ? (px.x / float(fb.x)) * 2.f - 1.f : 0.f;
+    const float y = (fb.y > 0) ? (px.y / float(fb.y)) * 2.f - 1.f : 0.f;
+    const float aspect = (fb.y > 0) ? float(fb.x) / float(fb.y) : 1.f;
+    origin = cam.pos;
+    return glm::normalize(cam.forward() + x * tanHalf * aspect * cam.right() -
+                          y * tanHalf * cam.up());
+}
+
+// Where the pointer hits the plane, and its angle in the plane's (U,V) basis.
+bool planeAngle(glm::vec2 px, const glm::vec3& centre, const glm::vec3& n,
+                const glm::vec3& u, const glm::vec3& v, const vf::Camera& cam,
+                float tanHalf, const glm::ivec2& fb, float& outAngle)
+{
+    glm::vec3 origin;
+    const glm::vec3 rd = pointerRay(px, cam, tanHalf, fb, origin);
+    const float denom = glm::dot(rd, n);
+    if (std::abs(denom) < 1e-4f)
+        return false; // the ray is parallel to the ring's plane
+    const float t = glm::dot(centre - origin, n) / denom;
+    if (t <= 0.f)
+        return false; // the plane is behind the camera
+    const glm::vec3 p = origin + rd * t;
+    const glm::vec3 d = p - centre;
+    outAngle = std::atan2(glm::dot(d, v), glm::dot(d, u));
+    return true;
+}
+
+float wrapPi(float a)
+{
+    while (a > glm::pi<float>()) a -= 2.f * glm::pi<float>();
+    while (a < -glm::pi<float>()) a += 2.f * glm::pi<float>();
+    return a;
 }
 
 } // namespace
 
-bool App::studioBoneGizmo(glm::vec2& centre, float& radius)
+glm::ivec2 App::viewportLogical() const
+{
+    // LOGICAL window pixels: GLFW cursor coordinates and ImGui's DisplaySize
+    // are logical while framebufferSize() is physical, and picking must use
+    // the former on a high-DPI display.
+    const ImVec2 ds = ImGui::GetIO().DisplaySize;
+    if (ds.x > 0.f && ds.y > 0.f)
+        return glm::ivec2(int(ds.x), int(ds.y));
+    // Before the first ImGui frame DisplaySize is UNSET (it reads back
+    // NEGATIVE), and a headless --shot may never build a UI frame at all. A
+    // negative size gives the projection a negative aspect and puts every
+    // gizmo off-screen, so fall back to the requested surface size.
+    return glm::ivec2(std::max(1, m_args.width), std::max(1, m_args.height));
+}
+
+bool App::studioBoneGizmo(BoneGizmo& out)
 {
     auto* b = studioBehaviour();
     if (!m_studio.active || !b || b->rig.bones.empty())
@@ -75,19 +145,57 @@ bool App::studioBoneGizmo(glm::vec2& centre, float& radius)
     if (glm::dot(c - cam.pos, cam.forward()) < 0.05f)
         return false;
 
-    // LOGICAL window pixels: GLFW cursor coordinates and ImGui's DisplaySize
-    // are logical while framebufferSize() is physical, and picking must use
-    // the former on a high-DPI display.
-    const glm::ivec2 fb(int(ImGui::GetIO().DisplaySize.x),
-                        int(ImGui::GetIO().DisplaySize.y));
+    out.centre = a;
+    // The bone's OWN frame, carried through the pose chain and the object
+    // transform. `boneRot` is a rotation, and so is the object's, so these stay
+    // orthonormal - which is what lets the rings be circles.
+    const glm::mat3 axes = R * b->boneRot[si];
+    for (int k = 0; k < 3; ++k) {
+        glm::vec3 e(0.f);
+        e[k] = 1.f;
+        out.axis[k] = glm::normalize(axes * e);
+    }
+    // A ring the size of the bone, so a short ear bone gets a small gizmo and
+    // the spine a large one, clamped so it is always grabbable.
+    const float boneLen = glm::length(c - a);
+    out.radius = glm::clamp(boneLen * 0.55f, 0.02f, 0.60f);
+
+    const glm::ivec2 fb = viewportLogical();
     const float tanHalf = tanHalfFov60();
-    centre = projectScreen(a, cam, tanHalf, fb);
-    const glm::vec2 pc = projectScreen(c, cam, tanHalf, fb);
-    // Size the rings from the bone's own length ON SCREEN, so a short ear bone
-    // gets a small gizmo and the spine a large one - a fixed pixel radius
-    // either swallows the animal or is unusable on a small bone.
-    radius = glm::clamp(glm::length(pc - centre) * 1.15f, 26.f, 140.f);
+    out.centrePx = projectScreen(a, cam, tanHalf, fb);
+    const glm::vec2 edge =
+        projectScreen(a + out.radius * out.axis[1], cam, tanHalf, fb);
+    out.radiusPx = glm::length(edge - out.centrePx);
     return true;
+}
+
+glm::vec2 App::studioRingPoint(const BoneGizmo& g, int axis, float t)
+{
+    const int i1 = (axis + 1) % 3;
+    const int i2 = (axis + 2) % 3;
+    const glm::vec3 p = g.centre + g.radius *
+        (std::cos(t) * g.axis[i1] + std::sin(t) * g.axis[i2]);
+    return projectScreen(p, m_camera, tanHalfFov60(), viewportLogical());
+}
+
+int App::studioBoneRingAt(const BoneGizmo& g, glm::vec2 p, float slop)
+{
+    float best = slop;
+    int hit = -1;
+    for (int axis = 0; axis < 3; ++axis) {
+        glm::vec2 prev = studioRingPoint(g, axis, 0.f);
+        for (int i = 1; i <= kRingSegments; ++i) {
+            const float t = 6.2831853f * float(i) / float(kRingSegments);
+            const glm::vec2 cur = studioRingPoint(g, axis, t);
+            const float d = screenSegmentDistance(p, prev, cur);
+            if (d < best) {
+                best = d;
+                hit = axis;
+            }
+            prev = cur;
+        }
+    }
+    return hit;
 }
 
 vf::voxel::MicroClip* App::studioEnsureClip()
@@ -149,7 +257,9 @@ vf::voxel::BoneKey* App::studioKeyAt(vf::voxel::MicroClip& clip,
     }
     vf::voxel::BoneKey k;
     k.t = t;
-    k.rotDeg = eulerAt(track->keys, t); // seed from the pose, never from zero
+    // SEED from the pose already on screen, or the first edit would snap the
+    // bone to zero and destroy the pose the user is looking at.
+    k.rotDeg = vf::voxel::sampleTrackEuler(track->keys, t);
     k.ease = vf::voxel::ClipEase::Smooth;
     track->keys.push_back(k);
     std::sort(track->keys.begin(), track->keys.end(),
@@ -180,22 +290,35 @@ bool App::studioBoneEulerAt(uint32_t boneId, float t, glm::vec3& out)
     return false;
 }
 
-bool App::studioBeginBoneDrag(int boneIndex, TrackballHandle handle,
-                              glm::vec2 mouse, float radius)
+bool App::studioBeginBoneDrag(int boneIndex, int axis, const BoneGizmo& g,
+                              glm::vec2 mouse)
 {
     auto* b = studioBehaviour();
     if (!b || boneIndex < 0 || size_t(boneIndex) >= b->rig.bones.size())
         return false;
-    if (handle == TrackballHandle::None)
+    if (axis < 0 || axis > 2)
         return false;
     auto* clip = studioEnsureClip();
     if (!clip)
         return false;
+    float angle = 0.f;
+    const glm::ivec2 fb = viewportLogical();
+    const float tanHalf = tanHalfFov60();
+    const int i1 = (axis + 1) % 3;
+    const int i2 = (axis + 2) % 3;
+    if (!planeAngle(mouse, g.centre, g.axis[axis], g.axis[i1], g.axis[i2],
+                    m_camera, tanHalf, fb, angle))
+        return false; // the pointer is not on the ring's plane at all
+
     m_studio.gizmoDragBone = boneIndex;
     m_studio.gizmoDragBoneId = b->rig.bones[size_t(boneIndex)].id;
-    m_studio.gizmoHandle = handle;
-    m_studio.gizmoLastMouse = mouse;
-    m_studio.gizmoRadius = radius;
+    m_studio.gizmoDragAxis = axis;
+    m_studio.gizmoCentre = g.centre;
+    m_studio.gizmoPlaneN = g.axis[axis];
+    m_studio.gizmoPlaneU = g.axis[i1];
+    m_studio.gizmoPlaneV = g.axis[i2];
+    m_studio.gizmoLastAngle = angle;
+    m_studio.gizmoRadiusPx = g.radiusPx;
     // The clip clock must not run under the drag, or the key would land at a
     // time the user is not looking at.
     m_studio.playing = false;
@@ -203,16 +326,15 @@ bool App::studioBeginBoneDrag(int boneIndex, TrackballHandle handle,
     b->clipTime = m_studio.time;
     // Create the key NOW, so the pose is already authored where the drag will
     // write and the ring has something to move.
-    studioKeyAt(*clip, b->rig.bones[size_t(boneIndex)].id, m_studio.time);
+    studioKeyAt(*clip, m_studio.gizmoDragBoneId, m_studio.time);
     b->animateBones();
     m_taaFirstFrame = true;
-    spdlog::info("studio: bone '{}' ring {} drag at t={:.3f}",
-                 b->rig.bones[size_t(boneIndex)].name, int(handle),
-                 m_studio.time);
+    spdlog::info("studio: bone '{}' axis {} drag at t={:.3f}",
+                 b->rig.bones[size_t(boneIndex)].name, axis, m_studio.time);
     return true;
 }
 
-void App::studioApplyBoneDrag(glm::vec2 delta)
+void App::studioApplyBoneDrag(glm::vec2 mouse)
 {
     if (m_studio.gizmoDragBone < 0)
         return;
@@ -228,32 +350,31 @@ void App::studioApplyBoneDrag(glm::vec2 delta)
     if (b->rig.bones[si].id != m_studio.gizmoDragBoneId) {
         spdlog::warn("studio: bone drag abandoned (rig changed under it)");
         m_studio.gizmoDragBone = -1;
-        m_studio.gizmoHandle = TrackballHandle::None;
-        m_studio.gizmoRadius = 0.f;
+        m_studio.gizmoDragAxis = -1;
         return;
     }
-    auto* k = studioKeyAt(clip, b->rig.bones[si].id, m_studio.time);
+    const glm::ivec2 fb = viewportLogical();
+    const float tanHalf = tanHalfFov60();
+    float angle = 0.f;
+    if (!planeAngle(mouse, m_studio.gizmoCentre, m_studio.gizmoPlaneN,
+                    m_studio.gizmoPlaneU, m_studio.gizmoPlaneV, m_camera,
+                    tanHalf, fb, angle))
+        return; // the pointer left the plane (parallel ray): keep the pose
+    const float delta = wrapPi(angle - m_studio.gizmoLastAngle);
+    m_studio.gizmoLastAngle = angle;
+    if (std::abs(delta) < 1e-6f)
+        return;
+    auto* k = studioKeyAt(clip, m_studio.gizmoDragBoneId, m_studio.time);
     if (!k)
         return;
-    // The object trackball's drag law: 120 degrees across a ring radius, so a
-    // small ring is not twitchy and a large one is not sluggish. The radius is
-    // the one captured at the drag's START - recomputing it would change the
-    // sensitivity under the user's hand.
-    const float dpp = 120.f /
-        (glm::pi<float>() * std::max(m_studio.gizmoRadius, 48.f));
-    switch (m_studio.gizmoHandle) {
-    case TrackballHandle::Yaw:   // the circle
-        k->rotDeg.y += delta.x * dpp;
-        break;
-    case TrackballHandle::Pitch: // the wide, flat ring
-        k->rotDeg.x -= delta.y * dpp;
-        break;
-    case TrackballHandle::Roll:  // the tall ring
-        k->rotDeg.z += delta.x * dpp;
-        break;
-    default:
-        return;
-    }
+    // Compose about the bone's OWN axis, in the frame the local rotation acts
+    // in, then decompose back to the clip's Euler. `R * dR` keeps the axis
+    // direction `R * e` fixed - the axis the ring was drawn for.
+    const glm::mat3 R = vf::voxel::boneEulerMatrix(k->rotDeg);
+    glm::vec3 e(0.f);
+    e[m_studio.gizmoDragAxis] = 1.f;
+    const glm::mat3 Rn = R * axisRotationRH(e, delta);
+    k->rotDeg = vf::voxel::boneEulerFromMatrix(Rn);
     // Re-sample THIS frame, so the dragged bone follows the pointer without a
     // frame of lag and the pose on screen is exactly the pose stored.
     b->clipTime = m_studio.time;

@@ -25,25 +25,27 @@ namespace app {
 // highlight outline.
 void App::runPreInputTestHooks()
 {
-    // VF_TEST_BONE_DRAG="<bone>:<yaw|pitch|roll>:dx,dy": drive the STUDIO's
-    // bone gizmo through the app's OWN drag path, with no mouse. A UI feature
-    // that only a mouse can reach cannot be gated, so the same
+    // VF_TEST_BONE_DRAG="<bone>:<x|y|z>:<degrees>": drive the STUDIO's bone
+    // gizmo through the app's OWN drag path, with no mouse. A UI feature that
+    // only a mouse can reach cannot be gated, so the same
     // studioBeginBoneDrag/studioApplyBoneDrag calls the frame loop makes are
-    // made here, and the result is reported as two numbers that must agree:
-    // the STORED key and the pose the rig sampled from it.
+    // made here, from two points ON the ring, and the result is reported as
+    // two numbers that must agree: the STORED key and the pose the rig
+    // sampled from it.
     //
-    // Runs ONCE: a delta applied every frame would spin the bone.
+    // Runs ONCE (a retry only while the pose does not exist yet): a rotation
+    // applied every frame would spin the bone.
     if (const char* bd = getenv("VF_TEST_BONE_DRAG"); bd && *bd) {
         static bool done = false;
         if (!done) {
             char boneName[64] = { 0 };
-            char axis[16] = { 0 };
-            float dx = 0.f, dy = 0.f;
-            if (std::sscanf(bd, "%63[^:]:%15[^:]:%f,%f", boneName, axis,
-                            &dx, &dy) != 4) {
+            char axisName[16] = { 0 };
+            float deg = 0.f;
+            if (std::sscanf(bd, "%63[^:]:%15[^:]:%f", boneName, axisName,
+                            &deg) != 3) {
                 done = true;
                 spdlog::warn("VF_TEST_BONE_DRAG: expected "
-                             "\"<bone>:<yaw|pitch|roll>:dx,dy\", got '{}'", bd);
+                             "\"<bone>:<x|y|z>:<degrees>\", got '{}'", bd);
             } else {
                 auto* b = studioBehaviour();
                 int idx = -1;
@@ -61,58 +63,104 @@ void App::runPreInputTestHooks()
                             idx = int(v);
                     }
                 }
-                TrackballHandle h = TrackballHandle::None;
-                if (!std::strcmp(axis, "yaw")) h = TrackballHandle::Yaw;
-                else if (!std::strcmp(axis, "pitch")) h = TrackballHandle::Pitch;
-                else if (!std::strcmp(axis, "roll")) h = TrackballHandle::Roll;
-                glm::vec2 gc;
-                float gr = 0.f;
+                int axis = -1;
+                if (!std::strcmp(axisName, "x")) axis = 0;
+                else if (!std::strcmp(axisName, "y")) axis = 1;
+                else if (!std::strcmp(axisName, "z")) axis = 2;
                 // The gizmo needs a POSE, and animateBones() has not run on
                 // frame 0 - so a false here means "not yet", not "broken".
-                // Retry on the next frame; only a bad SPEC is terminal.
-                if (idx < 0 || h == TrackballHandle::None) {
+                if (idx < 0 || axis < 0) {
                     done = true;
                     spdlog::warn("studio bone drag: bad spec (bone '{}' axis "
-                                 "'{}', {} bone(s))", boneName, axis,
+                                 "'{}', {} bone(s))", boneName, axisName,
                                  b ? int(b->rig.bones.size()) : 0);
-                } else if (studioBoneGizmo(gc, gr)) {
+                } else if (BoneGizmo giz; studioBoneGizmo(giz)) {
+                    // The STUDIO CAMERA is set up in the render step, so on
+                    // the first frames the joint can project outside the
+                    // viewport (or the ring to a point). Retry until the gizmo
+                    // is actually on screen - a hook that measures a
+                    // degenerate ring would report "no rotation" for a working
+                    // feature.
+                    const glm::ivec2 fbv = viewportLogical();
+                    const bool onScreen =
+                        giz.radiusPx > 1.f && giz.centrePx.x > 0.f &&
+                        giz.centrePx.y > 0.f && giz.centrePx.x < float(fbv.x) &&
+                        giz.centrePx.y < float(fbv.y);
+                    static int tries = 0;
+                    if (!onScreen) {
+                        if (++tries > 120) {
+                            done = true;
+                            spdlog::warn("studio bone drag: gizmo never projected "
+                                         "on screen (rpx={:.2f} centre=({:.1f},"
+                                         "{:.1f}))", giz.radiusPx, giz.centrePx.x,
+                                         giz.centrePx.y);
+                        } else if (tries <= 2) {
+                            spdlog::info("studio bone drag: waiting for the gizmo "
+                                         "(rpx={:.2f} centre=({:.1f},{:.1f}) "
+                                         "fb=({},{}))", giz.radiusPx,
+                                         giz.centrePx.x, giz.centrePx.y, fbv.x,
+                                         fbv.y);
+                        }
+                    } else {
                     done = true;
-                    if (studioBeginBoneDrag(idx, h, gc, gr)) {
-                    studioApplyBoneDrag({ dx, dy });
-                    glm::vec3 keyRot(0.f);
-                    int keys = 0;
-                    if (b && b->clip) {
-                        for (const auto& tr : b->clip->tracks)
-                            for (const auto& k : tr.keys) {
-                                keyRot = k.rotDeg;
-                                ++keys;
-                            }
-                    }
-                    spdlog::info("studio bone drag: bone={} axis={} key=({:.2f},"
-                                 "{:.2f},{:.2f}) keys={} radius={:.1f}",
-                                 boneName, axis, keyRot.x, keyRot.y, keyRot.z,
-                                 keys, gr);
-                    // The panel's READOUT, through the same function: it must
-                    // report the key it just wrote.
-                    glm::vec3 shown(0.f);
-                    if (studioBoneEulerAt(b->rig.bones[size_t(idx)].id,
-                                          m_studio.time, shown))
-                        spdlog::info("studio bone drag: readout at t={:.3f} = "
-                                     "({:.2f},{:.2f},{:.2f})", m_studio.time,
-                                     shown.x, shown.y, shown.z);
-                    if (b && size_t(idx) < b->boneRot.size()) {
-                        const glm::vec3 tip =
-                            b->boneRot[size_t(idx)] * b->rig.bones[size_t(idx)].b +
-                            b->boneXform[size_t(idx)];
-                        spdlog::info("studio bone drag: posed tip=({:.4f},{:.4f},"
-                                     "{:.4f})", tip.x, tip.y, tip.z);
-                    }
-                    m_studio.gizmoDragBone = -1;
-                    m_studio.gizmoHandle = TrackballHandle::None;
-                    m_studio.gizmoRadius = 0.f;
+                    // Two points ON the ring: the drag's angle is then exactly
+                    // `deg`, whatever the camera does to the projection.
+                    const int i1 = (axis + 1) % 3;
+                    const int i2 = (axis + 2) % 3;
+                    const glm::ivec2 fb = viewportLogical();
+                    const float tanHalf = tanHalfFov60();
+                    const float th = glm::radians(deg);
+                    const glm::vec2 m0 = projectScreen(
+                        giz.centre + giz.radius * giz.axis[i1], m_camera,
+                        tanHalf, fb);
+                    const glm::vec2 m1 = projectScreen(
+                        giz.centre + giz.radius *
+                            (std::cos(th) * giz.axis[i1] +
+                             std::sin(th) * giz.axis[i2]), m_camera, tanHalf, fb);
+                    if (studioBeginBoneDrag(idx, axis, giz, m0)) {
+                        studioApplyBoneDrag(m1);
+                        glm::vec3 keyRot(0.f);
+                        int keys = 0;
+                        if (b && b->clip) {
+                            for (const auto& tr : b->clip->tracks)
+                                for (const auto& k : tr.keys) {
+                                    keyRot = k.rotDeg;
+                                    ++keys;
+                                }
+                        }
+                        spdlog::info("studio bone drag: bone={} axis={} deg={:.1f} "
+                                     "key=({:.2f},{:.2f},{:.2f}) keys={} rpx={:.1f}",
+                                     boneName, axisName, deg, keyRot.x, keyRot.y,
+                                     keyRot.z, keys, giz.radiusPx);
+                        spdlog::info("studio bone drag: gizmo centre=({:.3f},{:.3f},"
+                                     "{:.3f}) r={:.4f} centrePx=({:.1f},{:.1f}) "
+                                     "axis=({:.3f},{:.3f},{:.3f})",
+                                     giz.centre.x, giz.centre.y, giz.centre.z,
+                                     giz.radius, giz.centrePx.x, giz.centrePx.y,
+                                     giz.axis[1].x, giz.axis[1].y, giz.axis[1].z);
+                        // The panel's READOUT, through the same function: it
+                        // must report the key it just wrote.
+                        glm::vec3 shown(0.f);
+                        if (studioBoneEulerAt(b->rig.bones[size_t(idx)].id,
+                                              m_studio.time, shown))
+                            spdlog::info("studio bone drag: readout at t={:.3f} = "
+                                         "({:.2f},{:.2f},{:.2f})", m_studio.time,
+                                         shown.x, shown.y, shown.z);
+                        if (size_t(idx) < b->boneRot.size()) {
+                            const glm::vec3 tip =
+                                b->boneRot[size_t(idx)] *
+                                    b->rig.bones[size_t(idx)].b +
+                                b->boneXform[size_t(idx)];
+                            spdlog::info("studio bone drag: posed tip=({:.4f},"
+                                         "{:.4f},{:.4f})", tip.x, tip.y, tip.z);
+                        }
+                        m_studio.gizmoDragBone = -1;
+                        m_studio.gizmoDragAxis = -1;
+                        m_studio.gizmoRadiusPx = 0.f;
                     } else {
                         spdlog::warn("studio bone drag: could not start (bone "
-                                     "'{}' axis '{}')", boneName, axis);
+                                     "'{}' axis '{}')", boneName, axisName);
+                    }
                     }
                 }
             }

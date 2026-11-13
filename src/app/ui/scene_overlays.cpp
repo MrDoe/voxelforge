@@ -64,34 +64,38 @@ void App::drawSceneOverlays()
             }
 
             // ---- the BONE GIZMO ------------------------------------------
-            // Three rings at the SELECTED bone's joint, in the SAME screen
-            // shapes trackballHandleAt tests (circle = Y, wide/flat = X,
-            // tall = Z), so the ring the user sees is the ring the pointer is
-            // tested against. The centre dot is the bone's joint.
-            glm::vec2 gc;
-            float gr = 0.f;
-            if (studioBoneGizmo(gc, gr)) {
+            // Three rings that are the PROJECTED CIRCLES of the selected
+            // bone's own axes, so a ring always lies in the plane it rotates
+            // about (the object trackball's fixed screen ellipses cannot: a
+            // bone is arbitrarily oriented, so which ring "was" X would depend
+            // on the camera). The centre dot is the bone's joint.
+            BoneGizmo giz;
+            if (studioBoneGizmo(giz)) {
                 const ImU32 ringIdle = ImGui::GetColorU32(
                     ImVec4(kAccent.x, kAccent.y, kAccent.z, 0.45f));
                 const ImU32 ringHot = ImGui::GetColorU32(
                     ImVec4(kAccent.x, kAccent.y, kAccent.z, 1.0f));
-                // During a drag the dragged ring stays highlighted, so the
+                // During a drag the grabbed ring stays highlighted, so the
                 // user can see WHICH axis is moving.
-                const TrackballHandle hot =
+                const int hot =
                     (m_studio.gizmoDragBone >= 0)
-                        ? m_studio.gizmoHandle
-                        : trackballHandleAt(glm::vec2(io.MousePos.x, io.MousePos.y),
-                                            gc, gr);
-                auto ring = [&](TrackballHandle h, float rx, float ry) {
-                    const bool on = (hot == h);
-                    dl->AddEllipse(ImVec2(gc.x, gc.y), ImVec2(rx, ry),
-                                   on ? ringHot : ringIdle, 0.f, 64,
-                                   on ? 2.5f : 1.5f);
-                };
-                ring(TrackballHandle::Pitch, gr, gr * 0.42f);
-                ring(TrackballHandle::Yaw, gr, gr);
-                ring(TrackballHandle::Roll, gr * 0.42f, gr);
-                dl->AddCircleFilled(ImVec2(gc.x, gc.y), 3.0f, ringHot);
+                        ? m_studio.gizmoDragAxis
+                        : studioBoneRingAt(giz, glm::vec2(io.MousePos.x,
+                                                          io.MousePos.y));
+                for (int axis = 0; axis < 3; ++axis) {
+                    const bool on = (hot == axis);
+                    const int segs = 48;
+                    ImVec2 pts[segs + 1];
+                    for (int i = 0; i <= segs; ++i) {
+                        const glm::vec2 q = studioRingPoint(
+                            giz, axis, 6.2831853f * float(i) / float(segs));
+                        pts[i] = ImVec2(q.x, q.y);
+                    }
+                    dl->AddPolyline(pts, segs + 1, on ? ringHot : ringIdle,
+                                    ImDrawFlags_None, on ? 2.5f : 1.5f);
+                }
+                dl->AddCircleFilled(ImVec2(giz.centrePx.x, giz.centrePx.y), 3.0f,
+                                    ringHot);
             }
         }
     }

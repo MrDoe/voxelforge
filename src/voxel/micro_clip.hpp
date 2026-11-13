@@ -81,6 +81,16 @@ glm::vec3 interpEuler(const BoneKey& a, const BoneKey& b, float t);
 // this, so what the editor shows at the playhead is exactly what the rig
 // poses from.
 glm::vec3 sampleTrackEuler(const std::vector<BoneKey>& keys, float t);
+// The Euler -> matrix construction `sample` uses (Rx * Ry * Rz), and its
+// INVERSE. Exposed because a gizmo works in matrices: it composes a rotation
+// about a bone's own axis onto the current pose and must decompose the result
+// back into the `rotDeg` the clip stores. Keeping both halves here means the
+// round trip is testable, and `sample` cannot drift from the pair.
+glm::mat3 boneEulerMatrix(const glm::vec3& rotDeg);
+glm::vec3 boneEulerFromMatrix(const glm::mat3& m);
+// A right-handed rotation about one of the three basis axes (0=X, 1=Y, 2=Z),
+// in the same convention `boneEulerMatrix` builds.
+glm::mat3 boneAxisRotation(int axis, float radians);
 void interpBody(const BodyKey& a, const BodyKey& b, float t,
                 glm::vec3& outOffset, float& outHeadingDeg);
 

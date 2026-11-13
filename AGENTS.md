@@ -1187,33 +1187,45 @@ one costs a whole turn, because the bad call is rejected before any work runs.
   `--anim --anim-layer micro/alpaca.vxw` (or `./animation_editor.sh`) targets
   ONE micro layer by name; locomotion is frozen so the animal stays put. In
   the **Animate** section (`Ctrl+7`), select a bone in the Skeleton list and
-  three rings appear at its joint in the viewport (circle = Y, wide/flat = X,
-  tall = Z — the same screen shapes `gizmo_math.hpp` tests for the object
-  trackball). Dragging a ring rotates the bone about that axis **and writes the
-  value as a `BoneKey` at the playhead**: the drag edits the clip's `rotDeg`
-  directly, which is what `MicroClip::sample` hands to `composeBones`, so the
-  pose on screen IS the pose stored — there is no preview transform to drift.
-  Four rules make it behave: the drag law is the object trackball's (120°
-  across a ring radius, radius captured at the START so sensitivity cannot
-  change under the hand); a new key is SEEDED from the pose already authored
-  at that time, so touching a ring never snaps the bone to rest; keys are
-  quantised to `1/fps`, so one drag updates ONE key instead of hundreds; and
-  the first drag with no clip creates and selects one (`studio`), because a key
-  needs somewhere to live. Bones are a CHAIN, so the UI only ever authors
-  per-bone LOCAL `rotDeg` — never a world matrix. The panel's pose readout is
+  three rings appear at its joint in the viewport. **Each ring is the
+  PROJECTED CIRCLE of that bone's own axis** (local X / Y / Z), so a ring
+  always lies in the plane it rotates about. The object trackball's fixed
+  screen shapes (circle / wide ellipse / tall ellipse) are NOT usable here: a
+  bone is arbitrarily oriented, so a fixed screen ellipse claims a plane the
+  bone does not have and which ring "was" X would depend on the camera — that
+  was the first version, and it read as wrong orientations. Dragging a ring
+  intersects the pointer with the ring's PLANE and tracks its ANGLE around the
+  joint; the delta is composed as `R * axisRotation(localAxis, dAngle)` and
+  decomposed back into `rotDeg` (`boneEulerMatrix`/`boneEulerFromMatrix`, the
+  exact inverse pair `sample` also uses — validated by a round-trip test).
+  The value is **written as a `BoneKey` at the playhead**, so the pose on
+  screen IS the pose stored — there is no preview transform to drift.
+  Four rules make it behave: the grabbed ring's plane is FROZEN at the drag's
+  start, so the drag cannot jump as the bone turns under the pointer; a new
+  key is SEEDED from the pose already authored at that time, so touching a
+  ring never snaps the bone to rest; keys are quantised to `1/fps`, so one
+  drag updates ONE key instead of hundreds; and the first drag with no clip
+  creates and selects one (`studio`), because a key needs somewhere to live.
+  Bones are a CHAIN, so the UI only ever authors per-bone LOCAL `rotDeg` —
+  never a world matrix. The panel's pose readout is
   **interpolated**: the playhead is almost never exactly ON a key, so it shows
   the blend the rig is actually using and edits it with the same auto-key rule,
   plus an **Ease out** control (Step/Linear/Smooth) for the segment starting at
   that key. The blend lives in ONE function — `sampleTrackEuler` — which
   `MicroClip::sample` poses the rig with AND the panel displays, so the editor
   cannot hold a second opinion about the curve.
-  `VF_TEST_BONE_DRAG="<bone>:<yaw|pitch|roll>:dx,dy"` drives the SAME
-  `studioBeginBoneDrag`/`studioApplyBoneDrag` path with no mouse and logs the
-  stored key plus the posed tip — a UI feature only a mouse can reach cannot
-  be gated. Measured: bone 0 yaw 60 px at a 26 px ring → key `(0, 47.75, 0)`,
-  posed tip `(-6.316,0.406,19.280)` → `(-5.907,0.406,19.099)`, identical in two
-  runs (the studio's own pixel floor is ~23 px, so gate the DATA, not the
-  frame).
+  `VF_TEST_BONE_DRAG="<bone>:<x|y|z>:<degrees>"` drives the SAME
+  `studioBeginBoneDrag`/`studioApplyBoneDrag` path with no mouse, from two
+  points ON the ring, and logs the stored key plus the posed tip — a UI
+  feature only a mouse can reach cannot be gated. Measured on the shipped
+  alpaca (spine along +Z, joint `(-6.316,0.406,18.728)`, ring 69 px at 2 m):
+  X 30° → key `(30,0,0)`, tip `(-6.316,0.130,19.206)`; Y 30° → key `(0,30,0)`,
+  tip `(-6.040,0.406,19.206)`; Z 30° → key `(0,0,30)` and the tip does NOT
+  move (the spine points along its own Z). All three are the exact
+  right-handed rotation about the bone's axis. Note `std::max(1,
+  m_args.width)` fallback in `viewportLogical()`: ImGui's DisplaySize reads
+  back NEGATIVE before the first frame, and a headless `--shot` may never
+  build one, which put every gizmo off-screen until it was fixed.
 
 ## Mesh actors — a raster mesh, shaded by the field
 - **Split:** a micro object may be moved and turned as a WHOLE (one continuous

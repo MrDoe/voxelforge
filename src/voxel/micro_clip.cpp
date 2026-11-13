@@ -362,6 +362,57 @@ void interpBody(const BodyKey& a, const BodyKey& b, float t,
     outHeadingDeg = a.headingDeg + (b.headingDeg - a.headingDeg) * u;
 }
 
+glm::mat3 boneAxisRotation(int axis, float radians)
+{
+    const float c = std::cos(radians), s = std::sin(radians);
+    switch (axis) {
+    case 0: // Rx: columns (1,0,0) (0,c,s) (0,-s,c)
+        return glm::mat3(1.f, 0.f, 0.f, 0.f, c, s, 0.f, -s, c);
+    case 2: // Rz: columns (c,s,0) (-s,c,0) (0,0,1)
+        return glm::mat3(c, s, 0.f, -s, c, 0.f, 0.f, 0.f, 1.f);
+    case 1:
+    default: // Ry: columns (c,0,-s) (0,1,0) (s,0,c)
+        return glm::mat3(c, 0.f, -s, 0.f, 1.f, 0.f, s, 0.f, c);
+    }
+}
+
+glm::mat3 boneEulerMatrix(const glm::vec3& rotDeg)
+{
+    // EXACTLY the construction `MicroClip::sample` has always used. `rotDeg.x`
+    // enters as-is: the matrix pattern already encodes the handedness, so
+    // negating it here would silently spin every pose the wrong way about X.
+    return boneAxisRotation(0, glm::radians(rotDeg.x)) *
+           boneAxisRotation(1, glm::radians(rotDeg.y)) *
+           boneAxisRotation(2, glm::radians(rotDeg.z));
+}
+
+glm::vec3 boneEulerFromMatrix(const glm::mat3& m)
+{
+    // Inverse of the product above. glm is COLUMN major, so m[c][r].
+    //
+    //   m[2][0] = sin(ry)
+    //   m[2][1] = -sin(rx) cos(ry)
+    //   m[2][2] =  cos(rx) cos(ry)
+    //   m[1][0] = -cos(ry) sin(rz)
+    //   m[0][0] =  cos(ry) cos(rz)
+    //
+    // GIMBAL: at |cos(ry)| = 0 the rx/rz split is undefined; pick rz = 0 and
+    // derive rx from the remaining terms, which keeps the round trip exact.
+    const float sy = glm::clamp(m[2][0], -1.f, 1.f);
+    const float cy = std::sqrt(std::max(0.f, 1.f - sy * sy));
+    float ax = 0.f, az = 0.f;
+    if (cy > 1e-5f) {
+        ax = std::atan2(-m[2][1], m[2][2]);
+        az = std::atan2(-m[1][0], m[0][0]);
+    } else {
+        az = 0.f;
+        const float sgn = (sy >= 0.f) ? 1.f : -1.f;
+        ax = std::atan2(m[0][1] * sgn, m[1][1]);
+    }
+    return glm::vec3(glm::degrees(ax), glm::degrees(glm::asin(sy)),
+                     glm::degrees(az));
+}
+
 glm::vec3 sampleTrackEuler(const std::vector<BoneKey>& keys, float t)
 {
     // THE blend rule for a bone track, in ONE place. `MicroClip::sample` (what
@@ -434,22 +485,9 @@ void MicroClip::sample(float t, const MicroRig& rig,
         // ONE interpolation rule, shared with the studio's readout.
         const glm::vec3 euler = sampleTrackEuler(tr.keys, t);
 
-        const float rx = glm::radians(euler.x);
-        const float ry = glm::radians(euler.y);
-        const float rz = glm::radians(euler.z);
-        const glm::mat3 Rx = glm::mat3(
-            1, 0, 0,
-            0, std::cos(rx), std::sin(rx),
-            0, -std::sin(rx), std::cos(rx));
-        const glm::mat3 Ry = glm::mat3(
-            std::cos(ry), 0, -std::sin(ry),
-            0, 1, 0,
-            std::sin(ry), 0, std::cos(ry));
-        const glm::mat3 Rz = glm::mat3(
-            std::cos(rz), std::sin(rz), 0,
-            -std::sin(rz), std::cos(rz), 0,
-            0, 0, 1);
-        localRot[(size_t)bi] = Rx * Ry * Rz;
+        // THE Euler -> matrix rule, shared with the studio's gizmo (which
+        // composes a rotation and must decompose the result back into rotDeg).
+        localRot[(size_t)bi] = boneEulerMatrix(euler);
     }
 }
 

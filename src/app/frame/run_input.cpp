@@ -408,23 +408,26 @@ void App::processInput(bool textCaptures, bool rotateLiveTest)
         // `MicroClip::sample` hands to `composeBones` - so the pose on screen
         // is the pose stored, with no separate preview transform to drift.
         if (m_studio.active) {
-            glm::vec2 gc;
-            float gr = 0.f;
-            const bool haveGizmo = studioBoneGizmo(gc, gr);
+            BoneGizmo giz;
+            const bool haveGizmo = studioBoneGizmo(giz);
             if (lmbEdge && haveGizmo && m_studio.gizmoDragBone < 0 && !wantMouse) {
-                const TrackballHandle h = trackballHandleAt(inputMouse, gc, gr);
-                if (h != TrackballHandle::None)
-                    studioBeginBoneDrag(m_studio.selectedBone, h, inputMouse, gr);
+                // Point-to-PROJECTED-POLYLINE, so the ring that is grabbed is
+                // the ring that was drawn, at any bone orientation.
+                const int axis = studioBoneRingAt(giz, inputMouse);
+                if (axis >= 0)
+                    studioBeginBoneDrag(m_studio.selectedBone, axis, giz,
+                                        inputMouse);
             }
             if (m_studio.gizmoDragBone >= 0) {
-                const glm::vec2 d = inputMouse - m_studio.gizmoLastMouse;
-                m_studio.gizmoLastMouse = inputMouse;
-                studioApplyBoneDrag(d);
+                // The drag tracks the pointer's ANGLE in the grabbed ring's
+                // plane, not a pixels-times-constant delta, so the bone follows
+                // the pointer around the ring wherever the camera is.
+                studioApplyBoneDrag(inputMouse);
                 if (!lmb) {
                     spdlog::info("studio: bone drag ended (t={:.3f})", m_studio.time);
                     m_studio.gizmoDragBone = -1;
-                    m_studio.gizmoHandle = TrackballHandle::None;
-                    m_studio.gizmoRadius = 0.f;
+                    m_studio.gizmoDragAxis = -1;
+                    m_studio.gizmoRadiusPx = 0.f;
                 }
             }
         }
