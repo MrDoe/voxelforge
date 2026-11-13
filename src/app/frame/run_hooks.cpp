@@ -231,6 +231,65 @@ void App::runPreInputTestHooks()
         }
     }
 
+    // VF_TEST_BONE_MOVE="<bone>:dx,dy,dz": move the bone's JOINT through the
+    // same path the viewport's centre-dot drag uses. The length must CHANGE
+    // (that is the implicit resize) while the TIP stays put, and a parent
+    // whose tip was this joint must follow.
+    if (const char* bm = getenv("VF_TEST_BONE_MOVE"); bm && *bm) {
+        static bool doneMove = false;
+        if (!doneMove) {
+            doneMove = true;
+            char boneName[64] = { 0 };
+            float dx = 0.f, dy = 0.f, dz = 0.f;
+            if (std::sscanf(bm, "%63[^:]:%f,%f,%f", boneName, &dx, &dy, &dz) != 4) {
+                spdlog::warn("VF_TEST_BONE_MOVE: expected \"<bone>:dx,dy,dz\", "
+                             "got '{}'", bm);
+            } else {
+                auto* b = studioBehaviour();
+                int idx = -1;
+                if (b) {
+                    for (size_t i = 0; i < b->rig.bones.size(); ++i)
+                        if (b->rig.bones[i].name == boneName) {
+                            idx = int(i);
+                            break;
+                        }
+                    if (idx < 0) {
+                        char* end = nullptr;
+                        const long v = std::strtol(boneName, &end, 10);
+                        if (end && *end == '\0' && v >= 0 &&
+                            size_t(v) < b->rig.bones.size())
+                            idx = int(v);
+                    }
+                }
+                if (idx < 0) {
+                    spdlog::warn("studio bone move: no bone '{}'", boneName);
+                } else {
+                    const auto& bb = b->rig.bones[size_t(idx)];
+                    const float lenBefore = glm::length(bb.b - bb.a);
+                    const glm::vec3 tipBefore = bb.b;
+                    const int pi = bb.parent;
+                    const glm::vec3 parentEndBefore =
+                        (pi >= 0 && size_t(pi) < b->rig.bones.size())
+                            ? b->rig.bones[size_t(pi)].b : glm::vec3(0.f);
+                    studioMoveBone(idx, glm::vec3(dx, dy, dz));
+                    const auto& ab = b->rig.bones[size_t(idx)];
+                    const float lenAfter = glm::length(ab.b - ab.a);
+                    spdlog::info("studio bone move: bone={} len {:.4f} -> {:.4f} "
+                                 "tipMoved={:.5f} joint=({:.3f},{:.3f},{:.3f})",
+                                 boneName, lenBefore, lenAfter,
+                                 glm::length(ab.b - tipBefore), ab.a.x, ab.a.y,
+                                 ab.a.z);
+                    if (pi >= 0 && size_t(pi) < b->rig.bones.size()) {
+                        const float pMove = glm::length(
+                            b->rig.bones[size_t(pi)].b - parentEndBefore);
+                        spdlog::info("studio bone move: parent {} tip moved "
+                                     "{:.5f}", pi, pMove);
+                    }
+                }
+            }
+        }
+    }
+
     // VF_TEST_BEHAVIOUR_CMD="name:command[:speed]": tell a micro object what
     // to do, the way the AI tool does ("let the alpaca run"). It runs in the
     // PRE-input hook so the command is in force for the frame.

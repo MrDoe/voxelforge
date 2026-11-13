@@ -334,8 +334,90 @@ bool App::studioSetBoneLength(int boneIndex, float metres)
     return true;
 }
 
-bool App::studioBoneEulerAt(uint32_t boneId, float t, glm::vec3& out)
+bool App::studioMoveBone(int boneIndex, glm::vec3 delta)
 {
+    auto* b = studioBehaviour();
+    if (!b || boneIndex < 0 || size_t(boneIndex) >= b->rig.bones.size())
+        return false;
+    auto& bone = b->rig.bones[size_t(boneIndex)];
+    const glm::vec3 oldA = bone.a;
+    // The JOINT moves and the TIP stays, so the bone's LENGTH and DIRECTION
+    // change IMPLICITLY - that is the resize. Moving both endpoints rigidly
+    // would need a separate length edit for every placement change, which is
+    // the wrong way round for a rig derived from voxels.
+    bone.a += delta;
+    // A CONNECTED chain stays connected: when the parent's tip WAS this joint,
+    // it follows, so the parent stretches instead of tearing away.
+    const int pi = bone.parent;
+    if (pi >= 0 && size_t(pi) < b->rig.bones.size()) {
+        auto& parent = b->rig.bones[size_t(pi)];
+        if (glm::length(parent.b - oldA) < 1e-4f)
+            parent.b = bone.a;
+    }
+    b->animateBones();
+    studioUploadRig();
+    m_taaFirstFrame = true;
+    return true;
+}
+
+bool App::studioBoneCentreAt(const BoneGizmo& g, glm::vec2 p, float slop)
+{
+    return glm::length(p - g.centrePx) <= slop;
+}
+
+bool App::studioBeginBoneTranslate(int boneIndex, const BoneGizmo& g,
+                                   glm::vec2 mouse)
+{
+    auto* b = studioBehaviour();
+    if (!b || boneIndex < 0 || size_t(boneIndex) >= b->rig.bones.size())
+        return false;
+    m_studio.gizmoDragBone = boneIndex;
+    m_studio.gizmoDragBoneId = b->rig.bones[size_t(boneIndex)].id;
+    m_studio.gizmoTranslating = true;
+    m_studio.gizmoLastMouse = mouse;
+    m_studio.gizmoCentre = g.centre; // the depth the slide is scaled at
+    // As with a rotation drag: the clip clock must not run under the hand.
+    m_studio.playing = false;
+    b->clipPlaying = false;
+    b->clipTime = m_studio.time;
+    spdlog::info("studio: bone '{}' translate drag at t={:.3f}",
+                 b->rig.bones[size_t(boneIndex)].name, m_studio.time);
+    return true;
+}
+
+void App::studioApplyBoneTranslate(glm::vec2 mouse)
+{
+    if (m_studio.gizmoDragBone < 0 || !m_studio.gizmoTranslating)
+        return;
+    auto* b = studioBehaviour();
+    if (!b)
+        return;
+    const size_t si = size_t(m_studio.gizmoDragBone);
+    if (si >= b->rig.bones.size() ||
+        b->rig.bones[si].id != m_studio.gizmoDragBoneId) {
+        m_studio.gizmoDragBone = -1;
+        m_studio.gizmoTranslating = false;
+        return;
+    }
+    const glm::vec2 d = mouse - m_studio.gizmoLastMouse;
+    m_studio.gizmoLastMouse = mouse;
+    if (glm::length(d) < 1e-4f)
+        return;
+    // Slide in the CAMERA plane, scaled so the joint stays under the pointer:
+    // world-per-pixel at the joint's depth. Screen y grows DOWN, hence -up.
+    const float depth =
+        glm::dot(m_studio.gizmoCentre - m_camera.pos, m_camera.forward());
+    if (depth <= 0.01f)
+        return;
+    const glm::ivec2 fb = viewportLogical();
+    const float wpp = 2.f * depth * tanHalfFov60() /
+                      float(std::max(1, fb.y));
+    const glm::vec3 delta = m_camera.right() * (d.x * wpp) -
+                            m_camera.up() * (d.y * wpp);
+    studioMoveBone(int(si), delta);
+}
+
+bool App::studioBoneEulerAt(uint32_t boneId, float t, glm::vec3& out){
     auto* b = studioBehaviour();
     if (!b || !b->clip)
         return false;

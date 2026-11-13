@@ -78,7 +78,7 @@ void App::drawSceneOverlays()
                 // During a drag the grabbed ring stays highlighted, so the
                 // user can see WHICH axis is moving.
                 const int hot =
-                    (m_studio.gizmoDragBone >= 0)
+                    (m_studio.gizmoDragBone >= 0 && !m_studio.gizmoTranslating)
                         ? m_studio.gizmoDragAxis
                         : studioBoneRingAt(giz, glm::vec2(io.MousePos.x,
                                                           io.MousePos.y));

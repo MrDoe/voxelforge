@@ -411,22 +411,33 @@ void App::processInput(bool textCaptures, bool rotateLiveTest)
             BoneGizmo giz;
             const bool haveGizmo = studioBoneGizmo(giz);
             if (lmbEdge && haveGizmo && m_studio.gizmoDragBone < 0 && !wantMouse) {
-                // Point-to-PROJECTED-POLYLINE, so the ring that is grabbed is
-                // the ring that was drawn, at any bone orientation.
-                const int axis = studioBoneRingAt(giz, inputMouse);
-                if (axis >= 0)
-                    studioBeginBoneDrag(m_studio.selectedBone, axis, giz,
-                                        inputMouse);
+                // The CENTRE DOT translates the bone; the RINGS rotate it -
+                // the same vocabulary the object gizmos use. Centre first, so
+                // a joint inside a ring is still grabbable.
+                if (studioBoneCentreAt(giz, inputMouse)) {
+                    studioBeginBoneTranslate(m_studio.selectedBone, giz,
+                                             inputMouse);
+                } else {
+                    // Point-to-PROJECTED-POLYLINE, so the ring that is grabbed
+                    // is the ring that was drawn, at any bone orientation.
+                    const int axis = studioBoneRingAt(giz, inputMouse);
+                    if (axis >= 0)
+                        studioBeginBoneDrag(m_studio.selectedBone, axis, giz,
+                                            inputMouse);
+                }
             }
             if (m_studio.gizmoDragBone >= 0) {
-                // The drag tracks the pointer's ANGLE in the grabbed ring's
-                // plane, not a pixels-times-constant delta, so the bone follows
-                // the pointer around the ring wherever the camera is.
-                studioApplyBoneDrag(inputMouse);
+                // A rotation tracks the pointer's ANGLE in the grabbed ring's
+                // plane; a translation slides the joint in the camera plane.
+                if (m_studio.gizmoTranslating)
+                    studioApplyBoneTranslate(inputMouse);
+                else
+                    studioApplyBoneDrag(inputMouse);
                 if (!lmb) {
                     spdlog::info("studio: bone drag ended (t={:.3f})", m_studio.time);
                     m_studio.gizmoDragBone = -1;
                     m_studio.gizmoDragAxis = -1;
+                    m_studio.gizmoTranslating = false;
                     m_studio.gizmoRadiusPx = 0.f;
                 }
             }

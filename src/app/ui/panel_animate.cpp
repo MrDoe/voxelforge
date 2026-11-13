@@ -364,6 +364,24 @@ void App::drawPanelAnimate()
             }
 
             ImGui::Text("Bone: %s  (id %u)", selBone.name.c_str(), selBone.id);
+
+            // ---- the JOINT (position) ------------------------------------
+            // Moving the joint moves the bone's START only; the tip stays, so
+            // the LENGTH changes implicitly - the same rule the viewport's
+            // centre-dot drag follows, so the two controls cannot disagree. A
+            // parent whose tip ended on this joint stretches with it.
+            {
+                glm::vec3 j = selBone.a;
+                bool moved = false;
+                moved |= ImGui::DragFloat("joint X (m)", &j.x, 0.002f, -5.f, 5.f,
+                                          "%.3f");
+                moved |= ImGui::DragFloat("joint Y (m)", &j.y, 0.002f, -5.f, 5.f,
+                                          "%.3f");
+                moved |= ImGui::DragFloat("joint Z (m)", &j.z, 0.002f, -5.f, 5.f,
+                                          "%.3f");
+                if (moved)
+                    studioMoveBone(m_studio.selectedBone, j - selBone.a);
+            }
             float r = selBone.radius;
             if (ImGui::SliderFloat("radius (m)", &r, 0.0f, 0.15f, "%.4f")) {
                 selBone.radius = r;

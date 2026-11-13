@@ -372,6 +372,10 @@ private:
         glm::vec3 gizmoPlaneV { 0.f, 0.f, 1.f };
         float gizmoLastAngle = 0.f;        // radians, in that plane
         float gizmoRadiusPx = 0.f;         // the ring's screen size (log)
+        // TRANSLATION: the joint itself is the drag handle (the centre dot),
+        // and the bone slides in the camera plane.
+        bool gizmoTranslating = false;
+        glm::vec2 gizmoLastMouse { 0.f };
     } m_studio;
 
     // THE STUDIO'S TARGET, resolved. Every studio site (the panel, the
@@ -432,6 +436,16 @@ private:
     // Set a bone's LENGTH in metres, keeping its joint and direction. The one
     // path the panel slider and the headless hook share.
     bool studioSetBoneLength(int boneIndex, float metres);
+    // TRANSLATE a bone by moving its JOINT. The tip stays put, so the bone's
+    // LENGTH and direction change implicitly (that is the resize); a parent
+    // whose tip was this joint stretches with it so the chain cannot tear.
+    bool studioMoveBone(int boneIndex, glm::vec3 delta);
+    // The joint's own screen hit test (the gizmo's centre dot), and the drag
+    // that slides the bone in the camera plane.
+    bool studioBoneCentreAt(const BoneGizmo& g, glm::vec2 p, float slop = 9.f);
+    bool studioBeginBoneTranslate(int boneIndex, const BoneGizmo& g,
+                                  glm::vec2 mouse);
+    void studioApplyBoneTranslate(glm::vec2 mouse);
 
     // The fur cards of the micro objects that carry a fur material, and the
     // objects' world AABBs (the cards are generated in the field's local
