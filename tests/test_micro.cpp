@@ -18,6 +18,7 @@
 //     not the world's bounding box),
 //   * the material lookup landing on the SOLID cell, not on air filler.
 #include "voxel/fur_cards.hpp"
+#include "voxel/micro_clip.hpp"
 #include "voxel/micro_field.hpp"
 #include "voxel/micro_mesh.hpp"
 #include "voxel/micro_svo.hpp"
@@ -1245,5 +1246,95 @@ TEST_CASE("micro rig: the weight kernel sums to 1, is smooth, and is rigid past 
         const BoneInfluences inf = empty.boneInfluences({ 0.f, 0.f, 0.f });
         CHECK(inf.count == 0);
         CHECK(empty.boneAt({ 0.f, 0.f, 0.f }) == -1);
+    }
+}
+
+// ---- studio authoring: a bone key IS the pose ---------------------------
+//
+// The studio's bone gizmo writes `BoneKey { t, rotDeg }` at the playhead and
+// nothing else. That is only an honest editor if the value written is the
+// value the rig samples, so this pins the two rules the gizmo relies on:
+//
+//   1. at a key's own time the sampled rotation IS that key's rotDeg;
+//   2. a track with ONE key holds it for the whole clip, which is what makes
+//      "pose it once and the clip is posed" true (clamp at both ends).
+//
+// The rotation is composed as Rx * Ry * Rz (micro_clip.cpp), so the expected
+// basis vectors below are stated as the geometric consequence, not as a copy
+// of that expression: +90 about Y must send the bone's +X to -Z, and so on.
+TEST_CASE("micro clip: a bone key at the playhead is the pose the rig samples")
+{
+    MicroRig rig;
+    MicroBone bone;
+    bone.id = 1;
+    bone.name = "spine";
+    bone.a = glm::vec3(0.f);
+    bone.b = glm::vec3(1.f, 0.f, 0.f);
+    bone.radius = 0.10f;
+    bone.role = BoneRole::Spine;
+    rig.bones.push_back(bone);
+
+    auto sampleAt = [&](const MicroClip& clip, float t) {
+        std::vector<glm::mat3> rot;
+        glm::vec3 bodyOff;
+        float bodyHdg = 0.f;
+        clip.sample(t, rig, rot, bodyOff, bodyHdg);
+        REQUIRE(rot.size() == 1);
+        return rot[0] * glm::vec3(1.f, 0.f, 0.f);
+    };
+
+    // ---- (1) each axis, at the key's own time --------------------------
+    // Absolute tolerance, not doctest::Approx's relative epsilon: several of
+    // these expected values are 0, where a relative compare proves nothing.
+    auto near = [](float a, float b, float eps = 1e-5f) {
+        return std::abs(a - b) < eps;
+    };
+    {
+        MicroClip clip;
+        BoneTrack tr;
+        tr.boneId = bone.id;
+        tr.keys.push_back({ 0.f, glm::vec3(0.f, 90.f, 0.f), ClipEase::Smooth });
+        clip.tracks.push_back(tr);
+        const glm::vec3 x = sampleAt(clip, 0.f);   // bone axis after +90 yaw
+        CHECK(near(x.x, 0.f));
+        CHECK(near(x.z, -1.f));
+        // ---- (2) and it holds everywhere else in the clip --------------
+        CHECK(near(sampleAt(clip, 0.37f).z, -1.f));
+        CHECK(near(sampleAt(clip, 5.f).z, -1.f));
+    }
+    {
+        MicroClip clip;
+        BoneTrack tr;
+        tr.boneId = bone.id;
+        tr.keys.push_back({ 0.f, glm::vec3(90.f, 0.f, 0.f), ClipEase::Smooth });
+        clip.tracks.push_back(tr);
+        // +90 about X sends the bone's +X nowhere (it is the axis) - use a
+        // direction that MUST move: the bone's own +Y.
+        std::vector<glm::mat3> rot;
+        glm::vec3 bo;
+        float bh = 0.f;
+        clip.sample(0.f, rig, rot, bo, bh);
+        const glm::vec3 y = rot[0] * glm::vec3(0.f, 1.f, 0.f);
+        CHECK(near(y.y, 0.f));
+        CHECK(near(y.z, 1.f));
+    }
+
+    // ---- (2b) TWO keys: the midpoint is the interpolated pose ---------
+    // Smooth easing at u = 0.5 is exactly 0.5, so the midpoint of 0 -> 90
+    // degrees of yaw is 45: the editor's "add a key, move the playhead, add
+    // another" flow produces an even blend, not a step.
+    {
+        MicroClip clip;
+        BoneTrack tr;
+        tr.boneId = bone.id;
+        tr.keys.push_back({ 0.f, glm::vec3(0.f), ClipEase::Smooth });
+        tr.keys.push_back({ 1.f, glm::vec3(0.f, 90.f, 0.f), ClipEase::Smooth });
+        clip.tracks.push_back(tr);
+        const glm::vec3 x = sampleAt(clip, 0.5f);
+        CHECK(near(x.x, std::cos(glm::radians(45.f))));
+        CHECK(near(x.z, -std::sin(glm::radians(45.f)), 1e-6f));
+        // ... and the ends are the keys themselves.
+        CHECK(near(sampleAt(clip, 0.f).z, 0.f));
+        CHECK(near(sampleAt(clip, 1.f).z, -1.f));
     }
 }

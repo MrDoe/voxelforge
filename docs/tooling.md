@@ -59,6 +59,60 @@ Inspect headlessly with:
 python3 .opencode/skills/voxel-object/scripts/ascii_view.py out.ppm 96 40
 ```
 
+## Animation studio (`--anim`)
+
+`./animation_editor.sh` (or `--anim --anim-layer micro/alpaca.vxw`) opens the
+studio in the sidebar's **Animate** section (`Ctrl+7`). It targets ONE micro
+layer, resolved once by name — the panel, the viewport overlay, the clip clock
+and the camera all go through that resolved index, because the old
+"index 0" binding drove the VASE while the header said `alpaca`.
+
+What it does:
+
+- **Transport.** Play/pause/stop/step, a Time slider and Speed, over the
+  target's clip set. Clips are `.anim` JSON files auto-discovered from the
+  layer's directory (`assets/micro/walk.anim`, `graze.anim`) whose `layer`
+  field matches. `--anim-time <s>` PINS the clock, which is what makes a
+  `--shot` of the studio reproducible.
+- **Authoring.** *New clip*, *Add body key*, *Add bone key*, *Save clip*.
+  `Add bone key` writes a key at the playhead with zero rotation; the pose
+  editor below is how a key gets a value.
+- **Posing the selected bone.** Select a bone in the **Skeleton** list; three
+  rings appear at its joint in the viewport (circle = Y, wide/flat = X, tall =
+  Z — the same screen shapes `gizmo_math.hpp` tests for the object
+  trackball). Dragging a ring rotates the bone about that axis and **stores the
+  result as a keyframe at the playhead**: the drag edits the clip's
+  `BoneKey.rotDeg` directly, which is exactly what `MicroClip::sample` hands to
+  `composeBones`, so the pose on screen IS the pose stored. There is no preview
+  transform that could drift from the data.
+  - The drag law is the object trackball's: 120° across a ring radius, and the
+    radius is captured at the drag's start so the sensitivity cannot change
+    under the user's hand.
+  - The first edit at a time with no key SEEDS the new key from the pose
+    already authored there, so touching a ring never snaps the bone to rest.
+  - Keys are quantised to the clip's frame grid (`1/fps`), so one drag updates
+    one key instead of writing hundreds.
+  - A numeric **Key at t=…** readout shows the stored Euler and allows a
+    precise nudge, with the same auto-key rule.
+  - No clip exists yet? The first drag creates one (`studio`) and selects it —
+    a key needs somewhere to live, and "make a clip first" is a step that
+    exists only because of the file format.
+- **Influence radius.** A per-bone slider (0–0.15 m) for the capsule test that
+  decides bone OWNERSHIP. *Save rig (override)* writes
+  `assets/micro/<name>.rig.json` stamped with the layer's size+mtime; *Reload
+  rig* re-derives.
+
+Bones are a **chain**: a bone's world transform is its parent's composed with
+its own, so a pose is per-bone LOCAL rotations plus the parent chain — never
+absolute transforms. The studio therefore authors `rotDeg` keys, which
+`animateBones` composes, and nothing in the UI writes a world matrix.
+
+Headless: `VF_TEST_BONE_DRAG="<bone>:<yaw|pitch|roll>:dx,dy"` drives the SAME
+`studioBeginBoneDrag`/`studioApplyBoneDrag` path the mouse drives (a UI
+feature only a mouse can reach cannot be gated) and logs the stored key and the
+posed bone tip, which must agree. With `--anim` the animal's locomotion is
+frozen so it stays put while being posed.
+
 ## `vf_mcp`
 
 stdio MCP server — see [AI editing](ai-editing.md#vf_mcp-protocol) for the

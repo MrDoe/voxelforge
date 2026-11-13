@@ -400,6 +400,35 @@ void App::processInput(bool textCaptures, bool rotateLiveTest)
             m_moveLayer.clear();
         }
 
+        // ---- the STUDIO's BONE GIZMO ------------------------------------
+        // Dragging a ring rotates the SELECTED bone about that axis and STORES
+        // the result as a keyframe at the playhead. It is deliberately the same
+        // drag law as the object trackball (120 degrees across a radius), and
+        // it edits the clip's Euler key directly - the value
+        // `MicroClip::sample` hands to `composeBones` - so the pose on screen
+        // is the pose stored, with no separate preview transform to drift.
+        if (m_studio.active) {
+            glm::vec2 gc;
+            float gr = 0.f;
+            const bool haveGizmo = studioBoneGizmo(gc, gr);
+            if (lmbEdge && haveGizmo && m_studio.gizmoDragBone < 0 && !wantMouse) {
+                const TrackballHandle h = trackballHandleAt(inputMouse, gc, gr);
+                if (h != TrackballHandle::None)
+                    studioBeginBoneDrag(m_studio.selectedBone, h, inputMouse, gr);
+            }
+            if (m_studio.gizmoDragBone >= 0) {
+                const glm::vec2 d = inputMouse - m_studio.gizmoLastMouse;
+                m_studio.gizmoLastMouse = inputMouse;
+                studioApplyBoneDrag(d);
+                if (!lmb) {
+                    spdlog::info("studio: bone drag ended (t={:.3f})", m_studio.time);
+                    m_studio.gizmoDragBone = -1;
+                    m_studio.gizmoHandle = TrackballHandle::None;
+                    m_studio.gizmoRadius = 0.f;
+                }
+            }
+        }
+
         // Ring input takes precedence over the object ray pick: clicking
         // a ring must rotate the already activated object, even when the
         // ring lies over another surface in screen space.

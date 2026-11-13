@@ -260,6 +260,7 @@ add_executable(voxelforge
     src/app/ui/panel_ai.cpp
     src/app/ui/panel_animate.cpp
     src/app/ui/timeline.cpp
+    src/app/ui/bone_gizmo.cpp
     src/app/ui/scene_overlays.cpp
     src/app/frame/run.cpp
     src/app/frame/run_startup.cpp

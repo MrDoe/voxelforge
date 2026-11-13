@@ -337,6 +337,23 @@ private:
         glm::vec3 camOffset { 0.f };
         glm::vec3 lastCenter { 0.f };
         bool camOffsetSet = false;
+        // ---- the BONE GIZMO ---------------------------------------------
+        // The selected bone gets three rings at its joint, and dragging one
+        // rotates that bone and STORES the result as a keyframe at the
+        // playhead. The state lives here because the frame loop owns the
+        // pointer while the panel owns the selection.
+        int gizmoDragBone = -1;            // the bone being dragged, -1 = idle
+        // The dragged bone's STABLE id. The rig can be reloaded mid-drag
+        // (Reload rig, a layer edit), and an index alone would then rotate
+        // whichever bone landed in that slot.
+        uint32_t gizmoDragBoneId = 0;
+        TrackballHandle gizmoHandle = TrackballHandle::None;
+        glm::vec2 gizmoLastMouse { 0.f };  // last pointer position (px)
+        // The ring radius captured when the drag STARTED. The degrees-per-pixel
+        // law divides by it, and recomputing it mid-drag would change the
+        // sensitivity under the user's hand (and blow up if the gizmo went
+        // behind the camera).
+        float gizmoRadius = 0.f;
     } m_studio;
 
     // THE STUDIO'S TARGET, resolved. Every studio site (the panel, the
@@ -350,6 +367,30 @@ private:
     std::vector<std::unique_ptr<vf::voxel::MicroClip>>* studioClips();
     // The occluder of the target (nullptr when there is no target).
     vf::voxel::MicroOccluder* studioOccluder();
+
+    // The selected bone's gizmo in SCREEN space, or false when there is
+    // nothing to manipulate. Shared by the overlay (which draws it) and the
+    // frame loop (which hit-tests it), so the ring the user sees is the ring
+    // the pointer is tested against - the same contract `ui/gizmo_math.hpp`
+    // states for the object trackball.
+    bool studioBoneGizmo(glm::vec2& centre, float& radius);
+    // The target's editable clip. CREATED and selected when the rig is in
+    // gait mode: a bone key has to live somewhere, and "make a clip first" is
+    // a step that exists only because of the file format.
+    vf::voxel::MicroClip* studioEnsureClip();
+    // The key at `t` for `boneId`, created (SEEDED from the pose there, so the
+    // first edit never snaps the bone to zero) when absent. `t` is quantised
+    // to the clip's frame grid, so one drag updates one key instead of
+    // writing hundreds.
+    vf::voxel::BoneKey* studioKeyAt(vf::voxel::MicroClip& clip, uint32_t boneId,
+                                    float t);
+    // Begin a bone drag on `handle` (screen bookkeeping, plus the key the drag
+    // writes into), and apply one pointer DELTA to the active drag. Split out
+    // of the frame loop so a headless hook drives the SAME code the mouse
+    // drives - a UI feature that only a mouse can reach cannot be gated.
+    bool studioBeginBoneDrag(int boneIndex, TrackballHandle handle,
+                             glm::vec2 mouse, float radius);
+    void studioApplyBoneDrag(glm::vec2 delta);
 
     // The fur cards of the micro objects that carry a fur material, and the
     // objects' world AABBs (the cards are generated in the field's local

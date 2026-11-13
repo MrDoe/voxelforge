@@ -25,6 +25,92 @@ namespace app {
 // highlight outline.
 void App::runPreInputTestHooks()
 {
+    // VF_TEST_BONE_DRAG="<bone>:<yaw|pitch|roll>:dx,dy": drive the STUDIO's
+    // bone gizmo through the app's OWN drag path, with no mouse. A UI feature
+    // that only a mouse can reach cannot be gated, so the same
+    // studioBeginBoneDrag/studioApplyBoneDrag calls the frame loop makes are
+    // made here, and the result is reported as two numbers that must agree:
+    // the STORED key and the pose the rig sampled from it.
+    //
+    // Runs ONCE: a delta applied every frame would spin the bone.
+    if (const char* bd = getenv("VF_TEST_BONE_DRAG"); bd && *bd) {
+        static bool done = false;
+        if (!done) {
+            char boneName[64] = { 0 };
+            char axis[16] = { 0 };
+            float dx = 0.f, dy = 0.f;
+            if (std::sscanf(bd, "%63[^:]:%15[^:]:%f,%f", boneName, axis,
+                            &dx, &dy) != 4) {
+                done = true;
+                spdlog::warn("VF_TEST_BONE_DRAG: expected "
+                             "\"<bone>:<yaw|pitch|roll>:dx,dy\", got '{}'", bd);
+            } else {
+                auto* b = studioBehaviour();
+                int idx = -1;
+                if (b) {
+                    for (size_t i = 0; i < b->rig.bones.size(); ++i)
+                        if (b->rig.bones[i].name == boneName) {
+                            idx = int(i);
+                            break;
+                        }
+                    if (idx < 0) {
+                        char* end = nullptr;
+                        const long v = std::strtol(boneName, &end, 10);
+                        if (end && *end == '\0' && v >= 0 &&
+                            size_t(v) < b->rig.bones.size())
+                            idx = int(v);
+                    }
+                }
+                TrackballHandle h = TrackballHandle::None;
+                if (!std::strcmp(axis, "yaw")) h = TrackballHandle::Yaw;
+                else if (!std::strcmp(axis, "pitch")) h = TrackballHandle::Pitch;
+                else if (!std::strcmp(axis, "roll")) h = TrackballHandle::Roll;
+                glm::vec2 gc;
+                float gr = 0.f;
+                // The gizmo needs a POSE, and animateBones() has not run on
+                // frame 0 - so a false here means "not yet", not "broken".
+                // Retry on the next frame; only a bad SPEC is terminal.
+                if (idx < 0 || h == TrackballHandle::None) {
+                    done = true;
+                    spdlog::warn("studio bone drag: bad spec (bone '{}' axis "
+                                 "'{}', {} bone(s))", boneName, axis,
+                                 b ? int(b->rig.bones.size()) : 0);
+                } else if (studioBoneGizmo(gc, gr)) {
+                    done = true;
+                    if (studioBeginBoneDrag(idx, h, gc, gr)) {
+                    studioApplyBoneDrag({ dx, dy });
+                    glm::vec3 keyRot(0.f);
+                    int keys = 0;
+                    if (b && b->clip) {
+                        for (const auto& tr : b->clip->tracks)
+                            for (const auto& k : tr.keys) {
+                                keyRot = k.rotDeg;
+                                ++keys;
+                            }
+                    }
+                    spdlog::info("studio bone drag: bone={} axis={} key=({:.2f},"
+                                 "{:.2f},{:.2f}) keys={} radius={:.1f}",
+                                 boneName, axis, keyRot.x, keyRot.y, keyRot.z,
+                                 keys, gr);
+                    if (b && size_t(idx) < b->boneRot.size()) {
+                        const glm::vec3 tip =
+                            b->boneRot[size_t(idx)] * b->rig.bones[size_t(idx)].b +
+                            b->boneXform[size_t(idx)];
+                        spdlog::info("studio bone drag: posed tip=({:.4f},{:.4f},"
+                                     "{:.4f})", tip.x, tip.y, tip.z);
+                    }
+                    m_studio.gizmoDragBone = -1;
+                    m_studio.gizmoHandle = TrackballHandle::None;
+                    m_studio.gizmoRadius = 0.f;
+                    } else {
+                        spdlog::warn("studio bone drag: could not start (bone "
+                                     "'{}' axis '{}')", boneName, axis);
+                    }
+                }
+            }
+        }
+    }
+
     // VF_TEST_BEHAVIOUR_CMD="name:command[:speed]": tell a micro object what
     // to do, the way the AI tool does ("let the alpaca run"). It runs in the
     // PRE-input hook so the command is in force for the frame.

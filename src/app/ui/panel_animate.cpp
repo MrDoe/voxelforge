@@ -240,6 +240,62 @@ void App::drawPanelAnimate()
             ImGui::TextColored(ImVec4(0.4f, 1, 0.4f, 1), "Rig OK (%d bones)", (int)rig.bones.size());
         }
 
+        // ---- the key at the playhead -------------------------------------
+        // The gizmo writes here; these fields show WHAT it wrote and allow a
+        // precise nudge. Editing an axis AUTO-KEYS: it creates or updates the
+        // key at the playhead, the same rule a ring drag follows, so there is
+        // one answer to "how does a pose become data".
+        //
+        // Read-only until a clip exists - the panel must NOT create one just
+        // because it was opened, or looking at the studio would switch the
+        // animal off its gait.
+        if (m_studio.selectedBone >= 0 &&
+            (size_t)m_studio.selectedBone < rig.bones.size()) {
+            const uint32_t selId = rig.bones[size_t(m_studio.selectedBone)].id;
+            auto* clip = target->clip
+                             ? const_cast<vf::voxel::MicroClip*>(target->clip)
+                             : nullptr;
+            vf::voxel::BoneKey* key = nullptr;
+            if (clip) {
+                const float step = (clip->fps > 1e-3f) ? 1.f / clip->fps : 1.f / 30.f;
+                const float tq = std::round(m_studio.time / step) * step;
+                for (auto& tr : clip->tracks) {
+                    if (tr.boneId != selId)
+                        continue;
+                    for (auto& k : tr.keys)
+                        if (std::abs(k.t - tq) < 0.5f * step) { key = &k; break; }
+                    break;
+                }
+            }
+            ImGui::Separator();
+            if (!clip) {
+                ImGui::TextDisabled("No clip: drag a ring to author the first key.");
+            } else if (!key) {
+                ImGui::TextDisabled("No key at t=%.3f: drag a ring to add one.",
+                                    m_studio.time);
+            } else {
+                ImGui::Text("Key at t=%.3f", key->t);
+                glm::vec3 r = key->rotDeg;
+                bool edited = false;
+                edited |= ImGui::DragFloat("Rot X (deg)", &r.x, 0.4f, -360.f, 360.f,
+                                           "%.1f");
+                edited |= ImGui::DragFloat("Rot Y (deg)", &r.y, 0.4f, -360.f, 360.f,
+                                           "%.1f");
+                edited |= ImGui::DragFloat("Rot Z (deg)", &r.z, 0.4f, -360.f, 360.f,
+                                           "%.1f");
+                if (edited) {
+                    key->rotDeg = r;
+                    // Same path the gizmo uses: re-sample now so the viewport
+                    // and the stored data cannot disagree for a frame.
+                    if (auto* bb = studioBehaviour()) {
+                        bb->clipTime = m_studio.time;
+                        bb->animateBones();
+                    }
+                    m_taaFirstFrame = true;
+                }
+            }
+        }
+
         // ---- cylindrical influence radius (adjustable) -----------------
         ImGui::Separator();
         ImGui::Text("Influence radius (cylindrical):");

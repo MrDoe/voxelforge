@@ -1183,6 +1183,32 @@ one costs a whole turn, because the bad call is rejected before any work runs.
   (0 missed on the shipped alpaca). See
   `.opencode/wiki/concepts/micro-voxel-svo-overlay.md` and
   `.opencode/wiki/concepts/geometry-format-policy.md`.
+- **The animation studio POSES a rig and stores the pose as a keyframe.**
+  `--anim --anim-layer micro/alpaca.vxw` (or `./animation_editor.sh`) targets
+  ONE micro layer by name; locomotion is frozen so the animal stays put. In
+  the **Animate** section (`Ctrl+7`), select a bone in the Skeleton list and
+  three rings appear at its joint in the viewport (circle = Y, wide/flat = X,
+  tall = Z — the same screen shapes `gizmo_math.hpp` tests for the object
+  trackball). Dragging a ring rotates the bone about that axis **and writes the
+  value as a `BoneKey` at the playhead**: the drag edits the clip's `rotDeg`
+  directly, which is what `MicroClip::sample` hands to `composeBones`, so the
+  pose on screen IS the pose stored — there is no preview transform to drift.
+  Four rules make it behave: the drag law is the object trackball's (120°
+  across a ring radius, radius captured at the START so sensitivity cannot
+  change under the hand); a new key is SEEDED from the pose already authored
+  at that time, so touching a ring never snaps the bone to rest; keys are
+  quantised to `1/fps`, so one drag updates ONE key instead of hundreds; and
+  the first drag with no clip creates and selects one (`studio`), because a key
+  needs somewhere to live. Bones are a CHAIN, so the UI only ever authors
+  per-bone LOCAL `rotDeg` — never a world matrix. A numeric **Key at t=…**
+  readout shows the stored Euler and nudges it with the same auto-key rule.
+  `VF_TEST_BONE_DRAG="<bone>:<yaw|pitch|roll>:dx,dy"` drives the SAME
+  `studioBeginBoneDrag`/`studioApplyBoneDrag` path with no mouse and logs the
+  stored key plus the posed tip — a UI feature only a mouse can reach cannot
+  be gated. Measured: bone 0 yaw 60 px at a 26 px ring → key `(0, 47.75, 0)`,
+  posed tip `(-6.316,0.406,19.280)` → `(-5.907,0.406,19.099)`, identical in two
+  runs (the studio's own pixel floor is ~23 px, so gate the DATA, not the
+  frame).
 
 ## Mesh actors — a raster mesh, shaded by the field
 - **Split:** a micro object may be moved and turned as a WHOLE (one continuous

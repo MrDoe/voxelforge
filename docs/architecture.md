@@ -106,6 +106,10 @@ because the preview consumes what input wrote). `main.cpp` is the entry point.
 - `mesh/` — STL/OBJ import; the GUI section and the headless hook share it.
 - `ui/` — the one docked sidebar: chrome, the six sections, the scene
   overlays, and `gizmo_math.*` (the shared projection/hit-test contract).
+  `panel_animate.cpp` + `timeline.cpp` are the animation studio's panel, and
+  `bone_gizmo.cpp` is its bone posing: the ring geometry (shared by the
+  overlay that draws it and the frame loop that hit-tests it), the keyframe
+  writer, and the drag law — see [Tooling](tooling.md#animation-studio---anim).
 - `frame/` — startup, the frame loop and its slices, the headless and
   interactive recording paths, the photorealism chain, `--selftest`, the GPU
   timestamp profiler. `frame.hpp` holds the per-frame state the slices share.

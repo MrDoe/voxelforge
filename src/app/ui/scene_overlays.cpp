@@ -62,6 +62,37 @@ void App::drawSceneOverlays()
                 glm::vec2 pm = projectScreen(mid, cam, tanHalf, fb);
                 dl->AddText(ImVec2(pm.x + 4, pm.y - 4), jointCol, mb.name.c_str());
             }
+
+            // ---- the BONE GIZMO ------------------------------------------
+            // Three rings at the SELECTED bone's joint, in the SAME screen
+            // shapes trackballHandleAt tests (circle = Y, wide/flat = X,
+            // tall = Z), so the ring the user sees is the ring the pointer is
+            // tested against. The centre dot is the bone's joint.
+            glm::vec2 gc;
+            float gr = 0.f;
+            if (studioBoneGizmo(gc, gr)) {
+                const ImU32 ringIdle = ImGui::GetColorU32(
+                    ImVec4(kAccent.x, kAccent.y, kAccent.z, 0.45f));
+                const ImU32 ringHot = ImGui::GetColorU32(
+                    ImVec4(kAccent.x, kAccent.y, kAccent.z, 1.0f));
+                // During a drag the dragged ring stays highlighted, so the
+                // user can see WHICH axis is moving.
+                const TrackballHandle hot =
+                    (m_studio.gizmoDragBone >= 0)
+                        ? m_studio.gizmoHandle
+                        : trackballHandleAt(glm::vec2(io.MousePos.x, io.MousePos.y),
+                                            gc, gr);
+                auto ring = [&](TrackballHandle h, float rx, float ry) {
+                    const bool on = (hot == h);
+                    dl->AddEllipse(ImVec2(gc.x, gc.y), ImVec2(rx, ry),
+                                   on ? ringHot : ringIdle, 0.f, 64,
+                                   on ? 2.5f : 1.5f);
+                };
+                ring(TrackballHandle::Pitch, gr, gr * 0.42f);
+                ring(TrackballHandle::Yaw, gr, gr);
+                ring(TrackballHandle::Roll, gr * 0.42f, gr);
+                dl->AddCircleFilled(ImVec2(gc.x, gc.y), 3.0f, ringHot);
+            }
         }
     }
 
