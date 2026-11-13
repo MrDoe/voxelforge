@@ -773,3 +773,77 @@ the micro overlay applies them to the field - the fur and the body can never
 drift apart. The preview is mirrored onto the fur through an index map
 (`m_furIndexOfMicro`), because a micro object without fur has no entry in
 the fur pass's table.
+
+## Raster mesh actors (`micro_mesh.vert` + `micro_mesh.frag`)
+
+A micro layer whose manifest names a `meshSource` is drawn from its TRIANGLE
+MESH rather than from its traced field. The split is the point: a micro object
+may be moved and turned as a WHOLE (one transform applied where the field is
+sampled), but the moment two parts move RELATIVE to each other — a walking
+animal's legs — it must be a mesh. A layer that also carries
+`rot`/`rotX`/`rotZ` stays on the traced path, because the mesh is authored
+unrotated.
+
+**Geometry.** There is no vertex buffer. One storage buffer holds
+`(rest.xyz, packed lane)` per vertex and the vertex stage pulls its record
+with `gl_VertexIndex`; a world's slice is the draw's `firstVertex`. The packed
+lane (`meshVertexWord`) carries bone + 1, the material, AO and a reserved
+shadow byte. Skinning is smooth linear-blend with weights recomputed from the
+ONE kernel (`micro_weights.glsl`), so the mesh and the fur cards cannot bind
+the same surface point to different bones.
+
+**The material is per VERTEX, and `flat`.** An STL carries no material, and
+the mesh surface differs from the field's by up to a cell, so a PER-FRAGMENT
+field lookup misses near every edge — and a miss has no correct fallback. 255
+means "look it up in the field".
+
+**The G-buffer contract is identical to the traced path**: hdr/gpos/gnorm,
+hit type 2, so the fur cards, SSAO, SSR and post cannot tell which path drew
+the object. The fragment stage samples the REST field for the detail
+albedo/normal, AO and self-shadow, then re-bones the bumped normal for
+shading.
+
+### The depth test alone does NOT make this pass deterministic
+
+This pass writes the G-buffer with `imageStore` from the FRAGMENT stage. A
+shader-side store is not suppressed by a depth test, and
+`layout(early_fragment_tests)` is inert on this driver (declared; the duplicate
+pair is unchanged; Vulkan exposes no `earlyFragmentTests` device feature to
+query). Two fragments covering one pixel are therefore two RACING WRITERS and
+whichever store lands last decides the frame. Two things fix it, and both are
+load-bearing:
+
+1. **Consistent outward winding at load.** `orientMeshWinding()` in
+   `src/voxel/micro_mesh.cpp` welds vertices by quantised position, flips
+   neighbours until every manifold edge is traversed once in each direction,
+   then orients each shell outward by the sign of its signed volume. The
+   shipped `assets/models/alpaca_mesh.stl` NEEDED it: 7,008 of its 26,897
+   shared edges (26.1 %) were traversed the SAME way by both neighbours, so a
+   quarter of the body faced inward and backface culling deleted the outer
+   wall there. It also fixed `assignMicroMeshAppearance`, which takes the face
+   normal as the direction to sample AO in — an inward normal sampled the
+   body's interior. Backface culling is consequently ON; `VF_MESH_CULL=0`
+   (cull none) and `=2` (opposite front face) are diagnostics, not settings.
+2. **A depth PREPASS + `EQUAL`.** `m_meshDepthPipeline` is a VERTEX-ONLY
+   pipeline: with no fragment stage it cannot store a texel, so contending
+   fragments resolve by the rasterizer's min-depth rule instead of by arrival
+   order. A `VkMemoryBarrier2` (EARLY|LATE_FRAGMENT_TESTS,
+   DEPTH_STENCIL_ATTACHMENT_WRITE → READ|WRITE; dynamic rendering has no
+   implicit subpass dependency) separates it from `m_meshPipeline`, which then
+   has `depthWriteEnable = FALSE` and `depthCompareOp = EQUAL`. Exactly one
+   fragment per pixel can write the G-buffer.
+
+**Measured** at the flicker camera
+(`--cam -4.9 1.25 20.6 -6.32 0.75 19.2`, pose frozen, one binary, all arms
+verified to carry the object): 4,536 px between two renders before any fix,
+291 px with culling over an oriented mesh, **0 px byte-identical** with the
+prepass. Two controls make that a mechanism rather than a coincidence: the
+cull-NONE arm is 0 px too (with no fragment shader, the prepass resolves the
+tie), and shipping-vs-cull-NONE is 0 px because cull BACK can only draw outer
+walls, so no inner wall is displayed at all. A headless `--shot` never
+advances the animation clock (`m_animTime` is only advanced interactively), so
+a pinned-pose pair is a determinism test with an expected floor of ZERO, not a
+tolerance.
+
+Gate rule: `tests/fur_check.py` measures the same property first and requires
+a floor of exactly 0; see `AGENTS.md` for the pose-pinning requirement.

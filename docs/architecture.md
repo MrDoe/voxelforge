@@ -81,7 +81,7 @@ Consequences worth internalizing:
 | `render/volumetric_fog_pass.{hpp,cpp}` | Volumetric fog march to the G-buffer hit (opt-in). |
 | `render/motion_blur_pass.{hpp,cpp}` | Motion blur using previous-frame camera. |
 | `render/dof_pass.{hpp,cpp}` | Depth of field (focus distance / focal length). |
-| `render/micro_svo_pass.{hpp,cpp}` | Overlay of separate micro-voxel SVO worlds into the main G-buffer. |
+| `render/micro_svo_pass.{hpp,cpp}` | Overlay of separate micro-voxel SVO worlds into the main G-buffer, and the RASTER MESH actor path (winding-oriented at load, depth prepass + `EQUAL`). |
 | `render/fur_pass.{hpp,cpp}` | Translucent hair-card layer over micro objects. |
 | `render/environment_pass.{hpp,cpp}` | Environment/IBL pass (initialised; not recorded in the current frame loop). |
 | `rhi/context.*` | Vulkan instance/device/VMA allocator, queue, `immediateSubmit` helper. |
