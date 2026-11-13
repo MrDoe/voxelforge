@@ -7101,3 +7101,37 @@ index, `FurPass::setBoneRotations` called from `micro_objects.cpp`, `fur.vert`'s
 third of the alpaca's mesh is wound backwards" where the measured figure is 26.1 %
 of shared edges traversed same-direction.
 Pages: concepts/render-nondeterminism.md, index.md, AGENTS.md
+
+## [2026-11-13] correction | culling is the lever, not the winding, and the 291 px residual is interior-only
+
+The verdict entry above says "the cause was orientation"; the peer's full arm set
+sharpens that, and the sharpening matters. On the SAME after-binary (oriented
+mesh), `VF_MESH_CULL=0` still reads **5,040 px** against shipping's **291 px**. So
+the mechanism is not the winding: it is that **two-sided drawing gives two writers
+per pixel**, and back-face culling removes the second one. Orientation was the
+*blocker*, not the cause — culling would delete an outer wall while 26.1 % of the
+surface faced inward, so the loader had to orient it (7,008 same-direction edges
+-> 0, 7,073/18,046 triangles flipped) before culling could be turned on safely.
+Shipping vs cull-off is 5,314 px, the same magnitude as the old flicker, so no
+face was wrongly culled either.
+
+The residual, characterised (291 px, flicker camera, `STATE_STABLE`): **100 %
+inside the body silhouette, 0 px on the silhouette; 102 clusters, largest 118 px,
+78 singletons; only 59 of 291 overlap the old flicker mask.** That is exactly the
+shape the single-writer story predicts — two OUTER surfaces (a limb in front of
+the body at a grazing view) still produce two writers, and `imageStore` is not
+gated by the depth test while `early_fragment_tests` is inert on this driver. The
+silhouette is clean because there is no second outer surface behind it.
+
+The second camera settles an old number: at `fur_check`'s derived alpaca camera
+the shipping duplicate pair is **0 px / max 0 — byte-identical**, against the
+24,427 px "noise floor" that gate used to report. So that floor was wall-clock
+animal motion (the gate passes no `VF_TEST_BEHAVIOUR_FREEZE`), and
+`tests/fur_check.py`'s "animated grass and the float16 G-buffer" comment is
+falsified: headless never advances `m_animTime`. The flicker is camera-local.
+
+**Cheapest next candidate, not yet implemented: a mesh depth PREPASS with the main
+pass testing `EQUAL`** — exactly one surviving writer per pixel without
+redesigning the G-buffer. Try that before the colour-attachment work; if it takes
+291 px to 0, the redesign was never needed.
+Pages: concepts/render-nondeterminism.md, index.md

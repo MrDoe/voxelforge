@@ -14,13 +14,15 @@ budget.
 
 ## The bisect ladder (cheapest cut first)
 
-> **VERDICT, LANDED 2026-11-13: the cause was ORIENTATION, and 94 % of the
-> flicker is gone — 291 px is NOT zero.** The mesh loader now orients the
-> winding (7,008 same-direction shared edges → **0**; 7,073 of 18,046 triangles
-> flipped; 1 connected component; the 86 non-manifold edges left alone) and the
-> shipping pipeline culls back faces (CCW). Measured on one binary `7343ada4`,
-> one session, frozen pose at the flicker camera, all four arms carrying the
-> alpaca, `STATE_STABLE`:
+> **VERDICT, LANDED 2026-11-13: the flicker needed SINGLE WRITERS, and
+> back-face culling now provides them; 94 % of the signal is gone — 291 px is
+> NOT zero.** The mesh loader first orients the winding (7,008 same-direction
+> shared edges → **0**; 7,073 of 18,046 triangles flipped; 1 connected
+> component; the 86 non-manifold edges left alone) — not because orientation is
+> the mechanism, but because culling would delete an outer wall without it. The
+> shipping pipeline then culls back faces (CCW). Measured on one binary
+> `7343ada4`, one session, frozen pose at the flicker camera, all four arms
+> carrying the alpaca, `STATE_STABLE`:
 >
 > | arm | duplicate-pair diff |
 > |---|---|
@@ -28,19 +30,51 @@ budget.
 > | `VF_MESH_CULL=0` (culling OFF) | 5,040 px, max 143 |
 > | shipping vs cull-off (image, not a pair) | 5,314 px, max 141 |
 >
-> So the 4,536 px signal fell to 291 px (94 % removed), culling OFF reproduces
-> the old magnitude on the same binary, and the shipping image differs from the
-> cull-off image by as much as the flicker did — i.e. **no face was wrongly
-> culled**. `VF_MESH_CULL=0` / `=2` remain diagnostics only; culling is ON in
-> shipping.
+> So the 4,536 px signal fell to 291 px (94 % removed), and culling OFF
+> reproduces the old magnitude on the same after-binary — **so culling is the
+> lever, not the winding per se**: an oriented mesh drawn two-sided flickers
+> almost exactly like the unoriented one, and orientation was only the blocker
+> that made culling unsafe (26.1 % of the surface faced inward). The shipping
+> image also differs from the cull-off image by as much as the flicker did —
+> i.e. **no face was wrongly culled**. `VF_MESH_CULL=0` / `=2` remain
+> diagnostics only; culling is ON in shipping.
 >
 > The residual 291 px is a residual **under characterisation**, not a fix: the
 > double-cover supply the ordering race needs is largely gone, but something
-> still stores twice on a small set of pixels. Everything below is the
-> pre-repair investigation, kept because its instruments (the `VF_MESH=0` fork,
-> the cull ladder, the Jaccard set test, the freeze-slot trap) are what led
-> here; read its "unexplained" / "eligibility" conclusions as **superseded and
-> historical**. Do not quote the 343x split as a current magnitude.
+> still stores twice on a small set of pixels. **The other camera is now
+> byte-identical**: at `fur_check`'s derived alpaca camera (`-7.15 0.80 16.90 →
+> -6.30 0.45 19.00`, 900x600) the shipping duplicate pair reads **0 px / max
+> 0**, against the 24,427 px "noise floor" that gate used to report there — so
+> that floor was wall-clock animal motion (the gate passes no
+> `VF_TEST_BEHAVIOUR_FREEZE`), and `tests/fur_check.py`'s *"animated grass and
+> the float16 G-buffer"* comment is falsified: headless never advances
+> `m_animTime`. The flicker is now a **camera-local** defect, not an ambient
+> noise level. Everything below is the pre-repair investigation, kept because
+> its instruments (the `VF_MESH=0` fork, the cull ladder, the Jaccard set test,
+> the freeze-slot trap) are what led here; read its "unexplained" /
+> "eligibility" conclusions as **superseded and historical**. Do not quote the
+> 343x split as a current magnitude.
+
+### The residual, characterised (291 px at the flicker camera)
+
+- **100 % inside the body silhouette; 0 px on the silhouette.**
+- 102 clusters, the largest 118 px, and 78 of them singletons.
+- Only 59 of the 291 overlap the old (pre-fix) flicker mask.
+
+Mechanism, now that the numbers agree with it: culling plus consistent winding
+leaves **one front-facing fragment per pixel almost everywhere**. Where two
+OUTER surfaces overlap — a limb in front of the body at a grazing view — there
+are still two writers, and `imageStore` is not gated by the depth test while
+`early_fragment_tests` is inert on this NVIDIA driver. The residual is therefore
+the same class as the original bug with a much smaller eligible set: 94 % removed,
+not 100 %, and interior-only because the silhouette has no second outer surface
+behind it.
+
+**Cheapest next candidate (NOT implemented): a mesh depth PREPASS with the main
+pass testing `EQUAL`.** That leaves exactly one surviving writer per pixel
+without redesigning the G-buffer, and it is the measurement that decides whether
+the colour-attachment work is still warranted. Try the prepass before starting
+the attachment redesign.
 
 
 
