@@ -1172,13 +1172,48 @@ one costs a whole turn, because the bad call is rejected before any work runs.
     `writeManifest` dropped `behaviour` until it was fixed, so one app run
     rewrote world.json without it and the alpaca stopped walking. A field
     added to `WorldLayer` must be added to the writer too.
-- Coverage: `tests/test_micro.cpp` (9 cases) pins the SDF's sign convention and
+- Coverage: `tests/test_micro.cpp` (20 cases) pins the SDF's sign convention and
   half-cell offset, the eighth-voxel quantisation, the margin, the dense field
   against the CPU field, the brick packing, a CPU replica of the shader's
-  trace finding the object's **surface** (not the box's), and the field's
+  trace finding the object's **surface** (not the box's), the field's
   continuity across a brick boundary — with a negative control proving that
-  check can detect the brick-clamped field. See
-  `.opencode/wiki/concepts/micro-voxel-svo-overlay.md`.
+  check can detect the brick-clamped field — the conservative filler outside
+  the grid, the rotation pivot, pickability, the cast shadow, the fur-card
+  contract, and the mesh path's packed vertex lane + per-vertex appearance
+  (0 missed on the shipped alpaca). See
+  `.opencode/wiki/concepts/micro-voxel-svo-overlay.md` and
+  `.opencode/wiki/concepts/geometry-format-policy.md`.
+
+## Mesh actors — a raster mesh, shaded by the field
+- **Split:** a micro object may be moved and turned as a WHOLE (one continuous
+  transform at field-sampling time); the moment two parts move RELATIVE to each
+  other it is a triangle mesh. The alpaca is
+  `assets/models/alpaca_mesh.stl` (Z-up, `"meshUp": "z"`; the conversion is a
+  proper rotation `(x,y,z) → (x,z,−y)`, never `mesh_import`'s mirroring
+  `swapYz`). `alpaca.skin` and `alpaca.rig` next to it are DERIVED side-cars
+  (gitignored cache or regenerable), not sources of truth.
+- `shaders/micro_mesh.{vert,frag}` write the same G-buffer the traced path
+  writes (hdr/gpos/gnorm, hit type 2), so nothing downstream can tell which
+  path drew the object. The vert does smooth linear-blend skinning with weights
+  recomputed from the kernel (`microBoneWeights`); the frag samples the REST
+  field for the detail albedo/normal, AO and self-shadow, and takes the
+  **material from the packed per-vertex lane** (`meshVertexWord`, byte 1; 255 =
+  fall back to the field lookup). The lane is `flat` - a material ID cannot be
+  interpolated across a seam. There is no vertex buffer: one storage buffer of
+  `(rest.xyz, packed lane)` records, selected per object by `firstVertex` + push
+  constant.
+- The world/micro depth verdict is a DISTANCE comparison against gpos, and it
+  must read the **pre-mesh snapshot** (binding 41) - reading the live image the
+  pass itself writes let a sibling fragment's store decide the verdict and
+  flickered the silhouette run to run.
+- The material is per VERTEX because an STL carries none and the mesh's surface
+  and the field's differ by up to a cell: a per-fragment lookup MISSES near
+  every edge, and a miss has no correct fallback. The loader's 2-cell
+  `nearestRestSolid` resolves all 54,138 vertices of the shipped asset, and the
+  records carry no per-cell tint (colour/palette 1.009 at p1/p50/p99), so a
+  material ID reproduces the look.
+- Policy, phase table and the measured gates:
+  `.opencode/wiki/concepts/geometry-format-policy.md`.
 
 ## Fur cards — a translucent layer over the micro objects
 - **A micro object is a SPHERE-TRACED SOLID: exact, opaque, hard-edged.** That
@@ -1333,6 +1368,33 @@ one costs a whole turn, because the bad call is rejected before any work runs.
   `applyFlora` with per-backend shadow dispatch) + `common_svo.glsl` (SVO
   traversal + `shadeTerrain`) + `common_splat.glsl` (splat marches +
   `shadeSurfel`/`shadeWaterSplat`).
+- **A pass that writes the G-buffer with `imageStore` is exposed to the
+  late-depth-test hazard, and this project's raster mesh pass IS nondeterministic
+  — but the mechanism is NOT settled, so do not "fix" it on theory.** Measured
+  2026-11-12 (one binary, one session, presence grepped per arm): the same alpaca
+  traced from its field (`VF_MESH=0`) gives a **0 px** pair while the raster path
+  gives thousands, so the raster pass owns it; and it is immune to barriers, the
+  gpos snapshot, queue draining, cull toggles and per-slot depth, because it
+  lives inside one draw. The tempting mechanism — a late depth test lets both
+  walls of a closed surface `imageStore`, so the survivor is whichever store
+  landed last — **does not survive the numbers**: double-covered area differs by
+  1.31x between two cameras while divergence differs by 343x, and pose moves the
+  divergence by only ±15 % against a 5,147 px vs 15 px camera split. Leading
+  refinement: near-tie pixels, where `LESS` is decided by interpolation noise
+  rather than geometry, which converges edge-on and separates head-on.
+  `layout(early_fragment_tests) in;` is declared and INERT here (pair unchanged;
+  Vulkan has no `earlyFragmentTests` device feature, so the driver's choice is
+  unqueryable and only a duplicate pair tells you). The structural candidate —
+  G-buffer as colour attachments, where a failing fragment's writes are suppressed
+  regardless of test timing — is **on hold until a diff-set location test
+  (Jaccard between two pairs' changed-pixel masks) shows the divergence is a race
+  at all**; if the same pixels move every time, it was never a race and the
+  redesign cures nothing. Gate rule: measure `0 px` at the flicker camera
+  `--cam -4.9 1.25 20.6 -6.32 0.75 19.2` (15 px at a low-overlap viewpoint is a
+  false green), behaviour frozen, and remember `VF_TEST_BEHAVIOUR_FREEZE` parses
+  `name:offset:heading:gait:graze:clipTime` — a value in the wrong slot parses
+  fine and means something else.
+  See `.opencode/wiki/concepts/geometry-format-policy.md`.
 - Surfel layout (80 B, 5×vec4, std430): `pos_rU` (w = radiusU, along the
   stored tangent), `normal_rV` (w = radiusV, across), `bent_sh` (bent normal +
   baked shadow), `mat_ao` (mat/refl/rough/packed metadata), `tan_aspect`

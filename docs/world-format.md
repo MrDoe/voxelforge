@@ -131,11 +131,30 @@ Field semantics:
 | key | meaning |
 |---|---|
 | `file` | relative to the manifest's directory; **required** |
-| `role` | `"landscape"` \| `"object"` \| `"scatter"` \| `"packed"`. Only one landscape layer should exist; `packed` entries are skipped by all loaders (legacy merged cache). |
+| `role` | `"landscape"` \| `"object"` \| `"scatter"` \| `"packed"` \| `"micro"`. Only one landscape layer should exist; `packed` entries are skipped by all loaders (legacy merged cache). `micro` entries are the only ones `App::loadMicroObjects` reads, and they need none of the merge keys below except `pos` and the three angles. |
 | `name` | human id used by GUI/MCP (`enable_layer` matches name *or* file) |
 | `pos`, `rot`, `rotX`, `rotZ` | **Applied at runtime** to `object`/`scatter` files. `transformRecords()` rotates the authored records about their exact bottom-center using `Ry(rot)·Rx(rotX)·Rz(rotZ)`, then applies `pos`; the placement hash dirties both old and new occupied chunks. All-zero is the authored lattice pose. JSON `rot` maps to C++ `rotDeg`; angles are degrees and are not restricted to `[0,360]`. |
+| `scale` | runtime placement scale for `object`/`scatter`, about the bottom-center pivot, applied together with the resample into the world lattice (1.0 = authored size) |
 | `enabled` | disabled files stay on disk but are excluded from merges |
 | `listed` | runtime bookkeeping: `false` marks folder-discovered entries not yet persisted |
+
+Micro-actor keys (`role: "micro"` only). A micro layer is a **separate SVO
+world**, so it never enters the record merge, `VoxelField` or `ChunkStore`:
+
+| key | meaning |
+|---|---|
+| `file` | the layer's `.vxw` on its own fine lattice; the `.skin` side-car is its sibling (`micro/alpaca.vxw` → `micro/alpaca.skin`) |
+| `behaviour` | `""` (static) \| `"grazer"` — an autonomous per-frame transform (walks, stops to graze) |
+| `command` | `""`/`"auto"` \| `"walk"` \| `"run"` \| `"graze"` \| `"stop"`, applied at load; the AI's `set_behaviour` writes the same field at runtime |
+| `pose` | flat `(bone, rx, ry, rz)` degrees triplets applied to the rig at load; empty = rest pose |
+| `clips` | `.anim` paths (relative to the manifest); the first is the default. Empty = the procedural gait |
+| `meshSource` | the STL/OBJ the layer was derived from; when set the layer is **raster-drawn from the mesh**, with its `.vxw` demoted to the shading/rig source. Relative to the manifest |
+| `meshUp` | the axis `meshSource` was authored in: `""`/`"y"` (engine frame, default) or `"z"` (a DCC export, rotated `(x,y,z) → (x,z,−y)` on load). Never substitute `mesh_import`'s mirroring `swapYz` |
+
+`pos` for a micro layer is the world position of the object's **min corner**
+(not a lattice offset), and `rot`/`rotX`/`rotZ` turn it about its bottom-center
+pivot. All of these keys are parsed *and* emitted by `writeManifest`; a parsed
+key the writer omits survives exactly one app run.
 
 Parser notes:
 
@@ -203,7 +222,14 @@ bool write(const std::string& path, const WorldFileData&);
 bool read(const std::string& path, WorldFileData&);   // validates magic+version+CRC
 
 struct WorldLayer { std::string file, role, name;
-                    float pos[3]; float rotDeg, rotX, rotZ; bool enabled, listed; };
+                    float pos[3]; float rotDeg, rotX, rotZ; float scale;
+                    bool enabled, listed;
+                    // micro layers only
+                    std::string behaviour, command;
+                    std::vector<float> pose;          // (bone, rx, ry, rz) *
+                    std::vector<std::string> clips;   // .anim paths
+                    std::string meshSource, meshUp;   // raster actor + its axis
+                  };
 
 bool loadManifest(const std::string& path, std::vector<WorldLayer>& out);
 bool writeManifest(const std::string& path, const std::vector<WorldLayer>&);

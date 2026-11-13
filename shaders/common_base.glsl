@@ -12,6 +12,11 @@ vec3 kSunDir = normalize(vec3(0.42, 0.78, 0.30)); // set from push in main()
 const vec3 kSunCol = vec3(1.00, 0.95, 0.84) * 1.35;
 const vec3 kZenith = vec3(0.20, 0.36, 0.62);
 const vec3 kHorizon = vec3(0.72, 0.80, 0.90);
+// The palette's length, named on both sides (src/voxel/common.hpp has the
+// same `kPaletteN`): a material byte is range-checked against this before it
+// indexes kPalette/kMatRefl, so an out-of-range value can only fall back, never
+// read past the end. Change all three together (0..21 is the shipped set).
+const int kPaletteN = 22;
 const vec3 kPalette[22] = vec3[22](
     vec3(0.07,0.52,0.06), vec3(0.16,0.68,0.10), vec3(0.62,0.36,0.14),
     vec3(0.84,0.72,0.38), vec3(0.48,0.42,0.38), vec3(0.66,0.64,0.60),

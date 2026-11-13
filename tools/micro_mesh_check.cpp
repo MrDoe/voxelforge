@@ -6,10 +6,13 @@
 // replacement (micro_mesh.hpp) before any of it is wired into the app:
 //
 //   rest   - voxelize the REST mesh and compare it cell for cell with the
-//            rest field baked from the .vxw records. The mesh was extracted
-//            from those voxels, so the two must agree; a disagreement means
-//            the voxelizer's sign or fill is wrong, and every later number
-//            would be built on it.
+//            rest field baked from the .vxw records. The bound depends on the
+//            mesh's PROVENANCE: a mesh extracted from those voxels must agree
+//            at 99% (a disagreement means the voxelizer's sign or fill is
+//            wrong), while an independently authored actor mesh sits at
+//            95-99% because a triangle surface and a cell set differ by up to
+//            one cell at the skin. Either way a wrong axis or scale collapses
+//            the number to ~15%, which every later figure would inherit.
 //   pose   - sample an animation clip, skin the mesh, voxelize the POSED
 //            surface on a union grid, and report the delta (cells added and
 //            removed), the bricks it touches, and how long each stage takes.
@@ -17,7 +20,9 @@
 //            and the pipeline is fast, only those bricks need re-uploading.
 //
 // Everything here is app-free (src/voxel only), so it runs headless:
-//   ./build/vf_micro_mesh_check [layer.vxw] [mesh.stl] [skin] [clip.anim]
+//   ./build/vf_micro_mesh_check [layer.vxw] [mesh.stl] [skin] [clip.anim] [--up y|z]
+#include "voxel/common.hpp"
+#include "voxel/fur_cards.hpp"
 #include "voxel/micro_clip.hpp"
 #include "voxel/micro_field.hpp"
 #include "voxel/micro_mesh.hpp"
@@ -195,14 +200,42 @@ size_t countBricksTouched(const MicroMeshGrid& a, const MicroMeshGrid& b,
 int main(int argc, char** argv)
 {
     const std::string assets = VOXELFORGE_ASSET_DIR;
+    // `--up` names the axis the MESH FILE was authored in, exactly as the
+    // app's `meshUp` does. It is load-bearing here: this tool voxelizes the
+    // mesh and compares it with the layer's baked field, so a Z-up file read
+    // as Y-up measures a rotated animal and every parity number below is
+    // noise. With no flag, the canonical `alpaca_mesh.stl` (Z-up) decides.
+    UpAxis up = UpAxis::Y;
+    bool upSet = false;
+    std::vector<std::string> pos;
+    for (int i = 1; i < argc; ++i) {
+        const std::string a = argv[i];
+        if (a == "--up" && i + 1 < argc) {
+            const std::string v = argv[++i];
+            upSet = true;
+            if (v == "z" || v == "Z")
+                up = UpAxis::Z;
+            else if (v != "y" && v != "Y") {
+                std::printf("FAIL --up expects y or z, got '%s'\n", v.c_str());
+                return 1;
+            }
+        } else {
+            pos.push_back(a);
+        }
+    }
     const std::string layerPath =
-        argc > 1 ? argv[1] : assets + "/micro/alpaca.vxw";
+        pos.size() > 0 ? pos[0] : assets + "/micro/alpaca.vxw";
     const std::string meshPath =
-        argc > 2 ? argv[2] : assets + "/models/alpaca_from_voxels.stl";
+        pos.size() > 1 ? pos[1] : assets + "/models/alpaca_mesh.stl";
     const std::string skinPath =
-        argc > 3 ? argv[3] : assets + "/micro/alpaca.skin";
+        pos.size() > 2 ? pos[2] : assets + "/micro/alpaca.skin";
     const std::string clipPath =
-        argc > 4 ? argv[4] : assets + "/micro/graze.anim";
+        pos.size() > 3 ? pos[3] : assets + "/micro/graze.anim";
+    if (!upSet)
+        up = meshPath.find("alpaca_mesh.stl") != std::string::npos ? UpAxis::Z
+                                                                  : UpAxis::Y;
+    std::printf("axis       %s%s\n", up == UpAxis::Z ? "z" : "y",
+                upSet ? " (--up)" : " (inferred from the mesh path)");
 
     // ---- the layer's rest field (the appearance + reference occupancy) ----
     WorldFileData data;
@@ -225,7 +258,7 @@ int main(int argc, char** argv)
     // ---- the mesh + skin --------------------------------------------------
     MicroMesh mesh;
     const auto tLoad = Clock::now();
-    if (!loadMicroMesh(meshPath, skinPath, mesh, &err)) {
+    if (!loadMicroMesh(meshPath, skinPath, mesh, &err, up)) {
         std::printf("FAIL %s\n", err.c_str());
         return 1;
     }
@@ -350,8 +383,316 @@ int main(int argc, char** argv)
                     "disagree with their own position's bone\n",
                     positions, conflicts);
     }
-    std::printf("REST_AGREEMENT=%.2f %s\n", agreePct,
-                agreePct >= 99.0 ? "PASS" : "FAIL");
+    // TWO BOUNDS, because the mesh has two possible provenances:
+    //
+    //   derived  - the mesh was extracted FROM these voxels (the historical
+    //              `alpaca_from_voxels.stl`), so a cell-level disagreement is a
+    //              VOXELIZER bug and the bound is 99%.
+    //   authored - the canonical actor mesh is its own asset (a retopology of
+    //              the same animal), and a triangle surface and an SDF-baked
+    //              cell set legitimately differ by up to one cell all along the
+    //              skin. The bound is 95%, which still catches the mistake this
+    //              check exists for: a wrong AXIS or SCALE collapses agreement
+    //              to ~15% (measured for a y/z mirror and a 180 deg yaw).
+    const bool derivedMesh = meshPath.find("from_voxels") != std::string::npos;
+    const double restBound = derivedMesh ? 99.0 : 95.0;
+    if (!derivedMesh && agreePct < 99.0)
+        std::printf("  note: an authored mesh sits in the 95-99%% band "
+                    "(triangle vs cell, ~1 cell at the skin), not 99%%+\n");
+    std::printf("REST_AGREEMENT=%.2f %s (bound %.0f, %s mesh)\n", agreePct,
+                agreePct >= restBound ? "PASS" : "FAIL", restBound,
+                derivedMesh ? "derived" : "authored");
+
+    // ---- the appearance a mesh ACTOR would carry -------------------------
+    // Phase B samples the material at every vertex ONCE
+    // (assignMicroMeshAppearance), which is what removes the per-pixel field
+    // lookup and with it the flat-grey fallback. Two numbers say how much of
+    // the look that keeps: how many vertices resolve at all, and how much of a
+    // cell's COLOUR is not explained by its material id (the records bake a
+    // per-cell `shade`, so a material-only lane would flatten authored
+    // variation - which is what still ties an actor to its field).
+    {
+        MeshAppearanceStats ast;
+        assignMicroMeshAppearance(rest, mesh, &ast);
+        std::printf("\n== per-vertex appearance ==\n");
+        std::printf("  %zu vertices: %zu resolved, %zu missed (%.2f%%)\n",
+                    ast.vertices, ast.assigned, ast.missed,
+                    ast.vertices ? 100.0 * double(ast.missed) /
+                                       double(ast.vertices)
+                                 : 0.0);
+
+        std::vector<float> ratio;
+        ratio.reserve(size_t(fieldSolids));
+        for (size_t k = 0; k < rest.size3(); ++k) {
+            if (!rest.solid[k])
+                continue;
+            const int m = std::min<int>(rest.mat[k], kPaletteN - 1);
+            const glm::vec3& pal = kPalette[m];
+            const float pl =
+                0.2126f * pal.r + 0.7152f * pal.g + 0.0722f * pal.b;
+            if (!(pl > 0.01f))
+                continue;
+            const float cl = (0.2126f * rest.r[k] + 0.7152f * rest.g[k] +
+                              0.0722f * rest.b[k]) / 255.f;
+            ratio.push_back(cl / pl);
+        }
+        if (!ratio.empty()) {
+            std::sort(ratio.begin(), ratio.end());
+            auto pc = [&](double q) {
+                return ratio[size_t(q * double(ratio.size() - 1))];
+            };
+            size_t flat = 0;
+            for (float r : ratio)
+                if (std::fabs(r - 1.f) < 0.02f)
+                    ++flat;
+            std::printf("  cell colour / palette: p1 %.3f p50 %.3f p99 %.3f, "
+                        "%.1f%% within 2%% of the palette\n",
+                        pc(0.01), pc(0.50), pc(0.99),
+                        100.0 * double(flat) / double(ratio.size()));
+        }
+        // The COST of a flat per-corner material. A triangle whose three
+        // vertices resolve to different materials renders as ONE of them (the
+        // provoking vertex), so a material boundary turns triangle-shaped. The
+        // class that actually shows is a coat triangle touching a bare one:
+        // the alpaca's eyes, muzzle and hooves ride other materials INSIDE the
+        // fleece. This is the number that says whether the packed lane is free
+        // or whether the material has to travel per corner with a dominant
+        // pick instead.
+        const std::vector<uint8_t> furMats = FurParams {}.materials;
+        auto growsFur = [&](uint8_t m) {
+            return std::find(furMats.begin(), furMats.end(), m) != furMats.end();
+        };
+        size_t uni = 0, seam = 0, coatEdge = 0, unresolved = 0;
+        for (size_t t = 0; t < mesh.tris.size(); ++t) {
+            const uint8_t m[3] = { mesh.mat[t * 3], mesh.mat[t * 3 + 1],
+                                   mesh.mat[t * 3 + 2] };
+            if (m[0] == 255 || m[1] == 255 || m[2] == 255) {
+                ++unresolved;
+                continue;
+            }
+            if (m[0] == m[1] && m[1] == m[2]) {
+                ++uni;
+                continue;
+            }
+            ++seam;
+            int fur = 0;
+            for (uint8_t v : m)
+                fur += growsFur(v) ? 1 : 0;
+            if (fur > 0 && fur < 3)
+                ++coatEdge;
+        }
+        std::printf("  triangles: %zu uniform, %zu material-seam (%.2f%%), "
+                    "%zu coat-against-bare, %zu unresolved\n",
+                    uni, seam,
+                    mesh.tris.empty() ? 0.0
+                                      : 100.0 * double(seam) / double(mesh.tris.size()),
+                    coatEdge, unresolved);
+
+        // The mesh's OPEN boundaries. An unpaired half-edge belongs to a
+        // boundary LOOP, and this asset has them: nothing shows on screen
+        // because the traced path seals the shell with the field's enclosure
+        // fill, but a MESH-seeded fur root on such a triangle would grow off an
+        // open edge into thin air. The edge COUNT mispredicts how visible that
+        // is - a dozen edges in one loop on the flank is nothing, the same
+        // dozen scattered over the muzzle is a fringe - so loops, total length
+        // and the longest single loop are printed as well. Vertices are matched
+        // at 1e-5 m (10 um) so a welded point agrees without being bit-identical.
+        using P3 = std::array<int64_t, 3>;
+        auto qd = [](const glm::vec3& p) {
+            return P3{ std::llround(double(p.x) * 1e5),
+                       std::llround(double(p.y) * 1e5),
+                       std::llround(double(p.z) * 1e5) };
+        };
+        auto less3 = [](const P3& a, const P3& b) {
+            return std::tie(a[0], a[1], a[2]) < std::tie(b[0], b[1], b[2]);
+        };
+        struct P3Hash {
+            size_t operator()(const P3& p) const
+            {
+                size_t h = 1469598103934665603ull;
+                for (int64_t v : p) {
+                    h ^= size_t(v);
+                    h *= 1099511628211ull;
+                }
+                return h;
+            }
+        };
+        // std::hash has no std::array specialization, so the 6-int64 edge key
+        // needs its own hasher too (the same FNV-1a fold over both endpoints).
+        struct P6Hash {
+            size_t operator()(const std::array<int64_t, 6>& p) const
+            {
+                size_t h = 1469598103934665603ull;
+                for (int64_t v : p) {
+                    h ^= size_t(v);
+                    h *= 1099511628211ull;
+                }
+                return h;
+            }
+        };
+        // Same fold, over nine int64s (a triangle's three quantised corners).
+        struct P9Hash {
+            size_t operator()(const std::array<int64_t, 9>& p) const
+            {
+                size_t h = 1469598103934665603ull;
+                for (int64_t v : p) {
+                    h ^= size_t(v);
+                    h *= 1099511628211ull;
+                }
+                return h;
+            }
+        };
+        std::unordered_map<std::array<int64_t, 6>, int, P6Hash> half;
+        // A SECOND table, keyed DIRECTED. This is not decoration: an undirected
+        // key pairs the two traversals of a shared edge, while a directed key
+        // leaves them as two different entries - so on a perfectly closed
+        // welded mesh a directed census reports ALMOST EVERY EDGE UNPAIRED. A
+        // peer audit reading "39,849 singletons" has almost certainly keyed
+        // directed; printing both here settles it instead of arguing about it.
+        std::unordered_map<std::array<int64_t, 6>, int, P6Hash> halfDir;
+        half.reserve(mesh.tris.size() * 3);
+        for (const MeshTri& t : mesh.tris) {
+            const P3 c[3] = { qd(t.v[0]), qd(t.v[1]), qd(t.v[2]) };
+            for (int e = 0; e < 3; ++e) {
+                const P3 a0 = c[e], b0 = c[(e + 1) % 3];
+                halfDir[{ a0[0], a0[1], a0[2], b0[0], b0[1], b0[2] }]++;
+                P3 a = a0, b = b0;
+                if (less3(b, a))
+                    std::swap(a, b);  // undirected: both windings share a key
+                half[{ a[0], a[1], a[2], b[0], b[1], b[2] }]++;
+            }
+        }
+        struct BEdge { P3 a, b; float len; };
+        std::vector<BEdge> open;
+        for (const auto& kv : half) {
+            if (kv.second != 1)
+                continue;  // paired (or over-shared): not a boundary
+            const P3 a{ kv.first[0], kv.first[1], kv.first[2] };
+            const P3 b{ kv.first[3], kv.first[4], kv.first[5] };
+            const glm::vec3 pa(float(a[0]) * 1e-5f, float(a[1]) * 1e-5f,
+                               float(a[2]) * 1e-5f);
+            const glm::vec3 pb(float(b[0]) * 1e-5f, float(b[1]) * 1e-5f,
+                               float(b[2]) * 1e-5f);
+            open.push_back({ a, b, glm::length(pa - pb) });
+        }
+        // Connected components over the SHARED vertices: one component = one
+        // loop. (A "loop" here is any edge-connected chain; a genuinely closed
+        // surface has none of these at all.)
+        auto findRoot = [](std::vector<int>& p, int x) {
+            while (p[x] != x) {
+                p[x] = p[p[x]];
+                x = p[x];
+            }
+            return x;
+        };
+        std::unordered_map<P3, int, P3Hash> vid;
+        std::vector<int> parent;
+        auto vertexId = [&](const P3& p) {
+            const auto it = vid.find(p);
+            if (it != vid.end())
+                return it->second;
+            const int id = int(parent.size());
+            parent.push_back(id);
+            vid.emplace(p, id);
+            return id;
+        };
+        for (const BEdge& e : open) {
+            const int ra = findRoot(parent, vertexId(e.a));
+            const int rb = findRoot(parent, vertexId(e.b));
+            if (ra != rb)
+                parent[ra] = rb;
+        }
+        std::map<int, std::pair<int, float>> comp;  // root -> (edges, metres)
+        for (const BEdge& e : open) {
+            auto& c = comp[findRoot(parent, vertexId(e.a))];
+            c.first += 1;
+            c.second += e.len;
+        }
+        // EDGE MULTIPLICITY, both conventions. Culling (and Phase C root
+        // seeding) is decided by the UNDIRECTED table: multiplicity 1 means a
+        // real boundary loop. The DIRECTED table is printed beside it because a
+        // directed census reports ~everything unpaired on a CLOSED mesh (each
+        // shared edge is traversed one way by each neighbour), and that is the
+        // classic false positive for "this mesh is not manifold".
+        auto histo = [](const std::unordered_map<std::array<int64_t, 6>, int,
+                                                P6Hash>& m) {
+            std::map<int, int> h;
+            for (const auto& kv : m)
+                h[std::min(kv.second, 5)]++;
+            std::string s;
+            for (const auto& kv : h)
+                s += std::to_string(kv.first) + ":" + std::to_string(kv.second) + " ";
+            return s;
+        };
+        std::printf("  edge multiplicity undirected {%s}  directed {%s}\n",
+                    histo(half).c_str(), histo(halfDir).c_str());
+        // Closed is not the same as CONSISTENTLY WOUND. An edge shared by two
+        // triangles traversed in the SAME direction means the two faces
+        // disagree about which side is outside, and back-face culling would then
+        // delete the OUTER wall of one of them. Counting it is free once both
+        // tables exist: an undirected edge with two traversals is proper iff the
+        // directed table shows one of each orientation, and same-direction iff it
+        // shows two of one and none of the other.
+        size_t shared = 0, sameDir = 0;
+        for (const auto& kv : half) {
+            if (kv.second < 2)
+                continue;
+            ++shared;
+            const auto& k = kv.first;
+            const std::array<int64_t, 6> fwd{ k[0], k[1], k[2], k[3], k[4], k[5] };
+            const std::array<int64_t, 6> rev{ k[3], k[4], k[5], k[0], k[1], k[2] };
+            const size_t f = halfDir.count(fwd) ? halfDir.at(fwd) : 0;
+            const size_t r = halfDir.count(rev) ? halfDir.at(rev) : 0;
+            if ((f == kv.second && r == 0) || (r == kv.second && f == 0))
+                sameDir += kv.second / 2;
+        }
+        std::printf("  orientation: %zu shared edges, %zu same-direction pair(s) "
+                    "(%.1f%%) - culling is unsafe where this is non-zero\n",
+                    shared, sameDir,
+                    shared ? 100.0 * double(sameDir) / double(shared) : 0.0);
+        // Duplicated triangles, counted DIRECTLY. Multiplicity 4 on an edge is
+        // NOT evidence of a coincident face pair: a non-manifold edge with four
+        // distinct incident faces looks the same, and inferring "~28 duplicated
+        // triangles" from 86/3 is exactly the kind of arithmetic shortcut that
+        // started the boundary-loop mistake (86 is not even divisible by 3).
+        // Coincident faces are what would revive the depth-tie theory, so they
+        // get measured: two triangles are duplicates when their three quantised
+        // corners agree as a SET, whatever the winding.
+        {
+            std::unordered_map<std::array<int64_t, 9>, int, P9Hash> face;
+            face.reserve(mesh.tris.size() * 2);
+            for (const MeshTri& t : mesh.tris) {
+                std::array<P3, 3> c = { qd(t.v[0]), qd(t.v[1]), qd(t.v[2]) };
+                std::sort(c.begin(), c.end(),
+                          [&less3](const P3& a, const P3& b) { return less3(a, b); });
+                face[{ c[0][0], c[0][1], c[0][2], c[1][0], c[1][1], c[1][2],
+                       c[2][0], c[2][1], c[2][2] }]++;
+            }
+            size_t dupFaces = 0, dupExtra = 0;
+            for (const auto& kv : face)
+                if (kv.second > 1) {
+                    ++dupFaces;
+                    dupExtra += size_t(kv.second - 1);
+                }
+            std::printf("  coincident faces: %zu distinct triangle(s) repeated, "
+                        "%zu redundant triangle(s) total -> depth ties %s\n",
+                        dupFaces, dupExtra, dupExtra ? "ARE possible" : "IMPOSSIBLE");
+        }
+        float totalLen = 0.f, longestLen = 0.f;
+        int longestEdges = 0;
+        for (const auto& kv : comp) {
+            totalLen += kv.second.second;
+            if (kv.second.second > longestLen) {
+                longestLen = kv.second.second;
+                longestEdges = kv.second.first;
+            }
+        }
+        std::printf("  boundary: %zu open edges in %zu loops, total %.4f m, "
+                    "longest %.4f m (%d edges), mean %.4f m/loop\n",
+                    open.size(), comp.size(), double(totalLen),
+                    double(longestLen), longestEdges,
+                    comp.empty() ? 0.0 : double(totalLen) / double(comp.size()));
+    }
 
     // ---- clip -------------------------------------------------------------
     MicroClip clip;
@@ -383,7 +724,7 @@ int main(int argc, char** argv)
 
         std::vector<MeshTri> posed;
         const auto tPose = Clock::now();
-        poseMicroMesh(mesh, boneRot, boneXform, posed);
+        poseMicroMesh(mesh, rig, boneRot, boneXform, posed);
         const double poseMs = msSince(tPose);
 
         // The pose must MOVE something, or every number below is the rest
@@ -553,7 +894,7 @@ int main(int argc, char** argv)
                 std::vector<glm::mat3> br;
                 std::vector<glm::vec3> bx;
                 composeBoneChain(rig, localRot, br, bx);
-                poseMicroMesh(mesh, br, bx, posed);
+                poseMicroMesh(mesh, rig, br, bx, posed);
                 bounds.add(posed);
             }
         const MicroUnionGrid ug = microUnionGrid(bounds, rest.voxel);
@@ -619,7 +960,7 @@ int main(int argc, char** argv)
                              const std::vector<glm::mat3>& br,
                              const std::vector<glm::vec3>& bx) {
         std::vector<MeshTri> posed;
-        poseMicroMesh(mesh, br, bx, posed);
+        poseMicroMesh(mesh, rig, br, bx, posed);
         MicroMeshGrid rg;
         if (!voxelizeMicroMesh(posed, grid.dim, grid.voxel, grid.origin, rg,
                                &err)) {
