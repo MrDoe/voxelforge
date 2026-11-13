@@ -14,16 +14,34 @@ budget.
 
 ## The bisect ladder (cheapest cut first)
 
-> **VERDICT IN FLIGHT (2026-11-13).** The mesh loader now has a
-> winding-orientation pass and the pipeline can cull back faces; a peer
-> session's verification renders are running against it. Everything below
-> describes the state BEFORE that change, so read the "quantitatively
-> unexplained" and "eligibility" sections as the pre-repair measurement, not as
-> the final verdict. Two facts from the cull fork are already reported and are
-> consistent with it: the residual after culling is near-disjoint from the
-> baseline (Jaccard 0.002), which is what an orientation-owned cause predicts.
-> Update this page with the landed numbers when they arrive; do not quote the
-> 343x split as the bug's final magnitude.
+> **VERDICT, LANDED 2026-11-13: the cause was ORIENTATION, and 94 % of the
+> flicker is gone — 291 px is NOT zero.** The mesh loader now orients the
+> winding (7,008 same-direction shared edges → **0**; 7,073 of 18,046 triangles
+> flipped; 1 connected component; the 86 non-manifold edges left alone) and the
+> shipping pipeline culls back faces (CCW). Measured on one binary `7343ada4`,
+> one session, frozen pose at the flicker camera, all four arms carrying the
+> alpaca, `STATE_STABLE`:
+>
+> | arm | duplicate-pair diff |
+> |---|---|
+> | shipping (culling ON) | **291 px > 6/255**, max 86, mean abs 0.014 |
+> | `VF_MESH_CULL=0` (culling OFF) | 5,040 px, max 143 |
+> | shipping vs cull-off (image, not a pair) | 5,314 px, max 141 |
+>
+> So the 4,536 px signal fell to 291 px (94 % removed), culling OFF reproduces
+> the old magnitude on the same binary, and the shipping image differs from the
+> cull-off image by as much as the flicker did — i.e. **no face was wrongly
+> culled**. `VF_MESH_CULL=0` / `=2` remain diagnostics only; culling is ON in
+> shipping.
+>
+> The residual 291 px is a residual **under characterisation**, not a fix: the
+> double-cover supply the ordering race needs is largely gone, but something
+> still stores twice on a small set of pixels. Everything below is the
+> pre-repair investigation, kept because its instruments (the `VF_MESH=0` fork,
+> the cull ladder, the Jaccard set test, the freeze-slot trap) are what led
+> here; read its "unexplained" / "eligibility" conclusions as **superseded and
+> historical**. Do not quote the 343x split as a current magnitude.
+
 
 
 Each rung is one render pair and each eliminates a whole class:

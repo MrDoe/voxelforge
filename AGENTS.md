@@ -1314,13 +1314,15 @@ one costs a whole turn, because the bad call is rejected before any work runs.
   pass every frame, exactly as it mirrors the rotation preview.
   **The walk is not optional**: the alpaca is a grazer, so a coat left in
   the rest pose would hang in the air where the animal used to be.
-  **The PER-BONE animation is still missing** (the legs swing inside the
-  body): the overlay animates the body by mapping an animated point back to
-  the REST pose before sampling the field, so the field's cells never move,
-  while the cards are drawn in that rest frame. The fix is small (the card
-  carries its bone index, the fur's table carries the bone base, the shader
-  applies the bone's forward rotation) and was left undone while the rig's
-  API was still moving.
+  **The PER-BONE animation is landed** (it was missing when this note was
+  first written): each card carries its rest-pose bone index
+  (`FurCard.shade.w`), `FurPass::setBoneRotations` uploads the animated bone
+  transforms, and `fur.vert` evaluates `furBoneWeights` at the card's ROOT once
+  for all four quad vertices (so the ribbon cannot shear), un-bones the ray
+  with `furBlendUnbone`, and re-bones the shading point/normal with
+  `furBlendRebone` under the same weights. A card with no rig falls back to the
+  side-car's stored bone index. So the coat follows swinging legs instead of
+  hanging in the rest frame.
 - **The coat is configurable in the GUI**: the Rendering section carries its
   SHAPE (density, strand length, clump width, curl amplitude and cycles, and
   how far a strand stands off the surface) and the Textures section carries

@@ -7062,3 +7062,42 @@ Filed with the material-seam census in the same pass: 17,688 uniform / 358 seam
 material lane's cost is one triangle-edge shift on 2 % of the surface. The index
 entry for the policy page now carries the measured number instead of "still owed".
 Pages: concepts/render-nondeterminism.md, concepts/geometry-format-policy.md
+
+## [2026-11-13] ingest | The winding fix lands: 94 % of the mesh flicker is gone, 291 px remains
+
+The cause was orientation, and the earlier "quantitatively unexplained" verdict is
+superseded. The mesh loader now orients the winding (7,008 same-direction shared
+edges -> **0**; 7,073 of 18,046 triangles flipped; 1 connected component; the 86
+non-manifold edges left alone) and the shipping pipeline culls back faces (CCW).
+One binary `7343ada4`, one session, frozen pose at the flicker camera, all four
+arms carrying the alpaca, `STATE_STABLE`:
+
+```
+shipping (culling ON)      pair: 291 px >6/255, max 86, mean|d| 0.014  [was 4,536]
+VF_MESH_CULL=0 (OFF)       pair: 5,040 px, max 143
+shipping vs cull-off       image: 5,314 px, max 141
+```
+
+So 94 % of the signal is gone, the culling-off arm reproduces the old magnitude on
+the same binary, and shipping differs from cull-off by as much as the flicker did —
+**no face was wrongly culled**. `VF_MESH_CULL=0/2` stay diagnostics; culling is ON.
+
+**Not a fix, a 291 px residual.** It is under characterisation: the double-cover
+supply the ordering race needs is largely gone, but something still stores twice on
+a small pixel set. Recorded as such in the page; do not write "fixed".
+
+Why the investigation's dead ends still matter: the `VF_MESH=0` fork (0 px vs
+4,278 px) localised the pass, the cull ladder halved the number and pointed at
+winding, and the Jaccard set test proved the failure was genuinely unordered rather
+than a fixed misdraw. The magnitude models (double-cover area 1.31x, near-ties
+<=10x, disagreement magnitude 27.0 vs 24.0) were all measured against a 343x split
+and all failed — they were the wrong question, because the pixels that could be
+double-covered were not the pixels that were *oriented consistently*.
+
+Two documentation corrections filed in the same commit: `AGENTS.md` still said the
+fur's per-bone animation was missing, but it is shipped (`FurCard.shade.w` bone
+index, `FurPass::setBoneRotations` called from `micro_objects.cpp`, `fur.vert`'s
+`furBoneWeights` + `furBlendUnbone`/`furBlendRebone`); and the index line said "a
+third of the alpaca's mesh is wound backwards" where the measured figure is 26.1 %
+of shared edges traversed same-direction.
+Pages: concepts/render-nondeterminism.md, index.md, AGENTS.md
