@@ -7135,3 +7135,44 @@ pass testing `EQUAL`** — exactly one surviving writer per pixel without
 redesigning the G-buffer. Try that before the colour-attachment work; if it takes
 291 px to 0, the redesign was never needed.
 Pages: concepts/render-nondeterminism.md, index.md
+
+## [2026-11-13] ingest | Residual closed: a depth prepass + EQUAL makes the mesh pair byte-identical
+
+The 291 px that survived culling is gone, and the fix is cheaper than the redesign
+that was on hold. Binary `4057eba3`, one session, frozen pose, flicker camera
+`-4.9 1.25 20.6 -> -6.32 0.75 19.2` at 900x700, alpaca present in every arm,
+`STATE_STABLE`:
+
+```
+shipping duplicate pair          0 px, max 0  (byte-identical)
+VF_MESH_CULL=0, same binary      0 px         (mechanism proof, not a bug)
+shipping vs cull-NONE image      0 px         (no inner-wall pixel displayed)
+vs pre-prepass binary          614 px, max 86, 0 on silhouette, median +6.4 luma
+```
+
+The cull-off control is the proof: the prepass pass has NO fragment stage, so two
+contending fragments resolve by the rasterizer's min-depth rule instead of by
+which `imageStore` landed last. Culling is no longer load-bearing for determinism
+(it stays ON because it is correct and cheaper). `VF_MESH_CULL=0/=2` are
+diagnostics only.
+
+Exact spelling: pass 1 `m_meshDepthPipeline`, vertex stage only, `depthWrite` ON,
+`LESS`; a `VkMemoryBarrier2` between (`EARLY|LATE_FRAGMENT_TESTS`,
+`DEPTH_STENCIL_ATTACHMENT_WRITE -> READ|WRITE`); pass 2 `m_meshPipeline`,
+`depthWrite` OFF, `EQUAL`. `layout(early_fragment_tests)` stays declared and stays
+inert — the fix is structural, not a mode.
+
+The prepass was also a CORRECTNESS fix: against the pre-prepass binary the image
+moved by 614 px (max 86, median +6.4 luma, nothing on the silhouette, nothing
+body->background). Those pixels used to show the shadowed INNER wall; the prepass
+reveals the lit OUTER one. So the last 6 % of "flicker" was partly the wrong
+surface, not only a coin flip.
+
+The arc in one line: 4,536 px (two writers, unordered) -> 291 px (culling removes
+most second writers) -> 0 px (the prepass removes the *opportunity* rather than
+the supply). The general lesson: when a race survives a coverage reduction, stop
+looking for an ordering guarantee from the driver and remove the second writer
+structurally — `early_fragment_tests` is inert here, and a fragment stage that
+does not exist cannot store. **The G-buffer-as-colour-attachments redesign is not
+needed and should stay unbuilt.**
+Pages: concepts/render-nondeterminism.md, index.md
