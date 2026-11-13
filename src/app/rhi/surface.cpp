@@ -81,11 +81,16 @@ bool App::createOffscreen(uint32_t w, uint32_t h)
     m_ssaoAo = vf::makeImage2D(
         m_ctx, w, h, VK_FORMAT_R16G16B16A16_SFLOAT,
         VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT);
+    vf::destroyImage3D(m_ctx, m_ssrOut);
+    m_ssrOut = vf::makeImage2D(
+        m_ctx, w, h, VK_FORMAT_R8G8B8A8_UNORM,
+        VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT |
+            VK_IMAGE_USAGE_TRANSFER_DST_BIT);
     if (!m_splatPass.recreateDepth(w, h))
         return false;
     if (!m_offscreen.img || !m_taaHistory[0].img || !m_taaHistory[1].img ||
         !m_taaResolved.img || !m_hdr.img || !m_gpos.img || !m_gnorm.img ||
-        !m_ssaoAo.img)
+        !m_ssaoAo.img || !m_ssrOut.img)
         return false;
     m_svoPass.updateDescriptors(m_hdr, m_gpos, m_gnorm);
     // The micro overlay composites into the SAME three images, so it must be
@@ -239,33 +244,76 @@ bool App::initVulkan()
     {
         m_manifestPath = std::string(VOXELFORGE_ASSET_DIR) + "/world.json";
         const std::string& manifestPath = m_manifestPath;
-        if (!m_layers.load(manifestPath)) {
-            spdlog::critical("cannot load {} - run 'ninja -C build world' to bake assets",
-                             manifestPath);
-            return false;
-        }
-        const auto& st = m_layers.stats();
-        spdlog::info("SVO world synthesized from layers: {} nodes, {} bricks,"
-                     " {}/{} chunks, {:.1f} MB",
-                     st.nodes, st.bricks, st.activeChunks,
-                     vf::voxel::GRID_N * vf::voxel::GRID_N * vf::voxel::GRID_N,
-                     double(st.memoryBytes) / (1024.0 * 1024.0));
-        {
-            if (!m_svoPass.init(m_ctx))
+        if (!m_studio.active) {
+            if (!m_layers.load(manifestPath)) {
+                spdlog::critical("cannot load {} - run 'ninja -C build world' to bake assets",
+                                 manifestPath);
                 return false;
-            const auto& g = m_layers.gpu();
-            m_svoPass.setWorld(g);
-            // every layer (incl. MCP-added ai_edits) is listed in the GUI
-            syncWorldLayerList();
-            rescanWorldLayers();
+            }
+            const auto& st = m_layers.stats();
+            spdlog::info("SVO world synthesized from layers: {} nodes, {} bricks,"
+                         " {}/{} chunks, {:.1f} MB",
+                         st.nodes, st.bricks, st.activeChunks,
+                         vf::voxel::GRID_N * vf::voxel::GRID_N * vf::voxel::GRID_N,
+                         double(st.memoryBytes) / (1024.0 * 1024.0));
+            {
+                if (!m_svoPass.init(m_ctx))
+                    return false;
+                const auto& g = m_layers.gpu();
+                m_svoPass.setWorld(g);
+                // every layer (incl. MCP-added ai_edits) is listed in the GUI
+                syncWorldLayerList();
+                rescanWorldLayers();
+            }
+            m_pushB = glm::vec4(vf::voxel::WORLD, vf::voxel::VOXEL, float(vf::voxel::GRID_N), 0);
+        } else {
+            // Studio mode: skip the world bake; bind neutral textures below.
+            if (!m_svoPass.init(m_ctx)) return false;
+            m_pushB = glm::vec4(vf::voxel::WORLD, vf::voxel::VOXEL, float(vf::voxel::GRID_N), 0);
         }
-
-        m_pushB = glm::vec4(vf::voxel::WORLD, vf::voxel::VOXEL, float(vf::voxel::GRID_N), 0);
     }
 
     // field-derived GPU textures (terrain heights/materials + object shadows)
-    if (!uploadTerrainTexture() || !uploadObjVolTexture())
-        return false;
+    if (!m_studio.active) {
+        if (!uploadTerrainTexture() || !uploadObjVolTexture())
+            return false;
+    } else {
+        // Studio: create 1x1 neutral textures so the micro pass has valid views.
+        const glm::vec2 neutralH { 0.f, 0.f }; // y=0, mat=0
+        m_heightImg = vf::makeImage3D(m_ctx, 1, 1, 1,
+                                      VK_FORMAT_R32G32_SFLOAT,
+                                      VK_IMAGE_USAGE_TRANSFER_DST_BIT |
+                                          VK_IMAGE_USAGE_STORAGE_BIT);
+        vf::uploadToImage3D(m_ctx, m_heightImg, &neutralH, sizeof(neutralH));
+        m_ctx.immediateSubmit([&](VkCommandBuffer cmd) {
+            vf::transitionImage(cmd, m_heightImg.img, VK_IMAGE_ASPECT_COLOR_BIT,
+                                VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+                                VK_IMAGE_LAYOUT_GENERAL,
+                                VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT,
+                                VK_ACCESS_2_MEMORY_READ_BIT | VK_ACCESS_2_MEMORY_WRITE_BIT,
+                                VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
+                                VK_ACCESS_2_SHADER_STORAGE_READ_BIT);
+        });
+        m_microSvoPass.setHeightmapView(m_heightImg.view);
+
+        // objvol: 1x1x1 empty (max distance)
+        std::vector<int8_t> neutralOv(1, 127); // +kObjVolMax-ish
+        m_objVolImg = vf::makeImage3D(m_ctx, 1, 1, 1,
+                                      VK_FORMAT_R8_SNORM,
+                                      VK_IMAGE_USAGE_TRANSFER_DST_BIT |
+                                          VK_IMAGE_USAGE_STORAGE_BIT);
+        vf::uploadToImage3D(m_ctx, m_objVolImg, neutralOv.data(), neutralOv.size());
+        m_ctx.immediateSubmit([&](VkCommandBuffer cmd) {
+            vf::transitionImage(cmd, m_objVolImg.img, VK_IMAGE_ASPECT_COLOR_BIT,
+                                VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+                                VK_IMAGE_LAYOUT_GENERAL,
+                                VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT,
+                                VK_ACCESS_2_MEMORY_READ_BIT | VK_ACCESS_2_MEMORY_WRITE_BIT,
+                                VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
+                                VK_ACCESS_2_SHADER_STORAGE_READ_BIT);
+        });
+        m_microSvoPass.setObjVolumeView(m_objVolImg.view);
+    }
 
     if (!m_taaPass.init(m_ctx))
         return false;
@@ -394,7 +442,7 @@ bool App::initVulkan()
                         size_t(n - parentCount) * sizeof(vf::voxel::Surfel));
         return range;
     });
-    loadStoreOverlay(); // restore the async-saved live-edit overlay, if any
+    if (!m_studio.active) loadStoreOverlay(); // restore the async-saved live-edit overlay, if any
 
     // VF_DUMP_CHUNK=N: read one chunk's base surfels back from the GPU and
     // report the tan_aspect.w (texture override) distribution - a quick
@@ -489,6 +537,7 @@ void App::destroy()
     vf::destroyImage3D(m_ctx, m_gpos);
     vf::destroyImage3D(m_ctx, m_gnorm);
     vf::destroyImage3D(m_ctx, m_ssaoAo);
+    vf::destroyImage3D(m_ctx, m_ssrOut);
     vf::destroyImage3D(m_ctx, m_taaHistory[0]);
     vf::destroyImage3D(m_ctx, m_taaHistory[1]);
     vf::destroyImage3D(m_ctx, m_taaResolved);

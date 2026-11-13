@@ -164,7 +164,7 @@ bool App::importMeshFromGui()
         spdlog::warn("mesh GUI import failed: {}", err);
         return false;
     }
-    if (!m_editable.writeObjectLayer(safeName, records)) {
+    if (!m_editable.writeObjectLayer(safeName, records, path)) {
         m_meshStatus = "Could not write the object layer or update world.json";
         m_meshStatusError = true;
         return false;

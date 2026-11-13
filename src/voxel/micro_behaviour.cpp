@@ -1,6 +1,8 @@
 // micro_behaviour.cpp - the walk and the graze.
 #include "voxel/micro_behaviour.hpp"
 
+#include <spdlog/spdlog.h>
+
 #include <algorithm>
 #include <cmath>
 
@@ -70,12 +72,59 @@ void MicroBehaviour::reset(glm::vec3 pos, float seedIn)
     scanAge = 1e9f;
 }
 
+void MicroBehaviour::startClip(const MicroClip* c)
+{
+    clip = c;
+    clipActive = c != nullptr;
+    clipTime = 0.f;
+    clipPlaying = c != nullptr;
+    bodyOffset = glm::vec3(0.f);
+    bodyRot = glm::mat3(1.f);
+    clipLocalRot.clear();
+    if (c)
+        state = (c->clock == ClipClock::Distance) ? State::Walk
+                                                  : State::Graze;
+}
+
+void MicroBehaviour::advanceClipDistance(float metres)
+{
+    if (!clip || metres <= 0.f || clip->length <= 0.f)
+        return;
+    // One clip cycle per `stride` metres. A clip that never authored a stride
+    // keeps a sane one so a missing field cannot freeze the phase at 0.
+    const float stride = std::max(0.05f, clip->stride);
+    clipTime = wrapClipTime(clipTime + (metres / stride) * clip->length,
+                            clip->length, clip->loop);
+}
+
 void MicroBehaviour::update(float dt)
 {
     // A long frame (a reload, a stall) must not teleport the animal: the
     // step is clamped, so a 5 s hitch advances the walk by one frame's
     // worth, not by five seconds'.
     dt = std::min(dt, 0.1f);
+
+    // CLIP MODE: the policy has chosen a clip. The clip owns the BONES (and
+    // a cosmetic body pose); this function still owns the LOCOMOTION and the
+    // heading, because the collision response steers through those and a clip
+    // must never be able to walk an object through a wall.
+    const bool clipMode = clip && clipActive;
+
+    // The clip clock. A TIME-clocked clip (graze, look around) advances with
+    // the frame. A DISTANCE-clocked one advances in advanceClipDistance()
+    // from the step the collision response ACCEPTED, so a blocked step holds
+    // mid-stride instead of skating the feet.
+    if (clipMode && clipPlaying && clip->clock == ClipClock::Time &&
+        clip->length > 0.f)
+        clipTime = wrapClipTime(clipTime + dt * clipSpeed, clip->length,
+                                clip->loop);
+
+    // FROZEN: skip locomotion, heading wander and the state machine. The
+    // clip clock above still advances (the studio owns the phase), so the
+    // bones keep animating while the object stays put.
+    if (frozen)
+        return;
+
     const float prevHeading = heading;
     stateT += dt;
     wander += dt;
@@ -84,7 +133,12 @@ void MicroBehaviour::update(float dt)
     // do not graze in lockstep. A COMMAND overrides it: the animal keeps
     // walking when it is told to, and keeps grazing when it is told to
     // (the AI can say "let the alpaca run" and it runs).
-    if (command == Command::Walk) {
+    // In clip mode the clip decides the stance (startClip), and the collision
+    // response may park it by setting Graze; the wander's own state machine
+    // is off so a walk cycle cannot be interrupted by a graze timer.
+    if (clipMode) {
+        // (stance is startClip's / the collision response's)
+    } else if (command == Command::Walk) {
         state = State::Walk;
     } else if (command == Command::Graze) {
         state = State::Graze;
@@ -102,7 +156,14 @@ void MicroBehaviour::update(float dt)
             stateT = 0.f;
         }
     }
-    const bool walking = state == State::Walk;
+    // A distance-clocked clip TRAVELS; a time-clocked one performs in place.
+    // Stop and Graze commands still hold it, and a fully-blocked scan parks
+    // it (the response sets Graze).
+    const bool walking =
+        clipMode ? (clip->clock == ClipClock::Distance && clipPlaying &&
+                    state == State::Walk && command != Command::Stop &&
+                    command != Command::Graze)
+                 : (state == State::Walk);
 
     // The heading: a slow wander, plus a pull back toward the anchor when
     // the animal has strayed too far. Both terms are smooth, so the turn
@@ -160,20 +221,34 @@ void MicroBehaviour::update(float dt)
     // driven by the DISTANCE travelled, not by the time, so the feet keep
     // their rhythm when the animal turns or slows. A STOP freezes it (the
     // animal stands, it does not skate).
-    if (walking && command != Command::Stop) {
-        const float step = speed * dt;
+    if (walking) {
+        // A clip carries the speed it was authored for, so playback and
+        // travel stay in step; `clipSpeed` is the studio's transport control
+        // (a slower playback must also cover less ground).
+        const float step = (clipMode ? clip->speed * clipSpeed : speed) * dt;
         offset.x += std::sin(heading) * step;
         offset.z += std::cos(heading) * step;
-        // Gait advances with DISTANCE (so feet keep rhythm). A turn is also
-        // a step: when the animal spins in place the gait must still advance,
-        // otherwise the legs freeze and the body slides. Add a contribution
-        // proportional to the yaw change, so a turn looks like stepping
-        // around rather than pivoting on frozen feet.
-        float turnDelta = heading - prevHeading;
-        while (turnDelta > 3.14159265f) turnDelta -= 6.28318531f;
-        while (turnDelta < -3.14159265f) turnDelta += 6.28318531f;
-        const float turnStep = std::abs(turnDelta) * 0.35f; // metres-equivalent
-        gait += ((step + turnStep) / std::max(0.05f, stride)) * 6.28318531f;
+        if (!clipMode) {
+            // Gait advances with DISTANCE (so feet keep rhythm). A turn is also
+            // a step: when the animal spins in place the gait must still advance,
+            // otherwise the legs freeze and the body slides. Add a contribution
+            // proportional to the yaw change, so a turn looks like stepping
+            // around rather than pivoting on frozen feet.
+            float turnDelta = heading - prevHeading;
+            while (turnDelta > 3.14159265f) turnDelta -= 6.28318531f;
+            while (turnDelta < -3.14159265f) turnDelta += 6.28318531f;
+            const float turnStep = std::abs(turnDelta) * 0.35f; // metres-equivalent
+            gait += ((step + turnStep) / std::max(0.05f, stride)) * 6.28318531f;
+        }
+    }
+
+    // CLIP MODE: the clip supplies the body pose; the procedural sway/bob/
+    // graze would be a SECOND, conflicting pose. The locomotion yaw stays the
+    // object's own rotation, and the clip's cosmetic body pose composes on
+    // top of it through renderRot()/renderOffset().
+    if (clipMode) {
+        rot = axisRotation(glm::vec3(0, 1, 0), heading);
+        return;
     }
 
     // The graze: a bow that eases in over the first second and out over the
@@ -193,8 +268,12 @@ void MicroBehaviour::update(float dt)
     // The transform. The rotation is a yaw (the heading), a roll (the gait
     // sway) and a pitch (the graze bow), about the object's pivot - the
     // same bottom-centre pivot the placement uses.
-    const float sway = walking ? std::sin(gait) * sway : 0.f;
-    const float bob = walking ? std::sin(gait * 2.f) * bob : 0.f;
+    // `this->` is load-bearing: a bare `sway` here names the local being
+    // declared, so the initializer read an uninitialised value (gcc's
+    // -Wmaybe-uninitialized said so) and the gait roll was garbage instead of
+    // the configured peak. Same for `bob`.
+    const float sway = walking ? std::sin(gait) * this->sway : 0.f;
+    const float bob = walking ? std::sin(gait * 2.f) * this->bob : 0.f;
     const float pitch = graze * grazePitch;
 
     const glm::mat3 yaw = axisRotation(glm::vec3(0, 1, 0), heading);
@@ -222,6 +301,37 @@ void MicroBehaviour::pinPose(glm::vec3 offsetIn, float headingDeg,
 
 void MicroBehaviour::animateBones()
 {
+    if (rig.bones.empty())
+        return;
+
+    // CLIP MODE: sample the clip into local rotations and compose. The sample
+    // also yields the cosmetic body pose, which lives on bodyOffset/bodyRot -
+    // NOT on the locomotion offset/heading (see the fields' comment).
+    if (clip && clipActive) {
+        const size_t n = rig.bones.size();
+        if (clipLocalRot.size() != n)
+            clipLocalRot.assign(n, glm::mat3(1.f));
+        float bodyHdg = 0.f;
+        clip->sample(clipTime, rig, clipLocalRot, bodyOffset, bodyHdg);
+        bodyRot = axisRotation(glm::vec3(0, 1, 0), glm::radians(bodyHdg));
+        composeBones(clipLocalRot);
+        return;
+    }
+
+    // No clip: drop a stale cosmetic pose, or a clip switched off would keep
+    // the last body transform applied forever.
+    bodyOffset = glm::vec3(0.f);
+    bodyRot = glm::mat3(1.f);
+
+    // STATIC POSE: wire the (previously dead) pose path.
+    if (poseActive && !poseRot.empty()) {
+        std::vector<glm::mat3> localRot = poseRot;
+        if (localRot.size() != rig.bones.size())
+            localRot.resize(rig.bones.size(), glm::mat3(1.f));
+        composeBones(localRot);
+        return;
+    }
+
     // The GAIT, driven by the rig's roles.
     //
     // The legs swing about their joints, in DIAGONAL pairs (a walk, not a
@@ -229,8 +339,6 @@ void MicroBehaviour::animateBones()
     // derivation sorted along the spine, so the front-left swings with the
     // back-right. The head nods with the stride and dips further when the
     // animal grazes; the tail sways.
-    if (rig.bones.empty())
-        return;
     const size_t n = rig.bones.size();
     if (boneRot.size() != n) {
         boneRot.assign(n, glm::mat3(1.f));
@@ -291,6 +399,7 @@ void MicroBehaviour::animateBones()
                                                // the graze bows it down. 1.6 rad
                                                // reaches the ground (3 links
                                                // x ~30 deg each)
+    std::vector<glm::mat3> localRot(n, glm::mat3(1.f));
     for (size_t i = 0; i < n; ++i) {
         const MicroBone& b = rig.bones[i];
         float angle = 0.f;
@@ -373,43 +482,44 @@ void MicroBehaviour::animateBones()
             ? axisRotation(side, angle) *
               axisRotation(up, headTurnCur / float(std::max(1, neckLinks)))
             : axisRotation(axis, angle);
-        glm::vec3 t = b.a - R * b.a;
-        // CHAIN it: the bone's world transform is its parent's composed with
-        // its own. Without this the head keeps turning about its REST joint
-        // while the body bows under it - the neck visibly tears away from
-        // the shoulders (which is what the user saw).
-        const int parent = b.parent;
-        if (parent >= 0 && size_t(parent) < n) {
-            const glm::mat3 Rp = boneRot[size_t(parent)];
-            const glm::vec3 tp = boneXform[size_t(parent)];
-            boneRot[i] = Rp * R;
-            boneXform[i] = Rp * t + tp;
-        } else {
-            boneRot[i] = R;
-            boneXform[i] = t;
-        }
+        localRot[i] = R;
     }
+    composeBones(localRot);
 }
 
 glm::vec3 MicroBehaviour::toLocal(glm::vec3 p) const
 {
     // The inverse of the animated transform: the offset comes off first,
     // then the rotation about the pivot.
-    p -= offset;
-    return pivot + glm::transpose(rot) * (p - pivot);
+    p -= renderOffset();
+    return pivot + glm::transpose(renderRot()) * (p - pivot);
 }
 
 glm::vec3 MicroBehaviour::dirToLocal(glm::vec3 d) const
 {
-    return glm::transpose(rot) * d;
+    return glm::transpose(renderRot()) * d;
+}
+
+void MicroBehaviour::composeBones(const std::vector<glm::mat3>& localRot)
+{
+    const size_t n = rig.bones.size();
+    if (boneJoint.size() != n) {
+        boneJoint.resize(n);
+        for (size_t i = 0; i < n; ++i)
+            boneJoint[i] = rig.bones[i].a;
+    }
+    // The chain rule itself lives in micro_rig (composeBoneChain) so the app
+    // and the offline proof tool cannot diverge: a bone's transform is its
+    // parent's composed with its own.
+    composeBoneChain(rig, localRot, boneRot, boneXform);
 }
 
 glm::vec3 MicroBehaviour::toWorld(glm::vec3 p) const
 {
     // The forward transform: the rotation about the pivot first, then the
     // offset.
-    p = pivot + rot * (p - pivot);
-    return p + offset;
+    p = pivot + renderRot() * (p - pivot);
+    return p + renderOffset();
 }
 
 } // namespace vf::voxel

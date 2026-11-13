@@ -494,6 +494,19 @@ bool loadManifest(const std::string& path, std::vector<WorldLayer>& out)
                         }
                         j.eat(']');
                     }
+                    else if (k == "clips" && j.eat('[')) {
+                        std::string v;
+                        while (j.str(v)) {
+                            layer.clips.push_back(v);
+                            if (!j.eat(','))
+                                break;
+                        }
+                        j.eat(']');
+                    }
+                    else if (k == "meshSource")
+                        j.str(layer.meshSource);
+                    else if (k == "meshUp")
+                        j.str(layer.meshUp);
                     else if (k == "pos") {
                         if (!j.eat('['))
                             return false;
@@ -1019,6 +1032,16 @@ bool writeManifest(const std::string& path, const std::vector<WorldLayer>& layer
                 std::fprintf(f, "%s%.3f", i ? "," : "", l.pose[i]);
             std::fprintf(f, "]");
         }
+        if (!l.clips.empty()) {
+            std::fprintf(f, ", \"clips\": [");
+            for (size_t i = 0; i < l.clips.size(); ++i)
+                std::fprintf(f, "%s\"%s\"", i ? "," : "", l.clips[i].c_str());
+            std::fprintf(f, "]");
+        }
+        if (!l.meshSource.empty())
+            std::fprintf(f, ", \"meshSource\": \"%s\"", l.meshSource.c_str());
+        if (!l.meshUp.empty())
+            std::fprintf(f, ", \"meshUp\": \"%s\"", l.meshUp.c_str());
         std::fprintf(f, " }%s\n", i + 1 < layers.size() ? "," : "");
     }
     std::fprintf(f, "  ]");

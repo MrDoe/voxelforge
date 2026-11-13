@@ -14,6 +14,11 @@
 #ifndef VF_COMMON_FUR_GLSL
 #define VF_COMMON_FUR_GLSL
 
+// The ONE skinning-weight kernel, shared with the raster mesh and the CPU
+// (src/voxel/micro_rig.cpp). Pure functions, no bindings, so including it from
+// a vertex, a fragment and a compute stage is free.
+#include "micro_weights.glsl"
+
 // One card: six vec4s (rootLen, dirWidth, nrmAlpha, tint, shade, curl).
 // The layout mirrors voxel::FurCard; see fur_cards.hpp for the field notes.
 layout(std430, set = 0, binding = 0) readonly buffer FurCards { vec4 fCard[]; };
@@ -127,6 +132,108 @@ vec3 furDirRebone(int w, vec3 d, int bone)
         return d;
     const FurBone mb = ft.uWorlds[w].bone[bone];
     return mat3(mb.r0.xyz, mb.r1.xyz, mb.r2.xyz) * d;
+}
+
+// THE COAT'S SKINNING WEIGHTS, the same kernel the body uses
+// (micro_weights.glsl, and the CPU's MicroRig::boneInfluences).
+//
+// A card bound to ONE bone DRIFTS OFF the blended body: at mid-graze the
+// single-bone card sat a mean 21.5 mm / p99 142 mm / max 230 mm away from the
+// surface its root was grown on, which is a visible halo of fur standing off
+// the shoulder and the hip. The coat therefore deforms with the SAME blend as
+// the body, evaluated at the same rest point - the root for the card's quad,
+// the fragment's own rest point for its shading - so a card cannot leave the
+// skin it was grown on.
+//
+// This is the FurBone table's copy of microBoneWeights: the rows differ (a.w
+// is the capsule radius here, the micro table keeps it in bone.a.w too), so
+// the two spell the kernel once through microWeightOne and nothing else.
+int furBoneWeights(int w, vec3 p, out int boneIdx[MICRO_MAX_INFLUENCES],
+                   out float wgt[MICRO_MAX_INFLUENCES], out int dominant)
+{
+    dominant = -1;
+    const int count = int(ft.uWorlds[w].bones.x);
+    float best = -1.0;
+    float sum = 0.0;
+    int nearest = 0;
+    float nearestD = 1e30;
+    for (int i = 0; i < MICRO_MAX_INFLUENCES; ++i) {
+        wgt[i] = 0.0;
+        boneIdx[i] = -1;
+    }
+    for (int i = 0; i < count && i < MICRO_MAX_INFLUENCES; ++i) {
+        const FurBone mb = ft.uWorlds[w].bone[i];
+        const float wi = microWeightOne(p, mb.a.xyz, mb.b.xyz, mb.a.w);
+        boneIdx[i] = i;
+        wgt[i] = wi;
+        sum += wi;
+        if (wi > best) {
+            best = wi;
+            dominant = i;
+        }
+        const vec3 ab = mb.b.xyz - mb.a.xyz;
+        const float t =
+            clamp(dot(p - mb.a.xyz, ab) / max(dot(ab, ab), 1e-12), 0.0, 1.0);
+        const float d = length(p - (mb.a.xyz + ab * t));
+        if (d < nearestD) {
+            nearestD = d;
+            nearest = i;
+        }
+    }
+    if (!(sum > 0.0)) {
+        if (count <= 0)
+            return 0;
+        boneIdx[0] = nearest;
+        wgt[0] = 1.0;
+        dominant = nearest;
+        return 1;
+    }
+    const int n = microNormalizeWeights(boneIdx, wgt);
+    if (dominant < 0 && n > 0)
+        dominant = boneIdx[0];
+    return n;
+}
+
+// A rest point through the coat's blended transform (linear blend skinning,
+// exactly what micro_mesh.vert does to a body vertex).
+vec3 furBlendRebone(int w, vec3 p, int bi[MICRO_MAX_INFLUENCES],
+                    float bw[MICRO_MAX_INFLUENCES], int n)
+{
+    if (n <= 0)
+        return p;
+    vec3 acc = vec3(0.0);
+    for (int i = 0; i < n; ++i)
+        acc += furRebone(w, p, bi[i]) * bw[i];
+    return acc;
+}
+
+// The blended inverse of the above, for the billboard's camera point. A
+// weighted sum of inverse transforms is not the inverse of the weighted sum
+// (LBS is not invertible), but for a SINGLE rigid bone - every card the
+// side-car pins - it is exact, and across a blend it is the average frame,
+// which is all the ribbon's width axis needs.
+vec3 furBlendUnbone(int w, vec3 p, int bi[MICRO_MAX_INFLUENCES],
+                    float bw[MICRO_MAX_INFLUENCES], int n)
+{
+    if (n <= 0)
+        return p;
+    vec3 acc = vec3(0.0);
+    for (int i = 0; i < n; ++i)
+        acc += furUnbone(w, p, bi[i]) * bw[i];
+    return acc;
+}
+
+// A direction through the blended transform (rotations only), renormalized.
+vec3 furBlendDirRebone(int w, vec3 d, int bi[MICRO_MAX_INFLUENCES],
+                       float bw[MICRO_MAX_INFLUENCES], int n)
+{
+    if (n <= 0)
+        return d;
+    vec3 acc = vec3(0.0);
+    for (int i = 0; i < n; ++i)
+        acc += furDirRebone(w, d, bi[i]) * bw[i];
+    const float l = length(acc);
+    return l > 1e-8 ? acc / l : d;
 }
 
 // A WORLD point -> the object's LOCAL frame (the field's frame). The

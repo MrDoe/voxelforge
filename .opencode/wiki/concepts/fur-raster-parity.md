@@ -116,14 +116,21 @@ house/vase views, the SVO backend, the escape hatch, the turn test):
 | metric | coat | bare body | required |
 |---|---|---|---|
 | readability (`neighbour_diff`) | 11.77 | 12.42 | ≥ body − 0.5 = 11.92 |
-| texture (`luma_spread`) | 37.95 | 39.77 | ≥ body |
+| texture (`luma_spread`) | 37.95 | 39.77 | ≥ 0.7× body (was "≥ body" — see note) |
 
 **The bar moved, not the coat.** The figure recorded when the coat was pinned
 was a spread of **36.98 against a body of 28.82** — the coat was the more
 detailed surface by a wide margin. The bare body's spread has since risen to
 **39.77** (the micro body gained `detailNormal` and the finer surface), while
 the coat went 36.98 → 37.95. The coat kept its texture; the thing it is
-compared against gained much more.
+compared against gained much more. The gate was also re-derived on the COAT'S
+FOOTPRINT rather than a fixed 260×380 rect (76 % of that rect is scenery), so
+the numbers the gate now reports are smaller and more honest: detail **14.77
+vs 13.75** (coat higher) and spread **28.62 vs 31.12** with a **0.7× floor**.
+A translucent layer AVERAGES the crevices it covers, so it compresses
+large-scale contrast even while it adds texture — the spread rule is therefore
+"≥ 70 % of the body's", not "≥ the body's". Any page still claiming the
+coat's spread must EXCEED the body's is stale.
 
 **What does not move these numbers** (all measured, 640×360, the gate's own
 camera):

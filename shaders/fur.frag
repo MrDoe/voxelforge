@@ -98,7 +98,17 @@ void main()
     const vec3 restN = normalize(vRestN);
     const uint mId = uint(vB.y + 0.5);
 
-    const vec3 animPos = furRebone(vWorld, restPos, vBone);
+    // The same blend the vertex stage applied, at this fragment's own rest
+    // point, so a card deforms with the skin under it instead of as a rigid
+    // blade hinged at its root.
+    int bi[MICRO_MAX_INFLUENCES];
+    float bw[MICRO_MAX_INFLUENCES];
+    int dom;
+    int nb = furBoneWeights(vWorld, restPos, bi, bw, dom);
+    if (nb == 0 && vBone >= 0) {
+        bi[0] = vBone; bw[0] = 1.0; nb = 1;
+    }
+    const vec3 animPos = furBlendRebone(vWorld, restPos, bi, bw, nb);
     const vec3 pWorld = furToWorld(vWorld, animPos);
 
     // The depth reference: the nearest opaque surface, in ray terms. The
@@ -121,7 +131,7 @@ void main()
     // is a no-op when the feature is off or the material is untextured, so
     // the bit-7-off frame stays bit-exact.
     const vec3 restBumped = detailNormal(restN, restPos, mId);
-    const vec3 nAnim = furDirRebone(vWorld, restBumped, vBone);
+    const vec3 nAnim = furBlendDirRebone(vWorld, restBumped, bi, bw, nb);
     vec3 nWorld = normalize(furDirToWorld(vWorld, nAnim));
     if (dot(nWorld, rd) > 0.0)
         nWorld = -nWorld; // a card is two-sided

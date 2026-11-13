@@ -91,6 +91,14 @@ int App::recordInteractiveFrame(FrameSync& fr, const FrameInputs& fx)
     updateBuriedProbe();
 
     // splat raster or ray-march -> HDR + G-buffer --------------------
+    // The STUDIO is its own path: no world backend, no water, no
+    // photorealism. It shares one implementation with the headless path
+    // (frame/record_studio.cpp), so the window shows exactly what a --shot
+    // of the studio renders.
+    if (m_studio.active) {
+        recordStudioFrame(fr.cmd, push);
+        profMark(3); // no photorealism in the studio
+    } else {
     if (m_renderMode == RenderMode::Splats) {
         vf::transitionImage(fr.cmd, m_hdr.img, VK_IMAGE_ASPECT_COLOR_BIT,
                             VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_GENERAL,
@@ -151,8 +159,17 @@ int App::recordInteractiveFrame(FrameSync& fr, const FrameInputs& fx)
         mb.srcStageMask = VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT;
         mb.srcAccessMask = VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT;
     }
-    mb.dstStageMask = VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT;
-    mb.dstAccessMask = VK_ACCESS_2_SHADER_STORAGE_READ_BIT;
+    // The micro pass is no longer compute-only: its raster half (the mesh
+    // worlds) writes hdr/gpos/gnorm from the FRAGMENT stage, so the barrier
+    // must order those writes against the world's colour-attachment stores
+    // too. With COMPUTE alone the mesh fragment could land its store while the
+    // world pass's store was still in flight - a write-after-write hazard on
+    // the very pixels the mesh covers, which read as run-to-run flicker on the
+    // object's outline.
+    mb.dstStageMask = VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT |
+                      VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT;
+    mb.dstAccessMask = VK_ACCESS_2_SHADER_STORAGE_READ_BIT |
+                       VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT;
     VkDependencyInfo di { VK_STRUCTURE_TYPE_DEPENDENCY_INFO };
     di.memoryBarrierCount = 1;
     di.pMemoryBarriers = &mb;
@@ -166,11 +183,15 @@ int App::recordInteractiveFrame(FrameSync& fr, const FrameInputs& fx)
     // it, with no depth attachment and no change to either pass. Runs for both
     // render modes, after the barrier above has made the images readable.
     if (!m_microSvoPass.empty()) {
-        m_microSvoPass.record(fr.cmd, push);
+        m_microSvoPass.record(fr.cmd, push, uint32_t(m_frameIdx % kMaxFramesInFlight));
+        // Src must include FRAGMENT: the mesh worlds' raster fragments write
+        // the G-buffer, and the next stage (the fur draw, then post) reads it.
         VkMemoryBarrier2 mb2 { VK_STRUCTURE_TYPE_MEMORY_BARRIER_2 };
-        mb2.srcStageMask = VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT;
+        mb2.srcStageMask = VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT |
+                           VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT;
         mb2.srcAccessMask = VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT;
-        mb2.dstStageMask = VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT;
+        mb2.dstStageMask = VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT |
+                           VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT;
         mb2.dstAccessMask = VK_ACCESS_2_SHADER_STORAGE_READ_BIT;
         VkDependencyInfo di2 { VK_STRUCTURE_TYPE_DEPENDENCY_INFO };
         di2.memoryBarrierCount = 1;
@@ -184,8 +205,11 @@ int App::recordInteractiveFrame(FrameSync& fr, const FrameInputs& fx)
     // no object carries fur.
     if (!m_furPass.empty()) {
         m_furPass.record(fr.cmd, push);
+        // The cards are a RASTER draw and the composite is a dispatch, so both
+        // stages can have pending stores here.
         VkMemoryBarrier2 mb3 { VK_STRUCTURE_TYPE_MEMORY_BARRIER_2 };
-        mb3.srcStageMask = VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT;
+        mb3.srcStageMask = VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT |
+                           VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT;
         mb3.srcAccessMask = VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT;
         mb3.dstStageMask = VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT;
         mb3.dstAccessMask = VK_ACCESS_2_SHADER_STORAGE_READ_BIT;
@@ -207,6 +231,7 @@ int App::recordInteractiveFrame(FrameSync& fr, const FrameInputs& fx)
     // see; TAA resolves the effected image afterwards
     recordPhotorealism(fr.cmd, push);
     profMark(3);
+    }
 
     // TAA resolve (interactive only, not for headless tests) ----------
     VkImage taaSrc = m_offscreen.img;
@@ -215,7 +240,7 @@ int App::recordInteractiveFrame(FrameSync& fr, const FrameInputs& fx)
         VkPipelineStageFlags2(VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT);
     VkAccessFlags2 taaSrcAccess =
         VkAccessFlags2(VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT);
-    if (m_taaEnabled && !headlessRun) {
+    if (m_taaEnabled && !headlessRun && !m_studio.active) {
         // current -> SHADER_READ for TAA
         vf::transitionImage(fr.cmd, m_offscreen.img, VK_IMAGE_ASPECT_COLOR_BIT,
                             taaSrcLayout, VK_IMAGE_LAYOUT_GENERAL,
@@ -307,6 +332,7 @@ int App::recordInteractiveFrame(FrameSync& fr, const FrameInputs& fx)
     ImGui_ImplGlfw_NewFrame();
     ImGui::NewFrame();
     drawHud();
+    drawTimeline();
     ImGui::Render();
     if (getenv("VF_IMGUI_DEBUG") && m_frameIdx == 5) {
         ImDrawData* dd = ImGui::GetDrawData();

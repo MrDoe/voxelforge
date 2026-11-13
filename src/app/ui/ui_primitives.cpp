@@ -419,6 +419,20 @@ static void iconBubble(ImDrawList* dl, ImVec2 c, float s, ImU32 col)
     dl->AddConvexPolyFilled(tri, 3, col);
 }
 
+static void iconPlay(ImDrawList* dl, ImVec2 c, float s, ImU32 col)
+{
+    // A playback glyph: the rounded frame says "a player", the triangle
+    // "playing". The rail had no Animate case at all, so the 7th section
+    // drew an empty slot.
+    const float w = 0.34f * s, h = 0.30f * s;
+    dl->AddRect(ImVec2(c.x - w, c.y - h), ImVec2(c.x + w, c.y + h), col,
+                0.09f * s, 0, 1.5f);
+    const ImVec2 tri[3] = { ImVec2(c.x - 0.09f * s, c.y - 0.15f * s),
+                            ImVec2(c.x - 0.09f * s, c.y + 0.15f * s),
+                            ImVec2(c.x + 0.17f * s, c.y) };
+    dl->AddConvexPolyFilled(tri, 3, col);
+}
+
 void drawPanelIcon(Panel panel, const ImVec2& center, float size, ImU32 color)
 {
     ImDrawList* dl = ImGui::GetWindowDrawList();
@@ -429,6 +443,7 @@ void drawPanelIcon(Panel panel, const ImVec2& center, float size, ImU32 color)
     case Panel::Textures:  iconSwatch(dl, center, size, color); break;
     case Panel::Mesh:      iconCube(dl, center, size, color); break;
     case Panel::AI:        iconBubble(dl, center, size, color); break;
+    case Panel::Animate:   iconPlay(dl, center, size, color); break;
     case Panel::kCount:    break;
     }
 }

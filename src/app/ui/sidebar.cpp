@@ -120,6 +120,11 @@ void App::drawSidebar()
         ImGui::Dummy(ImVec2(0.0f, 4.0f));
         for (int i = 0; i < kPanelCount; ++i) {
             const Panel p = Panel(i);
+            // The studio is a single-purpose surface: only the Animation
+            // section is reachable, so the other rail buttons are hidden
+            // (and their Ctrl+N shortcuts are ignored below).
+            if (m_studio.active && p != Panel::Animate)
+                continue;
             const bool active = (m_panel == p);
             const float cw = ImGui::GetContentRegionAvail().x;
             const ImVec2 pos = ImGui::GetCursorScreenPos();
@@ -183,6 +188,7 @@ void App::drawSidebar()
                 case Panel::Textures:  drawPanelTextures(); break;
                 case Panel::Mesh:      drawPanelMesh(); break;
                 case Panel::AI:        drawPanelAI(); break;
+                case Panel::Animate:   drawPanelAnimate(); break;
                 case Panel::kCount:    break;
                 }
             }
@@ -295,7 +301,7 @@ void App::drawSidebarFooter()
         ImGui::EndTable();
     }
     if (ImGui::IsItemHovered())
-        ImGui::SetTooltip("Ctrl+B collapses the sidebar; Ctrl+1..6 switch section\n"
+        ImGui::SetTooltip("Ctrl+B collapses the sidebar; Ctrl+1..7 switch section\n"
                           "Tab switches View/Edit mode; in Edit mode A/D/S/C/M pick a mode\n"
                           "The hotkey bar at the bottom lists the keys that "
                           "apply right now");

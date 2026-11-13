@@ -104,6 +104,8 @@ layout(push_constant) uniform PC {
     vec4 misc; // x = renderFlags, y = animTime, z = tonemapLook, w = exposure
 } pc;
 
+#include "micro_weights.glsl"
+
 const uint kEmpty = 0xFFFFFFFFu;
 const uint kSolid = 0xFFFFFFFEu;
 const int BRICK_N = 8;
@@ -253,6 +255,70 @@ vec3 microDirUnanimate(int w, vec3 d)
     return transpose(mat3(wt.uWorlds[w].arot0.xyz, wt.uWorlds[w].arot1.xyz,
                            wt.uWorlds[w].arot2.xyz)) * d;
 }
+
+// THE SKINNING WEIGHTS of a REST point, by the kernel in micro_weights.glsl.
+//
+// Two functions, two questions, and they are NOT interchangeable:
+//   microBoneWeights  - a REST point: "how much does each bone move this?"
+//                       (the body's and the coat's deformation)
+//   microBoneAt       - a POSED point: "whose rest surface is this?"
+//                       (the traced path's inverse map, and the shading)
+// The mesh path asks the first about its REST vertices and never asks the
+// second: its surface is the mesh, so there is no inverse map to resolve.
+//
+// Returns the influence count and fills the arrays ascending by bone index;
+// `dominant` receives the bone with the largest weight (-1 when no bone
+// reaches, in which case bone 0 is the nearest and carries the point
+// rigidly). Keep this in step with MicroRig::boneInfluences - the CPU poses
+// the same vertices for the voxelizer.
+int microBoneWeights(int w, vec3 p, out int boneIdx[MICRO_MAX_INFLUENCES],
+                     out float wgt[MICRO_MAX_INFLUENCES], out int dominant)
+{
+    dominant = -1;
+    const int count = int(wt.uWorlds[w].bones.x);
+    float best = -1.0;
+    float sum = 0.0;
+    int nearest = 0;
+    float nearestD = 1e30;
+    for (int i = 0; i < MICRO_MAX_INFLUENCES; ++i) {
+        wgt[i] = 0.0;
+        boneIdx[i] = -1;
+    }
+    for (int i = 0; i < count && i < MICRO_MAX_INFLUENCES; ++i) {
+        const MicroBone mb = wt.uWorlds[w].bone[i];
+        const float wi = microWeightOne(p, mb.a.xyz, mb.b.xyz, mb.a.w);
+        boneIdx[i] = i;
+        wgt[i] = wi;
+        sum += wi;
+        if (wi > best) {
+            best = wi;
+            dominant = i;
+        }
+        // The rigid fallback needs the nearest bone even when nothing reaches.
+        const vec3 ab = mb.b.xyz - mb.a.xyz;
+        const float t =
+            clamp(dot(p - mb.a.xyz, ab) / max(dot(ab, ab), 1e-12), 0.0, 1.0);
+        const float d = length(p - (mb.a.xyz + ab * t));
+        if (d < nearestD) {
+            nearestD = d;
+            nearest = i;
+        }
+    }
+    if (!(sum > 0.0)) {
+        if (count <= 0)
+            return 0;
+        boneIdx[0] = nearest;
+        wgt[0] = 1.0;
+        dominant = nearest;
+        return 1;
+    }
+    const int n = microNormalizeWeights(boneIdx, wgt);
+    if (dominant < 0 && n > 0)
+        dominant = boneIdx[0];
+    return n;
+}
+
+// The rigid transforms of the same rule, for the traced path's inverse map.
 
 // The SKELETON. A bone is a SEGMENT in the object's own REST frame (the rig is
 // DERIVED from the object's voxels, so a newly imported model has one too),

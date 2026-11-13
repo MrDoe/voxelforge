@@ -7,13 +7,18 @@
 #include "voxel/world.hpp" // BRICK_N, for the dirty-brick set
 
 #include <algorithm>
+#include <array>
 #include <chrono>
 #include <cmath>
 #include <cstdio>
 #include <cstring>
 #include <fstream>
 #include <limits>
+#include <map>
 #include <sstream>
+#include <tuple>
+
+#include <spdlog/spdlog.h>
 
 namespace vf::voxel {
 namespace {
@@ -84,27 +89,312 @@ size_t nearestRestSolid(const MicroField& rest, glm::vec3 rp)
 // a triangle whose posed position differs by one ulp from the full path's
 // would leave a one-cell seam in the parity delta that never heals. So both
 // paths call this.
-void poseTri(const MicroMesh& mesh, size_t t,
+// The weight kernel's blend, spelled once. `rig` empty means the mesh has no
+// skeleton: fall back to the `.skin`'s rigid bone so a side-car still poses.
+glm::vec3 skinPoint(const MicroMesh& mesh, const MicroRig& rig, size_t vi,
+                    const std::vector<glm::mat3>& boneRot,
+                    const std::vector<glm::vec3>& boneXform)
+{
+    const glm::vec3 p = mesh.rest[vi];
+    auto apply = [&](int b) {
+        if (b < 0 || size_t(b) >= boneRot.size() || size_t(b) >= boneXform.size())
+            return p;
+        return boneRot[size_t(b)] * p + boneXform[size_t(b)];
+    };
+    if (rig.bones.empty()) {
+        const int32_t b = vi < mesh.bone.size() ? mesh.bone[vi] : -1;
+        return apply(int(b));
+    }
+    const BoneInfluences inf = rig.boneInfluences(p);
+    glm::vec3 acc(0.f);
+    for (int i = 0; i < inf.count; ++i)
+        acc += apply(inf.bone[i]) * inf.weight[i];
+    return inf.count > 0 ? acc : p;
+}
+
+void poseTri(const MicroMesh& mesh, const MicroRig& rig, size_t t,
              const std::vector<glm::mat3>& boneRot,
              const std::vector<glm::vec3>& boneXform, MeshTri& out)
 {
     out = mesh.tris[t];
-    for (int k = 0; k < 3; ++k) {
-        const size_t vi = t * 3 + size_t(k);
-        const int32_t b = vi < mesh.bone.size() ? mesh.bone[vi] : -1;
-        if (b >= 0 && size_t(b) < boneRot.size() &&
-            size_t(b) < boneXform.size())
-            out.v[k] = boneRot[size_t(b)] * mesh.rest[vi] +
-                       boneXform[size_t(b)];
-        else
-            out.v[k] = mesh.rest[vi];
-    }
+    for (int k = 0; k < 3; ++k)
+        out.v[k] = skinPoint(mesh, rig, t * 3 + size_t(k), boneRot, boneXform);
 }
 
 } // namespace
 
+glm::vec3 upAxisToY(glm::vec3 p, UpAxis up)
+{
+    // -90 degrees about X. A rotation, not a swap: |J| = +1, so a triangle's
+    // winding (and therefore its normal) survives and nothing needs flipping.
+    if (up == UpAxis::Z)
+        return { p.x, p.z, -p.y };
+    return p;
+}
+
+// Fill the packed `w` lane from what the loader knows: the `.skin` bone (or
+// -1 for an unskinned mesh) and "material not resolved yet" (255). The
+// appearance pass overwrites this, so the load-time value is only a fallback -
+// but it must EXIST before the buffer is uploaded, otherwise the vertex record
+// has no 32-bit lane and a mesh with no rig loses the `.skin` bone entirely.
+static void fillMeshVertexWords(MicroMesh& mesh)
+{
+    mesh.word.resize(mesh.rest.size());
+    for (size_t vi = 0; vi < mesh.rest.size(); ++vi)
+        mesh.word[vi] =
+            meshVertexWord(vi < mesh.bone.size() ? mesh.bone[vi] : -1, 255, 255);
+}
+
+void assignMicroMeshAppearance(const MicroField& field, MicroMesh& mesh,
+                               MeshAppearanceStats* stats)
+{
+    MeshAppearanceStats st;
+    st.vertices = mesh.rest.size();
+    if (field.size3() == 0 || mesh.rest.empty() || mesh.tris.size() * 3 != mesh.rest.size()) {
+        // Leave the load-time lane (skin bone + "resolve in the field"), so a
+        // caller that cannot sample appearance still uploads a valid record.
+        fillMeshVertexWords(mesh);
+        if (stats)
+            *stats = st;
+        return;
+    }
+
+    mesh.mat.assign(mesh.rest.size(), 255);
+    mesh.ao.assign(mesh.rest.size(), 255);
+    mesh.word.assign(mesh.rest.size(), 0);
+
+    // The shader's microAO rings, in METRES and in the same three radii / four
+    // directions (micro_shade.glsl): a per-vertex AO then differs from a
+    // shaded one only in WHERE it is evaluated, not in how it is computed.
+    const float rad[3] = { 0.006f, 0.018f, 0.050f };
+
+    for (size_t vi = 0; vi < mesh.rest.size(); ++vi) {
+        const glm::vec3 p = mesh.rest[vi];
+        // The STL is NON-INDEXED: every triangle owns its three vertices, so a
+        // vertex's normal is its triangle's face normal. There is nothing to
+        // average, and an averaged normal would need an adjacency build.
+        const MeshTri& t = mesh.tris[vi / 3];
+        glm::vec3 n = glm::cross(t.v[1] - t.v[0], t.v[2] - t.v[0]);
+        const float nl = glm::length(n);
+        n = nl > 1e-12f ? n / nl : glm::vec3(0.f, 1.f, 0.f);
+
+        // A miss keeps byte 1 at 255, i.e. "look it up in the field": the pass
+        // is additive, so a mesh whose field disagrees in one place loses
+        // nothing that worked before.
+        const size_t k = nearestRestSolid(field, p);
+        uint8_t mat = 255;
+        if (k != SIZE_MAX) {
+            mat = field.mat[k];
+            ++st.assigned;
+        } else {
+            ++st.missed;
+        }
+
+        const glm::vec3 up = std::fabs(n.y) < 0.99f ? glm::vec3(0.f, 1.f, 0.f)
+                                                     : glm::vec3(1.f, 0.f, 0.f);
+        const glm::vec3 t1 = glm::normalize(glm::cross(n, up));
+        const glm::vec3 t2 = glm::cross(n, t1);
+        float occ = 0.f, wsum = 0.f;
+        for (int ring = 0; ring < 3; ++ring) {
+            const float r = rad[ring];
+            for (int a = 0; a < 4; ++a) {
+                const float ang = float(a) * 1.5708f + float(ring) * 0.785f;
+                const glm::vec3 dir =
+                    glm::normalize(n * 0.85f +
+                                   (std::cos(ang) * t1 + std::sin(ang) * t2) * 0.7f);
+                float fall = glm::clamp(1.f - field.sampleSdf(p + dir * r) / r,
+                                        0.f, 1.f);
+                fall = fall * fall * (3.f - 2.f * fall);
+                const float w = 1.f / (1.f + fall * fall * 4.f);
+                occ += w * fall;
+                wsum += w;
+            }
+        }
+        const float aoF =
+            glm::clamp(1.f - 0.85f * occ / std::max(wsum, 1e-4f), 0.f, 1.f);
+        const uint8_t ao = uint8_t(aoF * 255.f + 0.5f);
+
+        mesh.mat[vi] = mat;
+        mesh.ao[vi] = ao;
+        mesh.word[vi] = meshVertexWord(
+            vi < mesh.bone.size() ? mesh.bone[vi] : -1, mat, ao);
+    }
+    if (stats)
+        *stats = st;
+}
+
+bool orientMeshWinding(std::vector<MeshTri>& tris, MeshWindingStats* stats)
+{
+    MeshWindingStats st;
+    st.triangles = tris.size();
+    auto done = [&](bool ok) {
+        if (stats)
+            *stats = st;
+        return ok;
+    };
+    if (tris.size() < 4)
+        return done(false); // no closed surface, nothing to orient
+
+    // ---- weld ----------------------------------------------------------
+    // An STL carries no shared vertices, so the edge graph has to be rebuilt
+    // from POSITIONS. 0.01 mm: 1/800 of the 8 mm micro lattice, i.e. far below
+    // any real feature and far above float32 round-off at metre coordinates,
+    // so it merges exactly the corners that are the same point.
+    constexpr double kWeld = 1e-5;
+    std::map<std::tuple<int, int, int>, int32_t> weld;
+    std::vector<std::array<int32_t, 3>> vid(tris.size());
+    for (size_t t = 0; t < tris.size(); ++t) {
+        for (int k = 0; k < 3; ++k) {
+            const glm::vec3& p = tris[t].v[k];
+            const auto key = std::make_tuple(
+                int(std::llround(double(p.x) / kWeld)),
+                int(std::llround(double(p.y) / kWeld)),
+                int(std::llround(double(p.z) / kWeld)));
+            auto it = weld.find(key);
+            if (it == weld.end())
+                it = weld.emplace(key, int32_t(weld.size())).first;
+            vid[t][k] = it->second;
+        }
+    }
+
+    // ---- edge census ----------------------------------------------------
+    struct Use {
+        int32_t tri;
+        bool forward; // traversed the edge from its lower welded id upward
+    };
+    std::map<std::pair<int32_t, int32_t>, std::vector<Use>> edges;
+    size_t degenerate = 0;
+    for (size_t t = 0; t < tris.size(); ++t) {
+        const auto& v = vid[t];
+        if (v[0] == v[1] || v[1] == v[2] || v[2] == v[0]) {
+            ++degenerate;
+            continue;
+        }
+        for (int k = 0; k < 3; ++k) {
+            const int32_t a = v[k], b = v[(k + 1) % 3];
+            edges[{std::min(a, b), std::max(a, b)}].push_back(
+                { int32_t(t), a < b });
+        }
+    }
+    st.closed = degenerate == 0;
+    for (const auto& e : edges) {
+        const auto& uses = e.second;
+        if (uses.size() == 2 && uses[0].forward == uses[1].forward)
+            ++st.sameDirectionEdges;
+        if (uses.size() > 2)
+            ++st.nonManifoldEdges;
+        if (uses.size() != 2)
+            st.closed = false;
+    }
+
+    // ---- BFS: a neighbour must agree about its flip state ---------------
+    // `differs` is true when the two triangles traverse the shared edge the
+    // same way, i.e. exactly one of them is inverted relative to the other.
+    std::vector<std::vector<std::pair<int32_t, bool>>> adj(tris.size());
+    for (const auto& e : edges) {
+        const auto& uses = e.second;
+        if (uses.size() != 2)
+            continue; // a non-manifold junction is a barrier, not a seam
+        const bool differs = uses[0].forward == uses[1].forward;
+        adj[size_t(uses[0].tri)].push_back({ uses[1].tri, differs });
+        adj[size_t(uses[1].tri)].push_back({ uses[0].tri, differs });
+    }
+    std::vector<uint8_t> seen(tris.size(), 0), flip(tris.size(), 0);
+    size_t conflicts = 0;
+    for (size_t s = 0; s < tris.size(); ++s) {
+        if (seen[s])
+            continue;
+        ++st.components;
+        seen[s] = 1;
+        std::vector<int32_t> stack { int32_t(s) };
+        while (!stack.empty()) {
+            const int32_t t = stack.back();
+            stack.pop_back();
+            for (const auto& nb : adj[size_t(t)]) {
+                const uint8_t want = uint8_t(flip[size_t(t)] ^
+                                             (nb.second ? 1 : 0));
+                if (!seen[size_t(nb.first)]) {
+                    seen[size_t(nb.first)] = 1;
+                    flip[size_t(nb.first)] = want;
+                    stack.push_back(nb.first);
+                } else if (flip[size_t(nb.first)] != want) {
+                    ++conflicts;
+                }
+            }
+        }
+    }
+    st.conflicts = conflicts / 2; // every contradiction is seen from both ends
+    if (st.conflicts > 0) {
+        // A non-orientable surface cannot be repaired by flipping, and a
+        // best-effort flip would only move the defect. Leave the data alone
+        // and let the caller decide (the renderer keeps culling off).
+        st.consistent = false;
+        return done(false);
+    }
+
+    size_t flipped = 0;
+    for (size_t t = 0; t < tris.size(); ++t) {
+        if (!flip[t])
+            continue;
+        std::swap(tris[t].v[1], tris[t].v[2]);
+        std::swap(vid[t][1], vid[t][2]);
+        ++flipped;
+    }
+
+    // ---- OUTWARD -------------------------------------------------------
+    // The BFS fixes consistency but not which side is out: a shell can come
+    // back uniformly inside-out. The signed volume of a closed surface says
+    // which it is, and it is translation-invariant, so normalising the min
+    // corner beforehand cannot change the verdict. This also matters beyond
+    // culling: `assignMicroMeshAppearance` takes each triangle's face normal
+    // as the direction to sample AO in, so an inward normal sampled the
+    // interior and darkened the coat.
+    double vol = 0.0;
+    for (const MeshTri& t : tris)
+        vol += double(glm::dot(t.v[0], glm::cross(t.v[1], t.v[2]))) / 6.0;
+    if (vol < 0.0) {
+        for (MeshTri& t : tris)
+            std::swap(t.v[1], t.v[2]);
+        for (auto& v : vid)
+            std::swap(v[1], v[2]);
+        // Count from the FILE's baseline: a global flip rewinds the ones the
+        // BFS left alone and spares the ones it had already reversed.
+        flipped = tris.size() - flipped;
+    }
+
+    // ---- recount: the property the renderer actually depends on ---------
+    std::map<std::pair<int32_t, int32_t>, int> dirSum; // +1 per low->high
+    for (size_t t = 0; t < tris.size(); ++t) {
+        const auto& v = vid[t];
+        if (v[0] == v[1] || v[1] == v[2] || v[2] == v[0])
+            continue;
+        for (int k = 0; k < 3; ++k) {
+            const int32_t a = v[k], b = v[(k + 1) % 3];
+            dirSum[{ std::min(a, b), std::max(a, b) }] += a < b ? 1 : -1;
+        }
+    }
+    size_t sameAfter = 0;
+    for (const auto& e : dirSum)
+        if (e.second == 2 || e.second == -2)
+            ++sameAfter;
+
+    st.flipped = flipped;
+    st.sameDirectionEdgesAfter = sameAfter;
+    st.consistent = sameAfter == 0;
+    st.outward = vol >= 0.0; // the FILE's own orientation, before any repair
+
+    spdlog::info("micro mesh: winding {} of {} triangles ({:.1f}%), "
+                 "{} same-direction edge(s) -> {}, {} component(s), "
+                 "{} non-manifold, closed {}",
+                 st.flipped, st.triangles,
+                 100.0 * double(st.flipped) / double(std::max<size_t>(1, st.triangles)),
+                 st.sameDirectionEdges, st.sameDirectionEdgesAfter,
+                 st.components, st.nonManifoldEdges, st.closed);
+    return done(st.consistent);
+}
+
 bool loadMicroMesh(const std::string& meshPath, const std::string& skinPath,
-                   MicroMesh& out, std::string* err)
+                   MicroMesh& out, std::string* err, UpAxis up)
 {
     auto fail = [&](const std::string& msg) {
         if (err)
@@ -118,6 +408,35 @@ bool loadMicroMesh(const std::string& meshPath, const std::string& skinPath,
         return fail("micro mesh: " + readErr);
     if (out.tris.empty())
         return fail("micro mesh: no triangles in " + meshPath);
+
+    // AXIS. Convert the FILE's frame into the object frame BEFORE the min
+    // corner is measured, so the shift and every later consumer (the capsule
+    // skin, the rig's Y-up segments, the fur roots) work in one frame. A
+    // rotation preserves the winding, so the normals need no correction.
+    if (up == UpAxis::Z)
+        for (MeshTri& t : out.tris)
+            for (int k = 0; k < 3; ++k)
+                t.v[k] = upAxisToY(t.v[k], up);
+
+    // WINDING. Winding is author data and it is routinely wrong: the shipped
+    // alpaca is a closed surface whose two neighbours traverse 26.1 % of its
+    // shared edges the SAME way, so a quarter of the body faces inward. Two
+    // consumers care about facing and both were wrong until this ran: the
+    // raster pass's backface culling (which is the fix for the double-covered
+    // pixels that flickered, since two fragments storing the G-buffer at a
+    // near-tie are two racing writers) and `assignMicroMeshAppearance`, which
+    // takes the face normal as the direction to sample AO in - an inward
+    // normal sampled the body's interior and darkened the coat.
+    // Runs BEFORE `rest` is built, so the vertex list, the triangles and the
+    // skin's vertex indices keep one order.
+    {
+        MeshWindingStats ws;
+        if (!orientMeshWinding(out.tris, &ws))
+            spdlog::warn("micro mesh: '{}' cannot be oriented consistently "
+                         "({} contradiction(s), closed {}); the authored "
+                         "winding is kept and culling may drop faces",
+                         meshPath, ws.conflicts, ws.closed);
+    }
 
     // The STL reader emits one triangle per facet and no shared vertices, so
     // the vertex list IS the triangle corner list. Building it once keeps the
@@ -152,6 +471,7 @@ bool loadMicroMesh(const std::string& meshPath, const std::string& skinPath,
     // A missing skin is legal: a rigid object is a mesh with no bones.
     std::ifstream in(skinPath);
     if (!in) {
+        fillMeshVertexWords(out);
         out.loaded = true;
         return true;
     }
@@ -209,17 +529,19 @@ bool loadMicroMesh(const std::string& meshPath, const std::string& skinPath,
     }
     if (declaredBones > 64)
         return fail("micro skin: implausible bone count");
+    fillMeshVertexWords(out);
     out.loaded = true;
     return true;
 }
 
-void poseMicroMesh(const MicroMesh& mesh, const std::vector<glm::mat3>& boneRot,
+void poseMicroMesh(const MicroMesh& mesh, const MicroRig& rig,
+                   const std::vector<glm::mat3>& boneRot,
                    const std::vector<glm::vec3>& boneXform,
                    std::vector<MeshTri>& posed)
 {
     posed.resize(mesh.tris.size());
     for (size_t t = 0; t < mesh.tris.size(); ++t)
-        poseTri(mesh, t, boneRot, boneXform, posed[t]);
+        poseTri(mesh, rig, t, boneRot, boneXform, posed[t]);
 }
 
 bool voxelizeMicroMesh(const std::vector<MeshTri>& posed, glm::ivec3 dim,
@@ -750,23 +1072,31 @@ bool MicroDeformer::init(const MicroMesh& m, const MicroRig& r,
     stamp = 0;
 
     const size_t nb = rig.bones.size();
+    // WHICH TRIANGLES A MOVED BONE TOUCHES. The skin blends, so a triangle is
+    // affected by EVERY bone any of its three corners takes weight from - the
+    // `.skin`'s dominant bone alone would miss the triangles whose corner is
+    // only 30% this bone, and a moved bone would leave them un-posed (a neck
+    // that swings while the shoulder beside it keeps the old pose).
     boneTris.assign(nb, {});
     for (size_t t = 0; t < mesh.tris.size(); ++t) {
-        int32_t uniq[3];
+        int32_t uniq[kMicroMaxInfluences];
         int uc = 0;
         for (int k = 0; k < 3; ++k) {
             const size_t vi = t * 3 + size_t(k);
-            const int32_t b = vi < mesh.bone.size() ? mesh.bone[vi] : -1;
-            if (b < 0 || size_t(b) >= nb)
-                continue;
-            bool dup = false;
-            for (int j = 0; j < uc; ++j)
-                if (uniq[j] == b)
-                    dup = true;
-            if (dup)
-                continue;
-            uniq[uc++] = b;
-            boneTris[size_t(b)].push_back(uint32_t(t));
+            const BoneInfluences inf = rig.boneInfluences(mesh.rest[vi]);
+            for (int j = 0; j < inf.count; ++j) {
+                const int32_t b = int32_t(inf.bone[j]);
+                if (b < 0 || size_t(b) >= nb)
+                    continue;
+                bool dup = false;
+                for (int q = 0; q < uc; ++q)
+                    if (uniq[q] == b)
+                        dup = true;
+                if (dup)
+                    continue;
+                uniq[uc++] = b;
+                boneTris[size_t(b)].push_back(uint32_t(t));
+            }
         }
     }
     lastRot.assign(nb, glm::mat3(1.f));
@@ -852,7 +1182,7 @@ bool MicroDeformer::updatePose(const std::vector<glm::mat3>& boneRot,
             }
         }
         for (uint32_t t : movedList)
-            poseTri(mesh, t, boneRot, boneXform, posed[t]);
+            poseTri(mesh, rig, t, boneRot, boneXform, posed[t]);
     }
     st.movedTris = movedList.size();
     st.poseMs = defMsSince(tPose);

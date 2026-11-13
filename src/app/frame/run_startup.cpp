@@ -300,14 +300,40 @@ void App::setupCameraAndShots()
     m_camera.yaw = atan2(dir.z, dir.x);
     m_camera.pitch = asin(dir.y);
 
+    // Studio mode: auto-frame the SELECTED micro object - the layer named by
+    // --anim-layer, not micro world 0 (which is the vase in the shipped
+    // manifest: the editor framed and displayed the vases). A typo'd
+    // --anim-layer loads NOTHING, and indexing [0] here used to crash the
+    // app before the first frame; fall back to the reference view instead.
+    const vf::voxel::MicroOccluder* studioTargetOc =
+        m_studio.active ? studioOccluder() : nullptr;
+    if (m_studio.active && !args.camSet && studioTargetOc) {
+        const auto& oc = *studioTargetOc;
+        glm::vec3 center = 0.5f * (oc.aabbMin + oc.aabbMax);
+        glm::vec3 ext = oc.aabbMax - oc.aabbMin;
+        float radius = 0.5f * glm::length(ext);
+        if (radius < 0.1f) radius = 0.5f;
+        glm::vec3 camOff = glm::normalize(glm::vec3(1.f, 0.4f, 1.f)) * (radius * 3.0f);
+        m_camera.pos = center + camOff;
+        glm::vec3 d = glm::normalize(center - m_camera.pos);
+        m_camera.yaw = atan2(d.z, d.x);
+        m_camera.pitch = asin(d.y);
+    }
+
     // --shot holds one view (its camera comes from --cam); --shotlist holds
     // any number. Both share the headless capture loop below.
     m_shots = args.shots;
     if (m_shots.empty() && !args.shot.empty()) {
         ShotSpec s;
         s.path = args.shot;
-        s.camx = args.camx; s.camy = args.camy; s.camz = args.camz;
-        s.tx = args.tx;     s.ty = args.ty;     s.tz = args.tz;
+        if (m_studio.active && !args.camSet && studioTargetOc) {
+            s.camx = m_camera.pos.x; s.camy = m_camera.pos.y; s.camz = m_camera.pos.z;
+            glm::vec3 center = 0.5f * (studioTargetOc->aabbMin + studioTargetOc->aabbMax);
+            s.tx = center.x; s.ty = center.y; s.tz = center.z;
+        } else {
+            s.camx = args.camx; s.camy = args.camy; s.camz = args.camz;
+            s.tx = args.tx;     s.ty = args.ty;     s.tz = args.tz;
+        }
         m_shots.push_back(s);
     }
     if (!m_shots.empty()) {

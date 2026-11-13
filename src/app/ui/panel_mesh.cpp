@@ -134,6 +134,8 @@ void App::drawPanelMesh()
                      target->pos[2]);
             keyValue("Rotation", "yaw %.1f · pitch %.1f · roll %.1f", target->rotDeg,
                      target->rotX, target->rotZ);
+            if (!target->meshSource.empty())
+                keyValue("Mesh source", "%s", target->meshSource.c_str());
             ImGui::TextColored(kAccent, "Import replaces records, keeps this pose.");
             groupEnd();
         }

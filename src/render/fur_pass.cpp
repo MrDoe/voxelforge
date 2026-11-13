@@ -861,13 +861,14 @@ void FurPass::record(VkCommandBuffer cmd, const RaymarchPush& push)
         vmaFlushAllocation(m_ctx->allocator(), m_table.alloc, 0, VK_WHOLE_SIZE);
 
     // The FRAGMENT stage now reads the G-buffer (the depth reference), which
-    // the micro overlay wrote with a COMPUTE dispatch. The caller's barrier
-    // after that dispatch only makes the write visible to COMPUTE, so without
-    // this the depth test races the overlay - invisible on a slow frame,
-    // wrong on a fast one. Self-contained so the frame files stay agnostic.
+    // the micro overlay wrote - some of it with a COMPUTE dispatch (the traced
+    // worlds) and some from the FRAGMENT stage (the raster mesh worlds). Both
+    // must be sources here: naming COMPUTE alone lets the mesh's stores land
+    // after this barrier, and the depth test then races the body it covers.
     {
         VkMemoryBarrier2 mb { VK_STRUCTURE_TYPE_MEMORY_BARRIER_2 };
-        mb.srcStageMask = VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT;
+        mb.srcStageMask = VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT |
+                          VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT;
         mb.srcAccessMask = VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT;
         mb.dstStageMask = VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT;
         mb.dstAccessMask = VK_ACCESS_2_SHADER_STORAGE_READ_BIT;

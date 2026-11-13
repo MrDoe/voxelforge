@@ -31,7 +31,15 @@ void App::syncWorldLayerList()
 }
 
 void App::persistWorldLayers()
-{    std::vector<vf::voxel::worldfile::WorldLayer> out;
+{
+    // The studio loads NO world layers (it renders the micro object on a
+    // flat backdrop), so its m_worldLayers is empty. Persisting that would
+    // rewrite the shipped manifest with zero layers and destroy the scene -
+    // the exact failure mode AGENTS.md warns about. The studio never owns
+    // world.json; every manifest edit belongs to the main app.
+    if (m_studio.active)
+        return;
+    std::vector<vf::voxel::worldfile::WorldLayer> out;
     out.reserve(m_worldLayers.size());
     for (const auto& l : m_worldLayers)
         if (l.listed &&

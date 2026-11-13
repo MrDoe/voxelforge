@@ -74,6 +74,16 @@ Consequences worth internalizing:
 |---|---|
 | `render/svo_pass.{hpp,cpp}` | Compute pipeline around `svo_raymarch.comp`; owns the five SSBOs, descriptor set, selection/hover UBO; defines `RaymarchPush` (128 B). |
 | `render/taa_pass.{hpp,cpp}` | TAA resolve compute pass (AABB-clamped history blend, no reprojection). Interactive mode only. |
+| `render/splat_pass.{hpp,cpp}` | Primary Gaussian-surfel raster backend: sky/opaque/water pipelines, chunk draws, frustum + GPU cull + Hi-Z occlusion. |
+| `render/post_pass.{hpp,cpp}` | Deferred post: bloom, AgX tonemap, selection/hover/depth-marker outlines, bounding-box wireframe. |
+| `render/ssao_pass.{hpp,cpp}` | Two-band SSAO (raw AO + apply/blur) over the G-buffer. |
+| `render/ssr_pass.{hpp,cpp}` | Screen-space reflections. |
+| `render/volumetric_fog_pass.{hpp,cpp}` | Volumetric fog march to the G-buffer hit (opt-in). |
+| `render/motion_blur_pass.{hpp,cpp}` | Motion blur using previous-frame camera. |
+| `render/dof_pass.{hpp,cpp}` | Depth of field (focus distance / focal length). |
+| `render/micro_svo_pass.{hpp,cpp}` | Overlay of separate micro-voxel SVO worlds into the main G-buffer. |
+| `render/fur_pass.{hpp,cpp}` | Translucent hair-card layer over micro objects. |
+| `render/environment_pass.{hpp,cpp}` | Environment/IBL pass (initialised; not recorded in the current frame loop). |
 | `rhi/context.*` | Vulkan instance/device/VMA allocator, queue, `immediateSubmit` helper. |
 | `rhi/resources.*` | `Buffer`/`Image3D` factories, staging uploads, 2D readback, `transitionImage` (sync2). Note: some `VkPipelineStageFlags2` values exceed 32 bits — cast carefully. |
 | `rhi/swapchain.*` | Swapchain with `PresentPolicy {PreferMailbox, Immediate}`, recreate-on-resize. |

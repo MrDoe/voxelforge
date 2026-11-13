@@ -26,6 +26,7 @@
 #include "voxel/micro_rig.hpp"
 
 #include <cstdint>
+#include <functional>
 #include <string>
 #include <vector>
 
@@ -147,8 +148,13 @@ struct FurParams {
 //
 // Returns false with `err` when the field is empty or carries no fur
 // material at all.
+// `boneFn`, if non-null, overrides `rig->boneAt` for the per-card bone
+// assignment: it is called with the card root's WORLD position and returns the
+// bone index. This is how the coat binds to a different surface (e.g. the
+// mesh's skin) instead of the derived rig's nearest-segment rule.
 bool buildFurCards(const MicroField& field, const FurParams& params, FurObject& out,
                    std::string* err, const MicroRig* rig = nullptr,
-                   glm::vec3 worldOffset = glm::vec3(0.0f));
+                   glm::vec3 worldOffset = glm::vec3(0.0f),
+                   std::function<int(glm::vec3)> boneFn = nullptr);
 
 }  // namespace vf::voxel

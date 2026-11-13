@@ -65,8 +65,32 @@ namespace vf::voxel {
 // nothing to share.
 struct MicroMesh {
     std::vector<glm::vec3> rest;  // rest-pose vertices, object frame (metres)
-    std::vector<int32_t> bone;    // per-vertex bone index (-1 = unskinned)
+    // The DOMINANT bone per vertex (-1 = unskinned) - a cache of
+    // `MicroRig::boneAt`, NOT the deformation. `poseMicroMesh` blends the
+    // rig's influences; this lane is what a mesh with no rig falls back to,
+    // and what the tools print when they audit the binding.
+    std::vector<int32_t> bone;
     std::vector<MeshTri> tris;    // rest triangles (their v[] mirror `rest`)
+    // PER-VERTEX APPEARANCE, sampled once from the object's rest field at
+    // load. A rasterised mesh needs the material at each of its vertices, not
+    // a field lookup per fragment: the field's surface and the mesh's surface
+    // disagree by up to a cell, and a lookup that MISSES has no correct
+    // fallback (the tracer refuses a mesh world), so it renders flat grey.
+    // Resolving it per vertex - where the search can be widened and a miss
+    // statistics - turns a per-pixel race into a load-time decision.
+    //
+    // `mat` is the palette id; `ao` is 0..255 (255 = open). Both are empty
+    // until assignMicroMeshAppearance runs, and the PACKED word below says
+    // "no per-vertex material" (255) until it does, so a mesh can land in
+    // stages without a flag day.
+    std::vector<uint8_t> mat;
+    std::vector<uint8_t> ao;
+    // The packed `w` lane of each vertex record: byte 0 = bone + 1 (0 =
+    // unskinned), byte 1 = material (255 = "look it up in the field", the
+    // pre-Phase-B behaviour), byte 2 = AO, byte 3 = reserved. Stored as the
+    // float's BIT PATTERN, because the vertex record is (rest.xyz, w) and
+    // there is no other 32-bit lane.
+    std::vector<uint32_t> word;
     std::vector<std::string> boneNames; // from the skin header, for diagnostics
     // The translation that was REMOVED from the vertices on load, so the mesh's
     // min corner sits at the object's min corner. Non-zero means the file kept
@@ -80,6 +104,66 @@ struct MicroMesh {
     size_t vertCount() const { return rest.size(); }
 };
 
+// The UP axis a mesh file was authored in.
+//
+// The engine's object frame is Y-up (the world's up axis, and the frame the
+// layer's records and the rig's bone segments live in). A DCC tool exports
+// Z-up, so a Z-up asset arrives with the animal on its side - and a rotation
+// applied AFTER the skin is bound would compare Z-up vertices against Y-up
+// bone capsules and produce a plausible-looking, wrong binding. Convert at
+// load, before anything measures the mesh.
+enum class UpAxis { Y, Z };
+
+// Map a Z-up point into the Y-up object frame: (x, y, z) -> (x, z, -y).
+// A PROPER rotation about X by -90 degrees, so the winding (and the normals)
+// stay valid - unlike a y/z swap, which mirrors the mesh and would need the
+// triangle order reversed.
+glm::vec3 upAxisToY(glm::vec3 p, UpAxis up);
+
+// What an orientation pass found and fixed. Reported rather than assumed,
+// because the renderer's backface culling is only correct when the surface is
+// CLOSED and CONSISTENTLY wound outward, and a silent "probably fine" is how a
+// mesh ends up with a hole in its flank.
+struct MeshWindingStats {
+    size_t triangles = 0;
+    size_t components = 0;        // connected shells (a body + separate eyes)
+    size_t nonManifoldEdges = 0;  // used by 3+ triangles: barriers, not seams
+    size_t sameDirectionEdges = 0; // BEFORE: shared edges both neighbours run
+                                  // the same way = oppositely-wound patches
+    size_t flipped = 0;           // triangles whose winding was reversed
+    // AFTER the pass. `consistent` is the property the renderer needs: every
+    // manifold edge is traversed once in each direction.
+    size_t sameDirectionEdgesAfter = 0;
+    // BFS contradictions: a Möbius-like surface cannot be fixed by flipping.
+    size_t conflicts = 0;
+    bool closed = false;    // every edge is shared by exactly two triangles
+    bool consistent = false;
+    // The FILE was already outward (signed volume positive, i.e. CCW seen from
+    // outside). False means the whole shell arrived inside-out and the pass
+    // reversed every triangle; the returned mesh is always outward-facing.
+    bool outward = false;
+};
+
+// Make a triangle soup consistently wound and outward-facing, in place.
+//
+// THE MEASURED REASON THIS EXISTS. `assets/models/alpaca_mesh.stl` is a closed
+// surface (18,046 triangles, welded half-edge multiplicity {2: 26897, 4: 86}) —
+// and 7,008 of its 26,897 shared edges (26.1 %) are traversed in the SAME
+// direction by both neighbours, so a quarter of the body faces inward. Two
+// consequences: backface culling on that mesh deletes the outer wall across a
+// quarter of the animal, and with culling off the closed shell covers ~40 % of
+// the silhouette's pixels TWICE. The mesh raster pass writes the G-buffer with
+// `imageStore` from the fragment stage, so two fragments at a near-tie are two
+// racing writers and the frame differs run to run. Culling is the fix, and
+// consistent outward winding is what makes culling safe.
+//
+// The algorithm is standard and cheap (18k triangles, one BFS): weld vertices
+// by quantised position, walk the manifold edge graph flipping any neighbour
+// that agrees, then orient each shell outward by the sign of its signed
+// volume. Winding does not affect shading here — the fragment shader takes its
+// normal from the field's gradient — so this is a pure depth/culling fix.
+bool orientMeshWinding(std::vector<MeshTri>& tris, MeshWindingStats* stats);
+
 // Load a mesh and its skin side-car.
 //
 // The skin format is text:
@@ -89,15 +173,81 @@ struct MicroMesh {
 // A missing side-car is not an error: every vertex is then unskinned (-1) and
 // the posed mesh equals the rest mesh, which is exactly what a rigid object
 // wants.
+//
+// `up` is the axis the FILE was authored in; the returned mesh is always Y-up.
 bool loadMicroMesh(const std::string& meshPath, const std::string& skinPath,
-                   MicroMesh& out, std::string* err);
+                   MicroMesh& out, std::string* err,
+                   UpAxis up = UpAxis::Y);
 
-// Linear-blend skinning with RIGID weights (one bone per vertex):
-//   posed = R[bone] * rest + t[bone]
-// This is the same composed transform the shader applies (composeBones), so a
-// mesh posed here and a field sampled by the overlay agree bone for bone.
-// Vertices with an out-of-range or unset bone stay in the rest pose.
-void poseMicroMesh(const MicroMesh& mesh, const std::vector<glm::mat3>& boneRot,
+// The packed `w` lane of a mesh vertex record (see MicroMesh::word).
+//
+//   bits  0..7   bone + 1       (0 = unskinned)
+//   bits  8..15  material       (255 = "no per-vertex material; look it up")
+//   bits 16..23  ambient occlusion (255 = open)
+//   bits 24..31  reserved (a per-vertex sun shadow, once a mover's shadow is
+//                baked in the frame the sun actually reaches it)
+//
+// The lane is a float in the vertex buffer, so the writer reinterprets these
+// bits with uintBitsToFloat and both shaders read them back with
+// floatBitsToUint. Keep the byte order in one place: a shader that disagrees
+// with this function shades the whole animal with material 0.
+inline uint32_t meshVertexWord(int32_t bone, uint8_t mat, uint8_t ao)
+{
+    // SATURATE rather than wrap: a bone index past 254 would otherwise carry
+    // into the material byte and shade the body with a material nobody chose.
+    // The shipped rig has 9 bones, so this is defensive, not a live path.
+    int b = bone < 0 ? 0 : bone + 1;
+    if (b > 255)
+        b = 255;
+    return uint32_t(b) | (uint32_t(mat) << 8) | (uint32_t(ao) << 16);
+}
+
+inline glm::vec4 meshVertexRecord(const MicroMesh& mesh, size_t vi,
+                                  glm::vec3 offset)
+{
+    // The ANCHORED position: the layer's placement is added to the rest point
+    // (the rig's joints were shifted by the same offset), so the shader's
+    // bone lookup and the vertex position agree.
+    return glm::vec4(mesh.rest[vi] + offset,
+                     glm::uintBitsToFloat(vi < mesh.word.size()
+                                              ? mesh.word[vi]
+                                              : meshVertexWord(-1, 255, 255)));
+}
+
+// What one appearance pass resolved, for the load log.
+struct MeshAppearanceStats {
+    size_t vertices = 0;
+    size_t assigned = 0;  // found a solid rest cell and took its material
+    size_t missed = 0;    // nothing within the search radius (kept the field
+                          // lookup, which is why byte 1 stays 255)
+};
+
+// Sample the object's REST FIELD once per mesh vertex and fill
+// MicroMesh::mat/ao/word.
+//
+// The search radius is TWO cells, not the shader's one: the mesh is a different
+// tessellation than the field it was authored from, so a vertex can sit a
+// little outside the voxel surface, and a miss here is the flat-grey fallback
+// this pass exists to remove. The scan order matches nearestRestSolid's, so
+// this pass and the posed-cell transfer cannot disagree about which rest cell
+// owns a point that both of them see.
+//
+// `field` is in the object's own frame (its margin cells begin at
+// -kMicroMarginCells * voxel, so the object's min corner is still 0) - the
+// same frame as MicroMesh::rest, with no offset applied.
+void assignMicroMeshAppearance(const MicroField& field, MicroMesh& mesh,
+                               MeshAppearanceStats* stats = nullptr);
+
+// Linear-blend skinning with the rig's SMOOTH weights:
+//   posed = sum_i w_i * (R_i * rest + t_i),  w = rig.boneInfluences(rest)
+// This is the same kernel the shader applies (`microBoneWeights`), so a mesh
+// posed here and the mesh drawn on the GPU agree vertex for vertex - the
+// deformer's whole proof (that its delta equals a full re-voxelization) rests
+// on that. A vertex outside every bone's band falls back to its dominant bone,
+// and a mesh with no rig at all keeps the `.skin`'s rigid bone, so a side-car
+// without a skeleton still poses.
+void poseMicroMesh(const MicroMesh& mesh, const MicroRig& rig,
+                   const std::vector<glm::mat3>& boneRot,
                    const std::vector<glm::vec3>& boneXform,
                    std::vector<MeshTri>& posed);
 

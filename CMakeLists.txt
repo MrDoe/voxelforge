@@ -142,6 +142,13 @@ add_executable(vf_micro_mesh_check tools/micro_mesh_check.cpp)
 target_include_directories(vf_micro_mesh_check PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
 target_link_libraries(vf_micro_mesh_check PRIVATE vf_core)
 
+# Regenerate a micro mesh's `.skin` from the rig's ONE ownership rule (the
+# capsule test). Explicit tool: the `.skin` is a derived cache, so this is how
+# a rig edit (segment or radius) reaches the body without a scratch script.
+add_executable(vf_micro_skin tools/micro_skin.cpp)
+target_include_directories(vf_micro_skin PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
+target_link_libraries(vf_micro_skin PRIVATE vf_core)
+
 # ---- MCP server -----------------------------------------------------------------
 add_executable(vf_mcp src/ai/mcp_server.cpp)
 target_include_directories(vf_mcp PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
@@ -192,6 +199,8 @@ set(VF_SHADER_SRCS ${CMAKE_CURRENT_SOURCE_DIR}/shaders/svo_raymarch.comp
     ${CMAKE_CURRENT_SOURCE_DIR}/shaders/splat.vert
     ${CMAKE_CURRENT_SOURCE_DIR}/shaders/splat.frag
     ${CMAKE_CURRENT_SOURCE_DIR}/shaders/micro_overlay.comp
+    ${CMAKE_CURRENT_SOURCE_DIR}/shaders/micro_mesh.vert
+    ${CMAKE_CURRENT_SOURCE_DIR}/shaders/micro_mesh.frag
     ${CMAKE_CURRENT_SOURCE_DIR}/shaders/fur.vert
     ${CMAKE_CURRENT_SOURCE_DIR}/shaders/fur.frag
     ${CMAKE_CURRENT_SOURCE_DIR}/shaders/fur_composite.comp
@@ -214,7 +223,7 @@ foreach(src_file ${VF_SHADER_SRCS})
     set(out_file ${CMAKE_CURRENT_BINARY_DIR}/shaders/${name}.spv)
     add_custom_command(OUTPUT ${out_file}
         COMMAND ${GLSLANG_VALIDATOR} -V --target-env vulkan1.3 -I${CMAKE_CURRENT_SOURCE_DIR}/shaders -o ${out_file} ${src_file}
-        DEPENDS ${src_file} ${CMAKE_CURRENT_SOURCE_DIR}/shaders/common_base.glsl ${CMAKE_CURRENT_SOURCE_DIR}/shaders/common_svo.glsl ${CMAKE_CURRENT_SOURCE_DIR}/shaders/common_splat.glsl ${CMAKE_CURRENT_SOURCE_DIR}/shaders/common_surfel.glsl ${CMAKE_CURRENT_SOURCE_DIR}/shaders/common_irradiance.glsl ${CMAKE_CURRENT_SOURCE_DIR}/shaders/common_fur.glsl ${CMAKE_CURRENT_SOURCE_DIR}/shaders/micro_shade.glsl ${CMAKE_CURRENT_SOURCE_DIR}/shaders/micro_rig.glsl
+        DEPENDS ${src_file} ${CMAKE_CURRENT_SOURCE_DIR}/shaders/common_base.glsl ${CMAKE_CURRENT_SOURCE_DIR}/shaders/common_svo.glsl ${CMAKE_CURRENT_SOURCE_DIR}/shaders/common_splat.glsl ${CMAKE_CURRENT_SOURCE_DIR}/shaders/common_surfel.glsl ${CMAKE_CURRENT_SOURCE_DIR}/shaders/common_irradiance.glsl ${CMAKE_CURRENT_SOURCE_DIR}/shaders/common_fur.glsl ${CMAKE_CURRENT_SOURCE_DIR}/shaders/micro_shade.glsl ${CMAKE_CURRENT_SOURCE_DIR}/shaders/micro_rig.glsl ${CMAKE_CURRENT_SOURCE_DIR}/shaders/micro_weights.glsl
         COMMENT "glslangValidator ${name}")
     list(APPEND VF_SHADER_SPVS ${out_file})
 endforeach()
@@ -249,6 +258,8 @@ add_executable(voxelforge
     src/app/ui/panel_textures.cpp
     src/app/ui/panel_mesh.cpp
     src/app/ui/panel_ai.cpp
+    src/app/ui/panel_animate.cpp
+    src/app/ui/timeline.cpp
     src/app/ui/scene_overlays.cpp
     src/app/frame/run.cpp
     src/app/frame/run_startup.cpp
@@ -260,6 +271,7 @@ add_executable(voxelforge
     src/app/frame/record_headless.cpp
     src/app/frame/record_interactive.cpp
     src/app/frame/record_fx.cpp
+    src/app/frame/record_studio.cpp
     src/app/frame/selftest.cpp
     src/app/frame/profiler.cpp)
 target_compile_definitions(voxelforge PRIVATE

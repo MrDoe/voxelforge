@@ -100,6 +100,18 @@ public:
     // of flashing sky. Clear otherwise (fast exterior path).
     void setBuried(bool buried) { m_buried = buried; }
 
+    // Splat edge blend: fade alpha from full at the disk centre to zero at
+    // the clip radius. 0 = hard edges (default); 1 = full radial fade.
+    // Drives both the kernel edge window (uSplat2.w) and the base-seal
+    // decline (uSplat3.x) so the rim actually becomes transparent instead of
+    // being covered by the opaque seal.
+    void setEdgeStart(float s) { m_splatEdgeStart = glm::clamp(s, 0.0f, 0.999f); }
+    void setSealAlpha(float s) { m_splatSealAlpha = glm::clamp(s, 0.0f, 1.0f); }
+    void setEdgeBlend(float s) { setEdgeStart(s); setSealAlpha(s); }
+    float edgeStart() const { return m_splatEdgeStart; }
+    float sealAlpha() const { return m_splatSealAlpha; }
+    float edgeBlend() const { return std::max(m_splatEdgeStart, m_splatSealAlpha); }
+
     // Brush hover preview (bind 13, fragment): tint every splat fragment whose
     // surface point falls inside the active edit-brush volume, so the cells
     // the next stamp would affect are visible before the click.
@@ -314,8 +326,8 @@ private:
         bool trace = false;
         bool debugSet = false;
         float debugVal = 0.0f;
-        float lod1Dist = 30.0f;
-        float lod2Dist = 90.0f;
+        float lod1Dist = 20.0f;
+        float lod2Dist = 60.0f;
         float sigma = -1.0f;   // <0 = not set
         float extent = -1.0f;  // <0 = not set
         float radius = -1.0f;  // <0 = not set
@@ -333,6 +345,8 @@ private:
     void refreshEnvCache();
     glm::vec4 m_params { 0.0f, 0.5f, 1.02f, 0.0f };
     float m_radiusScale = 1.0f;
+    float m_splatEdgeStart = 0.0f;
+    float m_splatSealAlpha = 0.0f;
     bool m_buried = false;
 
     size_t m_count = 0;

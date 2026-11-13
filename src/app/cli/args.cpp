@@ -89,6 +89,17 @@ Args parseArgs(int argc, char** argv)
                         float(atof(argv[i + 3])) };
             i += 3;
             a.probeSet = true;
+        } else if (s == "--anim") {
+            a.anim = true;
+            if (i + 1 < argc && argv[i + 1][0] != '-') a.animLayer = argv[++i];
+        } else if (s == "--anim-layer" && i + 1 < argc) {
+            a.animLayer = argv[++i];
+        } else if (s == "--anim-clip" && i + 1 < argc) {
+            a.animClip = argv[++i];
+        } else if (s == "--anim-time" && i + 1 < argc) {
+            a.animClipTime = (float)atof(argv[++i]);
+        } else if (s == "--anim-world") {
+            a.animWorld = true;
         } else if ((s=="--llm-url" || s=="--ollama-url") && i+1<argc) a.llmUrl = argv[++i];
         else if ((s=="--llm-model" || s=="--ollama-model") && i+1<argc) a.llmModel = argv[++i];
     }

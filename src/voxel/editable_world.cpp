@@ -37,7 +37,8 @@ std::string EditableWorld::sanitizeLayerName(const std::string& name)
 // When replacing an existing entry, leave pos/rot/rotX/rotZ untouched: those
 // fields are the authored world placement/orientation, not mesh-import data.
 static void upsertObjectLayer(std::vector<worldfile::WorldLayer>& layers,
-                              const std::string& file, const std::string& name)
+                              const std::string& file, const std::string& name,
+                              const std::string& meshSource = "")
 {
     for (auto& l : layers) {
         if (l.file == file) {
@@ -45,6 +46,8 @@ static void upsertObjectLayer(std::vector<worldfile::WorldLayer>& layers,
             l.role = "object";
             l.name = name;
             l.listed = true;
+            if (!meshSource.empty())
+                l.meshSource = meshSource;
             return;
         }
     }
@@ -54,6 +57,7 @@ static void upsertObjectLayer(std::vector<worldfile::WorldLayer>& layers,
     nl.role = "object";
     nl.enabled = true;
     nl.listed = true;
+    nl.meshSource = meshSource;
     nl.pos[0] = nl.pos[1] = nl.pos[2] = 0.f;
     nl.rotDeg = 0.f;
     size_t insertAt = 0;
@@ -345,7 +349,8 @@ void EditableWorld::clear() {
 }
 
 bool EditableWorld::writeObjectLayer(const std::string& name,
-                                     const std::vector<VoxelRecord>& recs)
+                                     const std::vector<VoxelRecord>& recs,
+                                     const std::string& meshSource)
 {
     std::string safe = sanitizeLayerName(name);
     if (safe.empty())
@@ -360,7 +365,7 @@ bool EditableWorld::writeObjectLayer(const std::string& name,
     }
     std::vector<worldfile::WorldLayer> layers;
     worldfile::loadManifest(manifestPath(), layers);
-    upsertObjectLayer(layers, file, safe);
+    upsertObjectLayer(layers, file, safe, meshSource);
     if (!worldfile::writeManifest(manifestPath(), layers)) {
         spdlog::error("editable_world: failed to update manifest for {}", file);
         return false;

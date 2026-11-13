@@ -297,7 +297,12 @@ void App::processInput(bool textCaptures, bool rotateLiveTest)
         // diameter) so the result appears while drawing; the stroke is
         // saved asynchronously on release. Shift is the box-selection gesture
         // above and never stamps.
+        // The studio has NO world store (it never loads world layers), so a
+        // stamp there would index chunks that do not exist; the studio's own
+        // panel is the only place an edit can originate. Gate it out here
+        // rather than relying on the hover pick never landing on a world cell.
         const bool editLmb = lmb && !ctrl && !shift && !wantMouse && m_editActive &&
+                             !m_studio.active &&
                              m_editBrush != EditBrush::Rotate &&
                              m_editBrush != EditBrush::Move;
         bool doStamp = lmbEdge && editLmb;

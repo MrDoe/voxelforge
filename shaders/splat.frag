@@ -439,6 +439,12 @@ void main()
     // own alpha is indistinguishable in the interior - there the band sum
     // reaches 1 either way. Water stays premultiplied.
     if (PASS_MODE == 4) {
+        // Edge blend (slider > 0): disable the opaque base seal so the band
+        // pass draws the full radial gradient (alpha 1 at centre -> 0 at edge)
+        // instead of a hard opaque disk. The seal is what otherwise paints
+        // every (even rim) fragment at alpha 1, hiding the gradient.
+        if (sp.uSplat2.w > 0.0 || sp.uSplat3.x > 0.0)
+            discard;
         // uSplat3.x = base-seal alpha threshold (VF_SPLAT_SEAL_ALPHA, 0 =
         // seal everything = the previous behaviour exactly).
         const float sealAlpha = max(sp.uSplat3.x, 0.0);

@@ -1902,7 +1902,12 @@ void SplatPass::record(VkCommandBuffer cmd, const RaymarchPush& push, VkExtent2D
     // with the seal decline below, which is what actually uncovers the
     // silhouette. So it stays 0 until both are wanted at once.
     // VF_SPLAT_EDGE=0.6 enables it.
-    float edgeStart = m_env.edgeStart >= 0.0f ? m_env.edgeStart : 0.0f;
+    if (m_env.edgeStart >= 0.0f)
+        m_splatEdgeStart = m_env.edgeStart;
+    if (m_env.sealAlpha >= 0.0f)
+        m_splatSealAlpha = m_env.sealAlpha;
+    float edgeStart = m_splatEdgeStart;
+    float sealAlpha = m_splatSealAlpha;
     // Base-seal decline (uSplat3.x). 0 = the base pass seals every fragment at
     // alpha 1, which is the previous behaviour exactly (verified: 0.0000 mean
     // diff, 0 px changed against the pre-change build). Non-zero lets the base
@@ -1925,7 +1930,7 @@ void SplatPass::record(VkCommandBuffer cmd, const RaymarchPush& push, VkExtent2D
     // coverage count: the D24_S8 stencil is already allocated, bound and
     // cleared in both render scopes, and recreateDepth's comment names this
     // exact use ("stencil to tell interior rims apart from silhouette rims").
-    float sealAlpha = m_env.sealAlpha >= 0.0f ? m_env.sealAlpha : 0.0f;
+    // sealAlpha now comes from the runtime member (see above).
     if (m_paramsBuf.mapped) {
         glm::vec4 words[3] = { params,
                                glm::vec4(m_radiusScale, opacity, depthTol, edgeStart),

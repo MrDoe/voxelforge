@@ -38,19 +38,81 @@ constexpr char kCacheMagic[8] = { 'V', 'F', 'R', 'I', 'G', 'C', 0, 5 };
 
 } // namespace
 
+BoneInfluences MicroRig::boneInfluences(glm::vec3 p) const
+{
+    BoneInfluences out;
+    const int n = int(std::min<size_t>(bones.size(), size_t(kMicroMaxInfluences)));
+    if (n <= 0)
+        return out;
+
+    float nearestScore = 1e30f;
+    int nearest = 0;
+    float sum = 0.f;
+    for (int i = 0; i < n; ++i) {
+        const float d = distToSegment(p, bones[size_t(i)].a, bones[size_t(i)].b);
+        if (d < nearestScore) {
+            nearestScore = d;
+            nearest = i;
+        }
+        // The radius is the per-bone influence knob; a zero radius would make
+        // the band empty, so it keeps a floor.
+        const float reach =
+            std::max(bones[size_t(i)].radius * kMicroWeightReach, 1e-3f);
+        const float x = d / reach;
+        float wi = 0.f;
+        if (x < 1.f) {
+            const float t = 1.f - x * x;
+            const float t2 = t * t;
+            wi = t2 * t2; // t^4: two squarings, the SAME expression the shader
+                          // evaluates, so a vertex cannot land on a different
+                          // weight here than it does on the GPU.
+        }
+        out.bone[i] = i;
+        out.weight[i] = wi;
+        sum += wi;
+    }
+
+    if (!(sum > 0.f)) {
+        // Outside every bone's band: the nearest bone carries the point
+        // rigidly. With reach 3.5 this is 0.1% of the alpaca's vertices (the
+        // hooves and the ear tips), so there is no seam for it to open.
+        out.count = 1;
+        out.bone[0] = nearest;
+        out.weight[0] = 1.f;
+        return out;
+    }
+
+    // Compact to the bones that actually reach, keep the weights normalized,
+    // and order them by weight so bone[0] is the dominant one.
+    out.count = 0;
+    for (int i = 0; i < n; ++i) {
+        if (!(out.weight[i] > 0.f))
+            continue;
+        out.bone[out.count] = out.bone[i];
+        out.weight[out.count] = out.weight[i] / sum;
+        ++out.count;
+    }
+    for (int i = 1; i < out.count; ++i) {
+        const int b = out.bone[i];
+        const float w = out.weight[i];
+        int j = i - 1;
+        while (j >= 0 && out.weight[j] < w) {
+            out.bone[j + 1] = out.bone[j];
+            out.weight[j + 1] = out.weight[j];
+            --j;
+        }
+        out.bone[j + 1] = b;
+        out.weight[j + 1] = w;
+    }
+    return out;
+}
+
 int MicroRig::boneAt(glm::vec3 p) const
 {
-    int best = -1;
-    float bestD = 1e30f;
-    for (size_t i = 0; i < bones.size(); ++i) {
-        const float d = distToSegment(p, bones[i].a, bones[i].b);
-        if (d < bestD) {
-            bestD = d;
-            best = int(i);
-        }
-    }
-    return best;
+    const BoneInfluences inf = boneInfluences(p);
+    return inf.count > 0 ? inf.bone[0] : -1;
 }
+
 
 bool deriveMicroRig(const MicroField& field, MicroRig& out)
 {

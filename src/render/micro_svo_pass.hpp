@@ -63,6 +63,21 @@ public:
     void setBoneRotations(size_t worldIndex, const std::vector<glm::mat3>& rot,
                           const std::vector<glm::vec3>& xform);
 
+    // Upload the MESH of one micro world: its REST-pose vertices in the
+    // object's ANCHORED frame (metres, with the layer's world offset already
+    // applied) and the owning bone index + 1 in w (0 = unskinned). One record
+    // per triangle corner, 16 B each.
+    //
+    // Setting a mesh makes the world RASTER-OWNED: the compute tracer stops
+    // drawing its rest pose and a raster pass draws the posed mesh instead,
+    // with the field demoted to the shading source (material, texture,
+    // normal, AO, occlusion). That is what removes the traced path's whole
+    // failure class - a hole, a cut or a ghost can only come from geometry the
+    // field invented, and here the geometry is the mesh.
+    //
+    // Call AFTER setMicroWorlds, which resets every world's flags.
+    bool setMesh(size_t worldIndex, const std::vector<glm::vec4>& verts);
+
     bool empty() const { return m_worldCount == 0; }
     size_t worldCount() const { return m_worldCount; }
     size_t gpuBytes() const;
@@ -82,7 +97,15 @@ public:
     // its G-buffer for this frame: gpos is the depth reference the pass reads.
     // A no-op when no micro world is loaded, so the cost with the feature off is
     // a single branch.
-    void record(VkCommandBuffer cmd, const RaymarchPush& push);
+    //
+    // `frameSlot` is the frame loop's own in-flight slot (m_frameIdx %
+    // kMaxFramesInFlight). The pass takes its per-frame resources — the mesh
+    // depth attachment — from that slot, because the slot is the unit the
+    // frame loop's fence proves complete, so nothing the pass destroys at the
+    // start of a frame can still be read by a frame in flight. Callers pass
+    // their real slot; the default keeps a caller that has no slots (or no mesh
+    // world) correct rather than silently sharing one.
+    void record(VkCommandBuffer cmd, const RaymarchPush& push, uint32_t frameSlot = 0);
 
 private:
     struct Ssbo {
@@ -93,6 +116,8 @@ private:
     bool uploadSsbo(Ssbo& s, const void* data, size_t bytes);
     void destroySsbo(Ssbo& s);
     void bindMicroBuffers();
+    bool ensureMeshDepth(uint32_t slot, uint32_t w, uint32_t h);
+    bool ensureMeshScene(uint32_t w, uint32_t h);
 
     const Context* m_ctx = nullptr;
     VkPipelineLayout m_layout = VK_NULL_HANDLE;
@@ -100,6 +125,13 @@ private:
     VkDescriptorPool m_pool = VK_NULL_HANDLE;
     VkDescriptorSet m_set = VK_NULL_HANDLE;
     VkPipeline m_pipeline = VK_NULL_HANDLE;
+    // The raster path's pipeline: same layout, same set, depth-only.
+    VkPipeline m_meshPipeline = VK_NULL_HANDLE;
+    // The raster path's DEPTH PREPASS: the vertex stage alone, so it writes
+    // depth and can not write a G-buffer texel. `m_meshPipeline` then tests
+    // EQUAL against it, which is what leaves exactly one surviving writer per
+    // pixel (see the comment at its creation).
+    VkPipeline m_meshDepthPipeline = VK_NULL_HANDLE;
 
     // The micro worlds' own pools. These are NOT the world's SVO buffers.
     Ssbo m_grid, m_childBase, m_payload, m_handles, m_bricks, m_chunkInfo;
@@ -107,6 +139,56 @@ private:
     // concatenated. Separate from the bricks because the field has to be
     // CONTINUOUS across brick boundaries (see MicroWorld::field).
     Ssbo m_field;
+    // The RASTER MESH worlds' vertices, all objects concatenated:
+    // vec4(rest.xyz, bone + 1). A world's slice is addressed with the draw's
+    // firstVertex, so one buffer and one pipeline serve every object.
+    Ssbo m_meshVertsBuf;
+    std::vector<std::vector<glm::vec4>> m_meshVerts;
+    size_t m_meshWorldCount = 0;
+    // Per-frame-slot depth attachment (D32, linear), kMeshSlots of them. It
+    // exists only so a mesh occludes itself and the other mesh objects; the
+    // world/micro boundary stays the distance comparison against gpos the
+    // traced path already makes, and the main backend's depth is never touched.
+    //
+    // WHY SLOTS AND NOT ONE IMAGE — and what it is NOT.
+    //
+    // What it IS: hygiene with a latent defect behind it. Every frame CLEARS
+    // this attachment, and a clear is destructive, so with one image frame
+    // N+1's clear is unordered against frame N's depth tests: the in-flight
+    // fence only proves the submission THREE frames back complete, and a
+    // barrier cannot reach across submissions. Indexing the attachment by the
+    // slot the fence DOES prove complete removes the defect by construction,
+    // which is why it is here.
+    //
+    // What it is NOT: the fix for the mesh flicker. Measured 2026-11-12, the
+    // duplicate-pose pair still differed by 4,843 px after this change, and
+    // 4,518 px with `VF_TEST_SERIAL_SUBMIT=1` draining the queue after every
+    // submit — so no cross-frame overlap was involved at all. The flicker was
+    // LATE FRAGMENT TESTS: this pass writes the G-buffer with `imageStore`
+    // side effects, so the driver cannot run the depth test before the
+    // fragment shader, both walls of the (culling-off, closed) mesh execute,
+    // both store, and the losing store is never un-done — so the surviving
+    // pixel was whichever fragment happened to store last. `VF_MESH=0` on the
+    // same camera and pose reads 0 px, which is the proof the raster pass owns
+    // it. See .opencode/wiki/concepts/render-nondeterminism.md.
+    static constexpr int kMeshSlots = 3; // == kMaxFramesInFlight (app/app.hpp)
+    Image3D m_meshDepth[kMeshSlots] {};
+    VkExtent2D m_meshDepthExtent[kMeshSlots] { {}, {}, {} };
+    // A SNAPSHOT of gpos taken once per frame BEFORE the mesh draw. The mesh
+    // fragment needs the world surface's distance as its depth reference, but
+    // it also WRITES gpos: reading the image it writes is a read/write hazard
+    // inside one raster pass, so a fragment could see a sibling's own position.
+    // dot(gp - ro, rd) then differs from that sibling's t by up to a pixel
+    // footprint - larger than the half-voxel the boundary test tolerates - so
+    // the verdict (world pixel vs coat) depended on draw completion order and
+    // flipped from run to run (measured: ~4 k pixels between two runs of the
+    // same pinned pose, 96 % on the object's outline). Reading a snapshot
+    // taken before the pass turns that into a plain read.
+    Image3D m_meshScene {};
+    VkExtent2D m_meshSceneExtent { 0, 0 };
+    // The live gpos image (set by updateDescriptors): the snapshot's copy
+    // source. The view is not enough - vkCmdCopyImage needs the image.
+    VkImage m_gposImage = VK_NULL_HANDLE;
     // Per-world scale table (std140): 4 vec4 per world, world count in the
     // first ivec4. Host-visible so setMicroWorlds can write it directly.
     Buffer m_worldTable {};

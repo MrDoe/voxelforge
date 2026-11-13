@@ -25,9 +25,26 @@
 // segment, the neck is a segment, and the joint a bone rotates about is the
 // segment's END that touches the core.
 //
-// The WEIGHTS are not stored: a point belongs to the bone whose segment is
-// nearest, with the seams placed where the two bones meet INSIDE the body
-// (so the seam never shows on the silhouette).
+// The WEIGHTS are not stored: they are a FUNCTION of the point and the rig
+// (boneInfluences below), so the mesh, the fur cards, the voxelizer and the
+// shader cannot disagree about how much each bone moves a surface point.
+//
+// THEY USED TO BE ONE BONE PER POINT, and that was the tear the user saw. The
+// upper back of the alpaca is 27 cm from the spine's segment and 27 cm from
+// the last neck link's base, so every nearest-segment rule is a coin flip
+// there; one vertex landed on the neck link and its neighbours on the static
+// spine, and the neck link carried it 0.318 m while they stayed put. Measured
+// on the graze clip (11 poses, 78 376 triangles, every rest triangle exactly
+// 3.2e-05 m2): the worst triangle stretched 108.8x and 2 137 triangles
+// stretched past 8x, all at that shoulder patch. Trying other ownership rules
+// only moved the seam - capsule-first 134.2x, nearest raw 134.2x, smallest
+// d/r 92.2x, non-root capsules with a root fallback 178.6x.
+//
+// A kernel over ALL bones removes the class: the weights are continuous in p,
+// so the displacement field is continuous, so the surface can bend but cannot
+// come apart. The same measurement with the kernel below (reach 3.5x radius,
+// quartic falloff) is 4.60x worst and ZERO triangles past 8x, with the hooves
+// still moving 0.0 mm (they are outside every other bone's kernel).
 #pragma once
 
 #include <glm/glm.hpp>
@@ -77,6 +94,35 @@ struct MicroBone {
     int parent = -1;
 };
 
+// A point's bone INFLUENCES: a weight per bone, normalized to 1.
+//
+// THE KERNEL, and why each factor is the number it is:
+//   w_i = (1 - (d_i / (kMicroWeightReach * r_i))^2)^kMicroWeightFalloff
+// where d_i is the distance from the point to bone i's SEGMENT and r_i is the
+// bone's capsule radius (the per-bone influence radius the GUI exposes). A
+// bone's blend band is therefore 3.5 radii wide, the weight is smooth at the
+// band's edge (the quartic's first two derivatives vanish, so no crease forms
+// where a bone enters or leaves), and the per-bone radius is the ONE knob that
+// moves it.
+//
+// The reach is 3.5 because that is where the tear closes: 2.0 leaves a 52x
+// needle, 2.5 leaves 10.3x, 3.0 leaves 5.9x, 3.5 leaves 4.6x and no triangle
+// past 8x; 4.0 adds leg weight to the belly for no gain. Pruning to the top 4
+// bones makes it WORSE (17.2x at reach 3.5) - the tail of the blend is doing
+// real work - so the influence list carries every bone, and the shader blends
+// them all.
+inline constexpr int kMicroMaxInfluences = 12;
+inline constexpr float kMicroWeightReach = 3.5f;
+inline constexpr int kMicroWeightFalloff = 4;
+
+struct BoneInfluences {
+    int count = 0;
+    // Descending by weight, so bone[0]/weight[0] is the DOMINANT bone - the
+    // single bone the shading's rest lookup and the `.skin` cache use.
+    int bone[kMicroMaxInfluences] = {};
+    float weight[kMicroMaxInfluences] = {};
+};
+
 struct MicroRig {
     std::vector<MicroBone> bones;
     // The frame the derivation found, so the animation can walk along the
@@ -88,7 +134,15 @@ struct MicroRig {
     int legCount = 0;
 
     bool valid() const { return !bones.empty(); }
-    // The bone whose segment is nearest a point, or -1.
+    // The bone influences of a point, by the kernel above. THE one skinning
+    // rule: `poseMicroMesh`, the fur-card build, the deformer's dirty set and
+    // the shader's `microBoneWeights` all read it, so the body and the coat
+    // cannot be bound to different bones for the same surface point.
+    BoneInfluences boneInfluences(glm::vec3 p) const;
+    // The DOMINANT bone (the heaviest influence), or -1. Equivalent to
+    // boneInfluences(p).bone[0]; kept as its own call because the shading and
+    // the diagnostics ask "which bone owns this point" far more often than
+    // "how much".
     int boneAt(glm::vec3 p) const;
 };
 

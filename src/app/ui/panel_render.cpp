@@ -257,6 +257,15 @@ void App::drawPanelRender()
                 if (ImGui::SliderFloat("##radius", &radius, 0.5f, 2.0f, "%.2f"))
                     m_splatPass.setRadiusScale(radius);
             });
+            controlRow("Edge blend", [&] {
+                ImGui::SetNextItemWidth(-1.0f);
+                float eb = m_splatPass.edgeBlend();
+                if (ImGui::SliderFloat("##edgeBlend", &eb, 0.0f, 1.0f, "%.2f"))
+                    m_splatPass.setEdgeBlend(eb);
+            });
+            if (ImGui::IsItemHovered())
+                ImGui::SetTooltip("Fade splat alpha from full at the centre to "
+                                  "zero at the edge. 0 = hard edges (default).");
             controlRow("Sharp-edge fit", [&] {
                 ImGui::SetNextItemWidth(-1.0f);
                 ImGui::SliderFloat("##edgeShrink", &m_edgeShrink, 0.0f, 0.8f,

@@ -79,13 +79,25 @@ void main()
     const vec3 n = nrmAlpha.xyz;
     const int bone = int(shade.w);
 
+    // THE COAT'S WEIGHTS, evaluated ONCE at the card's ROOT: the ribbon's
+    // width axis is perpendicular to `dir` in the card's own frame, so all
+    // four quad vertices must agree on that frame or the ribbon shears.
+    int bi[MICRO_MAX_INFLUENCES];
+    float bw[MICRO_MAX_INFLUENCES];
+    int dom;
+    int nb = furBoneWeights(w, root, bi, bw, dom);
+    if (nb == 0 && bone >= 0) {
+        // No rig: fall back to the side-car's per-card bone.
+        bi[0] = bone; bw[0] = 1.0; nb = 1;
+    }
+
     // The camera in the CARD's own (rest) frame: the ribbon is billboarded
     // about its strand, so the width axis depends on where the viewer is.
     // Un-boning the camera point is the same operation the ray version did to
     // the ray origin, so the axis matches it exactly.
     vec3 roL = furToLocal(w, pc.camPos.xyz);
-    if (bone >= 0)
-        roL = furUnbone(w, roL, bone);
+    if (nb > 0)
+        roL = furBlendUnbone(w, roL, bi, bw, nb);
 
     vec3 toCam = roL - root;
     const float tc = length(toCam);
@@ -129,7 +141,19 @@ void main()
     // The REST point is what the texture and the detail normal are sampled
     // at (the fur must not slide), so it travels to the fragment untouched;
     // the ANIMATED world point is what gets rasterized and depth-tested.
-    const vec3 animPos = furRebone(w, rest, bone);
+    //
+    // The deformation blends at THIS vertex's rest point, not at the root:
+    // a card spans 26 mm of a surface that bends, so its tip must move with
+    // the bone that reaches the tip. A root-only blend would make the coat a
+    // rigid bristle board hinged at the skin.
+    int vbi[MICRO_MAX_INFLUENCES];
+    float vbw[MICRO_MAX_INFLUENCES];
+    int vdom;
+    int vnb = furBoneWeights(w, rest, vbi, vbw, vdom);
+    if (vnb == 0 && bone >= 0) {
+        vbi[0] = bone; vbw[0] = 1.0; vnb = 1;
+    }
+    const vec3 animPos = furBlendRebone(w, rest, vbi, vbw, vnb);
     const vec3 pWorld = furToWorld(w, animPos);
 
     vRest = rest;

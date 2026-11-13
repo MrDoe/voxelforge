@@ -21,6 +21,50 @@ namespace app {
 void App::drawSceneOverlays()
 {
     ImGuiIO& io = ImGui::GetIO();
+    // ---- studio skeleton overlay: draw the target's posed bones ----------
+    if (m_studio.active && m_studio.showSkeleton) {
+        vf::voxel::MicroBehaviour* b = studioBehaviour();
+        if (b && !b->rig.bones.empty()) {
+            ImDrawList* dl = ImGui::GetForegroundDrawList();
+            const vf::Camera& cam = m_camera;
+            const glm::ivec2 fb((int)ImGui::GetIO().DisplaySize.x,
+                                (int)ImGui::GetIO().DisplaySize.y);
+            const float tanHalf = tanHalfFov60();
+            const ImU32 col = ImGui::GetColorU32(ImVec4(0.3f, 0.9f, 0.4f, 0.85f));
+            const ImU32 jointCol = ImGui::GetColorU32(ImVec4(0.9f, 0.9f, 0.3f, 0.95f));
+            for (size_t i = 0; i < b->rig.bones.size(); ++i) {
+                const vf::voxel::MicroBone& mb = b->rig.bones[i];
+                // Posed segment endpoints in the anchored frame.
+                glm::vec3 a = b->boneRot[i] * mb.a + b->boneXform[i];
+                glm::vec3 c = b->boneRot[i] * mb.b + b->boneXform[i];
+                // Apply the behaviour's whole-object transform.
+                const glm::mat3 R = b->renderRot();
+                const glm::vec3 pv = b->pivot;
+                a = pv + R * (a - pv) + b->renderOffset();
+                c = pv + R * (c - pv) + b->renderOffset();
+                // Skip segments behind the camera.
+                if (glm::dot(a - cam.pos, cam.forward()) < 0.05f) continue;
+                if (glm::dot(c - cam.pos, cam.forward()) < 0.05f) continue;
+                glm::vec2 pa = projectScreen(a, cam, tanHalf, fb);
+                glm::vec2 pc2 = projectScreen(c, cam, tanHalf, fb);
+                dl->AddLine(ImVec2(pa.x, pa.y), ImVec2(pc2.x, pc2.y), col, 2.0f);
+                dl->AddCircleFilled(ImVec2(pa.x, pa.y), 3.0f, jointCol);
+                dl->AddCircleFilled(ImVec2(pc2.x, pc2.y), 3.0f, jointCol);
+            }
+            // Draw the bone names.
+            for (size_t i = 0; i < b->rig.bones.size(); ++i) {
+                const vf::voxel::MicroBone& mb = b->rig.bones[i];
+                glm::vec3 mid = (b->boneRot[i] * 0.5f * (mb.a + mb.b) + b->boneXform[i]);
+                const glm::mat3 R = b->renderRot();
+                const glm::vec3 pv = b->pivot;
+                mid = pv + R * (mid - pv) + b->renderOffset();
+                if (glm::dot(mid - cam.pos, cam.forward()) < 0.05f) continue;
+                glm::vec2 pm = projectScreen(mid, cam, tanHalf, fb);
+                dl->AddText(ImVec2(pm.x + 4, pm.y - 4), jointCol, mb.name.c_str());
+            }
+        }
+    }
+
     if (m_gizmoValid && m_editBrush == EditBrush::Rotate) {
         ImDrawList* dl = ImGui::GetForegroundDrawList();
         const ImVec2 c(m_gizmoCentre.x, m_gizmoCentre.y);
@@ -28,9 +72,15 @@ void App::drawSceneOverlays()
         const ImVec2 mouse = io.MousePos;
         const TrackballHandle hovered = trackballHandleAt(
             glm::vec2(mouse.x, mouse.y), m_gizmoCentre, radius);
-        const ImU32 idle = IM_COL32(54, 160, 205, 220);
-        const ImU32 hover = IM_COL32(220, 248, 255, 255);
-        const ImU32 active = IM_COL32(255, 205, 92, 255);
+        // One colour family for the gizmo: the ACCENT, at three strengths.
+        // The accent means state, and the ring's state is exactly idle /
+        // hovered / being dragged - so the ring is the accent, dimmed when it
+        // is not in play. The thickness carries the rest.
+        const ImU32 idle = ImGui::GetColorU32(
+            ImVec4(kAccent.x, kAccent.y, kAccent.z, 0.35f));
+        const ImU32 hover = ImGui::GetColorU32(
+            ImVec4(kAccent.x, kAccent.y, kAccent.z, 0.70f));
+        const ImU32 active = ImGui::GetColorU32(kAccent);
         auto ringStyle = [&](TrackballHandle handle) {
             const bool isActive = m_rotating && m_rotateHandle == handle;
             const ImU32 color = isActive ? active
@@ -69,6 +119,10 @@ void App::drawSceneOverlays()
             const glm::ivec2 fb(static_cast<int>(display.x),
                                 static_cast<int>(display.y));
             const float tanHalfFov = tanf(glm::radians(60.0f) * 0.5f);
+            // The axis colours are the R/G/B CONVENTION, not the app's
+            // palette - they tell the user which axis is which, so they stay.
+            // The SELECTED axis is the accent, because "the axis you are
+            // dragging" is state.
             const ImU32 axisColors[3] = {
                 IM_COL32(244, 96, 96, 235),  // X
                 IM_COL32(104, 226, 132, 235), // Y
@@ -82,7 +136,7 @@ void App::drawSceneOverlays()
                 const MoveAxisLine line = moveAxisScreenLine(
                     centre, axis, m_camera, tanHalfFov, fb, m_gizmoRadius);
                 const bool selected = m_moveAxis == axis;
-                const ImU32 color = selected ? IM_COL32(255, 205, 92, 255)
+                const ImU32 color = selected ? ImGui::GetColorU32(kAccent)
                                              : axisColors[i];
                 dl->AddLine(ImVec2(line.a.x, line.a.y),
                             ImVec2(line.b.x, line.b.y), color,
@@ -92,7 +146,7 @@ void App::drawSceneOverlays()
                 dl->AddText(ImVec2(line.b.x + 5.0f, line.b.y - 7.0f), color,
                             moveAxisName(axis));
             }
-            dl->AddCircleFilled(centreI, 4.0f, IM_COL32(220, 248, 255, 235), 20);
+            dl->AddCircleFilled(centreI, 4.0f, ImGui::GetColorU32(kAccent), 20);
             if (m_moveStaged) {
                 const float amount = m_moveAxis == MoveAxis::X ? m_moveDelta.x
                                   : m_moveAxis == MoveAxis::Y ? m_moveDelta.y
@@ -102,7 +156,7 @@ void App::drawSceneOverlays()
                          moveAxisName(m_moveAxis), amount,
                          m_moving ? " (dragging)" : " (staged)");
                 dl->AddText(ImVec2(centreI.x - 48.0f, centreI.y + 22.0f),
-                            IM_COL32(255, 205, 92, 255), text);
+                            ImGui::GetColorU32(kWarn), text);
             }
         }
     }
@@ -111,7 +165,7 @@ void App::drawSceneOverlays()
         ImDrawList* dl = ImGui::GetForegroundDrawList();
         const ImVec2 centre(io.DisplaySize.x * 0.5f, io.DisplaySize.y * 0.5f);
         const ImVec2 marker(centre.x - 42.0f, centre.y + 25.0f);
-        dl->AddCircleFilled(marker, 3.5f, IM_COL32(64, 224, 160, 235), 16);
+        dl->AddCircleFilled(marker, 3.5f, ImGui::GetColorU32(kAccent), 16);
         // Name the SELECTED LAYER, not "a voxel": a MICRO object is not a
         // voxel at all (it lives on its own fine lattice), and the layer
         // name is what the user can act on - it is also the World panel's
@@ -127,11 +181,11 @@ void App::drawSceneOverlays()
             ? font->CalcTextSizeA(font->FontSize, FLT_MAX, 0.0f, label).x
             : 50.0f;
         dl->AddText(ImVec2(centre.x - 33.0f, centre.y + 20.0f),
-                    IM_COL32(160, 245, 210, 245), label);
+                    ImGui::GetColorU32(kTextPrimary), label);
         if (!m_selectedLayer.empty())
             dl->AddText(ImVec2(centre.x - 33.0f + labelW + 6.0f,
                                 centre.y + 20.0f),
-                        IM_COL32(160, 245, 210, 245), m_selectedLayer.c_str());
+                        ImGui::GetColorU32(kAccent), m_selectedLayer.c_str());
     }
 
     drawHotkeyBar();
@@ -241,6 +295,10 @@ ImFont* font = io.FontDefault ? io.FontDefault
     // alone cannot carry legibility on every background the scene produces.
     // Drawn first so every chip and label composites on top of it.
     //
+    // The plate is the sidebar's window surface with its own opacity (it sits
+    // over the RENDER, not over the window) and a hairline border, so the bar
+    // reads as the same product as the sidebar instead of a second palette.
+    //
     // The plate is laid out from the BOTTOM EDGE INWARD and the text is centred
     // inside it. Anchoring the text to a fixed offset from the screen bottom and
     // then padding the plate put the plate's lower edge ~3.5 px OFF-SCREEN
@@ -251,21 +309,33 @@ ImFont* font = io.FontDefault ? io.FontDefault
     const float y = plateTop + platePad; // text top, inside the plate
     dl->AddRectFilled(ImVec2(barX - platePad, plateTop),
                       ImVec2(barX + width + platePad, plateBottom),
-                      IM_COL32(10, 13, 18, 200), 6.0f);
+                      ImGui::GetColorU32(kSurfacePlate), 6.0f);
+    dl->AddRect(ImVec2(barX - platePad, plateTop),
+                ImVec2(barX + width + platePad, plateBottom),
+                ImGui::GetColorU32(ImGuiCol_Border), 6.0f, 0, 1.0f);
 
     float x = barX;
-    const ImU32 dim = IM_COL32(200, 210, 220, 225);
-    const ImU32 keyCol = IM_COL32(160, 205, 255, 245);
-    const ImU32 actCol = IM_COL32(255, 205, 92, 255);
+    // A key is a KEYCAP: a small raised control with the key on it. The
+    // action it performs is secondary text beside it. The armed mode is the
+    // accent - the same "the accent means state" rule the sidebar follows.
+    const ImU32 dim = ImGui::GetColorU32(kTextSecondary);
+    const ImU32 keyCol = ImGui::GetColorU32(kTextPrimary);
+    const ImU32 actCol = ImGui::GetColorU32(kAccent);
 
     for (const Entry& e : entries) {
         const float kw = font->CalcTextSizeA(fontSize, FLT_MAX, 0.0f, e.key).x;
         const float lw = font->CalcTextSizeA(fontSize, FLT_MAX, 0.0f, e.label).x;
         const float chipW = kw + gap + lw + pad * 2.0f;
+        // The keycap sits around the KEY only; the label rides beside it.
+        const float capW = kw + pad * 2.0f;
         if (e.active) {
-            dl->AddRectFilled(ImVec2(x, y - 2.0f),
-                              ImVec2(x + chipW, y + fontSize + 2.0f),
-                              IM_COL32(70, 54, 18, 235), 4.0f);
+            dl->AddRectFilled(ImVec2(x - 2.0f, y - 3.0f),
+                              ImVec2(x + capW + 2.0f, y + fontSize + 3.0f),
+                              ImGui::GetColorU32(kAccentSoft), 5.0f);
+        } else {
+            dl->AddRectFilled(ImVec2(x - 2.0f, y - 3.0f),
+                              ImVec2(x + capW + 2.0f, y + fontSize + 3.0f),
+                              ImGui::GetColorU32(kSurfaceKeycap), 5.0f);
         }
         dl->AddText(ImVec2(x + pad, y), e.active ? actCol : keyCol, e.key);
         dl->AddText(ImVec2(x + pad + kw + gap, y), e.active ? actCol : dim,

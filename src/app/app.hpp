@@ -66,6 +66,7 @@
 #include <cmath>
 #include <cstdint>
 #include <cstdlib>
+#include <functional>
 #include <map>
 #include <string>
 #include <unordered_map>
@@ -107,12 +108,14 @@ private:
     // pane + status footer). Each section is its own method so the sidebar
     // stays a thin dispatcher and every section reads on its own.
     void drawSidebar();
+    void drawTimeline();
     void drawPanelEdit();
     void drawPanelWorld();
     void drawPanelRender();
     void drawPanelTextures();
     void drawPanelMesh();
     void drawPanelAI();
+    void drawPanelAnimate();
     void drawSidebarFooter();
     void drawSceneOverlays();
     // Bottom-of-screen reminder of the currently available hotkeys. Shows the
@@ -284,9 +287,70 @@ private:
     std::vector<vf::voxel::MicroOccluder> m_microOccluders;
     // The fields the occluders point at; owning storage for the pointers.
     std::vector<vf::voxel::MicroField> m_microFields;
+    // MESH-AS-GROUND-TRUTH: when a micro layer has a meshSource, the field is
+    // derived from the mesh (deformed via LBS) instead of being pre-baked.
+    // Stored per micro world (parallel to m_microFields).
+    struct MicroMeshData {
+        std::vector<glm::vec3> restVerts;   // rest-pose vertices (metres, object frame)
+        std::vector<glm::vec3> deformedVerts; // scratch buffer
+        std::vector<int> skinBone;            // per-vertex bone index (-1 = unskinned)
+        std::vector<vf::voxel::MeshTri> tris;           // rest-pose triangles (for voxelization)
+        std::string meshPath;
+        std::string skinPath;
+        bool active = false;                  // true if meshSource is set and loaded
+    };
+    std::vector<MicroMeshData> m_microMeshes;
     // One behaviour per micro world (parallel to m_microOccluders). A layer
     // with a "behaviour" in the manifest walks on its own.
     std::vector<vf::voxel::MicroBehaviour> m_microBehaviours;
+    // Owned clip storage (parallel-ish; indexed by micro world). Pointer-stable
+    // via unique_ptr so MicroBehaviour::clip can point into it.
+    std::vector<std::vector<std::unique_ptr<vf::voxel::MicroClip>>> m_microClips;
+
+    // Animation studio state.
+    struct StudioState {
+        bool active = false;
+        bool overWorld = false;
+        std::string layerFile;
+        // THE STUDIO'S TARGET: the index into the micro layers (the same
+        // index m_microOccluders / m_microBehaviours / m_microClips use) of
+        // the layer the editor animates. Resolved from layerFile in
+        // loadMicroObjects().
+        //
+        // It used to be "index 0" everywhere, and index 0 in the shipped
+        // manifest is the VASE - so "--anim-layer micro/alpaca.vxw" framed,
+        // drove and displayed the vases while the panel header said
+        // "Object: micro/alpaca.vxw". -1 = no target (a typo'd name).
+        int targetIndex = -1;
+        std::string clipFile;
+        bool playing = true;
+        float time = 0.f;
+        float speed = 1.f;
+        // --anim-time: the clip clock is pinned to `time` and does not
+        // advance. A shot of the studio is reproducible only when this is
+        // on; without it the editor plays live (the behaviour owns the clock).
+        bool pinned = false;
+        int selectedBone = 0;
+        int selectedClip = 0;
+        bool showGrid = true;
+        bool showSkeleton = true;
+        glm::vec3 camOffset { 0.f };
+        glm::vec3 lastCenter { 0.f };
+        bool camOffsetSet = false;
+    } m_studio;
+
+    // THE STUDIO'S TARGET, resolved. Every studio site (the panel, the
+    // timeline, the camera, the clip clock) goes through these, so the
+    // target can never drift back to "index 0" - which is the vase in the
+    // shipped manifest, not the animal the user asked for.
+    int studioTarget() const { return m_studio.targetIndex; }
+    // The behaviour of the target (nullptr when there is no target).
+    vf::voxel::MicroBehaviour* studioBehaviour();
+    // The clip set of the target (nullptr when there is no target).
+    std::vector<std::unique_ptr<vf::voxel::MicroClip>>* studioClips();
+    // The occluder of the target (nullptr when there is no target).
+    vf::voxel::MicroOccluder* studioOccluder();
+
     // The fur cards of the micro objects that carry a fur material, and the
     // objects' world AABBs (the cards are generated in the field's local
     // frame, so the world min is what turns that frame into the world one).
@@ -319,7 +383,8 @@ private:
     // Grow the cards for ONE micro field and append them to m_furObjects.
     // Returns the new object's fur index, or -1 when it grows no coat.
     int growFurCards(const vf::voxel::MicroField& field, glm::vec3 worldOffset,
-                     const vf::voxel::MicroRig& rig);
+                     const vf::voxel::MicroRig& rig,
+                     std::function<int(glm::vec3)> boneFn = nullptr);
     // Sun: m_sunDir is the single source of truth for where the sun is (it
     // rides the per-frame push constant), so every control that moves the sun
     // funnels through setSunAngles and nothing keeps parallel angle floats.
@@ -401,6 +466,10 @@ private:
     // value >= 0 to end the run with that status (see frame/frame.hpp).
     int recordHeadlessFrame(FrameSync& fr);
     int recordInteractiveFrame(FrameSync& fr, const FrameInputs& fx);
+    // The animation studio's frame: backdrop clear + micro overlay + fur +
+    // post, and nothing else. Shared by both recording paths so the editor
+    // and a --shot of it cannot drift apart.
+    void recordStudioFrame(VkCommandBuffer cmd, const vf::RaymarchPush& push);
     // The resolved shot list (--shot plus any --shotlist entries): built by
     // setupCameraAndShots() and walked by the headless capture path, so it is App
     // state rather than a local of whichever loop happened to own it.
@@ -439,6 +508,12 @@ private:
     vf::Image3D m_gpos;    // ray-march G-buffer: world pos + hit type
     vf::Image3D m_gnorm;   // G-buffer: shading normal (xyz), 0 on sky
     vf::Image3D m_ssaoAo;  // SSAO scratch: raw AO term (ssao.comp -> ssao_apply.comp)
+    // SSR scratch. `ssr.comp` reads the scene colour at pixels it did NOT
+    // write (its reflected ray marches across the screen), so it may not
+    // sample the image it stores into. This is the read side's twin: the
+    // pass writes here and the frame copies it back, which is what makes a
+    // still frame bit-reproducible.
+    vf::Image3D m_ssrOut;
     vf::Image3D m_heightImg;
     vf::Image3D m_objVolImg;
     vf::Image3D m_irrImg; // 64^3 irradiance volume (binding 26): created once,

@@ -21,6 +21,7 @@
 #pragma once
 
 #include "voxel/micro_rig.hpp"
+#include "voxel/micro_clip.hpp"
 
 #include <glm/glm.hpp>
 
@@ -70,6 +71,29 @@ struct MicroBehaviour {
     // manifest's "pose" field or by an MCP pose command.
     std::vector<glm::mat3> poseRot;
     bool poseActive = false;
+
+    // A CLIP: a recorded motion primitive. When set and active, it drives
+    // the bones (and a cosmetic body offset) instead of the gait. The policy
+    // (the real game) decides which clip plays; this struct just holds the
+    // current one and its playback state.
+    const vf::voxel::MicroClip* clip = nullptr;
+    // FROZEN: locomotion and heading wander are suspended (the object stays
+    // put) while the clip still drives the bones through its own clock. Used
+    // by the animation studio so the target never drifts.
+    bool frozen = false;
+    bool clipActive = false;
+    float clipTime = 0.f;
+    float clipSpeed = 1.f;
+    bool clipPlaying = true;
+    // The COSMETIC body pose a clip authors (a small bob/lean, `body` track).
+    // It is deliberately NOT `offset`/`heading`: those are the LOCOMOTION
+    // state the collision response owns and withdraws. The first version
+    // wrote the clip's body values into them, so an unpinned playing clip
+    // read bodyHdg = 0 every frame and snapped the object to +X.
+    glm::vec3 bodyOffset { 0.f };
+    glm::mat3 bodyRot { 1.f };
+    // Scratch for the clip sample, so playback does not allocate each frame.
+    std::vector<glm::mat3> clipLocalRot;
 
     // The runtime state.
     State state = State::Walk;
@@ -132,6 +156,23 @@ struct MicroBehaviour {
     std::vector<glm::vec3> boneXform;   // the translation of each transform
     std::vector<glm::vec3> boneJoint;
 
+    // The transform the renderer applies: locomotion (offset/rot) with the
+    // clip's cosmetic body pose folded in. The body pose lives in the
+    // object's own frame, so its translation is rotated by the heading:
+    //   world = pivot + renderRot() * (p - pivot) + renderOffset()
+    glm::vec3 renderOffset() const { return offset + rot * bodyOffset; }
+    glm::mat3 renderRot() const { return rot * bodyRot; }
+
+    // Start (or clear, with nullptr) a clip. Resets the clip clock and picks
+    // the locomotion stance from the clip's clock: a distance-clocked clip
+    // travels, a time-clocked one performs in place.
+    void startClip(const MicroClip* c);
+
+    // Advance a DISTANCE-clocked clip by the displacement the collision
+    // response actually accepted. A refused step therefore holds the clip
+    // mid-stride instead of skating the legs in place.
+    void advanceClipDistance(float metres);
+
     // Set the behaviour up for an object placed at `pos`. `seed` makes two
     // animals of the same kind behave differently (they do not graze in
     // lockstep and they do not turn the same way).
@@ -144,6 +185,10 @@ struct MicroBehaviour {
     // sways. It is driven by the rig's roles, so it works on any rig - an
     // imported cat animates the same way an imported horse does.
     void animateBones();
+
+    // Chain a set of LOCAL rotations into the composed boneRot/boneXform.
+    // Parents must come before children (guaranteed by the rig's ordering).
+    void composeBones(const std::vector<glm::mat3>& localRot);
 
     // PIN a pose: the transform, the gait phase and (optionally) the graze
     // blend, with no state machine and no wandering. A headless `--shot` of an

@@ -99,6 +99,24 @@ int App::run(const Args& args)
     // local `args`, and the init block assigned m_args several lines later).
     m_args = args;
 
+    // Animation studio mode.
+    m_studio.active = args.anim;
+    m_studio.overWorld = args.animWorld;
+    if (m_studio.active)
+        m_panel = Panel::Animate;
+    if (!args.animLayer.empty()) m_studio.layerFile = args.animLayer;
+    else m_studio.layerFile = "micro/alpaca.vxw";
+    if (!args.animClip.empty()) m_studio.clipFile = args.animClip;
+    if (args.animClipTime >= 0.f) {
+        m_studio.time = args.animClipTime;
+        // A pinned time freezes playback: a --shot of the studio must be
+        // reproducible, and the frame loop must not advance the object under
+        // it. Without the flag the studio plays LIVE (the old test was
+        // `time >= 0`, which is true for every run, so the editor was frozen
+        // at t=0 and looked like a still image).
+        m_studio.pinned = true;
+    }
+
     // --sun elevation/azimuth, in degrees, into a direction TOWARD the sun.
     {
         m_manifestPath = std::string(VOXELFORGE_ASSET_DIR) + "/world.json";
@@ -231,7 +249,48 @@ int App::run(const Args& args)
         // The micro objects' autonomous behaviours (a walking animal). The
         // transform is pushed to the micro pass, so it costs one matrix and
         // a vector per object per frame.
+        // The BEHAVIOUR owns the clip clock (it advances with the frame or
+        // with the distance the collision response accepted). The studio only
+        // PINS it - --anim-time, for a reproducible shot - and otherwise reads
+        // it back for the timeline.
+        if (m_studio.active && m_studio.pinned) {
+            for (auto& b : m_microBehaviours) {
+                if (b.clip && b.clipActive) {
+                    b.clipTime = m_studio.time;
+                    b.clipPlaying = false;
+                }
+            }
+        }
         updateMicroBehaviours(dt);
+        // The studio's clock belongs to its TARGET (the layer named by
+        // --anim-layer), not to index 0 - which is the vase.
+        if (m_studio.active && !m_studio.pinned) {
+            if (auto* tb = studioBehaviour(); tb && tb->clip)
+                m_studio.time = tb->clipTime;
+        }
+
+        // Studio mode: keep the object centered in the view. Track the
+        // object's movement and apply the delta to the camera, so the user
+        // can still orbit freely while the animation stays in frame.
+        // The object is the studio's TARGET, not micro world 0.
+        if (m_studio.active) {
+            auto* oc = studioOccluder();
+            auto* tb = studioBehaviour();
+            if (oc) {
+                glm::vec3 center = 0.5f * (oc->aabbMin + oc->aabbMax);
+                if (tb)
+                    center += tb->renderOffset();
+                if (!m_studio.camOffsetSet) {
+                    m_studio.camOffset = m_camera.pos - center;
+                    m_studio.lastCenter = center;
+                    m_studio.camOffsetSet = true;
+                } else {
+                    glm::vec3 delta = center - m_studio.lastCenter;
+                    m_camera.pos += delta;
+                    m_studio.lastCenter = center;
+                }
+            }
+        }
         // VF_TEST_ROTATE_LIVE is a synthetic, PERSISTENT preview state. It is
         // hoisted here because two consumers need it - processInput (which must
         // not treat a synthetic pose as a live drag) and the post-input hook

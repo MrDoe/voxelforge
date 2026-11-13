@@ -119,6 +119,25 @@ struct WorldLayer {
     // to the skeleton at load time. Lets an AI pose a rigged animal without
     // re-running the gait. Empty = rest pose (gait drives the bones).
     std::vector<float> pose;
+    // CLIP SET: available motion primitives for a MICRO layer. Each entry is
+    // a path to a .anim file (relative to the manifest dir). The clips
+    // carry their own names; the first is the default. Empty = procedural
+    // gait (the built-in behaviour).
+    std::vector<std::string> clips;
+    // SOURCE MESH for a mesh-derived layer: relative path to the STL/OBJ that
+    // produced this layer's voxels (e.g. "models/alpaca_mesh.stl").
+    // Empty = the layer was authored directly (voxel records, no mesh). When
+    // set, the layer can be re-voxelized from this mesh on demand, and the
+    // mesh is the ground truth for deformation (voxelize the deformed mesh
+    // each frame instead of animating rigid voxel cells). See
+    // .opencode/wiki/concepts/micro-deformation-surface.md.
+    std::string meshSource;
+    // UP AXIS of `meshSource`: "" / "y" = Y-up (the engine's object frame,
+    // default), "z" = Z-up (a DCC export). The mesh loader converts a Z-up
+    // file with a -90 deg X rotation before anything measures it, so the skin
+    // and the rig's Y-up bone segments agree. A key `parseWorldLayer` reads
+    // MUST also be emitted by `writeManifest`, or one app run erases it.
+    std::string meshUp;
 };
 
 bool loadManifest(const std::string& path, std::vector<WorldLayer>& out);

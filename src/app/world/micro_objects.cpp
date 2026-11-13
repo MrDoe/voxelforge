@@ -14,6 +14,8 @@
 // layered_world.cpp).
 #include "app/app.hpp"
 
+#include "voxel/micro_mesh.hpp"
+
 #include <algorithm>
 #include <chrono>
 #include <cmath>
@@ -83,6 +85,15 @@ void App::loadMicroObjects()
     std::vector<std::string> commandFiles;
     std::vector<vf::voxel::MicroRig> microRigs;
     std::vector<vf::voxel::MicroWorld> worlds;
+    // A layer whose manifest names a `meshSource` is drawn from its MESH, not
+    // from the traced field. The vertices cannot go up until every world has
+    // been compacted into the pass (a world with an empty chunk grid is
+    // skipped, so the GPU index is not the manifest index), so they are
+    // collected here and uploaded after setMicroWorlds.
+    std::vector<std::pair<size_t, std::vector<glm::vec4>>> pendingMeshes;
+    // One entry per layer, parallel to `worlds`, carrying the MESH the layer
+    // was loaded from (for picking and diagnostics). Empty for a traced layer.
+    std::vector<MicroMeshData> meshes;
     struct FurStat { std::string file; size_t cards; double ms; int bones; };
     std::vector<FurStat> furStats;
     // VF_FUR=0 turns the fur off. It is the escape hatch: with the cards
@@ -163,6 +174,111 @@ void App::loadMicroObjects()
         }
         vf::voxel::MicroWorld world;
         vf::voxel::synthesizeMicroSvo(field, offset, world);
+        // THE MESH SIDE-CAR. A layer that names a `meshSource` is drawn from
+        // its MESH, posed on the GPU by the rig, with the field demoted to the
+        // SHADING source (material, texture, normal, AO, self-shadow). That is
+        // what removes the traced path's hole / notch / ghost failure class:
+        // the surface is the mesh's, so an inverse bone map can no longer
+        // invent geometry that is not there.
+        {
+            MicroMeshData md;
+            if (!l.meshSource.empty()) {
+                if (l.rotDeg != 0.0f || l.rotX != 0.0f || l.rotZ != 0.0f) {
+                    // The manifest rotation is applied to the RECORDS before
+                    // the field is built, so the field's frame is the rotated
+                    // one while the mesh is authored unrotated. Pose a mesh in
+                    // the wrong frame and every material lookup misses, so
+                    // until the rotation is applied to the mesh as well this
+                    // layer stays traced.
+                    spdlog::warn("micro: '{}' declares a mesh AND a manifest "
+                                 "rotation; the mesh is authored in the unrotated "
+                                 "frame - leaving the layer traced",
+                                 l.file);
+                } else if (!world.chunkGrid.empty()) {
+                    // The skin is the layer's sibling: micro/alpaca.vxw ->
+                    // micro/alpaca.skin. The mesh path is relative to the
+                    // manifest, like every other asset path in it.
+                    std::string skinPath = path;
+                    const size_t sdot = skinPath.find_last_of('.');
+                    const size_t sslash = skinPath.find_last_of('/');
+                    if (sdot != std::string::npos &&
+                        (sslash == std::string::npos || sdot > sslash))
+                        skinPath = skinPath.substr(0, sdot);
+                    skinPath += ".skin";
+                    std::string meshPath = l.meshSource;
+                    if (meshPath.empty() || meshPath[0] != '/')
+                        meshPath = dir + "/" + meshPath;
+                    vf::voxel::MicroMesh mesh;
+                    std::string merr;
+                    // The axis the FILE was authored in. Y-up is the engine's
+                    // object frame; "z" is a DCC export and is rotated into it
+                    // before the skin is measured (see UpAxis).
+                    vf::voxel::UpAxis up = vf::voxel::UpAxis::Y;
+                    if (l.meshUp == "z" || l.meshUp == "Z")
+                        up = vf::voxel::UpAxis::Z;
+                    else if (!l.meshUp.empty() && l.meshUp != "y" &&
+                             l.meshUp != "Y")
+                        spdlog::warn("micro: '{}' declares meshUp \"{}\" - "
+                                     "expected \"y\" or \"z\"; assuming y",
+                                     l.file, l.meshUp);
+                    if (!vf::voxel::loadMicroMesh(meshPath, skinPath, mesh, &merr,
+                                                  up)) {
+                        spdlog::error("micro: '{}': {}", l.file, merr);
+                    } else {
+                        // PER-VERTEX APPEARANCE. The field's surface and the
+                        // mesh's surface disagree by up to a cell, so a
+                        // fragment-time lookup MISSES near every edge - and a
+                        // miss has no correct fallback (`microSurface` refuses
+                        // a mesh world), which renders flat grey. Resolve the
+                        // material and AO once per vertex at load, where the
+                        // search can be widened and a miss counted.
+                        vf::voxel::MeshAppearanceStats ast;
+                        vf::voxel::assignMicroMeshAppearance(field, mesh, &ast);
+                        if (ast.missed > 0)
+                            spdlog::warn("micro: '{}' {} of {} mesh vertices had "
+                                         "no rest solid within 2 cells - they keep "
+                                         "the field lookup",
+                                         l.file, ast.missed, ast.vertices);
+                        else
+                            spdlog::info("micro: '{}' per-vertex appearance on "
+                                         "{} vertices ({} fell back)",
+                                         l.file, ast.assigned, ast.missed);
+                        // ANCHORED frame: the field's local frame plus the
+                        // layer's placement - the very frame the rig's joints
+                        // were shifted into above, so `microRebone` (R*p + t)
+                        // poses a vertex against the same joints the shading
+                        // lookups use.
+                        std::vector<glm::vec4> verts(mesh.rest.size());
+                        for (size_t vi = 0; vi < mesh.rest.size(); ++vi)
+                            verts[vi] = vf::voxel::meshVertexRecord(mesh, vi, offset);
+                        pendingMeshes.emplace_back(size_t(microWorldCount),
+                                                   std::move(verts));
+                        md.deformedVerts = mesh.rest;
+                        md.restVerts = mesh.rest;
+                        md.skinBone = mesh.bone;
+                        md.tris = mesh.tris;
+                        md.meshPath = meshPath;
+                        md.skinPath = skinPath;
+                        md.active = true;
+                        spdlog::info("micro: '{}' raster-owned from {} ({} verts, "
+                                     "{} tris)",
+                                     l.file, meshPath, mesh.rest.size(),
+                                     mesh.tris.size());
+                        // The COAT's bone comes from `MicroRig::boneAt`, the
+                        // same capsule rule the `.skin` side-car is derived
+                        // from (`vf_micro_skin`), so body and fur share ONE
+                        // ownership. There used to be a second, coarse grid
+                        // here (a 0.1 m cell holding the lowest-index vertex'
+                        // bone, expanded by one cell): a cell straddling a
+                        // bone seam handed every card in it the wrong bone, so
+                        // the clumps followed a transform up to 10 cm off and
+                        // peeled off the body during a graze. The rule is
+                        // exact and per-point; there is nothing to index.
+                    }
+                }
+            }
+            meshes.push_back(std::move(md));
+        }
         // The SKELETON. It is DERIVED from the object's own voxels, so a
         // newly imported model animates too - nothing here knows what an
         // alpaca is. Deriving it is a pass over the voxels, so the result is
@@ -175,14 +291,25 @@ void App::loadMicroObjects()
             std::error_code ec;
             const uint64_t lsize = std::filesystem::file_size(path, ec);
             const uint64_t lmtime = fileStamp(path);
-            if (!vf::voxel::readMicroRigCache(rigPath, rig, lsize, lmtime)) {
-                if (vf::voxel::deriveMicroRig(field, rig)) {
-                    vf::voxel::writeMicroRigCache(rigPath, rig, lsize, lmtime);
-                    spdlog::info("micro: derived a rig for '{}' ({} bones, "
-                                 "{} legs) and cached it at {}",
-                                 l.file, rig.bones.size(), rig.legCount,
-                                 rigPath);
+            // The authored override (micro/<name>.rig.json) wins over the
+            // binary cache when its signature matches: it carries the
+            // adjustable bone radius and any hand edits. The cache is only a
+            // convenience.
+            std::string overridePath = rigPath + ".json";
+            if (!vf::voxel::readMicroRigOverride(overridePath, rig, lsize, lmtime)) {
+                if (!vf::voxel::readMicroRigCache(rigPath, rig, lsize, lmtime)) {
+                    if (vf::voxel::deriveMicroRig(field, rig)) {
+                        vf::voxel::writeMicroRigCache(rigPath, rig, lsize, lmtime);
+                        spdlog::info("micro: derived a rig for '{}' ({} bones, "
+                                     "{} legs) and cached it at {}",
+                                     l.file, rig.bones.size(), rig.legCount,
+                                     rigPath);
+                    }
+                } else {
+                    spdlog::info("micro: rig cache hit for '{}'", l.file);
                 }
+            } else {
+                spdlog::info("micro: rig override hit for '{}' (radius editable)", l.file);
             }
             // The rig's points come from the FIELD's frame (the cells the
             // object is made of), but the shader looks the bones up in the
@@ -206,7 +333,7 @@ void App::loadMicroObjects()
         occluderFiles.push_back(l.file);
         behaviourFiles.push_back(l.behaviour);
         commandFiles.push_back(l.command);
-// The FUR CARDS. A micro object whose material grows fur (21,
+        // The FUR CARDS. A micro object whose material grows fur (21,
         // `fleece`) gets a coat of hair cards; the vase and the urn do not,
         // and the fur pass stays empty for them.
         //
@@ -220,7 +347,7 @@ void App::loadMicroObjects()
         int nBones = 0;
         if (furEnabled && !world.chunkGrid.empty()) {
             const auto t0 = std::chrono::steady_clock::now();
-            furIndex = growFurCards(field, offset, microRigs.back());
+            furIndex = growFurCards(field, offset, microRigs.back(), nullptr);
             furMs = std::chrono::duration<double, std::milli>(
                         std::chrono::steady_clock::now() - t0)
                         .count();
@@ -246,9 +373,50 @@ void App::loadMicroObjects()
         }
         worlds.push_back(std::move(world));
     }
+    // THE STUDIO'S TARGET. The editor animates ONE micro layer, named by
+    // --anim-layer, and it used to bind to index 0 - which in the shipped
+    // manifest is the VASE. So "--anim-layer micro/alpaca.vxw" framed the
+    // vases, drove the vase's behaviour and showed the vase's (empty) clip
+    // set, while the panel header said "Object: micro/alpaca.vxw". Resolve
+    // the name against the loaded layers ONCE, here, and let every studio
+    // site use the resolved index.
+    m_studio.targetIndex = -1;
+    if (m_studio.active) {
+        auto baseName = [](const std::string& p) {
+            const size_t s = p.find_last_of('/');
+            return s == std::string::npos ? p : p.substr(s + 1);
+        };
+        const std::string want = m_studio.layerFile;
+        int hit = -1;
+        bool ambiguous = false;
+        for (size_t i = 0; i < occluderFiles.size(); ++i) {
+            if (occluderFiles[i] == want ||
+                baseName(occluderFiles[i]) == baseName(want)) {
+                if (hit >= 0) { ambiguous = true; break; }
+                hit = int(i);
+            }
+        }
+        if (hit >= 0 && !ambiguous) {
+            m_studio.targetIndex = hit;
+            spdlog::info("studio: target '{}' -> micro layer {} ('{}')",
+                         m_studio.layerFile, hit, occluderFiles[size_t(hit)]);
+        } else {
+            spdlog::warn("studio: no micro layer matches '{}' (loaded: {})",
+                         m_studio.layerFile, [&] {
+                             std::string s;
+                             for (const auto& f : occluderFiles) s += f + " ";
+                             return s;
+                         }());
+        }
+    }
+
     // Second pass: NOW that no more fields can move, point the occluders at
     // them. See the reserve above.
     m_microBehaviours.clear();
+    // The clip sets are rebuilt from scratch too: they used to be only ever
+    // APPENDED to, so a world reload left the old sets in front of the new
+    // ones and every index past the first reload pointed at the wrong clip.
+    m_microClips.clear();
     for (size_t i = 0; i < m_microFields.size(); ++i) {
         vf::voxel::MicroOccluder oc;
         oc.field = &m_microFields[i];
@@ -311,6 +479,66 @@ void App::loadMicroObjects()
             }
         }
 
+        // CLIP SET: load available motion primitives.
+        m_microClips.push_back({});
+        // Studio --anim-clip override. It belongs to the TARGET layer only:
+        // it used to be attached to EVERY micro layer, so the vases "played"
+        // the alpaca's clip - and the studio's UI drove whichever layer
+        // happened to be index 0, which is the vase.
+        if (m_studio.active && !m_studio.clipFile.empty() &&
+            int(i) == m_studio.targetIndex) {
+            auto clip = std::make_unique<vf::voxel::MicroClip>();
+            if (vf::voxel::readMicroClip(m_studio.clipFile, *clip)) {
+                m_microClips.back().push_back(std::move(clip));
+            } else {
+                spdlog::warn("studio: failed to read clip '{}'", m_studio.clipFile);
+            }
+        }
+        // Find the layer for this micro field.
+        const vf::voxel::worldfile::WorldLayer* _clp = nullptr;
+        for (const auto& _ll : layers) if (_ll.file == occluderFiles[i]) { _clp = &_ll; break; }
+        if (_clp) {
+            std::vector<std::string> clipPaths = _clp->clips;
+            std::error_code ec;
+            const std::string layerDir = (_clp->file.find('/') != std::string::npos)
+                ? (dir + "/" + _clp->file.substr(0, _clp->file.find_last_of('/')))
+                : dir;
+            for (auto& entry : std::filesystem::directory_iterator(layerDir, ec)) {
+                if (!entry.is_regular_file() || entry.path().extension() != ".anim")
+                    continue;
+                std::string rel = entry.path().lexically_relative(dir).generic_string();
+                if (std::find(clipPaths.begin(), clipPaths.end(), rel) == clipPaths.end())
+                    clipPaths.push_back(rel);
+            }
+            for (const auto& cf : clipPaths) {
+                const std::string cpath = dir + "/" + cf;
+                auto clip = std::make_unique<vf::voxel::MicroClip>();
+                if (vf::voxel::readMicroClip(cpath, *clip)) {
+                    if (!clip->layer.empty() && clip->layer != _clp->file)
+                        continue;
+                    if (i < microRigs.size()) {
+                        auto issues = clip->validate(microRigs[i]);
+                        for (const auto& iss : issues)
+                            spdlog::warn("micro clip '{}': {}", cf, iss);
+                    }
+                    m_microClips.back().push_back(std::move(clip));
+                } else {
+                    spdlog::warn("micro: cannot read clip '{}'", cpath);
+                }
+            }
+        }
+        // If a clip set exists, the first clip is the default.
+        if (!m_microClips.back().empty()) {
+            b.active = true;
+            if (!wants) {
+                b.reset(oc.aabbMin, float(i) * 7.31f + 1.7f);
+                b.pivot = oc.aabbMin;
+                if (i < microRigs.size())
+                    b.rig = microRigs[i];
+            }
+            b.startClip(m_microClips.back().front().get());
+        }
+
         // A manifest-issued command (from MCP/chat) overrides the default.
         const std::string& cmd = (i < commandFiles.size()) ? commandFiles[i] : std::string();
         if (!cmd.empty()) {
@@ -331,6 +559,30 @@ void App::loadMicroObjects()
         m_microBehaviours.push_back(b);
     }
     m_microSvoPass.setMicroWorlds(worlds);
+    // Upload the mesh side-cars NOW that the worlds are compacted: a world
+    // with an empty chunk grid was skipped, so the GPU index is the
+    // microWorldCount value recorded at mesh-load time, NOT the manifest
+    // index. setMesh flips the world to raster-owned (tracer skips it, field
+    // sampler stops un-boning it).
+    // VF_MESH=0 is the diagnostic escape hatch: the object is drawn from its
+    // TRACED FIELD instead of rastered from its MESH — same object, same
+    // camera, same pose, two geometry paths. It exists because the alternative
+    // is editing `meshSource` out of assets/world.json, which the app rewrites
+    // on every run and which a concurrent test reads, and a manifest edit can
+    // silently disable the layer that is under test. This is the arm that
+    // separates "the raster mesh pass flickers" from "the micro pass flickers".
+    // A run with it set is NOT the shipping configuration — label it.
+    const char* meshEnv = std::getenv("VF_MESH");
+    const bool meshOn = !(meshEnv && meshEnv[0] == '0');
+    if (meshOn) {
+        for (const auto& pm : pendingMeshes)
+            m_microSvoPass.setMesh(pm.first, pm.second);
+    } else {
+        spdlog::warn("micro: VF_MESH=0 — {} mesh layer(s) fall back to the "
+                     "traced field (diagnostic, not the shipping path)",
+                     pendingMeshes.size());
+    }
+    m_microMeshes = std::move(meshes);
     // The fur cards go up last: the pass needs the objects, and the preview
     // mirroring needs the index mapping that was just built.
     m_furPass.setObjects(m_furObjects);
@@ -470,7 +722,8 @@ bool App::layerPivotWorld(const std::string& file, glm::vec3& pivot) const
 // only place that knows how to make one: the load and the rebuild (the
 // sidebar's sliders changed) share it.
 int App::growFurCards(const vf::voxel::MicroField& field, glm::vec3 worldOffset,
-                      const vf::voxel::MicroRig& rig)
+                      const vf::voxel::MicroRig& rig,
+                      std::function<int(glm::vec3)> boneFn)
 {
     if (!m_furEnabled)
         return -1;
@@ -486,7 +739,7 @@ int App::growFurCards(const vf::voxel::MicroField& field, glm::vec3 worldOffset,
     fp.materials = m_furMaterials;
     vf::voxel::FurObject fo;
     std::string ferr;
-    if (!vf::voxel::buildFurCards(field, fp, fo, &ferr, &rig, worldOffset))
+    if (!vf::voxel::buildFurCards(field, fp, fo, &ferr, &rig, worldOffset, boneFn))
         return -1;
     fo.worldMin = field.origin + worldOffset;
     m_furObjects.push_back(std::move(fo));
@@ -632,9 +885,20 @@ struct FreezePose {
     float headingDeg = 0.f;
     float gait = 0.f;
     float graze = 0.f;
+    // The CLIP's own clock, in seconds. A clip-driven object (the alpaca
+    // plays graze/walk clips) ignores gait/graze entirely, so pinning the
+    // transform alone still leaves the POSE advancing with the frame clock -
+    // i.e. a shader A/B on a clip-driven object had no way to hold still. The
+    // 7th field pins it; 0 is the clip's first frame.
+    float clipTime = 0.f;
+    bool hasClipTime = false;
 };
 
-// VF_TEST_BEHAVIOUR_FREEZE="name:dx,dy,dz:headingDeg:gait[:graze][;...]"
+// VF_TEST_BEHAVIOUR_FREEZE="name:dx,dy,dz:headingDeg:gait[:graze[:clipTime]][;...]"
+//
+// `clipTime` pins the CLIP's clock. A clip-driven object ignores gait/graze
+// (the clip poses the bones), so without it the pose keeps advancing with the
+// frame clock and even a pinned transform is not a fixed image.
 //
 // A headless `--shot` of an ANIMATED micro object is NOT deterministic: the
 // behaviour advances with the frame clock (the step is clamped to 0.1 s) for
@@ -659,14 +923,17 @@ const std::map<std::string, FreezePose>& freezePoses()
             pos = end + 1;
             char name[64] = {};
             float x = 0.f, y = 0.f, z = 0.f, hd = 0.f, gait = 0.f, graze = 0.f;
-            const int got = std::sscanf(item.c_str(), "%63[^:]:%f,%f,%f:%f:%f:%f",
-                                        name, &x, &y, &z, &hd, &gait, &graze);
+            float ct = 0.f;
+            const int got = std::sscanf(item.c_str(), "%63[^:]:%f,%f,%f:%f:%f:%f:%f",
+                                        name, &x, &y, &z, &hd, &gait, &graze, &ct);
             if (got >= 5) {
                 FreezePose p;
                 p.offset = glm::vec3(x, y, z);
                 p.headingDeg = hd;
                 p.gait = gait;
                 p.graze = got >= 6 ? graze : 0.f;
+                p.hasClipTime = got >= 7;
+                p.clipTime = ct;
                 poses[name] = p;
             }
         }
@@ -713,6 +980,24 @@ void App::updateMicroBehaviours(float dt)
         vf::voxel::MicroBehaviour& b = m_microBehaviours[i];
         if (!b.active)
             continue;
+        // Studio mode: freeze locomotion (no walking/turning) so the animal
+        // stays put while editing. The clip still drives the bones via its
+        // own clock, so pose animation plays in place.
+        if (m_studio.active) {
+            b.command = vf::voxel::MicroBehaviour::Command::Stop;
+            b.frozen = true;
+        } else {
+            b.frozen = false;
+        }
+        // Studio mode: freeze locomotion (no walking/turning) so the animal
+        // stays put while editing. The clip still drives the bones via its
+        // own clock, so pose animation plays in place.
+        if (m_studio.active) {
+            b.command = vf::voxel::MicroBehaviour::Command::Stop;
+            b.frozen = true;
+        } else {
+            b.frozen = false;
+        }
         // A pinned pose wins over both the state machine and the user's
         // manipulation: it exists so a render is exactly reproducible. It
         // does NOT skip the ground clamp below - a pinned pose still stands
@@ -729,6 +1014,10 @@ void App::updateMicroBehaviours(float dt)
                     stem.resize(stem.size() - 4);
                 const auto fit = poses.find(stem);
                 if (fit != poses.end()) {
+                    // The clip's clock is pinned BEFORE pinPose, because
+                    // pinPose poses the bones from it.
+                    if (fit->second.hasClipTime)
+                        b.clipTime = fit->second.clipTime;
                     b.pinPose(fit->second.offset, fit->second.headingDeg,
                               fit->second.gait, fit->second.graze);
                     frozen = true;
@@ -1325,6 +1614,33 @@ void App::updateMicroBehaviours(float dt)
             }
         }
     }
+}
+
+// The studio's accessors. Every studio site goes through these, so the
+// target can never drift back to "index 0" - which is the vase in the
+// shipped manifest, not the animal the user named.
+vf::voxel::MicroBehaviour* App::studioBehaviour()
+{
+    const int t = m_studio.targetIndex;
+    if (t < 0 || size_t(t) >= m_microBehaviours.size())
+        return nullptr;
+    return &m_microBehaviours[size_t(t)];
+}
+
+std::vector<std::unique_ptr<vf::voxel::MicroClip>>* App::studioClips()
+{
+    const int t = m_studio.targetIndex;
+    if (t < 0 || size_t(t) >= m_microClips.size())
+        return nullptr;
+    return &m_microClips[size_t(t)];
+}
+
+vf::voxel::MicroOccluder* App::studioOccluder()
+{
+    const int t = m_studio.targetIndex;
+    if (t < 0 || size_t(t) >= m_microOccluders.size())
+        return nullptr;
+    return &m_microOccluders[size_t(t)];
 }
 
 } // namespace app

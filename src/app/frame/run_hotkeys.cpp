@@ -1,11 +1,11 @@
 // The keyboard: render-flag bits, the browser-style tool shortcuts, the edit
-// hotkeys, and the sidebar chrome (Tab collapse, Ctrl+1..6 section jumps).
+// hotkeys, and the sidebar chrome (Tab collapse, Ctrl+1..7 section jumps).
 //
 // THE RULE: a text field owns the keyboard, so nothing here fires. That is
 // broader than "don't echo a character". While the user types a layer filter,
 // a mesh path or a sun time, every key below is a character or a chord the
 // field wants: WASD/QE, the bare 1..5/0/G/H/B/J/K/L render-flag toggles, T/F/N,
-// P, Exposure `+`/`-`, the brush size keys, Ctrl+1..6 section jumps, Ctrl+B
+// P, Exposure `+`/`-`, the brush size keys, Ctrl+1..7 section jumps, Ctrl+B
 // collapse, Ctrl+Z undo, and Tab - which is a REAL CHARACTER in an InputText.
 //
 // The gate is textFieldOwnsKeyboard() (see frame.hpp), read once per frame
@@ -228,7 +228,7 @@ void App::handleHotkeys(bool textCaptures, bool headlessRun)
             // Ctrl+B, which is free and the conventional "toggle the panel"
             // chord. Note B is NOT unbound - bare B toggles detail normals
             // below - so this relies on the same latch discipline as
-            // Ctrl+1..6 vs bare 1..5: this block runs FIRST, so while Ctrl is
+            // Ctrl+1..7 vs bare 1..5: this block runs FIRST, so while Ctrl is
             // held it takes B's edge and the bare toggle below sees none. That
             // is the intended reading of the latch, not an accident.
             if (ctrl && edge(GLFW_KEY_B, hw)) {
@@ -238,6 +238,8 @@ void App::handleHotkeys(bool textCaptures, bool headlessRun)
             }
             if (ctrl) {
                 for (int i = 0; i < kPanelCount; ++i) {
+                    if (m_studio.active && Panel(i) != Panel::Animate)
+                        continue;
                     if (!edge(GLFW_KEY_1 + i, hw))
                         continue;
                     if (Panel(i) == Panel::Mesh)
@@ -320,7 +322,7 @@ void App::handleHotkeys(bool textCaptures, bool headlessRun)
             }
         }
         // Bare 1..5 toggle render flags. edge() is a per-key-code latch,
-        // not a consume: the Ctrl+1..6 sidebar switch above polls these
+        // not a consume: the Ctrl+1..7 sidebar switch above polls these
         // same codes first, but only while Ctrl is held, so it takes the
         // edge on exactly the frames this loop must not act on.
         for (int i = 0; i < 5; ++i) {

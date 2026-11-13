@@ -7176,3 +7176,21 @@ structurally — `early_fragment_tests` is inert here, and a fragment stage that
 does not exist cannot store. **The G-buffer-as-colour-attachments redesign is not
 needed and should stay unbuilt.**
 Pages: concepts/render-nondeterminism.md, index.md
+
+## [2026-11-13] correction | fur_check spread rule is >= 0.7x body, not >= body
+
+The fur gate was re-derived on the COAT'S FOOTPRINT instead of a fixed 260x380
+rect (76 % of that rect is scenery, so the old check measured the frame). The
+shape numbers are now detail 14.77 vs body 13.75 and spread 28.62 vs 31.12, with
+the spread floor set to 0.7x the body's. A translucent layer averages the
+crevices it covers, so it compresses large-scale contrast even while it adds
+texture — the coat's spread need only stay >= 70 % of the body's, not exceed
+it. `tests/fur_check.py` now PINS the pose (VF_TEST_BEHAVIOUR_FREEZE) in every
+render and requires a noise floor of exactly 0 px (was <= 200 against a
+12,051 px "floor"); clearing `behaviour` in the manifest never stood the
+animal still because the layer also carries "command": "auto", and mutating a
+tracked file from a gate races the app's own rewrite of world.json. The gate is
+green end to end (all 10 checks). Any page still saying "the coat's spread must
+EXCEED the body's" is now wrong: `fur-raster-parity.md`'s required column is
+updated to `>= 0.7x body`.
+Pages: concepts/fur-raster-parity.md

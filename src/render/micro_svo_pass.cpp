@@ -13,6 +13,11 @@ namespace vf {
 
 namespace {
 
+// The mesh pass's own depth attachment. D32 is a mandatory depth-attachment
+// format, and 24 bits of a D24_S8 would clamp a 200 m linear range to 1 cm
+// steps - enough to z-fight a 5 mm lattice against itself.
+constexpr VkFormat kMicroMeshDepthFormat = VK_FORMAT_D32_SFLOAT;
+
 // Same per-file helper the other passes carry (each render translation unit has
 // its own; it is four lines and not worth a header).
 std::vector<uint8_t> loadSpirv(const std::string& path)
@@ -153,6 +158,11 @@ void MicroSvoPass::bindMicroBuffers()
 bool MicroSvoPass::setMicroWorlds(const std::vector<voxel::MicroWorld>& worlds)
 {
     m_worldCount = 0;
+    // The world list is being rebuilt, so every mesh flag dies with it: the
+    // app uploads the meshes again after this call, and a world that no longer
+    // has one must go back to the tracer rather than draw a stale buffer.
+    m_meshWorldCount = 0;
+    m_meshVerts.clear();
     if (worlds.empty()) {
         destroySsbo(m_grid);
         destroySsbo(m_childBase);
@@ -206,6 +216,10 @@ bool MicroSvoPass::setMicroWorlds(const std::vector<voxel::MicroWorld>& worlds)
             row.lo[i] = s.worldMin[i];
             row.hi[i] = s.worldMax[i];
         }
+        // Every world starts TRACED. setMesh() flips this to 1 for the ones
+        // whose geometry is a posed mesh; a reload re-runs this loop, so a
+        // layer that lost its mesh goes back to the tracer.
+        row.hi[3] = 0.0f;
         row.preview[3] = 0.0f; // no live preview until one is set
         // The bones: their segments and joints (static) and the identity
         // rotation, which the gait then drives.
@@ -371,7 +385,47 @@ void MicroSvoPass::setWorldAnimation(size_t worldIndex, glm::vec3 offset, glm::m
 size_t MicroSvoPass::gpuBytes() const
 {
     return m_grid.bytes + m_childBase.bytes + m_payload.bytes + m_handles.bytes +
-           m_bricks.bytes + m_chunkInfo.bytes + m_field.bytes;
+           m_bricks.bytes + m_chunkInfo.bytes + m_field.bytes + m_meshVertsBuf.bytes;
+}
+
+bool MicroSvoPass::setMesh(size_t worldIndex, const std::vector<glm::vec4>& verts)
+{
+    if (!m_ctx || !m_set || worldIndex >= size_t(m_worldCount) || verts.empty())
+        return false;
+    if (m_meshVerts.size() <= worldIndex)
+        m_meshVerts.resize(worldIndex + 1);
+    m_meshVerts[worldIndex] = verts;
+
+    // Concatenate and re-upload. This runs at LOAD time only (a reload re-runs
+    // the whole thing), so copying a few MB is cheaper than the bookkeeping a
+    // per-slice upload would need to relocate on growth.
+    std::vector<glm::vec4> flat;
+    for (const auto& v : m_meshVerts)
+        flat.insert(flat.end(), v.begin(), v.end());
+    if (!uploadSsbo(m_meshVertsBuf, flat.data(), flat.size() * sizeof(glm::vec4))) {
+        spdlog::error("micro: failed to upload the mesh vertices for world {}", worldIndex);
+        return false;
+    }
+    VkDescriptorBufferInfo info { m_meshVertsBuf.buf, 0, VK_WHOLE_SIZE };
+    VkWriteDescriptorSet w { VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, nullptr, m_set, 11, 0,
+                             1, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, nullptr, &info,
+                             nullptr };
+    vkUpdateDescriptorSets(m_ctx->device(), 1, &w, 0, nullptr);
+
+    // Flip the world to RASTER-OWNED. The tracer skips it (so the rest pose is
+    // no longer drawn on top of the posed mesh - the object would be its own
+    // ghost) and the field sampler stops un-boning its points.
+    m_meshWorldCount = 0;
+    if (m_worldTable.mapped) {
+        auto* rows = reinterpret_cast<MicroWorldRow*>(m_worldTable.mapped);
+        rows[worldIndex].hi[3] = 1.0f;
+        for (size_t i = 0; i < m_worldCount; ++i)
+            m_meshWorldCount += rows[i].hi[3] > 0.5f ? 1 : 0;
+        vmaFlushAllocation(m_ctx->allocator(), m_worldTable.alloc, 0, VK_WHOLE_SIZE);
+    }
+    spdlog::info("micro: world {} raster-owned, {} vertices, {} mesh world(s)", worldIndex,
+                 flat.size(), m_meshWorldCount);
+    return true;
 }
 
 bool MicroSvoPass::init(const Context& ctx)
@@ -382,46 +436,50 @@ bool MicroSvoPass::init(const Context& ctx)
     // Binding 0 is intentionally absent (an unwritten binding invalidates the
     // whole set on this driver). b[] count is load-bearing: one more entry than
     // this overflows the array with no error anywhere.
-    VkDescriptorSetLayoutBinding b[18] = {};
+    //
+    // Every binding is declared for ALL THREE stages: the raster mesh pipeline
+    // shares this set with the compute tracer (that is the point of one shared
+    // layout), and a per-stage split would let the two paths drift apart.
+    const VkShaderStageFlags gfx = VkShaderStageFlags(
+        VK_SHADER_STAGE_COMPUTE_BIT | VK_SHADER_STAGE_VERTEX_BIT |
+        VK_SHADER_STAGE_FRAGMENT_BIT);
+    VkDescriptorSetLayoutBinding b[20] = {};
     int n = 0;
     // 1-6: the micro worlds' own six pools (separate from the world's SVO set).
     for (uint32_t i = 1; i < 7; ++i)
-        b[n++] = { i, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1,
-                   VK_SHADER_STAGE_COMPUTE_BIT, nullptr };
+        b[n++] = { i, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, gfx, nullptr };
     // 7: per-world scale table.
-    b[n++] = { 7, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, 1, VK_SHADER_STAGE_COMPUTE_BIT,
-               nullptr };
+    b[n++] = { 7, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, 1, gfx, nullptr };
     // 10: the dense signed-distance fields (one byte per cell, all worlds
     // concatenated). Separate from the bricks so the field is continuous
     // across brick boundaries - see MicroWorld::field.
-    b[n++] = { 10, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, VK_SHADER_STAGE_COMPUTE_BIT,
-               nullptr };
+    b[n++] = { 10, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, gfx, nullptr };
+    // 11: the raster mesh worlds' vertices, vec4(rest.xyz, bone + 1), all
+    // objects concatenated (the vertex shader indexes it with gl_VertexIndex,
+    // so a world's slice is just the draw's firstVertex).
+    b[n++] = { 11, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, gfx, nullptr };
     // 8/9: terrain height texture + coarse object volume (declared by the micro
     // shader itself; shared_model includes reference them by name).
-    b[n++] = { 8, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 1, VK_SHADER_STAGE_COMPUTE_BIT,
-               nullptr };
-    b[n++] = { 9, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 1, VK_SHADER_STAGE_COMPUTE_BIT,
-               nullptr };
+    b[n++] = { 8, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 1, gfx, nullptr };
+    b[n++] = { 9, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 1, gfx, nullptr };
     // 12/13/14: the main backend's hdr/gpos/gnorm, read-modify-write. gpos is
     // the depth reference; the others are the composited output.
-    b[n++] = { 12, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 1, VK_SHADER_STAGE_COMPUTE_BIT,
-               nullptr };
-    b[n++] = { 13, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 1, VK_SHADER_STAGE_COMPUTE_BIT,
-               nullptr };
-    b[n++] = { 14, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 1, VK_SHADER_STAGE_COMPUTE_BIT,
-               nullptr };
+    b[n++] = { 12, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 1, gfx, nullptr };
+    b[n++] = { 13, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 1, gfx, nullptr };
+    b[n++] = { 14, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 1, gfx, nullptr };
     // atlas sampler + table (shared detailAlbedo; same binding numbers as the
     // other backends so common_base.glsl's declaration is reused as-is).
-    b[n++] = { 22, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1,
-               VK_SHADER_STAGE_COMPUTE_BIT, nullptr };
-    b[n++] = { 23, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, 1, VK_SHADER_STAGE_COMPUTE_BIT,
-               nullptr };
+    b[n++] = { 22, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1, gfx, nullptr };
+    b[n++] = { 23, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, 1, gfx, nullptr };
     // explicit point lights (shared with the other backends)
-    b[n++] = { 25, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, 1, VK_SHADER_STAGE_COMPUTE_BIT,
-               nullptr };
+    b[n++] = { 25, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, 1, gfx, nullptr };
     // coarse irradiance volume (same binding as the other sets)
-    b[n++] = { 26, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1,
-               VK_SHADER_STAGE_COMPUTE_BIT, nullptr };
+    b[n++] = { 26, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1, gfx, nullptr };
+    // 41: the PRE-MESH gpos snapshot, read-only. The raster mesh fragment uses
+    // it as its world-depth reference; it must not read the live gpos, which
+    // the same draw writes (a read/write hazard made the world/micro verdict
+    // depend on fragment completion order).
+    b[n++] = { 41, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 1, gfx, nullptr };
 
     VkDescriptorSetLayoutCreateInfo li { VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO };
     li.bindingCount = n;
@@ -429,7 +487,7 @@ bool MicroSvoPass::init(const Context& ctx)
     if (vkCreateDescriptorSetLayout(dev, &li, nullptr, &m_setLayout) != VK_SUCCESS)
         return false;
 
-    VkPushConstantRange pc { VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(RaymarchPush) };
+    VkPushConstantRange pc { gfx, 0, sizeof(RaymarchPush) };
     VkPipelineLayoutCreateInfo pli { VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO };
     pli.setLayoutCount = 1;
     pli.pSetLayouts = &m_setLayout;
@@ -460,11 +518,184 @@ bool MicroSvoPass::init(const Context& ctx)
         return false;
     }
 
+    // ---- the raster MESH pipeline ----------------------------------------
+    // Same layout, same descriptor set and the same push block as the tracer -
+    // that is the point of one shared set. It is DEPTH-ONLY: the fragment stage
+    // writes hdr/gpos/gnorm with imageStore exactly like the compute path, so
+    // the world/micro depth comparison and every downstream consumer (fur
+    // cards, SSAO, SSR, post) cannot tell which path drew the object.
+    //
+    // The one attachment is this pass's own depth, which exists so a mesh
+    // occludes ITSELF and the other mesh objects; the main backend's depth is
+    // never touched. Linear depth (zc / 200 m) in the vertex shader keeps the
+    // two trivially in step, and the depth test is what orders two overlapping
+    // objects' gpos writes.
+    {
+        auto makeModule = [&](const char* file, VkShaderModule* out) {
+            auto spirv = loadSpirv(std::string(VOXELFORGE_SHADER_DIR) + "/" + file);
+            if (spirv.empty())
+                return false;
+            VkShaderModuleCreateInfo smci { VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO };
+            smci.codeSize = spirv.size();
+            smci.pCode = reinterpret_cast<const uint32_t*>(spirv.data());
+            return vkCreateShaderModule(dev, &smci, nullptr, out) == VK_SUCCESS;
+        };
+        VkShaderModule vs = VK_NULL_HANDLE, fs = VK_NULL_HANDLE;
+        if (!makeModule("micro_mesh.vert.spv", &vs) ||
+            !makeModule("micro_mesh.frag.spv", &fs)) {
+            spdlog::critical("micro: mesh shader module load failed");
+            return false;
+        }
+        VkPipelineShaderStageCreateInfo stages[2] = {};
+        stages[0] = { VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO };
+        stages[0].stage = VK_SHADER_STAGE_VERTEX_BIT;
+        stages[0].module = vs;
+        stages[0].pName = "main";
+        stages[1] = { VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO };
+        stages[1].stage = VK_SHADER_STAGE_FRAGMENT_BIT;
+        stages[1].module = fs;
+        stages[1].pName = "main";
+
+        // No vertex input at all: the whole object is one storage buffer and
+        // the vertex shader pulls its record with gl_VertexIndex.
+        VkPipelineVertexInputStateCreateInfo vi {
+            VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO
+        };
+        VkPipelineInputAssemblyStateCreateInfo ia {
+            VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO
+        };
+        ia.topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST;
+        VkPipelineViewportStateCreateInfo vp {
+            VK_STRUCTURE_TYPE_PIPELINE_VIEWPORT_STATE_CREATE_INFO
+        };
+        vp.viewportCount = 1;
+        vp.scissorCount = 1;
+        VkPipelineRasterizationStateCreateInfo rs {
+            VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO
+        };
+        rs.polygonMode = VK_POLYGON_MODE_FILL;
+        // CULLING IS ON, and it is the fix for the flicker this pass had.
+        //
+        // The mesh writes its G-buffer through `imageStore` from the FRAGMENT
+        // stage. A closed shell drawn with culling OFF covers ~40 % of the
+        // silhouette's pixels TWICE — the near wall and the far wall — and
+        // where the depth test is a near-tie (interpolation noise, not
+        // geometry) `LESS` does not settle which fragment survives. Both
+        // execute, both store, and the last store wins, so the frame differs
+        // run to run. Measured 2026-11-13: two renders of ONE binary with a
+        // frozen pose differed on 4,536 px at the flicker camera, and
+        // `layout(early_fragment_tests)` is inert on this driver so nothing
+        // orders the stores. Culling removes the second writer, and the depth
+        // test keeps early-Z: one fragment per pixel, nothing to race.
+        //
+        // It is only SAFE because `loadMicroMesh` now orients the winding:
+        // the shipped alpaca arrived with 7,008 of its 26,897 shared edges
+        // (26.1 %) traversed the same way by both neighbours, so a quarter of
+        // the body faced inward and culling BACK deleted the outer wall
+        // there. The falsifiable half, measured in one session on one binary:
+        // the two cull conventions left near-DISJOINT residuals (4,536 px
+        // unculled; 2,475 px with the shipping front face; 693 px with the
+        // opposite one; Jaccard of the two residual masks 0.002, 5 px of
+        // 3,163 overlapping). Every remaining ambiguous pixel was decided by
+        // WHICH WALL SURVIVED the cull — the geometric definition of two
+        // opposite walls contending, not of a barrier race.
+        //
+        // VF_MESH_CULL stays as a diagnostic: =0 disables culling (the
+        // pre-fix A/B), =2 culls with the OPPOSITE front face (the
+        // "orientation is inverted" arm). Neither is a configuration.
+        const char* meshCull = std::getenv("VF_MESH_CULL");
+        const bool cullOff = meshCull && meshCull[0] == '0';
+        const bool flipFront = meshCull && meshCull[0] == '2';
+        rs.cullMode = cullOff ? VK_CULL_MODE_NONE : VK_CULL_MODE_BACK_BIT;
+        rs.frontFace = flipFront ? VK_FRONT_FACE_CLOCKWISE
+                                 : VK_FRONT_FACE_COUNTER_CLOCKWISE;
+        rs.lineWidth = 1.0f;
+        VkPipelineMultisampleStateCreateInfo ms {
+            VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO
+        };
+        ms.rasterizationSamples = VK_SAMPLE_COUNT_1_BIT;
+        VkPipelineDepthStencilStateCreateInfo ds {
+            VK_STRUCTURE_TYPE_PIPELINE_DEPTH_STENCIL_STATE_CREATE_INFO
+        };
+        // The mesh is a closed, consistently outward-wound surface (the loader
+        // certifies both), so backface culling plus the depth test leave
+        // exactly one fragment per pixel. Keep both enabled: without the depth
+        // test the last-drawn triangle wins every pixel regardless of distance.
+        ds.depthTestEnable = VK_TRUE;
+        // NO depth write here. The depth buffer is owned by the PREPASS below:
+        // this pass tests EQUAL against it, so a pixel can only be written by
+        // the fragment that is exactly the nearest one. That is the difference
+        // between "the nearest wins" and "the last store wins", and it matters
+        // because `imageStore` is not suppressed by the depth test.
+        ds.depthWriteEnable = VK_FALSE;
+        ds.depthCompareOp = VK_COMPARE_OP_EQUAL;
+        ds.depthBoundsTestEnable = VK_FALSE;
+        ds.stencilTestEnable = VK_FALSE;
+        // No colour attachments: the fragment stage's imageStore is the
+        // output. Vulkan allows a depth-only dynamic-rendering pass.
+        VkPipelineRenderingCreateInfo prc {
+            VK_STRUCTURE_TYPE_PIPELINE_RENDERING_CREATE_INFO
+        };
+        prc.colorAttachmentCount = 0;
+        prc.pColorAttachmentFormats = nullptr;
+        prc.depthAttachmentFormat = kMicroMeshDepthFormat;
+
+        VkDynamicState dyn[] = { VK_DYNAMIC_STATE_VIEWPORT, VK_DYNAMIC_STATE_SCISSOR };
+        VkPipelineDynamicStateCreateInfo dy {
+            VK_STRUCTURE_TYPE_PIPELINE_DYNAMIC_STATE_CREATE_INFO
+        };
+        dy.dynamicStateCount = 2;
+        dy.pDynamicStates = dyn;
+
+        VkGraphicsPipelineCreateInfo gpi {
+            VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO
+        };
+        gpi.pNext = &prc;
+        gpi.stageCount = 2;
+        gpi.pStages = stages;
+        gpi.pVertexInputState = &vi;
+        gpi.pInputAssemblyState = &ia;
+        gpi.pViewportState = &vp;
+        gpi.pRasterizationState = &rs;
+        gpi.pMultisampleState = &ms;
+        gpi.pDepthStencilState = &ds;
+        gpi.pDynamicState = &dy;
+        gpi.layout = m_layout;
+        const VkResult mr =
+            vkCreateGraphicsPipelines(dev, VK_NULL_HANDLE, 1, &gpi, nullptr, &m_meshPipeline);
+
+        // ---- the DEPTH PREPASS ------------------------------------------
+        // The vertex stage ALONE. With no fragment shader there is no
+        // `imageStore`, so this pass can only write depth — and two contending
+        // fragments then resolve by the rasterizer's min-depth rule, which does
+        // not depend on the order they arrive in. That is the one property the
+        // shaded pass cannot offer, because a shader-side image write is not
+        // suppressed by a late depth test (`layout(early_fragment_tests)` is
+        // inert on this driver). The shaded pass then tests EQUAL against this
+        // pass's depth, so exactly one fragment per pixel survives to write the
+        // G-buffer.
+        VkPipelineDepthStencilStateCreateInfo dsd = ds;
+        dsd.depthWriteEnable = VK_TRUE;
+        dsd.depthCompareOp = VK_COMPARE_OP_LESS;
+        VkGraphicsPipelineCreateInfo gpd = gpi;
+        gpd.stageCount = 1; // vertex only - no fragment stage at all
+        gpd.pDepthStencilState = &dsd;
+        const VkResult dr = vkCreateGraphicsPipelines(
+            dev, VK_NULL_HANDLE, 1, &gpd, nullptr, &m_meshDepthPipeline);
+        vkDestroyShaderModule(dev, vs, nullptr);
+        vkDestroyShaderModule(dev, fs, nullptr);
+        if (mr != VK_SUCCESS || dr != VK_SUCCESS) {
+            spdlog::critical("micro: mesh pipeline failed (shaded {}, prepass {})",
+                             int(mr), int(dr));
+            return false;
+        }
+    }
+
     // Pool sizes cover every binding above: STORAGE_IMAGE 8/9/12/13/14 (5),
-    // STORAGE_BUFFER 1-6 + 10 (7), UNIFORM_BUFFER 7/23/25 (3),
+    // STORAGE_BUFFER 1-6 + 10 + 11 (8), UNIFORM_BUFFER 7/23/25 (3),
     // COMBINED_IMAGE_SAMPLER 22/26 (2).
     VkDescriptorPoolSize sizes[4] = { { VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 5 },
-                                       { VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 7 },
+                                       { VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 8 },
                                        { VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, 3 },
                                        { VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 2 } };
     VkDescriptorPoolCreateInfo pi { VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO };
@@ -493,6 +724,22 @@ bool MicroSvoPass::init(const Context& ctx)
                                1, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, nullptr, &wtInfo,
                                nullptr };
     vkUpdateDescriptorSets(dev, 1, &wwt, 0, nullptr);
+
+    // Binding 11 must be WRITTEN even when no layer uses a mesh: an unwritten
+    // binding in a declared layout is what silently invalidates the whole set
+    // on this driver, and that failure looks like "the pass draws nothing".
+    // Sixteen zero bytes is a legal empty buffer; no mesh world is drawn, so no
+    // shader invocation ever reads it.
+    {
+        const float zero[4] = { 0.f, 0.f, 0.f, 0.f };
+        if (!uploadSsbo(m_meshVertsBuf, zero, sizeof(zero)))
+            return false;
+    }
+    VkDescriptorBufferInfo meshInfo { m_meshVertsBuf.buf, 0, VK_WHOLE_SIZE };
+    VkWriteDescriptorSet wmesh { VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, nullptr, m_set, 11,
+                                 0, 1, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, nullptr,
+                                 &meshInfo, nullptr };
+    vkUpdateDescriptorSets(dev, 1, &wmesh, 0, nullptr);
     return true;
 }
 
@@ -501,12 +748,16 @@ void MicroSvoPass::updateDescriptors(const Image3D& hdrImage, const Image3D& gpo
 {
     if (!m_set || !m_ctx)
         return;
+    // The mesh depth attachment is created lazily in record() from the render
+    // extent (m_hdr is not sized yet during init), so nothing to do here.
+    // The SNAPSHOT is created there too, but the copy source is this image.
+    m_gposImage = gposImage.img;
     VkDescriptorImageInfo ii { VK_NULL_HANDLE, hdrImage.view, VK_IMAGE_LAYOUT_GENERAL };
     VkDescriptorImageInfo gi { VK_NULL_HANDLE, gposImage.view, VK_IMAGE_LAYOUT_GENERAL };
     VkDescriptorImageInfo ni { VK_NULL_HANDLE, gnormImage.view, VK_IMAGE_LAYOUT_GENERAL };
     VkDescriptorImageInfo hi { VK_NULL_HANDLE, m_heightView, VK_IMAGE_LAYOUT_GENERAL };
     VkDescriptorImageInfo oi { VK_NULL_HANDLE, m_objVolView, VK_IMAGE_LAYOUT_GENERAL };
-    VkWriteDescriptorSet w[5] = {};
+    VkWriteDescriptorSet w[6] = {};
     w[0] = { VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, nullptr, m_set, 8, 0, 1,
              VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, &hi, nullptr, nullptr };
     w[1] = { VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, nullptr, m_set, 9, 0, 1,
@@ -517,7 +768,96 @@ void MicroSvoPass::updateDescriptors(const Image3D& hdrImage, const Image3D& gpo
              VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, &gi, nullptr, nullptr };
     w[4] = { VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, nullptr, m_set, 14, 0, 1,
              VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, &ni, nullptr, nullptr };
-    vkUpdateDescriptorSets(m_ctx->device(), 5, w, 0, nullptr);
+    // 41 starts out naming the LIVE gpos: an unwritten binding in a declared
+    // layout invalidates the whole set on this driver, and a frame with no mesh
+    // world never copies a snapshot. ensureMeshScene() rebinds it to the
+    // snapshot the moment one exists.
+    w[5] = { VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, nullptr, m_set, 41, 0, 1,
+             VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, &gi, nullptr, nullptr };
+    vkUpdateDescriptorSets(m_ctx->device(), 6, w, 0, nullptr);
+}
+
+bool MicroSvoPass::ensureMeshDepth(uint32_t slot, uint32_t w, uint32_t h)
+{
+    slot %= kMeshSlots;
+    Image3D& depth = m_meshDepth[slot];
+    VkExtent2D& extent = m_meshDepthExtent[slot];
+    if (!m_ctx) { spdlog::error("ensureMeshDepth: no ctx"); return false; }
+    if (w == 0 || h == 0) { spdlog::error("ensureMeshDepth: zero extent {}x{}", w, h); return false; }
+    if (depth.img && extent.width == w && extent.height == h)
+        return true;
+    destroyImage3D(*m_ctx, depth);
+    depth = makeImage2D(*m_ctx, w, h, kMicroMeshDepthFormat,
+                        VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT,
+                        VK_IMAGE_ASPECT_DEPTH_BIT);
+    if (!depth.img) {
+        spdlog::critical("micro: mesh depth image {}x{} failed", w, h);
+        extent = { 0, 0 };
+        return false;
+    }
+    extent = { w, h };
+    // Leave it in DEPTH_ATTACHMENT_OPTIMAL once, here (the same shape the fur
+    // accumulators use): the frame path then only needs the write-after-write
+    // dependency between frames, never a layout transition.
+    const bool ok = m_ctx->immediateSubmit([&](VkCommandBuffer cmd) {
+        vf::transitionImage(cmd, depth.img, VK_IMAGE_ASPECT_DEPTH_BIT,
+                            VK_IMAGE_LAYOUT_UNDEFINED,
+                            VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL,
+                            VK_PIPELINE_STAGE_2_NONE, VK_ACCESS_2_NONE,
+                            VK_PIPELINE_STAGE_2_EARLY_FRAGMENT_TESTS_BIT |
+                                VK_PIPELINE_STAGE_2_LATE_FRAGMENT_TESTS_BIT,
+                            VK_ACCESS_2_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT);
+    });
+    if (!ok)
+        spdlog::critical("micro: mesh depth transition failed");
+    else
+        spdlog::info("micro: mesh depth slot {} created {}x{}", slot, w, h);
+    return ok;
+}
+
+bool MicroSvoPass::ensureMeshScene(uint32_t w, uint32_t h)
+{
+    if (!m_ctx) { spdlog::error("ensureMeshScene: no ctx"); return false; }
+    if (w == 0 || h == 0) { spdlog::error("ensureMeshScene: zero extent {}x{}", w, h); return false; }
+    if (m_meshScene.img && m_meshSceneExtent.width == w &&
+        m_meshSceneExtent.height == h)
+        return true;
+    destroyImage3D(*m_ctx, m_meshScene);
+    m_meshScene = makeImage2D(*m_ctx, w, h, VK_FORMAT_R16G16B16A16_SFLOAT,
+                              VK_IMAGE_USAGE_STORAGE_BIT |
+                                  VK_IMAGE_USAGE_TRANSFER_DST_BIT);
+    if (!m_meshScene.img) {
+        spdlog::critical("micro: mesh scene snapshot {}x{} failed", w, h);
+        m_meshSceneExtent = { 0, 0 };
+        return false;
+    }
+    m_meshSceneExtent = { w, h };
+    // Leave it in GENERAL once: a storage-image read AND a transfer
+    // destination both accept GENERAL, so the frame only needs access
+    // dependencies around the copy, never a layout transition.
+    const bool ok = m_ctx->immediateSubmit([&](VkCommandBuffer cmd) {
+        vf::transitionImage(cmd, m_meshScene.img, VK_IMAGE_ASPECT_COLOR_BIT,
+                            VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_GENERAL,
+                            VK_PIPELINE_STAGE_2_NONE, VK_ACCESS_2_NONE,
+                            VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT,
+                            VK_ACCESS_2_SHADER_STORAGE_READ_BIT |
+                                VK_ACCESS_2_TRANSFER_WRITE_BIT);
+    });
+    if (!ok) {
+        spdlog::critical("micro: mesh scene snapshot transition failed");
+        return false;
+    }
+    // The view changed, so the read-only binding must name the new image.
+    VkDescriptorImageInfo si { VK_NULL_HANDLE, m_meshScene.view,
+                               VK_IMAGE_LAYOUT_GENERAL };
+    VkWriteDescriptorSet w41 { VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, nullptr,
+                               m_set, 41, 0, 1,
+                               VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, &si, nullptr,
+                               nullptr };
+    vkUpdateDescriptorSets(m_ctx->device(), 1, &w41, 0, nullptr);
+    spdlog::info("micro: mesh scene snapshot {}x{} created, binding 41 rebound",
+                 w, h);
+    return true;
 }
 
 void MicroSvoPass::setTexAtlas(VkImageView view, VkSampler sampler, VkBuffer tableUbo)
@@ -583,7 +923,8 @@ void MicroSvoPass::setLights(const vf::voxel::LightUBO& lights)
     }
 }
 
-void MicroSvoPass::record(VkCommandBuffer cmd, const RaymarchPush& push)
+void MicroSvoPass::record(VkCommandBuffer cmd, const RaymarchPush& push,
+                          uint32_t frameSlot)
 {
     // No micro worlds loaded -> nothing to composite. This is the whole cost of
     // the feature when it is off, and it guarantees the main render path is
@@ -725,6 +1066,212 @@ void MicroSvoPass::record(VkCommandBuffer cmd, const RaymarchPush& push)
     vkCmdPushConstants(cmd, m_layout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(pushData), &pushData);
     vkCmdDispatch(cmd, uint32_t(rectMaxX - rectMinX + 7) / 8,
                   uint32_t(rectMaxY - rectMinY + 7) / 8, 1);
+
+    // CPU-STATE SPLIT for the mesh worlds. A headless render of a MESH object
+    // used to differ from run to run at a fixed pose, so the first question is
+    // whether the POSE the CPU uploads is identical: hash the per-world bone
+    // table here, once per frame. Same hash in two runs + different pixels
+    // means the divergence is on the GPU side (pass ordering / the raster
+    // path), not in the rig or the clip clock.
+    if (const char* dbg = std::getenv("VF_TRACE_MESH_HASH"); dbg && *dbg) {
+        static int traceFrame = 0;
+        const uint8_t* tb = reinterpret_cast<const uint8_t*>(m_worldTable.mapped);
+        const size_t tn = sizeof(MicroWorldRow) * m_worldCount;
+        uint64_t h = 1469598103934665603ull;
+        for (size_t k = 0; k < tn; ++k) { h ^= tb[k]; h *= 1099511628211ull; }
+        spdlog::info("meshhash frame {} table {:016x} bytes {} worlds {} meshWorlds {}",
+                     traceFrame++, h, tn, m_worldCount, m_meshWorldCount);
+        const auto* rows = reinterpret_cast<const MicroWorldRow*>(m_worldTable.mapped);
+        for (size_t i = 0; i < m_worldCount; ++i) {
+            spdlog::info("meshhash   world {} anim {:.6f} {:.6f} {:.6f} {:.3f}",
+                         i, rows[i].anim[0], rows[i].anim[1], rows[i].anim[2],
+                         rows[i].anim[3]);
+        }
+    }
+
+    // ---- the RASTER MESH worlds ------------------------------------------
+    // Everything above traced a field. A world whose geometry is a MESH is
+    // skipped by the tracer (microWorldIsMesh) and drawn here instead, into the
+    // same G-buffer, so the object is its surface and never the field's
+    // rest-pose invention: no hole, no cut, no ghost. The field still supplies
+    // every shaded term (material, texture, normal, AO, self-shadow), read at
+    // the REST point the vertex stage passes down.
+    // The per-frame resources come from the frame loop's OWN in-flight slot:
+    // see the kMeshSlots comment in the header for why an attachment that every
+    // frame clears cannot be single-buffered while frames overlap.
+    const uint32_t meshSlot = frameSlot % kMeshSlots;
+    Image3D& meshDepth = m_meshDepth[meshSlot];
+    if (m_meshWorldCount > 0 && m_meshPipeline != VK_NULL_HANDLE &&
+        ensureMeshDepth(meshSlot, uint32_t(push.a.z), uint32_t(push.a.w)) &&
+        ensureMeshScene(uint32_t(push.a.z), uint32_t(push.a.w)) &&
+        meshDepth.img && m_meshScene.img &&
+        m_meshDepthExtent[meshSlot].width == uint32_t(push.a.z) &&
+        m_meshDepthExtent[meshSlot].height == uint32_t(push.a.w) &&
+        m_meshSceneExtent.width == uint32_t(push.a.z) &&
+        m_meshSceneExtent.height == uint32_t(push.a.w)) {
+        // SNAPSHOT the world reference BEFORE any mesh fragment writes.
+        // The fragment stage needs gpos (the world's distance along the view
+        // ray) but also writes it; reading the image a raster pass writes is a
+        // read/write hazard, and a fragment that saw a SIBLING's position got a
+        // distance off by up to a pixel footprint - enough to flip the
+        // half-voxel boundary test, so a pixel toggled between the world and
+        // the coat depending on fragment completion order. A copy of the rect
+        // makes the fragment's read a plain, ordered read.
+        if (m_gposImage != VK_NULL_HANDLE) {
+            {
+                VkMemoryBarrier2 mb { VK_STRUCTURE_TYPE_MEMORY_BARRIER_2 };
+                mb.srcStageMask = VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT |
+                                  VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT |
+                                  VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT |
+                                  VK_PIPELINE_STAGE_2_LATE_FRAGMENT_TESTS_BIT;
+                // WRITE: the world's gpos - a COLOUR ATTACHMENT in splat mode
+                // (oGPos, location 1) and a storage image in the SVO/tile path
+                // - plus the tracer's storage stores. READ: a PREVIOUS frame's
+                // mesh fragments reading the snapshot (single-buffered across
+                // frames in flight, so overwriting it is a write-after-read).
+                mb.srcAccessMask = VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT |
+                                   VK_ACCESS_2_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT |
+                                   VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT |
+                                   VK_ACCESS_2_SHADER_STORAGE_READ_BIT;
+                mb.dstStageMask = VK_PIPELINE_STAGE_2_TRANSFER_BIT;
+                mb.dstAccessMask = VK_ACCESS_2_TRANSFER_READ_BIT |
+                                   VK_ACCESS_2_TRANSFER_WRITE_BIT;
+                VkDependencyInfo di { VK_STRUCTURE_TYPE_DEPENDENCY_INFO };
+                di.memoryBarrierCount = 1;
+                di.pMemoryBarriers = &mb;
+                vkCmdPipelineBarrier2(cmd, &di);
+            }
+            VkImageCopy crop {};
+            crop.srcSubresource = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1 };
+            crop.srcOffset = { int32_t(rectMinX), int32_t(rectMinY), 0 };
+            crop.dstSubresource = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1 };
+            crop.dstOffset = { int32_t(rectMinX), int32_t(rectMinY), 0 };
+            crop.extent = { uint32_t(rectMaxX - rectMinX),
+                            uint32_t(rectMaxY - rectMinY), 1 };
+            vkCmdCopyImage(cmd, m_gposImage, VK_IMAGE_LAYOUT_GENERAL,
+                           m_meshScene.img, VK_IMAGE_LAYOUT_GENERAL, 1, &crop);
+            {
+                VkMemoryBarrier2 mb { VK_STRUCTURE_TYPE_MEMORY_BARRIER_2 };
+                mb.srcStageMask = VK_PIPELINE_STAGE_2_TRANSFER_BIT;
+                mb.srcAccessMask = VK_ACCESS_2_TRANSFER_WRITE_BIT;
+                mb.dstStageMask = VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT;
+                mb.dstAccessMask = VK_ACCESS_2_SHADER_STORAGE_READ_BIT;
+                VkDependencyInfo di { VK_STRUCTURE_TYPE_DEPENDENCY_INFO };
+                di.memoryBarrierCount = 1;
+                di.pMemoryBarriers = &mb;
+                vkCmdPipelineBarrier2(cmd, &di);
+            }
+        }
+        // The caller's barrier only makes the dispatch visible to COMPUTE, so
+        // without this the mesh's other reads race the tracer.
+        {
+            VkMemoryBarrier2 mb { VK_STRUCTURE_TYPE_MEMORY_BARRIER_2 };
+            mb.srcStageMask = VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT;
+            mb.srcAccessMask = VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT;
+            mb.dstStageMask = VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT;
+            mb.dstAccessMask = VK_ACCESS_2_SHADER_STORAGE_READ_BIT |
+                               VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT;
+            VkDependencyInfo di { VK_STRUCTURE_TYPE_DEPENDENCY_INFO };
+            di.memoryBarrierCount = 1;
+            di.pMemoryBarriers = &mb;
+            vkCmdPipelineBarrier2(cmd, &di);
+        }
+        // No dependency on the previous frame's depth here, and none was ever
+        // effective: the same-layout transition this replaced did nothing,
+        // because a barrier inside a command buffer orders work inside ITS OWN
+        // submission and cannot reach a previous submission at all. The ordering
+        // is structural instead — this frame draws into the depth attachment of
+        // its own in-flight slot, which the frame loop's fence already proves
+        // idle. See kMeshSlots in the header.
+
+        const VkRect2D rect { { rectMinX, rectMinY },
+                              { uint32_t(rectMaxX - rectMinX),
+                                uint32_t(rectMaxY - rectMinY) } };
+        VkRenderingAttachmentInfo depth {};
+        depth.sType = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO;
+        depth.imageView = meshDepth.view;
+        depth.imageLayout = VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL;
+        depth.loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;
+        depth.storeOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
+        depth.clearValue.depthStencil = { 1.0f, 0 };
+        VkRenderingInfo ri { VK_STRUCTURE_TYPE_RENDERING_INFO };
+        ri.renderArea = rect;
+        ri.layerCount = 1;
+        ri.colorAttachmentCount = 0;
+        ri.pColorAttachments = nullptr;
+        ri.pDepthAttachment = &depth;
+
+        vkCmdBeginRendering(cmd, &ri);
+        const VkViewport gvp { 0.0f, 0.0f, float(push.a.z), float(push.a.w), 0.0f, 1.0f };
+        vkCmdSetViewport(cmd, 0, 1, &gvp);
+        vkCmdSetScissor(cmd, 0, 1, &rect);
+        // One draw per world: `firstVertex` is the world's slice of the shared
+        // vertex buffer and b.z names the world (the fragment stage needs it
+        // for the field lookups). The depth attachment orders the objects, so
+        // the order they are drawn in does not change the result.
+        auto drawMeshWorlds = [&](VkPipeline pipe) {
+            vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pipe);
+            vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, m_layout,
+                                    0, 1, &m_set, 0, nullptr);
+            uint32_t meshBase = 0;
+            for (size_t i = 0; i < m_worldCount; ++i) {
+                const size_t nv =
+                    i < m_meshVerts.size() ? m_meshVerts[i].size() : size_t(0);
+                if (nv == 0)
+                    continue;
+                RaymarchPush mp = push;
+                mp.b.z = float(i);
+                vkCmdPushConstants(cmd, m_layout,
+                                   VkShaderStageFlags(VK_SHADER_STAGE_VERTEX_BIT |
+                                                      VK_SHADER_STAGE_FRAGMENT_BIT),
+                                   0, sizeof(mp), &mp);
+                vkCmdDraw(cmd, uint32_t(nv), 1, meshBase, 0);
+                meshBase += uint32_t(nv);
+            }
+        };
+
+        // PREPASS. Depth only - it has no fragment stage, so it cannot write a
+        // G-buffer texel even if two fragments cover the same pixel. Its
+        // outcome is the nearest depth per pixel, which the rasterizer
+        // resolves by comparison, not by arrival order.
+        drawMeshWorlds(m_meshDepthPipeline);
+        {
+            VkMemoryBarrier2 mb { VK_STRUCTURE_TYPE_MEMORY_BARRIER_2 };
+            mb.srcStageMask = VK_PIPELINE_STAGE_2_EARLY_FRAGMENT_TESTS_BIT |
+                              VK_PIPELINE_STAGE_2_LATE_FRAGMENT_TESTS_BIT;
+            mb.srcAccessMask = VK_ACCESS_2_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT;
+            mb.dstStageMask = VK_PIPELINE_STAGE_2_EARLY_FRAGMENT_TESTS_BIT |
+                              VK_PIPELINE_STAGE_2_LATE_FRAGMENT_TESTS_BIT;
+            mb.dstAccessMask = VK_ACCESS_2_DEPTH_STENCIL_ATTACHMENT_READ_BIT |
+                               VK_ACCESS_2_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT;
+            VkDependencyInfo di { VK_STRUCTURE_TYPE_DEPENDENCY_INFO };
+            di.memoryBarrierCount = 1;
+            di.pMemoryBarriers = &mb;
+            vkCmdPipelineBarrier2(cmd, &di);
+        }
+        // SHADED pass, EQUAL against the prepass depth: only the fragment that
+        // IS the nearest one survives, so a pixel has one writer and the
+        // frame is deterministic even though `imageStore` is not gated by a
+        // late depth test.
+        drawMeshWorlds(m_meshPipeline);
+        vkCmdEndRendering(cmd);
+
+        // The FRAGMENT stage wrote the G-buffer, and the caller's next barrier
+        // only names COMPUTE as the source (it was written for the dispatch).
+        // Make the fragment writes visible here so the pass is self-contained
+        // and the frame files stay agnostic about which path drew a pixel.
+        {
+            VkMemoryBarrier2 mb { VK_STRUCTURE_TYPE_MEMORY_BARRIER_2 };
+            mb.srcStageMask = VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT;
+            mb.srcAccessMask = VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT;
+            mb.dstStageMask = VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT;
+            mb.dstAccessMask = VK_ACCESS_2_SHADER_STORAGE_READ_BIT;
+            VkDependencyInfo di { VK_STRUCTURE_TYPE_DEPENDENCY_INFO };
+            di.memoryBarrierCount = 1;
+            di.pMemoryBarriers = &mb;
+            vkCmdPipelineBarrier2(cmd, &di);
+        }
+    }
 }
 
 void MicroSvoPass::destroy()
@@ -739,10 +1286,26 @@ void MicroSvoPass::destroy()
     destroySsbo(m_bricks);
     destroySsbo(m_chunkInfo);
     destroySsbo(m_field);
+    destroySsbo(m_meshVertsBuf);
     if (m_irrSampler)
         vkDestroySampler(dev, m_irrSampler, nullptr);
     if (m_pipeline)
         vkDestroyPipeline(dev, m_pipeline, nullptr);
+    if (m_meshPipeline)
+        vkDestroyPipeline(dev, m_meshPipeline, nullptr);
+    if (m_meshDepthPipeline)
+        vkDestroyPipeline(dev, m_meshDepthPipeline, nullptr);
+    for (int s = 0; s < kMeshSlots; ++s) {
+        destroyImage3D(*m_ctx, m_meshDepth[s]);
+        m_meshDepthExtent[s] = { 0, 0 };
+    }
+    destroyImage3D(*m_ctx, m_meshScene);
+    m_meshSceneExtent = { 0, 0 };
+    m_gposImage = VK_NULL_HANDLE;
+    m_meshVerts.clear();
+    m_meshWorldCount = 0;
+    m_meshPipeline = VK_NULL_HANDLE;
+    m_meshDepthPipeline = VK_NULL_HANDLE;
     if (m_layout)
         vkDestroyPipelineLayout(dev, m_layout, nullptr);
     if (m_setLayout)

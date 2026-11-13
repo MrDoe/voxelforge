@@ -23,6 +23,12 @@ struct Args {
     bool selftest = false;
     int smokeFrames = 0;
     int width = 1600, height = 900;
+    // Animation studio mode.
+    bool anim = false;
+    std::string animLayer;   // micro/<name>.vxw
+    std::string animClip;    // path to a .anim file
+    float animClipTime = -1.f;   // pinned clip time (-1 = live)
+    bool animWorld = false;  // open studio over the live hamlet
     std::string shot;    // dump one frame to PPM and exit
     std::vector<ShotSpec> shots; // --shotlist: one load, N cameras
     float camx=0,camy=0,camz=0,tx=0,ty=0,tz=0;

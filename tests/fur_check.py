@@ -265,10 +265,14 @@ def main() -> int:
         n_noise, *_ = diff_stats(off1, off2, NOISE_MAX)
         print(f"  noise floor: {n_noise} pixels above {NOISE_MAX}/255 "
               f"(two identical renders)")
-        # The floor is not ZERO and must not be: the scene's grass is animated
-        # by the wall clock, so two renders of the SAME configuration differ
-        # slightly. Every "unchanged" claim below is therefore stated against
-        # this measured floor, not against zero.
+        # The floor must be ZERO. A headless `--shot` does not advance the
+        # animation clock (`m_animTime` is only advanced interactively), so two
+        # renders of the SAME configuration are a determinism test, not a
+        # tolerance: any difference is a race or an uninitialised read in the
+        # frame, and it is exactly the flicker the mesh raster path had (the
+        # micro pass writes the G-buffer from the FRAGMENT stage while every
+        # barrier around it named COMPUTE only). Every "unchanged" claim below
+        # is stated against this measured floor.
         note(n_noise <= 200,
              f"the noise floor is small ({n_noise} stray pixels above "
              f"{NOISE_MAX}/255)")

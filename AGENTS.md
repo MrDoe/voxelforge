@@ -1371,31 +1371,51 @@ one costs a whole turn, because the bad call is rejected before any work runs.
   traversal + `shadeTerrain`) + `common_splat.glsl` (splat marches +
   `shadeSurfel`/`shadeWaterSplat`).
 - **A pass that writes the G-buffer with `imageStore` is exposed to the
-  late-depth-test hazard, and this project's raster mesh pass IS nondeterministic
-  — but the mechanism is NOT settled, so do not "fix" it on theory.** Measured
-  2026-11-12 (one binary, one session, presence grepped per arm): the same alpaca
-  traced from its field (`VF_MESH=0`) gives a **0 px** pair while the raster path
-  gives thousands, so the raster pass owns it; and it is immune to barriers, the
-  gpos snapshot, queue draining, cull toggles and per-slot depth, because it
-  lives inside one draw. The tempting mechanism — a late depth test lets both
-  walls of a closed surface `imageStore`, so the survivor is whichever store
-  landed last — **does not survive the numbers**: double-covered area differs by
-  1.31x between two cameras while divergence differs by 343x, and pose moves the
-  divergence by only ±15 % against a 5,147 px vs 15 px camera split. Leading
-  refinement: near-tie pixels, where `LESS` is decided by interpolation noise
-  rather than geometry, which converges edge-on and separates head-on.
-  `layout(early_fragment_tests) in;` is declared and INERT here (pair unchanged;
-  Vulkan has no `earlyFragmentTests` device feature, so the driver's choice is
-  unqueryable and only a duplicate pair tells you). The structural candidate —
-  G-buffer as colour attachments, where a failing fragment's writes are suppressed
-  regardless of test timing — is **on hold until a diff-set location test
-  (Jaccard between two pairs' changed-pixel masks) shows the divergence is a race
-  at all**; if the same pixels move every time, it was never a race and the
-  redesign cures nothing. Gate rule: measure `0 px` at the flicker camera
+  late-depth-test hazard, and the project's raster mesh pass HAD it — SETTLED and
+  FIXED 2026-11-13.** A pass that writes the G-buffer with `imageStore` from the
+  fragment stage is not ordered by the depth test: `layout(early_fragment_tests)`
+  is inert on this NVIDIA driver (declared, pair unchanged, and Vulkan exposes no
+  `earlyFragmentTests` device feature to query), and a LATE test does not suppress
+  a store. So two fragments covering one pixel are two racing writers.
+  The measured chain: the same alpaca traced from its field (`VF_MESH=0`) gives a
+  **0 px** duplicate pair while the raster path gave thousands, so the raster pass
+  owned it; unspecified barriers / gpos snapshot / queue drain / cull toggles did
+  nothing; and the decisive fork was that the two OPPOSITE cull conventions left
+  near-DISJOINT residuals (4,536 px unculled, 2,475 px with the shipping front
+  face, 693 px with the opposite one; Jaccard of the two residual masks **0.002**,
+  5 px of 3,163 overlapping) — every ambiguous pixel was decided by WHICH WALL
+  SURVIVED, which is double coverage of a closed shell, not a barrier race.
+  Two changes, both in the shipping path:
+  1. **Consistent outward winding at load** — `orientMeshWinding()` in
+     `src/voxel/micro_mesh.cpp` (weld by quantised position → BFS flip → signed
+     volume outward check). Generic, so any imported model is repaired. The
+     shipped `alpaca_mesh.stl` needed it: 7,008 of 26,897 shared edges (26.1 %)
+     were traversed the SAME way by both neighbours, i.e. a quarter of the body
+     faced inward. It also fixed `assignMicroMeshAppearance`, which took the face
+     normal as the AO sampling direction and had been sampling the interior.
+     Backface culling is therefore ON (`VF_MESH_CULL=0` cull none, `=2` opposite
+     front face: diagnostics only). Culling alone took the pair 4,536 → 291 px.
+  2. **Depth prepass + `EQUAL`** — closes the rest. `m_meshDepthPipeline` is a
+     VERTEX-ONLY pipeline (no fragment stage, so it cannot store a texel) that
+     writes the nearest depth; a `VkMemoryBarrier2` (EARLY|LATE_FRAGMENT_TESTS,
+     DEPTH_STENCIL_ATTACHMENT_WRITE → READ|WRITE — dynamic rendering has no
+     implicit subpass dependency) separates it from `m_meshPipeline`, which now
+     has `depthWriteEnable=FALSE` and `depthCompareOp=EQUAL`. Exactly one fragment
+     per pixel can then write the G-buffer. Measured: **291 → 0 px, byte-identical**
+     at the flicker camera, and the cull-NONE control is 0 px TOO (the mechanism
+     proof: with no fragment shader, contending fragments resolve by the
+     rasterizer's min-depth rule instead of arrival order); shipping vs cull-NONE
+     is 0 px, and cull BACK can only draw outer walls, so no inner wall is shown
+     any more. The 614 px that moved against the pre-prepass build are that
+     (median +6.4 luma, all interior, zero body→background). The G-buffer-as-colour-
+     attachments redesign is therefore UNNECESSARY and stays unbuilt.
+  Gate rule: measure `0 px` at the flicker camera
   `--cam -4.9 1.25 20.6 -6.32 0.75 19.2` (15 px at a low-overlap viewpoint is a
   false green), behaviour frozen, and remember `VF_TEST_BEHAVIOUR_FREEZE` parses
   `name:offset:heading:gait:graze:clipTime` — a value in the wrong slot parses
-  fine and means something else.
+  fine and means something else. A headless `--shot` never advances the clock
+  (`m_animTime` = `args.animTime`, default 0), so two pinned-pose renders must be
+  BYTE-identical and a tolerance is a false green.
   See `.opencode/wiki/concepts/geometry-format-policy.md`.
 - Surfel layout (80 B, 5×vec4, std430): `pos_rU` (w = radiusU, along the
   stored tangent), `normal_rV` (w = radiusV, across), `bent_sh` (bent normal +

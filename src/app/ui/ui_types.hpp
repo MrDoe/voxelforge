@@ -44,9 +44,9 @@ constexpr float kDragTravelPx = 6.0f; // screen px of travel since the last stam
 // The editor has exactly one panel: a docked left sidebar whose icon rail
 // picks which of these sections fills the content pane. There are no floating
 // windows, so this replaces the old m_showWorldLayers / m_showMeshImport /
-// m_showTextures visibility booleans. Order is the rail order and the Ctrl+1..6
-// shortcut order.
-enum class Panel : int { Edit = 0, World, Render, Textures, Mesh, AI,
+// m_showTextures visibility booleans. Order is the rail order and the Ctrl+1..7
+// shortcut order (Ctrl+1..7).
+enum class Panel : int { Edit = 0, World, Render, Textures, Mesh, AI, Animate,
                          kCount };
 constexpr int kPanelCount = int(Panel::kCount);
 
@@ -61,6 +61,7 @@ constexpr PanelInfo kPanels[kPanelCount] = {
     { "Textures", "Material textures", "Ctrl+4" },
     { "Mesh",     "Import mesh",       "Ctrl+5" },
     { "AI",       "AI assistant",      "Ctrl+6" },
+    { "Animate",  "Animation studio",  "Ctrl+7" },
 };
 
 // Sidebar metrics. The sidebar is an overlay: the render is still full-window
@@ -107,6 +108,13 @@ const ImVec4 kOk(0.361f, 0.831f, 0.573f, 1.0f);
 const ImVec4 kTextPrimary(0.898f, 0.925f, 0.965f, 1.0f);
 const ImVec4 kTextSecondary(0.596f, 0.651f, 0.714f, 1.0f);
 const ImVec4 kTextTertiary(0.427f, 0.478f, 0.541f, 1.0f);
+
+// The overlay surfaces: the hotkey bar's plate and its keycaps. They are
+// drawn on the foreground list over the SCENE, so they need their own
+// opacity - the sidebar's surfaces are opaque because they sit on the
+// window, not on a render.
+const ImVec4 kSurfacePlate(0.055f, 0.067f, 0.086f, 0.92f);
+const ImVec4 kSurfaceKeycap(0.110f, 0.137f, 0.173f, 1.0f);
 
 // kPalette names (src/voxel/common.hpp) for the material combo. The array
 // must cover every palette entry (kPaletteN), or the last materials are

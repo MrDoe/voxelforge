@@ -19,6 +19,7 @@
 //   * the material lookup landing on the SOLID cell, not on air filler.
 #include "voxel/fur_cards.hpp"
 #include "voxel/micro_field.hpp"
+#include "voxel/micro_mesh.hpp"
 #include "voxel/micro_svo.hpp"
 #include "voxel/surfelize.hpp"
 #include "voxel/worldfile.hpp"
@@ -27,6 +28,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <limits>
 #include <vector>
 
 using namespace vf::voxel;
@@ -880,4 +882,368 @@ TEST_CASE("fur cards: every card is filed in a cell that holds it")
     for (size_t i = 1; i < o.cellStart.size(); ++i)
         CHECK(o.cellStart[i] >= o.cellStart[i - 1]);
     CHECK(o.cellStart.back() == o.cellItems.size());
+}
+
+// The MESH ACTOR's vertex lane. This is a cross-language contract - the CPU
+// writer below and TWO shaders (micro_mesh.vert decodes it, micro_mesh.frag
+// reads the material) - so a drift has to be caught here, not by looking at a
+// grey alpaca. Byte order: bone+1, material (255 = "look it up"), AO, reserved.
+TEST_CASE("micro mesh: the packed vertex lane")
+{
+    CHECK(meshVertexWord(-1, 255, 255) == 0x00FFFF00u);
+    CHECK(meshVertexWord(0, 0, 0) == 0x00000001u);
+    CHECK(meshVertexWord(8, 21, 128) == ((128u << 16) | (21u << 8) | 9u));
+    // A bone index past 254 must saturate the byte, never wrap into "unskinned"
+    // or into the material byte.
+    CHECK((meshVertexWord(300, 0, 0) & 0xFFu) == 255u);
+
+    // A mesh whose appearance pass has not run still uploads a VALID record:
+    // unskinned and "look it up in the field" - never material 0, which would
+    // shade the whole body as rock.
+    MicroMesh mesh;
+    mesh.rest.push_back(glm::vec3(0.1f, 0.2f, 0.3f));
+    const glm::vec4 rec = meshVertexRecord(mesh, 0, glm::vec3(1.f, 2.f, 3.f));
+    CHECK(rec.x == doctest::Approx(1.1f));
+    CHECK(rec.y == doctest::Approx(2.2f));
+    CHECK(rec.z == doctest::Approx(3.3f));
+    const uint32_t bits = glm::floatBitsToUint(rec.w);
+    CHECK((bits & 0xFFu) == 0u);
+    CHECK(((bits >> 8) & 0xFFu) == 255u);
+}
+
+// The APPEARANCE pass: a vertex of a mesh sits a little OUTSIDE the field's
+// surface (the two are different tessellations of the same animal), so the
+// lookup search is two cells wide. Measured on the shipped alpaca: all 54,138
+// vertices resolve. Here the triangle stands 2 mm off a material-21 cube's +X
+// face - exactly the case the per-pixel lookup used to MISS and render grey.
+TEST_CASE("micro mesh: per-vertex appearance resolves against the rest field")
+{
+    WorldFileData d = cubeLayer(6, 0.005f, 21);
+    MicroField f;
+    std::string err;
+    REQUIRE(buildMicroField(d.voxels, d.meta, f, &err));
+
+    // The solid cube occupies margin .. margin+12 cells; its +X surface is the
+    // far corner of the last one. Read it off the field rather than assuming
+    // the margin, so a change to kMicroMarginCells cannot silently move the
+    // test's surface off the cube.
+    const float face = f.origin.x + float(f.solidMax.x + 1) * f.voxel;
+    MicroMesh mesh;
+    MeshTri t;
+    t.v[0] = vec3(face + 0.002f, 0.030f, 0.030f);
+    t.v[1] = vec3(face + 0.002f, 0.040f, 0.030f);
+    t.v[2] = vec3(face + 0.002f, 0.030f, 0.040f);
+    t.mat = 21;
+    mesh.tris.push_back(t);
+    mesh.rest = { t.v[0], t.v[1], t.v[2] };
+    mesh.bone.assign(3, -1);
+
+    MeshAppearanceStats st;
+    assignMicroMeshAppearance(f, mesh, &st);
+    CHECK(st.vertices == 3);
+    CHECK(st.missed == 0);
+    CHECK(st.assigned == 3);
+    for (size_t i = 0; i < mesh.mat.size(); ++i) {
+        CHECK(mesh.mat[i] == 21);
+        CHECK(((mesh.word[i] >> 8) & 0xFFu) == 21u);
+        CHECK((mesh.word[i] & 0xFFu) == 0u);  // unskinned: no .skin bone
+        CHECK(((mesh.word[i] >> 16) & 0xFFu) == mesh.ao[i]);
+    }
+
+    // A vertex far outside the surface has NO appearance - and it must say so
+    // (byte 1 = 255), because that is what tells the shader to fall back
+    // instead of shading material 0.
+    MicroMesh far;
+    MeshTri ft;
+    ft.v[0] = vec3(10.f, 0.03f, 0.03f);
+    ft.v[1] = vec3(10.f, 0.04f, 0.03f);
+    ft.v[2] = vec3(10.f, 0.03f, 0.04f);
+    far.tris.push_back(ft);
+    far.rest = { ft.v[0], ft.v[1], ft.v[2] };
+    far.bone.assign(3, -1);
+    MeshAppearanceStats fst;
+    assignMicroMeshAppearance(f, far, &fst);
+    CHECK(fst.missed == 3);
+    for (size_t i = 0; i < far.word.size(); ++i)
+        CHECK(((far.word[i] >> 8) & 0xFFu) == 255u);
+}
+
+// ---- winding -----------------------------------------------------------
+//
+// The mesh raster pass writes its G-buffer from the FRAGMENT stage with
+// `imageStore`, so a pixel covered TWICE (the near and the far wall of a closed
+// shell) has two racing writers and the frame differs run to run. Culling
+// removes the second writer, and culling is only correct if the winding is
+// consistent and outward. The shipped alpaca arrived with 26.1 % of its shared
+// edges traversed the same way by both neighbours, i.e. a quarter of the body
+// faced inward - and the loader did not care, so this is the pin.
+namespace {
+
+// A unit cube at the origin, 12 triangles, CCW seen from OUTSIDE.
+std::vector<MeshTri> unitCube()
+{
+    const glm::vec3 p[8] = {
+        { 0, 0, 0 }, { 1, 0, 0 }, { 1, 1, 0 }, { 0, 1, 0 },
+        { 0, 0, 1 }, { 1, 0, 1 }, { 1, 1, 1 }, { 0, 1, 1 },
+    };
+    // corner index triples per face, in an order whose cross product is the
+    // OUTWARD normal (checked by the assertions below, not by eye).
+    const int f[12][3] = {
+        { 0, 3, 2 }, { 0, 2, 1 }, // z = 0
+        { 4, 5, 6 }, { 4, 6, 7 }, // z = 1
+        { 0, 4, 7 }, { 0, 7, 3 }, // x = 0
+        { 1, 2, 6 }, { 1, 6, 5 }, // x = 1
+        { 0, 1, 5 }, { 0, 5, 4 }, // y = 0
+        { 3, 7, 6 }, { 3, 6, 2 }, // y = 1
+    };
+    std::vector<MeshTri> tris(12);
+    for (int t = 0; t < 12; ++t)
+        for (int k = 0; k < 3; ++k)
+            tris[size_t(t)].v[k] = p[f[t][k]];
+    return tris;
+}
+
+double signedVolume(const std::vector<MeshTri>& tris)
+{
+    double v = 0.0;
+    for (const MeshTri& t : tris)
+        v += double(glm::dot(t.v[0], glm::cross(t.v[1], t.v[2]))) / 6.0;
+    return v;
+}
+
+// Distance of each triangle's plane from the centre, measured along its own
+// normal: positive for every face of an outward-wound convex solid.
+float minOutwardDot(const std::vector<MeshTri>& tris)
+{
+    const glm::vec3 c(0.5f, 0.5f, 0.5f);
+    float worst = std::numeric_limits<float>::max();
+    for (const MeshTri& t : tris) {
+        const glm::vec3 n = glm::cross(t.v[1] - t.v[0], t.v[2] - t.v[0]);
+        const glm::vec3 mid = (t.v[0] + t.v[1] + t.v[2]) / 3.f;
+        worst = std::min(worst, glm::dot(glm::normalize(n), mid - c));
+    }
+    return worst;
+}
+
+} // namespace
+
+TEST_CASE("micro mesh: the winding is made consistent and OUTWARD")
+{
+    std::vector<MeshTri> tris = unitCube();
+    // A clean cube is the control: the pass must not touch it.
+    {
+        MeshWindingStats s;
+        CHECK(orientMeshWinding(tris, &s));
+        CHECK(s.sameDirectionEdges == 0);
+        CHECK(s.flipped == 0);
+        CHECK(s.consistent);
+        CHECK(s.outward);
+        CHECK(s.closed);
+        CHECK(s.components == 1);
+        CHECK(signedVolume(tris) == doctest::Approx(1.0).epsilon(1e-4));
+        CHECK(minOutwardDot(tris) == doctest::Approx(0.5f).epsilon(1e-3));
+    }
+
+    // Now invert a third of the faces, the way the shipped STL is broken.
+    std::vector<MeshTri> broken = unitCube();
+    for (int t : { 1, 4, 7, 10 })
+        std::swap(broken[size_t(t)].v[1], broken[size_t(t)].v[2]);
+    CHECK(signedVolume(broken) != doctest::Approx(1.0).epsilon(1e-3));
+
+    MeshWindingStats s;
+    REQUIRE(orientMeshWinding(broken, &s));
+    CHECK(s.sameDirectionEdges > 0);        // the defect WAS there
+    CHECK(s.sameDirectionEdgesAfter == 0);  // and is gone
+    CHECK(s.flipped > 0);
+    CHECK(s.consistent);
+    CHECK(s.closed);
+    CHECK(s.nonManifoldEdges == 0);
+    CHECK(signedVolume(broken) == doctest::Approx(1.0).epsilon(1e-4));
+    CHECK(minOutwardDot(broken) == doctest::Approx(0.5f).epsilon(1e-3));
+
+    // Idempotent: a second pass has nothing left to do. A pass that keeps
+    // flipping would re-aim every face normal the AO pass samples along.
+    MeshWindingStats again;
+    CHECK(orientMeshWinding(broken, &again));
+    CHECK(again.flipped == 0);
+    CHECK(again.sameDirectionEdges == 0);
+}
+
+TEST_CASE("micro mesh: an entirely inside-out shell is turned outward")
+{
+    // Consistency alone does not say which side is OUT: a shell can arrive
+    // uniformly inverted, and culling BACK would then delete the outside.
+    std::vector<MeshTri> tris = unitCube();
+    for (MeshTri& t : tris)
+        std::swap(t.v[1], t.v[2]);
+    REQUIRE(signedVolume(tris) == doctest::Approx(-1.0).epsilon(1e-4));
+
+    MeshWindingStats s;
+    REQUIRE(orientMeshWinding(tris, &s));
+    CHECK(s.sameDirectionEdges == 0); // it was already consistent...
+    CHECK(!s.outward);                // ...just inside-out
+    CHECK(s.flipped == 12);           // every triangle reversed
+    CHECK(signedVolume(tris) == doctest::Approx(1.0).epsilon(1e-4));
+    CHECK(minOutwardDot(tris) == doctest::Approx(0.5f).epsilon(1e-3));
+}
+
+TEST_CASE("micro mesh: a soup too small to be a surface is left alone")
+{
+    std::vector<MeshTri> one(1);
+    one[0].v[0] = { 0, 0, 0 };
+    one[0].v[1] = { 1, 0, 0 };
+    one[0].v[2] = { 0, 1, 0 };
+    MeshWindingStats s;
+    CHECK_FALSE(orientMeshWinding(one, &s));
+    CHECK(s.triangles == 1);
+    CHECK(one[0].v[1] == glm::vec3(1, 0, 0)); // untouched
+}
+
+// ---- the skinning weight kernel ----------------------------------------
+//
+// THE one skinning rule: `poseMicroMesh`, the fur-card build, the deformer's
+// dirty set and the shader's `microBoneWeights` all read this kernel, so the
+// body and the coat cannot be bound to different bones for the same surface
+// point. Three properties have to hold or the animal tears again:
+//
+//   1. the weights SUM to 1 at every point, so the blend is an average and not
+//      a shrink;
+//   2. the weight is CONTINUOUS at the band's edge, so no crease forms where a
+//      bone enters or leaves the blend;
+//   3. past `kMicroWeightReach * radius` a bone contributes NOTHING and the
+//      nearest bone carries the point rigidly - which is what keeps a hoof
+//      moving 0.0 mm when the spine bends.
+TEST_CASE("micro rig: the weight kernel sums to 1, is smooth, and is rigid past its reach")
+{
+    auto bone = [](glm::vec3 a, glm::vec3 b, float r, BoneRole role) {
+        MicroBone B;
+        B.a = a;
+        B.b = b;
+        B.radius = r;
+        B.role = role;
+        return B;
+    };
+    auto rig = [&](std::vector<MicroBone> bs) {
+        MicroRig R;
+        R.bones = std::move(bs);
+        return R;
+    };
+
+    // A spine at the origin plus one leg hanging off its far end.
+    const MicroRig R = rig({
+        bone({ -0.30f, 0.f, 0.f }, { 0.30f, 0.f, 0.f }, 0.10f, BoneRole::Spine),
+        bone({ 0.25f, -0.02f, 0.f }, { 0.25f, -0.45f, 0.f }, 0.06f, BoneRole::Leg),
+    });
+
+    // (1) normalized everywhere, including points no bone reaches.
+    for (float x = -0.6f; x <= 0.6001f; x += 0.05f) {
+        for (float y = -0.6f; y <= 0.3001f; y += 0.05f) {
+            const BoneInfluences inf = R.boneInfluences({ x, y, 0.f });
+            REQUIRE(inf.count >= 1);
+            REQUIRE(inf.count <= kMicroMaxInfluences);
+            float sum = 0.f;
+            for (int i = 0; i < inf.count; ++i)
+                sum += inf.weight[i];
+            CHECK(sum == doctest::Approx(1.0f).epsilon(1e-4));
+            // Descending, so bone[0] really is the dominant bone.
+            for (int i = 1; i < inf.count; ++i)
+                CHECK(inf.weight[i - 1] >= inf.weight[i]);
+            for (int i = 0; i < inf.count; ++i) {
+                CHECK(inf.bone[i] >= 0);
+                CHECK(inf.bone[i] < int(R.bones.size()));
+                CHECK(inf.weight[i] >= 0.f);
+            }
+            // `boneAt` is defined as the head of that list, never a re-derivation.
+            CHECK(R.boneAt({ x, y, 0.f }) == inf.bone[0]);
+        }
+    }
+
+    // (2) rigid on one bone where nothing else reaches.
+    {
+        // The hoof: on the leg's axis, 0.45 m below the spine, outside its band.
+        const BoneInfluences hoof = R.boneInfluences({ 0.25f, -0.45f, 0.f });
+        CHECK(hoof.count == 1);
+        CHECK(hoof.bone[0] == 1);
+        CHECK(hoof.weight[0] == doctest::Approx(1.0f));
+        // Mid-spine: on the spine's axis, outside the leg's band.
+        const BoneInfluences back = R.boneInfluences({ 0.f, 0.f, 0.f });
+        CHECK(back.count == 1);
+        CHECK(back.bone[0] == 0);
+    }
+
+    // (3) THE TEAR FIX: at the shoulder both bones must contribute. A single
+    // dominant bone there is exactly the hard crease the kernel replaced.
+    {
+        const BoneInfluences sh = R.boneInfluences({ 0.25f, 0.10f, 0.f });
+        CHECK(sh.count >= 2);
+        CHECK(sh.weight[0] > 0.05f);
+        CHECK(sh.weight[1] > 0.05f);
+        CHECK(sh.weight[0] < 0.95f); // it is a BLEND, not a rigid attachment
+    }
+
+    // (4) the band edge is smooth. This has to be measured with TWO bones: the
+    // weights are NORMALIZED, so a lone contributing bone always comes back
+    // with weight 1 however small its raw kernel value is - which is exactly
+    // what makes the weights a partition of unity and what an earlier version
+    // of this check got wrong. The real property is that a bone's normalized
+    // share goes to zero CONTINUOUSLY as it leaves its band, with the other
+    // bone taking over.
+    {
+        const MicroRig two = rig({
+            bone({ 0.f, 0.f, 0.f }, { 0.4f, 0.f, 0.f }, 0.05f, BoneRole::Spine),
+            bone({ 0.f, 0.30f, 0.f }, { 0.4f, 0.30f, 0.f }, 0.05f, BoneRole::Neck),
+        });
+        const float reach = kMicroWeightReach * 0.05f;
+        // On the spine's axis the neck is outside its band: A owns the point.
+        const BoneInfluences onAxis = two.boneInfluences({ 0.2f, 0.f, 0.f });
+        REQUIRE(onAxis.count == 1);
+        CHECK(onAxis.bone[0] == 0);
+        CHECK(onAxis.weight[0] == doctest::Approx(1.0f));
+
+        // Walk out of the spine's band. ITS share must fall monotonically to
+        // (near) nothing, never step. The list is sorted by weight, so once the
+        // neck overtakes it the spine is no longer slot 0 - follow the bone id,
+        // not the index. The range starts where the neck's band begins reaching,
+        // so both contribute throughout and the rigid fallback cannot mask the
+        // shape of the decay.
+        float prev = 2.f;
+        for (float y = 0.13f; y <= 0.174f; y += 0.004f) {
+            const BoneInfluences inf = two.boneInfluences({ 0.2f, y, 0.f });
+            REQUIRE(inf.count == 2); // both reach here, so no fallback can mask it
+            int si = -1;
+            for (int i = 0; i < inf.count; ++i)
+                if (inf.bone[i] == 0)
+                    si = i;
+            REQUIRE(si >= 0);
+            CHECK(inf.weight[si] <= prev);
+            CHECK(inf.weight[0] + inf.weight[1]
+                  == doctest::Approx(1.0f).epsilon(1e-4));
+            prev = inf.weight[si];
+        }
+        const BoneInfluences atEdge =
+            two.boneInfluences({ 0.2f, 0.999f * reach, 0.f });
+        // The neck has taken over and the spine's share is smooth at the edge.
+        CHECK(atEdge.bone[0] == 1);
+        CHECK(atEdge.weight[0] > 0.99f);
+        CHECK(atEdge.weight[1] < 1e-4f);
+    }
+
+    // (5) past every band the nearest bone carries the point RIGIDLY, which is
+    // what keeps a hoof at 0.0 mm while the spine bends.
+    {
+        const MicroRig one = rig({ bone({ 0.f, 0.f, 0.f }, { 0.4f, 0.f, 0.f },
+                                        0.05f, BoneRole::Spine) });
+        const float reach = kMicroWeightReach * 0.05f;
+        const BoneInfluences outside = one.boneInfluences({ 0.2f, 1.001f * reach, 0.f });
+        CHECK(outside.count == 1);
+        CHECK(outside.weight[0] == doctest::Approx(1.0f));
+    }
+
+    // (6) a rig with no bones is inert, not a crash.
+    {
+        const MicroRig empty;
+        const BoneInfluences inf = empty.boneInfluences({ 0.f, 0.f, 0.f });
+        CHECK(inf.count == 0);
+        CHECK(empty.boneAt({ 0.f, 0.f, 0.f }) == -1);
+    }
 }

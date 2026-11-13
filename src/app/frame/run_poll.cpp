@@ -25,10 +25,30 @@ void App::pollWorldAndTextures(float dt)
     // LayeredWorld), so an in-progress rebuild never blocks a frame; the
     // finished world is swapped in here on the next consumeRebuild().
     m_layerPollT += dt;
-    if (m_layers.loaded() && m_layerPollT >= 0.5f) {
+    if (!m_studio.active && m_layers.loaded() && m_layerPollT >= 0.5f) {
         m_layerPollT = 0.f;
-        if (m_layers.reloadIfChanged(m_camera.pos) == vf::voxel::LayeredWorld::kSyncDone)
+        // snapshot manifest mtime/size before the reload consumes it
+        std::error_code ec;
+        unsigned long long mt = 0, sz = 0;
+        auto t = std::filesystem::last_write_time(m_manifestPath, ec);
+        if (!ec) mt = (unsigned long long)t.time_since_epoch().count();
+        sz = (unsigned long long)std::filesystem::file_size(m_manifestPath, ec);
+        const bool manifestChanged =
+            m_microManifestSeeded && (mt != m_microManifestMtime || sz != m_microManifestSize);
+        auto res = m_layers.reloadIfChanged(m_camera.pos);
+        const bool worldReloaded = (res == vf::voxel::LayeredWorld::kSyncDone);
+        if (worldReloaded)
             applyWorldReload();
+        // micro objects are separate SVO worlds and are skipped by the world
+        // bake; a manifest-only edit (e.g. MCP set_layer_transform on a micro
+        // layer) never triggers applyWorldReload, so reload them here.
+        if (manifestChanged && !worldReloaded) {
+            loadMicroObjects();
+            m_taaFirstFrame = true;
+        }
+        m_microManifestMtime = mt;
+        m_microManifestSize = sz;
+        m_microManifestSeeded = true;
     }
     if (m_layers.consumeRebuild())
         applyWorldReload();

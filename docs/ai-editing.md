@@ -132,6 +132,28 @@ ai_edits), and writes edits through its own `EditableWorld` instance.
 | `add_ellipsoid` | `anchor`\|`ground`, `radius:[rx,ry,rz]`, `material` | default [0.5,0.5,0.5] m |
 | `add_stamp` | `anchor`\|`ground`, `cells:[{dx,dy,dz,mat}…]` | ≤1000 literal 0.1 m cells relative to anchor |
 | `clear_edits` | – | wipe `ai_edits.vxw` |
+| `get_layer` | `layer` (name/file) | detailed layer info (role, enabled, pos, rot, scale, behaviour, voxel count) |
+| `set_layer_transform` | `layer`, `pos?`, `rot?`/`rotX?`/`rotZ?` (or yaw/pitch/roll), `scale?` | update a layer's placement in the manifest |
+| `set_layer_behaviour` | `layer`, `behaviour` | set autonomous behaviour (e.g. "grazer" for micro objects) |
+| `inspect_layer` | `layer`/`path` | bbox + voxel count + material histogram for a .vxw |
+| `layer_stats` | `layer` (name/file) | AABB + voxel count for a layer |
+| `duplicate_layer` | `source`, `name` | copy a .vxw layer to a new name (registered, disabled) |
+| `rename_layer` | `layer`, `new_name` | rename a layer (file + manifest entry) |
+| `delete_layer` | `layer` (name/file) | delete a non-protected layer |
+| `list_micro` | – | list micro-voxel object layers with placement |
+| `list_materials` | – | palette materials: id, name, rgb, reflectivity, roughness, emissive |
+| `list_textures` | – | texture files + current material bindings |
+| `list_models` | – | STL/OBJ mesh files in assets/models |
+| `world_info` | – | world constants (size, voxel, water level, grid, materials, max lights) |
+| `probe_region` | `min:[x,y,z]`, `max:[x,y,z]` (lattice cells) | solid/air counts + material histogram in a box |
+| `reload_world` | – | reload the cached world field from world.json |
+| `list_lights` | – | authored point lights in world.json |
+| `add_light` | `pos`, `color?`, `radius?`, `intensity?`, `follow?` | add a point light |
+| `remove_light` | `index` | remove a point light by index |
+| `set_texture` | `mat`, `file?`, `scale?`, `emissive?`, `emissiveScale?` | bind a texture to a material (empty file = palette) |
+| `render_shot` | `out?`, `cam?` (6 nums), `width?`, `height?`, `mode?`, `animtime?`, `sun?` | headless render to a PPM image path |
+| `inspect_rig` | `layer` | derive + report the skeleton (bones, roles, parents, segments) of a micro layer |
+| `set_pose` | `layer`, `pose` (flat: bone,rx,ry,rz,...) | set a static rigged pose on a micro layer |
 
 Conventions:
 

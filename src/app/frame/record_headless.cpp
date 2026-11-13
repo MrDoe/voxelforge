@@ -75,8 +75,15 @@ int App::recordHeadlessFrame(FrameSync& fr)
         push.misc = glm::vec4(float(m_renderFlags), m_animTime, float(m_tonemapLook), m_exposure);
         // buried camera (inside solid): render shells two-sided this frame
         updateBuriedProbe();
-        {
-            if (m_renderMode == RenderMode::Splats) {
+        if (m_studio.active) {
+            // STUDIO: backdrop + micro + fur + post only. The implementation
+            // is shared with the interactive path (frame/record_studio.cpp),
+            // so a --shot of the studio is the editor's own image.
+            recordStudioFrame(fr.cmd, push);
+            profMark(3); // no photorealism in the studio
+            profMark(4);
+        } else {
+        if (m_renderMode == RenderMode::Splats) {
                 // splat raster writes linear HDR + G-buffer
                 vf::transitionImage(fr.cmd, m_hdr.img, VK_IMAGE_ASPECT_COLOR_BIT,
                                     VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_GENERAL,
@@ -104,14 +111,18 @@ int App::recordHeadlessFrame(FrameSync& fr)
                 m_splatPass.record(fr.cmd, push,
                                    { m_offscreen.extent.width,
                                      m_offscreen.extent.height });
-                // barrier: HDR/G-buffer written -> read by post pass
+                // barrier: HDR/G-buffer written -> read by post pass. The dst
+                // also covers the micro pass's RASTER half, which writes the
+                // same images from the FRAGMENT stage (a WAW hazard otherwise).
                 VkMemoryBarrier2 mb { VK_STRUCTURE_TYPE_MEMORY_BARRIER_2 };
                 mb.srcStageMask = VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT |
                                   VK_PIPELINE_STAGE_2_LATE_FRAGMENT_TESTS_BIT;
                 mb.srcAccessMask = VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT |
                                    VK_ACCESS_2_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT;
-                mb.dstStageMask = VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT;
-                mb.dstAccessMask = VK_ACCESS_2_SHADER_STORAGE_READ_BIT;
+                mb.dstStageMask = VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT |
+                                  VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT;
+                mb.dstAccessMask = VK_ACCESS_2_SHADER_STORAGE_READ_BIT |
+                                   VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT;
                 VkDependencyInfo di { VK_STRUCTURE_TYPE_DEPENDENCY_INFO };
                 di.memoryBarrierCount = 1;
                 di.pMemoryBarriers = &mb;
@@ -134,12 +145,15 @@ int App::recordHeadlessFrame(FrameSync& fr)
                                 VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
                                 VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT);
             m_svoPass.record(fr.cmd, push);
-            // barrier: HDR/G-buffer written -> read by post pass
+            // barrier: HDR/G-buffer written -> read by post pass. FRAGMENT in
+            // the dst covers the micro pass's raster half writing these images.
             VkMemoryBarrier2 mb { VK_STRUCTURE_TYPE_MEMORY_BARRIER_2 };
             mb.srcStageMask = VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT;
             mb.srcAccessMask = VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT;
-            mb.dstStageMask = VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT;
-            mb.dstAccessMask = VK_ACCESS_2_SHADER_STORAGE_READ_BIT;
+            mb.dstStageMask = VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT |
+                              VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT;
+            mb.dstAccessMask = VK_ACCESS_2_SHADER_STORAGE_READ_BIT |
+                               VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT;
             VkDependencyInfo di { VK_STRUCTURE_TYPE_DEPENDENCY_INFO };
             di.memoryBarrierCount = 1;
             di.pMemoryBarriers = &mb;
@@ -150,11 +164,13 @@ int App::recordHeadlessFrame(FrameSync& fr)
             // a pixel only where a micro surface is nearer than what the main
             // backend already resolved there. A no-op when none are loaded.
             if (!m_microSvoPass.empty()) {
-                m_microSvoPass.record(fr.cmd, push);
+                m_microSvoPass.record(fr.cmd, push, m_frameIdx % kMaxFramesInFlight);
                 VkMemoryBarrier2 mb2 { VK_STRUCTURE_TYPE_MEMORY_BARRIER_2 };
-                mb2.srcStageMask = VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT;
+                mb2.srcStageMask = VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT |
+                                   VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT;
                 mb2.srcAccessMask = VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT;
-                mb2.dstStageMask = VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT;
+                mb2.dstStageMask = VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT |
+                                   VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT;
                 mb2.dstAccessMask = VK_ACCESS_2_SHADER_STORAGE_READ_BIT;
                 VkDependencyInfo di2 { VK_STRUCTURE_TYPE_DEPENDENCY_INFO };
                 di2.memoryBarrierCount = 1;
@@ -169,7 +185,8 @@ int App::recordHeadlessFrame(FrameSync& fr)
             if (!m_furPass.empty()) {
                 m_furPass.record(fr.cmd, push);
                 VkMemoryBarrier2 mb3 { VK_STRUCTURE_TYPE_MEMORY_BARRIER_2 };
-                mb3.srcStageMask = VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT;
+                mb3.srcStageMask = VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT |
+                                   VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT;
                 mb3.srcAccessMask = VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT;
                 mb3.dstStageMask = VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT;
                 mb3.dstAccessMask = VK_ACCESS_2_SHADER_STORAGE_READ_BIT;
@@ -199,6 +216,16 @@ int App::recordHeadlessFrame(FrameSync& fr)
         hsi.commandBufferCount = 1;
         hsi.pCommandBuffers = &fr.cmd;
         vkQueueSubmit(m_ctx.graphicsQueue(), 1, &hsi, fr.inFlight);
+        // DIAGNOSTIC (env-gated, default off): drain the queue after every
+        // submit so no two frames are ever in flight together. A single-image
+        // resource that one frame DESTROYS (a depth CLEAR, a snapshot copy)
+        // while the previous frame still READS it is not ordered by any fence:
+        // the in-flight fence only protects the slot three frames back. If a
+        // duplicate-pose pair comes out pixel-identical here and differs
+        // without this, the run-to-run flicker is that cross-frame race and not
+        // the shader, the rig, or the pass order.
+        if (getenv("VF_TEST_SERIAL_SUBMIT"))
+            vkQueueWaitIdle(m_ctx.graphicsQueue());
         ++m_frameIdx;
         if (getenv("VF_TRACE"))
             fprintf(stderr, "[f%llu] headless submitted\n", (unsigned long long)m_frameIdx);

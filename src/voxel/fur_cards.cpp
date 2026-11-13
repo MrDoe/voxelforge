@@ -112,7 +112,8 @@ float bakedSunShadow(const MicroField& f, glm::vec3 root, glm::vec3 n,
 }  // namespace
 
 bool buildFurCards(const MicroField& field, const FurParams& params, FurObject& out,
-                   std::string* err, const MicroRig* rig, glm::vec3 worldOffset)
+                   std::string* err, const MicroRig* rig, glm::vec3 worldOffset,
+                   std::function<int(glm::vec3)> boneFn)
 {
     (void)rig; (void)worldOffset;
     out = FurObject {};
@@ -223,7 +224,12 @@ bool buildFurCards(const MicroField& field, const FurParams& params, FurObject& 
         // is tilted out of the surface by 25..60 degrees.
         const float ao = bakedAo(field, r.p, r.t1, r.t2);
         const float sh = bakedSunShadow(field, r.p, r.n, sun, maxShadowDist);
-        const int bn = rig ? rig->boneAt(r.p + field.origin + worldOffset) : -1;
+        int bn = -1;
+        if (boneFn) {
+            bn = boneFn(r.p + field.origin + worldOffset);
+        } else if (rig) {
+            bn = rig->boneAt(r.p + field.origin + worldOffset);
+        }
         for (int k = 0; k < params.perCell; ++k) {
             const int slot = k * 7;
             // The root wanders inside the cell, so the coat is not a lattice

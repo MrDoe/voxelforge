@@ -198,7 +198,8 @@ struct EditableWorld {
     // (the modification path: read_object -> edit -> write_object). Returns
     // false for an empty/illegal name.
     bool writeObjectLayer(const std::string& name,
-                          const std::vector<VoxelRecord>& recs);
+                          const std::vector<VoxelRecord>& recs,
+                          const std::string& meshSource = "");
 
     // Remove a named object layer file + its manifest entry (never landscape or
     // the packed cache). Returns false if absent, protected, or an illegal name.

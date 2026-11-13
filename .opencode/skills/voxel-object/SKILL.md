@@ -105,6 +105,14 @@ hand-written.
   `write_object` with the same `name` (overwrites in place).
 - `delete_object` — remove a named object layer file + its manifest entry
   (never `landscape`/`packed`).
+- `import_mesh` — convert an STL/OBJ mesh to a voxel object layer.
+- `get_layer` / `inspect_layer` / `layer_stats` — layer details, bbox, voxel
+  count, material histogram.
+- `set_layer_transform` — move/rotate/scale a layer (pos, rot/rotX/rotZ, scale).
+- `set_layer_behaviour` — set autonomous behaviour (e.g. "grazer").
+- `list_micro` / `list_materials` / `list_textures` / `list_models` /
+  `list_lights` / `world_info` / `probe_region` / `reload_world` / `render_shot`
+  — inspection, constants, region queries, reload, headless render.
 
 Fuzzy tool names from small models are normalized onto these
 (`create_object`, `voxel_art`, `new_layer`, `inspect_object`, `remove_object`,
