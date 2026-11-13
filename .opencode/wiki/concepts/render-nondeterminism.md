@@ -14,6 +14,18 @@ budget.
 
 ## The bisect ladder (cheapest cut first)
 
+> **VERDICT IN FLIGHT (2026-11-13).** The mesh loader now has a
+> winding-orientation pass and the pipeline can cull back faces; a peer
+> session's verification renders are running against it. Everything below
+> describes the state BEFORE that change, so read the "quantitatively
+> unexplained" and "eligibility" sections as the pre-repair measurement, not as
+> the final verdict. Two facts from the cull fork are already reported and are
+> consistent with it: the residual after culling is near-disjoint from the
+> baseline (Jaccard 0.002), which is what an orientation-owned cause predicts.
+> Update this page with the landed numbers when they arrive; do not quote the
+> 343x split as the bug's final magnitude.
+
+
 Each rung is one render pair and each eliminates a whole class:
 
 1. **Intra-process, same view repeated** — `--shotlist` with N identical lines
