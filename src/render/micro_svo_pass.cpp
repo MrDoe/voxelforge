@@ -335,8 +335,7 @@ void MicroSvoPass::setWorldRotation(size_t worldIndex, glm::mat3 R, glm::vec3 pi
 
 void MicroSvoPass::setBoneRotations(size_t worldIndex,
                                     const std::vector<glm::mat3>& rot,
-                                    const std::vector<glm::vec3>& xform)
-{
+                                    const std::vector<glm::vec3>& xform){
     // The gait rewrites the bones' rotations every frame. Only the matrix
     // part of each bone changes, so the world table is edited in place (the
     // segments and the joints stay as they were uploaded).
@@ -358,6 +357,30 @@ void MicroSvoPass::setBoneRotations(size_t worldIndex,
             br.xform[1] = xform[size_t(i)].y;
             br.xform[2] = xform[size_t(i)].z;
         }
+    }
+    vmaFlushAllocation(m_ctx->allocator(), m_worldTable.alloc, 0, VK_WHOLE_SIZE);
+}
+
+void MicroSvoPass::setBoneSegments(size_t worldIndex,
+                                   const std::vector<glm::vec3>& a,
+                                   const std::vector<glm::vec3>& b,
+                                   const std::vector<float>& radius)
+{
+    if (!m_worldTable.mapped || worldIndex >= size_t(m_worldCount))
+        return;
+    auto* rows = reinterpret_cast<MicroWorldRow*>(m_worldTable.mapped);
+    MicroWorldRow& row = rows[worldIndex];
+    const size_t count = std::min({ a.size(), b.size(), radius.size(),
+                                    sizeof(row.bone) / sizeof(row.bone[0]) });
+    for (size_t i = 0; i < count; ++i) {
+        MicroBoneRow& br = row.bone[i];
+        br.a[0] = a[i].x;
+        br.a[1] = a[i].y;
+        br.a[2] = a[i].z;
+        br.a[3] = radius[i]; // per-bone capsule radius (for microBoneAt)
+        br.b[0] = b[i].x;
+        br.b[1] = b[i].y;
+        br.b[2] = b[i].z;
     }
     vmaFlushAllocation(m_ctx->allocator(), m_worldTable.alloc, 0, VK_WHOLE_SIZE);
 }

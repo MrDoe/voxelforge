@@ -274,6 +274,66 @@ vf::voxel::BoneKey* App::studioKeyAt(vf::voxel::MicroClip& clip,
     return nullptr;
 }
 
+void App::studioUploadRig()
+{
+    auto* b = studioBehaviour();
+    if (!b)
+        return;
+    std::vector<glm::vec3> segA, segB;
+    std::vector<float> radius;
+    segA.reserve(b->rig.bones.size());
+    segB.reserve(b->rig.bones.size());
+    radius.reserve(b->rig.bones.size());
+    for (const auto& bone : b->rig.bones) {
+        segA.push_back(bone.a);
+        segB.push_back(bone.b);
+        radius.push_back(bone.radius);
+    }
+    const int mi = m_studio.targetIndex;
+    if (mi >= 0)
+        m_microSvoPass.setBoneSegments(size_t(mi), segA, segB, radius);
+    // The FUR pass keeps its segments in the fur object's own frame (the
+    // field's origin plus the layer's world offset), not the rig's.
+    if (mi >= 0 && size_t(mi) < m_furIndexOfMicro.size()) {
+        const int fi = m_furIndexOfMicro[size_t(mi)];
+        if (fi >= 0 && size_t(fi) < m_furObjects.size()) {
+            vf::voxel::FurObject& fo = m_furObjects[size_t(fi)];
+            std::vector<glm::vec3> fa, fb;
+            fa.reserve(segA.size());
+            fb.reserve(segB.size());
+            for (size_t i = 0; i < segA.size(); ++i) {
+                fa.push_back(segA[i] - fo.rigFrame);
+                fb.push_back(segB[i] - fo.rigFrame);
+            }
+            m_furPass.setBoneSegments(size_t(fi), fa, fb, radius);
+            // Keep the CPU copy in step: a later rebuild (the coat's shape
+            // sliders) re-reads these.
+            fo.boneSegA = fa;
+            fo.boneSegB = fb;
+            fo.boneRadius = radius;
+        }
+    }
+}
+
+bool App::studioSetBoneLength(int boneIndex, float metres)
+{
+    auto* b = studioBehaviour();
+    if (!b || boneIndex < 0 || size_t(boneIndex) >= b->rig.bones.size())
+        return false;
+    auto& bone = b->rig.bones[size_t(boneIndex)];
+    const glm::vec3 d = bone.b - bone.a;
+    const glm::vec3 dir = (glm::length(d) > 1e-6f) ? glm::normalize(d)
+                                                   : glm::vec3(0.f, -1.f, 0.f);
+    // The JOINT stays put: `a` is the pivot the clip's local rotation turns
+    // the bone about, so moving it would change the pose's anchor, which is a
+    // different (and much riskier) edit than "this bone is too short".
+    bone.b = bone.a + dir * std::max(metres, 0.005f);
+    b->animateBones();
+    studioUploadRig();
+    m_taaFirstFrame = true;
+    return true;
+}
+
 bool App::studioBoneEulerAt(uint32_t boneId, float t, glm::vec3& out)
 {
     auto* b = studioBehaviour();

@@ -167,6 +167,70 @@ void App::runPreInputTestHooks()
         }
     }
 
+    // VF_TEST_BONE_LENGTH="<bone>:<metres>": drive the rig editor's length
+    // path (the same studioSetBoneLength the panel slider calls) and report
+    // what it produced. Two numbers must agree: the SEGMENT length the rig now
+    // holds, and the distance from the posed joint to the posed tip - a
+    // rotation cannot change a length, so a mismatch means the pose was not
+    // re-derived from the edited rig.
+    if (const char* bl = getenv("VF_TEST_BONE_LENGTH"); bl && *bl) {
+        static bool doneLen = false;
+        if (!doneLen) {
+            doneLen = true;
+            char boneName[64] = { 0 };
+            float metres = 0.f;
+            if (std::sscanf(bl, "%63[^:]:%f", boneName, &metres) != 2) {
+                spdlog::warn("VF_TEST_BONE_LENGTH: expected \"<bone>:<metres>\", "
+                             "got '{}'", bl);
+            } else {
+                auto* b = studioBehaviour();
+                int idx = -1;
+                if (b) {
+                    for (size_t i = 0; i < b->rig.bones.size(); ++i)
+                        if (b->rig.bones[i].name == boneName) {
+                            idx = int(i);
+                            break;
+                        }
+                    if (idx < 0) {
+                        char* end = nullptr;
+                        const long v = std::strtol(boneName, &end, 10);
+                        if (end && *end == '\0' && v >= 0 &&
+                            size_t(v) < b->rig.bones.size())
+                            idx = int(v);
+                    }
+                }
+                if (idx < 0) {
+                    spdlog::warn("studio bone length: no bone '{}'", boneName);
+                } else {
+                    const float before = glm::length(
+                        b->rig.bones[size_t(idx)].b - b->rig.bones[size_t(idx)].a);
+                    if (!studioSetBoneLength(idx, metres)) {
+                        spdlog::warn("studio bone length: set failed");
+                    } else {
+                        const float after = glm::length(
+                            b->rig.bones[size_t(idx)].b - b->rig.bones[size_t(idx)].a);
+                        glm::vec3 posedLen(0.f);
+                        if (size_t(idx) < b->boneRot.size() &&
+                            size_t(idx) < b->boneXform.size()) {
+                            const glm::vec3 j =
+                                b->boneRot[size_t(idx)] *
+                                    b->rig.bones[size_t(idx)].a +
+                                b->boneXform[size_t(idx)];
+                            const glm::vec3 t =
+                                b->boneRot[size_t(idx)] *
+                                    b->rig.bones[size_t(idx)].b +
+                                b->boneXform[size_t(idx)];
+                            posedLen = glm::vec3(glm::length(t - j));
+                        }
+                        spdlog::info("studio bone length: bone={} before={:.4f} "
+                                     "after={:.4f} posedLen={:.4f}", boneName,
+                                     before, after, posedLen.x);
+                    }
+                }
+            }
+        }
+    }
+
     // VF_TEST_BEHAVIOUR_CMD="name:command[:speed]": tell a micro object what
     // to do, the way the AI tool does ("let the alpaca run"). It runs in the
     // PRE-input hook so the command is in force for the frame.

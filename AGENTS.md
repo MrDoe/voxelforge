@@ -1207,7 +1207,21 @@ one costs a whole turn, because the bad call is rejected before any work runs.
   drag updates ONE key instead of hundreds; and the first drag with no clip
   creates and selects one (`studio`), because a key needs somewhere to live.
   Bones are a CHAIN, so the UI only ever authors per-bone LOCAL `rotDeg` —
-  never a world matrix. The panel's pose readout is
+  never a world matrix. **A bone's LENGTH is editable too**
+  (`studioSetBoneLength`): the tip moves along the bone's own direction and
+  the JOINT stays put, because `a` is the pivot a local rotation turns about —
+  moving it is a different, riskier edit. The segments and radii are uploaded
+  ONCE at load and otherwise static, so an edit MUST call `studioUploadRig()`
+  → `MicroSvoPass::setBoneSegments` + `FurPass::setBoneSegments` (the fur
+  keeps its own copy in the layer's frame, `FurObject::rigFrame`); without
+  that the drawn skeleton and the CPU rig move while the BODY keeps the old
+  capsule. Measured: `VF_TEST_BONE_LENGTH="1:0.12"` turns a 0.5016 m leg into
+  0.1200 m with the posed length matching exactly, and with the bone posed 40°
+  the frame changes by 3,004 px in a coherent leg region — at REST the
+  skinning is the identity, so a length edit is invisible until the bone
+  rotates (a 0.55 → 0.30 m spine at rest moves only 674 px). The same upload
+  makes the influence-radius slider real; it used to change the CPU rig only.
+  The panel's pose readout is
   **interpolated**: the playhead is almost never exactly ON a key, so it shows
   the blend the rig is actually using and edits it with the same auto-key rule,
   plus an **Ease out** control (Step/Linear/Smooth) for the segment starting at

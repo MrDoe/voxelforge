@@ -313,6 +313,30 @@ void FurPass::setBoneRotations(size_t worldIndex,
     }
     vmaFlushAllocation(m_ctx->allocator(), m_table.alloc, 0, VK_WHOLE_SIZE);
 }
+
+void FurPass::setBoneSegments(size_t worldIndex,
+                              const std::vector<glm::vec3>& a,
+                              const std::vector<glm::vec3>& b,
+                              const std::vector<float>& radius)
+{
+    if (!m_table.mapped || worldIndex >= size_t(m_objectCount))
+        return;
+    auto* rows = reinterpret_cast<FurWorldRow*>(m_table.mapped);
+    FurWorldRow& row = rows[worldIndex];
+    const size_t count = std::min({ a.size(), b.size(), radius.size(),
+                                    sizeof(row.bone) / sizeof(row.bone[0]) });
+    for (size_t i = 0; i < count; ++i) {
+        FurBoneRow& br = row.bone[i];
+        br.a[0] = a[i].x;
+        br.a[1] = a[i].y;
+        br.a[2] = a[i].z;
+        br.a[3] = radius[i];
+        br.b[0] = b[i].x;
+        br.b[1] = b[i].y;
+        br.b[2] = b[i].z;
+    }
+    vmaFlushAllocation(m_ctx->allocator(), m_table.alloc, 0, VK_WHOLE_SIZE);
+}
 size_t FurPass::gpuBytes() const
 {
     return m_cards.bytes + m_cellStart.bytes + m_cellItems.bytes;

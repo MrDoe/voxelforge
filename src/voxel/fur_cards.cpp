@@ -357,6 +357,7 @@ bool buildFurCards(const MicroField& field, const FurParams& params, FurObject& 
         out.boneSegA.assign(size_t(out.boneCount), glm::vec3(0.f));
         out.boneSegB.assign(size_t(out.boneCount), glm::vec3(0.f));
         const glm::vec3 frame = field.origin + worldOffset;
+        out.rigFrame = frame;
         for (int i = 0; i < out.boneCount; ++i) {
             out.boneSegA[size_t(i)] = rig->bones[size_t(i)].a - frame;
             out.boneSegB[size_t(i)] = rig->bones[size_t(i)].b - frame;

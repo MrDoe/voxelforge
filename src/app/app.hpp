@@ -413,8 +413,7 @@ private:
     // The target's editable clip. CREATED and selected when the rig is in
     // gait mode: a bone key has to live somewhere, and "make a clip first" is
     // a step that exists only because of the file format.
-    vf::voxel::MicroClip* studioEnsureClip();
-    // The key at `t` for `boneId`, created (SEEDED from the pose there, so the
+    vf::voxel::MicroClip* studioEnsureClip();    // The key at `t` for `boneId`, created (SEEDED from the pose there, so the
     // first edit never snaps the bone to zero) when absent. `t` is quantised
     // to the clip's frame grid, so one drag updates one key instead of
     // writing hundreds.
@@ -425,6 +424,14 @@ private:
     // The playhead is almost never exactly ON a key, so a panel that only read
     // keys would show nothing for most of the timeline.
     bool studioBoneEulerAt(uint32_t boneId, float t, glm::vec3& out);
+    // Push the (edited) rig's bone SEGMENTS and radii to the micro and fur
+    // passes. They are uploaded once at load and otherwise treated as static,
+    // so a length/radius edit that skipped this would move the drawn skeleton
+    // and the CPU rig while the body kept the old capsule.
+    void studioUploadRig();
+    // Set a bone's LENGTH in metres, keeping its joint and direction. The one
+    // path the panel slider and the headless hook share.
+    bool studioSetBoneLength(int boneIndex, float metres);
 
     // The fur cards of the micro objects that carry a fur material, and the
     // objects' world AABBs (the cards are generated in the field's local

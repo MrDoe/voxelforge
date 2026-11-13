@@ -62,6 +62,14 @@ public:
     // uploaded.
     void setBoneRotations(size_t worldIndex, const std::vector<glm::mat3>& rot,
                           const std::vector<glm::vec3>& xform);
+    // Re-upload a world's bone SEGMENTS and radii. The comment above says the
+    // segments "stay as they were uploaded" - true of the gait, but the
+    // studio EDITS them (a bone's length and influence radius), and the
+    // shader's weight kernel reads both from here. Without this an edit moved
+    // the drawn skeleton and the CPU rig while the body kept the old capsule.
+    void setBoneSegments(size_t worldIndex, const std::vector<glm::vec3>& a,
+                         const std::vector<glm::vec3>& b,
+                         const std::vector<float>& radius);
 
     // Upload the MESH of one micro world: its REST-pose vertices in the
     // object's ANCHORED frame (metres, with the layer's world offset already

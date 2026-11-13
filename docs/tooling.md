@@ -106,10 +106,18 @@ with it and the studio's readout displays it, so what the editor shows at the
 playhead cannot disagree with the pose on screen. It clamps at both ends
 (a lone key holds for the whole clip, never extrapolates) and applies the
 starting key's easing across each span.
-- **Influence radius.** A per-bone slider (0–0.15 m) for the capsule test that
-  decides bone OWNERSHIP. *Save rig (override)* writes
+- **Influence radius and LENGTH.** A per-bone radius slider (0–0.15 m) for the
+  capsule test that decides bone OWNERSHIP, and a `length` drag that moves the
+  bone's TIP along its own direction while the joint stays put (`a` is the
+  pivot a local rotation turns about, so moving it is a different edit).
+  Both re-upload the segments (`studioUploadRig`) — they are otherwise static
+  after load, and an edit that skipped it would move the drawn skeleton while
+  the body kept the old capsule. *Save rig (override)* writes
   `assets/micro/<name>.rig.json` stamped with the layer's size+mtime; *Reload
   rig* re-derives.
+  At REST the skinning is the identity, so a length change is only visible once
+  the bone is POSED (measured: a leg shortened 0.50 → 0.12 m moves 3,004 px
+  when rotated 40°, but only 674 px at rest).
 
 Bones are a **chain**: a bone's world transform is its parent's composed with
 its own, so a pose is per-bone LOCAL rotations plus the parent chain — never

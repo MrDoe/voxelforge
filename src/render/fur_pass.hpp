@@ -64,6 +64,12 @@ public:
     void setBoneRotations(size_t worldIndex,
                           const std::vector<glm::mat3>& rot,
                           const std::vector<glm::vec3>& xform);
+    // Re-upload a world's bone SEGMENTS and radii (in the fur object's LOCAL
+    // frame, i.e. minus FurObject::rigFrame). The studio's rig editor changes
+    // a bone's length/radius, and the shader's weight kernel reads both.
+    void setBoneSegments(size_t worldIndex, const std::vector<glm::vec3>& a,
+                         const std::vector<glm::vec3>& b,
+                         const std::vector<float>& radius);
 
     bool empty() const { return m_objectCount == 0; }
     size_t objectCount() const { return m_objectCount; }

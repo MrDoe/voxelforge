@@ -96,6 +96,11 @@ struct FurObject {
     std::vector<glm::vec3> boneSegA;
     std::vector<glm::vec3> boneSegB;
     std::vector<float> boneRadius;
+    // The frame the segments above are expressed in: the field's origin plus
+    // the layer's world offset. The segments are stored RELATIVE to it, so a
+    // rig edit made in the object's frame can be re-uploaded without the
+    // caller having to remember the offset.
+    glm::vec3 rigFrame { 0.f };
 };
 
 // How the fur grows.

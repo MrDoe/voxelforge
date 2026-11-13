@@ -343,10 +343,34 @@ void App::drawPanelAnimate()
         if (m_studio.selectedBone >= 0 &&
             (size_t)m_studio.selectedBone < rig.bones.size()) {
             auto& selBone = rig.bones[m_studio.selectedBone];
+
+            // ---- the bone's LENGTH --------------------------------------
+            // A rig DERIVED from voxels can put a limb short or long, and the
+            // segment is what the weight kernel measures against (distance to
+            // a->b) as well as what the skeleton draws. The JOINT stays put:
+            // moving it would move the pivot the clip poses about, which is a
+            // bigger change than "the bone is too short".
+            {
+                const glm::vec3 d = selBone.b - selBone.a;
+                float len = glm::length(d);
+                if (ImGui::DragFloat("length (m)", &len, 0.002f, 0.005f, 1.50f,
+                                     "%.3f")) {
+                    // One path with the headless hook: set the segment,
+                    // re-pose, re-upload. Skipping the upload would move the
+                    // drawn skeleton while the body kept the old capsule.
+                    studioSetBoneLength(m_studio.selectedBone, len);
+                }
+                ImGui::TextDisabled("Tip moves along the bone; the joint stays.");
+            }
+
             ImGui::Text("Bone: %s  (id %u)", selBone.name.c_str(), selBone.id);
             float r = selBone.radius;
             if (ImGui::SliderFloat("radius (m)", &r, 0.0f, 0.15f, "%.4f")) {
                 selBone.radius = r;
+                // The radius is half of the weight kernel's reach, so it has
+                // to reach the SHADER too, not just the slider's own copy.
+                studioUploadRig();
+                m_taaFirstFrame = true;
                 spdlog::info("studio: bone %s radius -> %.4f", selBone.name, r);
             }
             ImGui::TextDisabled("Radius is the cylindrical influence radius used "
