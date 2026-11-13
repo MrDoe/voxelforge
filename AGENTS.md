@@ -1347,14 +1347,22 @@ one costs a whole turn, because the bad call is rejected before any work runs.
   reads as washed-out plastic. The sky ambient is evaluated ONCE per pixel
   (the sun term is the cards' average) — evaluating the sky per card costs a
   sky evaluation per card hit, and a pixel through the coat hits a dozen.
-- Gate: `tests/fur_check.py` (the `fur` group) measures the noise floor
-  first, then the signal (the alpaca's pixels must change), the
+- Gate: `tests/fur_check.py` (the `fur` group) **pins the animal's pose**
+  (`VF_TEST_BEHAVIOUR_FREEZE`) in every render, so the noise floor it measures
+  first is a DETERMINISM test and must be **0 px** — two renders of one pinned
+  pose are byte-reproducible. Clearing `behaviour` in the manifest is NOT
+  enough and must not be reintroduced: the layer also carries
+  `"command": "auto"`, which keeps the animal walking on its own, and mutating
+  a TRACKED file from a gate races the app's own rewrite of `world.json`
+  (measured floor without the pin: 12,000–14,500 px, all walk phase). Then the
+  signal (the alpaca's pixels must change), the
   **confinement** (the change must be a compact blob, and the house view must
-  be untouched), the **shape** (the coat must be at least as SMOOTH as the
-  body under it — a straight, spiky coat concentrates its ink in narrow
-  streaks, and a narrow streak IS high-frequency energy, so a spiky coat
-  reads as crunchier than the body it covers; a curled one does not, and
-  with the curl removed this check fails), the **backend-independence** (the
+  be untouched), the **shape** (measured INSIDE the coat's footprint, not a
+  fixed rect — 76 % of that rect is scenery: the coat's detail must exceed the
+  bare body's, and its luma spread must stay ≥70 % of the body's; a
+  translucent layer AVERAGES the crevices it covers, so it compresses
+  large-scale contrast even while it adds texture — 22.90 vs 28.35 measured),
+  the **backend-independence** (the
   SVO reference must show it too) and the **escape hatch** (`VF_FUR=0` must
   load no fur object and render the same frame). `tests/test_micro.cpp`
   gains five cases: only a fur material grows a coat, the roots sit ON the

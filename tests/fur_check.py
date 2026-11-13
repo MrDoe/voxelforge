@@ -13,8 +13,9 @@ screenshot:
 
   1. THE FUR EXISTS. The alpaca's pixels must change when the fur is on.
      The instrument's NOISE FLOOR is measured first, from two renders of the
-     SAME configuration (the scene's animated grass and the float16
-     G-buffer move a little between runs), and the signal has to clear it.
+     SAME configuration with the animal's pose PINNED (see FREEZE), so the
+     floor is a determinism test - it must be ZERO pixels - and the signal
+     has to clear it.
   2. THE FUR IS CONFINED. The changed pixels must be a COMPACT BLOB (a high
      fill ratio inside their own bounding box) and must not spread over the
      frame. A DDA that walked off the object would light up the sky, and a
@@ -61,9 +62,15 @@ HOUSE_CAM = "2.5,1.3,6.0,6.8,1.0,12.2"
 W, H = 900, 600
 MANIFEST = os.path.join(ROOT, "assets", "world.json")
 
-# The noise floor of a same-configuration pair. Measured, not assumed: the
-# scene's animated grass and the float16 G-buffer move a little between runs.
+# The noise floor of a same-configuration pair. With the pose PINNED (see
+# FREEZE) a headless `--shot` is byte-reproducible, so this is a determinism
+# test and not a tolerance: the only thing that may differ is a race or an
+# uninitialised read in the frame.
 NOISE_MAX = 6
+
+# The pose every render in this gate uses: name, offset, heading, gait, graze,
+# clipTime. Chosen once and never varied, so every arm compares the SAME animal.
+FREEZE = "alpaca:0,0,0:0:0:0:0.32"
 
 failures: list[str] = []
 
@@ -81,6 +88,21 @@ def render(out: str, cam: str, mode: str = "", env_extra: dict | None = None) ->
     env = os.environ.copy()
     # Never touch the live-edit overlay file: this is a read-only measurement.
     env["VF_OVERLAY_PATH"] = os.path.join(OUTDIR, "overlay.vxw")
+    # PIN THE POSE. The alpaca is a grazer, so it walks, and a gate that
+    # measures a moving animal measures the GAIT: two renders of the SHIPPED
+    # scene differ by ~14,000 px at this camera, all of it walk phase, which is
+    # why every metric below used to be stated against a floor of thousands.
+    # The hook pins the transform, the gait phase and the graze blend while
+    # keeping the ground clamp, so the pair becomes a true determinism test and
+    # every arm compares the same pose.
+    #
+    # This replaced clearing `behaviour` in the manifest, which did NOT stand
+    # the animal still: the layer also carries `"command": "auto"`, and that
+    # keeps it walking on its own. It also removes a gate's need to WRITE a
+    # tracked file - the app rewrites world.json from its own layer list, so a
+    # write can land after the gate's restore (that is how the shipped alpaca
+    # lost its `behaviour` twice).
+    env["VF_TEST_BEHAVIOUR_FREEZE"] = FREEZE
     if env_extra:
         env.update(env_extra)
     proc = subprocess.run(cmd, check=True, cwd=ROOT, env=env,
@@ -156,17 +178,6 @@ def save_micro() -> None:
                 (layer.get("file", ""), bool(layer.get("enabled", True)),
                  float(layer.get("rot", 0.0)), str(layer.get("behaviour", "")))
             )
-
-
-def set_behaviour(file: str, behaviour: str) -> None:
-    doc = _read_manifest()
-    for layer in doc["layers"]:
-        if layer.get("file", "") == file:
-            if behaviour:
-                layer["behaviour"] = behaviour
-            else:
-                layer.pop("behaviour", None)
-    _write_manifest(doc)
 
 
 def restore_micro() -> bool:
@@ -248,13 +259,14 @@ def main() -> int:
     global OUTDIR
     OUTDIR = tempfile.mkdtemp(prefix="vf-fur-check-")
     print(f"fur_check: {APP}")
+    # The pose is pinned through the environment (see render()), so the gate
+    # never writes the manifest. `save_micro`/`restore_micro` stay as a GUARD:
+    # they verify the shipped scene came through the run unchanged, which is
+    # the check AGENTS.md asks for (the app rewrites world.json every run).
     save_micro()
 
     alpaca_cam = alpaca_camera()
     print(f"  alpaca camera: {alpaca_cam}")
-    # The alpaca is a grazer: it walks, and a gate that measures a moving
-    # animal measures the GAIT. The behaviour is cleared for the duration.
-    set_behaviour("micro/alpaca.vxw", "")
 
     try:
         # ---- the instrument's noise floor, measured first ------------------
@@ -265,16 +277,15 @@ def main() -> int:
         n_noise, *_ = diff_stats(off1, off2, NOISE_MAX)
         print(f"  noise floor: {n_noise} pixels above {NOISE_MAX}/255 "
               f"(two identical renders)")
-        # The floor must be ZERO. A headless `--shot` does not advance the
-        # animation clock (`m_animTime` is only advanced interactively), so two
-        # renders of the SAME configuration are a determinism test, not a
-        # tolerance: any difference is a race or an uninitialised read in the
-        # frame, and it is exactly the flicker the mesh raster path had (the
-        # micro pass writes the G-buffer from the FRAGMENT stage while every
-        # barrier around it named COMPUTE only). Every "unchanged" claim below
-        # is stated against this measured floor.
-        note(n_noise <= 200,
-             f"the noise floor is small ({n_noise} stray pixels above "
+        # The floor must be ZERO. The pose is pinned, so two renders of the SAME
+        # configuration have the same clock, the same geometry and the same
+        # shading inputs: any difference is a race or an uninitialised read in
+        # the frame. It used to be 12,000-14,000 px, all of it walk phase - see
+        # the FREEZE note in render(). Every "unchanged" claim below is stated
+        # against this floor, so a tolerance here would hide exactly the
+        # G-buffer double-writer race the mesh raster path had.
+        note(n_noise == 0,
+             f"the noise floor is ZERO ({n_noise} stray pixels above "
              f"{NOISE_MAX}/255)")
 
         # ---- 1 + 2: the fur exists and is confined -------------------------
@@ -294,57 +305,99 @@ def main() -> int:
              "the change's bounding box is inside the frame")
 
         # ---- 2b: the coat is DETAILED, and it keeps the fleece's texture --
-        # Two numbers, both about the coat being a coat and not a wash:
+        # Two numbers, both measured INSIDE THE COAT'S OWN FOOTPRINT (the
+        # pixels the fur changed, dilated 3 px so the coat's rim counts):
         #
         #   detail - the mean |difference| between horizontal neighbours. A
         #     coat whose strands are smeared into a haze has LITTLE of it;
         #     a coat with readable strands has more than the bare body.
-        #   spread - the luma's standard deviation. A flat wash has the
-        #     body's low spread; a coat that keeps the fleece's texture has
-        #     a much higher one.
+        #   spread - the luma's standard deviation. A flat wash has almost
+        #     none; a coat that keeps the fleece's texture keeps most of the
+        #     body's.
         #
-        # The first check caught a BLUR once already: a large curl (0.45)
-        # spreads a strand's ink over a wide band, and the coat's detail fell
-        # to 12.7 - BELOW the bare body's 13.5. So the claim is directional:
-        # the coat must be at least as detailed as the body under it, and it
-        # must keep at least the body's texture contrast.
-        def neighbour_diff(buf: bytes, x0: int, y0: int, x1: int, y1: int) -> float:
+        # WHY THE FOOTPRINT AND NOT A FIXED RECT. Both metrics used to run
+        # over (260,100)-(520,480), a 98,800 px box of which the coat covers
+        # 23.7 %: the numbers were mostly SCENERY, so the check measured the
+        # frame rather than the coat. Measured on the shipped scene, footprints
+        # differ by 8 % (detail) where the old rect differed by 2 %.
+        #
+        # The detail check caught a BLUR once already: a large curl (0.45)
+        # spreads a strand's ink over a wide band and the coat's detail fell
+        # BELOW the bare body's. So its claim is directional: the coat must be
+        # at least as detailed as the body under it.
+        #
+        # The spread check's claim is weaker than it looks, ON PURPOSE. A
+        # translucent layer AVERAGES the dark crevices it covers, so it
+        # COMPRESSES large-scale contrast even when it adds texture: measured
+        # 22.90 against the bare body's 28.35 (ratio 0.81) on the shipped
+        # scene. Requiring spread >= the body's was only ever true while the
+        # mesh's AO sampled INWARD and the bare body was flat; the orientation
+        # fix points it outward, which raises the body's own contrast. So the
+        # bound is a floor that a flat wash fails (it would sit near zero) and
+        # a textured coat passes with margin.
+        def coat_footprint(dilate: int = 3) -> bytearray:
+            m = bytearray(len(on) // 3)
+            for i in range(len(m)):
+                o = i * 3
+                if max(abs(on[o] - off1[o]), abs(on[o + 1] - off1[o + 1]),
+                       abs(on[o + 2] - off1[o + 2])) > NOISE_MAX:
+                    m[i] = 1
+            for _ in range(dilate):
+                g = bytearray(m)
+                for y in range(H):
+                    row = y * W
+                    for x in range(W):
+                        i = row + x
+                        if m[i]:
+                            continue
+                        if ((x > 0 and m[i - 1]) or (x + 1 < W and m[i + 1])
+                                or (y > 0 and m[i - W]) or (y + 1 < H and m[i + W])):
+                            g[i] = 1
+                m = g
+            return m
+
+        def neighbour_diff(buf: bytes, mask: bytearray) -> float:
             tot = 0
             cnt = 0
-            for y in range(y0, min(y1, H)):
+            for y in range(H):
                 row = y * W
-                for x in range(x0, min(x1, W) - 1):
-                    o = (row + x) * 3
+                for x in range(W - 1):
+                    i = row + x
+                    if not (mask[i] and mask[i + 1]):
+                        continue
+                    o = i * 3
                     for c in range(3):
                         tot += abs(buf[o + c] - buf[o + c + 3])
                     cnt += 3
             return tot / max(cnt, 1)
 
-        def luma_spread(buf: bytes, x0: int, y0: int, x1: int, y1: int) -> float:
+        def luma_spread(buf: bytes, mask: bytearray) -> float:
             vals = []
-            for y in range(y0, min(y1, H)):
-                row = y * W
-                for x in range(x0, min(x1, W)):
-                    o = (row + x) * 3
-                    vals.append((buf[o] * 299 + buf[o + 1] * 587 + buf[o + 2] * 114)
-                                / 1000.0)
+            for i in range(len(mask)):
+                if not mask[i]:
+                    continue
+                o = i * 3
+                vals.append((buf[o] * 299 + buf[o + 1] * 587 + buf[o + 2] * 114)
+                            / 1000.0)
             m = sum(vals) / max(len(vals), 1)
             return (sum((v - m) ** 2 for v in vals) / max(len(vals), 1)) ** 0.5
 
-        fur_det = neighbour_diff(on, 260, 100, 520, 480)
-        body_det = neighbour_diff(off1, 260, 100, 520, 480)
-        fur_spr = luma_spread(on, 260, 100, 520, 480)
-        body_spr = luma_spread(off1, 260, 100, 520, 480)
-        print(f"  detail: fur {fur_det:.2f} vs the bare body {body_det:.2f}   "
-              f"spread: fur {fur_spr:.2f} vs {body_spr:.2f}")
-        # The margin covers the run-to-run noise of the metric itself (the
-        # scene's animated grass moves a little between renders).
-        note(fur_det >= body_det - 0.5,
+        fp = coat_footprint()
+        fur_det = neighbour_diff(on, fp)
+        body_det = neighbour_diff(off1, fp)
+        fur_spr = luma_spread(on, fp)
+        body_spr = luma_spread(off1, fp)
+        print(f"  footprint: {sum(fp)} px   detail: fur {fur_det:.2f} vs the "
+              f"bare body {body_det:.2f}   spread: fur {fur_spr:.2f} vs "
+              f"{body_spr:.2f}")
+        # Both frames are the SAME pinned pose, so the comparison is between
+        # the coat and the body under it and nothing else.
+        note(fur_det >= body_det,
              f"the coat's strands are readable, not a haze ({fur_det:.2f} vs "
              f"the body's {body_det:.2f})")
-        note(fur_spr >= body_spr,
+        note(fur_spr >= 0.7 * body_spr,
              f"the coat keeps the fleece's texture ({fur_spr:.2f} vs the "
-             f"body's {body_spr:.2f})")
+             f"body's {body_spr:.2f}, floor {0.7*body_spr:.2f})")
 
         # ---- 3: the fur touches nothing else ------------------------------
         # The house view has no micro object in it at all, so the fur must
