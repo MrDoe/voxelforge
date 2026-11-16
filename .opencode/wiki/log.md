@@ -6526,29 +6526,12 @@ See [[concepts/fur-cards]].
 Committed as 8f45e63 on top of 2f03aba. See
 [[concepts/sidebar-ui-vocabulary]].
 
-## 2026-10-21 ingest | The wheel scrolls the sidebar; the speed is a setting
+## 2026-10-21 amend | The wheel scrolls the sidebar; the speed is a setting (duplicate)
 
-The mouse wheel scaled the camera's movement speed, invisibly:
-`Camera::update` did `speed *= exp(-scroll * 0.15)` from the platform
-window's own scroll accumulator, and nothing on screen said what the speed
-was. ImGui's GLFW backend **chains** the app's scroll callback, so a scroll
-over the sidebar changed how fast the camera flew - and the sidebar is an
-overlay, so there is no "outside" to scroll it.
-
-- The speed is now the Render panel's VIEW group slider (0.5-40 m/s, with a
-  readout); Shift/Ctrl keep the 3.5x / 0.25x modifiers.
-- The app installs no scroll callback at all; the wheel belongs to the UI and
-  the sidebar's pane scrolls with it.
-- AGENTS.md, README.md and docs/getting-started.md stop claiming a wheel
-  binding.
-
-The lesson, recorded because the earlier log entry got it wrong: `grep
-io.MouseWheel` finds nothing, because the app did not use ImGui's wheel - it
-used `Window::scrollDelta()`. **A grep of one input path is not a proof that
-an input is unbound**; follow the binding to its consumer.
-
-See [[concepts/sidebar-ui-vocabulary]].
-
+This entry was appended twice, byte for byte. The canonical copy is the
+one above; this one is kept only so the timeline stays append-only.
+Nothing here is lost - check the earlier heading for the body, the
+lessons, and [[concepts/sidebar-ui-vocabulary]].
 
 ## [2026-10-24] feat | Obstacle avoidance + head turning for the alpaca
 
@@ -7194,3 +7177,56 @@ green end to end (all 10 checks). Any page still saying "the coat's spread must
 EXCEED the body's" is now wrong: `fur-raster-parity.md`'s required column is
 updated to `>= 0.7x body`.
 Pages: concepts/fur-raster-parity.md
+
+## [2026-11-16] ingest | Animation studio — posing a rig and editing its bones
+
+The studio had three feature commits and no page. Filed as
+[[concepts/animation-studio-bone-editing]]: the POSE (a clip's
+`BoneKey.rotDeg`, auto-keyed at the playhead, quantised to `1/fps`) versus the
+RIG (`MicroBone.a/b/radius`), and why conflating them produces "the pose looks
+right but the body does not follow".
+
+Three things are worth carrying forward:
+
+1. **One interpolation rule.** `sampleTrackEuler` owns clamp-and-blend and is
+   called by BOTH `MicroClip::sample` (which poses the rig) and the panel's
+   readout. The studio previously had its own copy of the clamping/bracketing
+   logic — exactly the duplicate that drifts and then displays a pose the rig
+   is not in.
+2. **The gizmo had wrong orientations because its rings were fake.** It reused
+   the object trackball's fixed screen shapes (circle / wide ellipse / tall
+   ellipse). A bone is arbitrarily oriented, so a fixed screen ellipse claims
+   a plane the bone does not have and which ring "was" X depends on the camera.
+   The rings are now the PROJECTED CIRCLES of the bone's own axes, and the drag
+   tracks the pointer's ANGLE in the grabbed ring's plane. Measured: X 30° →
+   key `(30,0,0)`, tip `(-6.316,0.130,19.206)`; Y 30° → `(0,30,0)`, tip
+   `(-6.040,0.406,19.206)`; **Z 30° → key `(0,0,30)` and the tip does NOT move**
+   (the spine points along its own Z) — the Z row is what proves the gizmo is
+   axis-correct rather than merely rotating something.
+3. **A joint move resizes implicitly.** Only `a` moves, the tip stays, so the
+   length and direction change; a parent whose tip WAS that joint stretches
+   with it. Head measured: 0.1114 → 0.1973 m, tip moved 0.00000, parent 6 tip
+   moved 0.10000.
+
+The load-bearing contract is the UPLOAD: bone segments and radii are pushed to
+the GPU once, and only rotations stream per frame. Every rig edit must call
+`studioUploadRig()` (→ `MicroSvoPass::setBoneSegments` +
+`FurPass::setBoneSegments`, the fur in its own layer frame via
+`FurObject::rigFrame`), or the drawn skeleton and the CPU rig move while the
+BODY keeps the old capsule. That same upload finally made the influence-radius
+slider real — it only ever changed the CPU rig.
+
+Two traps that each cost a round, both worth remembering: ImGui's
+`DisplaySize` reads back **negative** before the first `NewFrame` (and may
+never be set in a headless `--shot`), which gives the projection a negative
+aspect and puts every gizmo off-screen; and the studio does **not** frame the
+camera — it only tracks the target, so a headless studio shot must pass its own
+`--cam`. At REST the skinning is the identity, so a rig edit is invisible until
+the bone is posed (a leg shortened 0.50 → 0.12 m moves 3,004 px at 40° of pose,
+674 px at rest).
+
+Also fixed in this pass: `log.md` had the 2026-10-21 "wheel scrolls the
+sidebar" entry appended TWICE, byte for byte (the one hard lint finding). The
+duplicate is now an amendment pointer to the canonical copy, so the timeline
+stays append-only.
+Pages: concepts/animation-studio-bone-editing.md
