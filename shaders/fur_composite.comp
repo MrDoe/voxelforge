@@ -110,10 +110,26 @@ void main()
         alb = detailAlbedo(alb, pAvg, nAvg, matId);
     }
 
+    // Backlit translucency: the signature of real fleece. When the sun is
+    // behind the coat and we look toward it through the fibres, light scatters
+    // through and the rim glows. The body path has foliage SSS (common_base)
+    // but the coat had none, so a backlit alpaca read as an opaque cut-out.
+    //   towardSun - dot(view ray, sun): peaks when looking INTO the sun
+    //   thin      - exp(-sumA): the sparse fringe transmits, the dense body
+    //               does not (sumA is the coat's accumulated optical depth)
+    // pc.misc.z carries the strength (0 = the original look, bit-exact).
+    vec3 furCol = alb * light;
+    const float sss = pc.misc.z;
+    if (sss > 0.0) {
+        const vec3 rdv = normalize(pAvg - pc.camPos.xyz);
+        const float towardSun = max(dot(rdv, kSunDir), 0.0);
+        const float thin = exp(-sumA);
+        furCol += alb * sunCol() * pow(towardSun, 3.0) * thin * sss;
+    }
+
     // The coverage: the standard many-layer approximation, exact for the
     // small alphas a coat is made of.
     const float coverage = 1.0 - exp(-sumA);
-    const vec3 furCol = alb * light;
     const vec3 before = imageLoad(uOutHdr, pix).rgb;
     imageStore(uOutHdr, pix, vec4(mix(before, furCol, coverage), 1.0));
 }

@@ -81,10 +81,13 @@ def note(ok: bool, msg: str) -> None:
         failures.append(msg)
 
 
-def render(out: str, cam: str, mode: str = "", env_extra: dict | None = None) -> str:
+def render(out: str, cam: str, mode: str = "", env_extra: dict | None = None,
+           args_extra: list | None = None) -> str:
     cmd = [APP, "--shot", out, "--cam", cam, "--width", str(W), "--height", str(H)]
     if mode:
         cmd += ["--mode", mode]
+    if args_extra:
+        cmd += args_extra
     env = os.environ.copy()
     # Never touch the live-edit overlay file: this is a read-only measurement.
     env["VF_OVERLAY_PATH"] = os.path.join(OUTDIR, "overlay.vxw")
@@ -488,6 +491,68 @@ def main() -> int:
         note(c <= n_noise,
              f"VF_FUR=0 renders the same frame as the fur-off reference "
              f"({c} pixels changed, the floor is {n_noise})")
+
+        # ---- 6: backlit translucency --------------------------------------
+        # Real fleece transmits light when the sun is behind it; a Lambert-only
+        # coat reads as an opaque cut-out. These three renders use a BACKLIT
+        # sun (azim 22 puts the sun behind the animal from this camera) and
+        # toggle VF_FUR_SSS. The strength is a composite uniform, so the two
+        # arms are otherwise byte-identical - the difference is ONLY the glow.
+        backlit = ["--sun", "20", "22"]
+        render(os.path.join(OUTDIR, "sss0.ppm"), alpaca_cam,
+               args_extra=backlit, env_extra={"VF_FUR_SSS": "0"})
+        render(os.path.join(OUTDIR, "sss1.ppm"), alpaca_cam,
+               args_extra=backlit, env_extra={"VF_FUR_SSS": "0.8"})
+        _, _, sss0 = read_ppm(os.path.join(OUTDIR, "sss0.ppm"))
+        _, _, sss1 = read_ppm(os.path.join(OUTDIR, "sss1.ppm"))
+        sss_cnt, *_ = diff_stats(sss1, sss0, NOISE_MAX)
+        note(sss_cnt > 3000,
+             f"backlit translucency lights the fleece ({sss_cnt} pixels)")
+        # The glow must WARM the coat (R-B up) and brighten it - a red/blue
+        # wash with no luma change would be a tint, not subsurface scattering.
+        def coat_luma_rb(buf: bytes, mask: bytes) -> tuple[float, float]:
+            ls = rs = 0.0
+            n = 0
+            for i in range(len(mask)):
+                if not mask[i]:
+                    continue
+                o = i * 3
+                ls += 0.299 * buf[o] + 0.587 * buf[o + 1] + 0.114 * buf[o + 2]
+                rs += buf[o] - buf[o + 2]
+                n += 1
+            return (ls / max(n, 1), rs / max(n, 1))
+        glow = bytearray(len(sss0) // 3)
+        for i in range(len(glow)):
+            o = i * 3
+            if max(abs(sss1[o] - sss0[o]), abs(sss1[o + 1] - sss0[o + 1]),
+                   abs(sss1[o + 2] - sss0[o + 2])) > NOISE_MAX:
+                glow[i] = 1
+        l0, rb0 = coat_luma_rb(sss0, glow)
+        l1, rb1 = coat_luma_rb(sss1, glow)
+        note(l1 > l0 + 5.0 and rb1 > rb0 + 2.0,
+             f"the glow warms and brightens the fleece "
+             f"(luma {l0:.0f}->{l1:.0f}, R-B {rb0:.0f}->{rb1:.0f})")
+        # Confinement: the SSS uniform must not touch a view with no fur in it.
+        render(os.path.join(OUTDIR, "hsss0.ppm"), HOUSE_CAM,
+               args_extra=backlit, env_extra={"VF_FUR_SSS": "0"})
+        render(os.path.join(OUTDIR, "hsss1.ppm"), HOUSE_CAM,
+               args_extra=backlit, env_extra={"VF_FUR_SSS": "0.8"})
+        _, _, h0 = read_ppm(os.path.join(OUTDIR, "hsss0.ppm"))
+        _, _, h1 = read_ppm(os.path.join(OUTDIR, "hsss1.ppm"))
+        hc, *_ = diff_stats(h1, h0, NOISE_MAX)
+        note(hc == 0,
+             f"the glow touches nothing without fur in view ({hc} px on the house)")
+        # The DEFAULT sun is side/back to these cameras: shipping shots must be
+        # byte-identical with SSS on, so no existing gate or reference moves.
+        render(os.path.join(OUTDIR, "dsss0.ppm"), alpaca_cam,
+               env_extra={"VF_FUR_SSS": "0"})
+        render(os.path.join(OUTDIR, "dsss1.ppm"), alpaca_cam,
+               env_extra={"VF_FUR_SSS": "0.8"})
+        _, _, d0 = read_ppm(os.path.join(OUTDIR, "dsss0.ppm"))
+        _, _, d1 = read_ppm(os.path.join(OUTDIR, "dsss1.ppm"))
+        dc, *_ = diff_stats(d1, d0, NOISE_MAX)
+        note(dc == 0,
+             f"the default sun's reference frame is unchanged ({dc} px)")
 
     finally:
         if not restore_micro():

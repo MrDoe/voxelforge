@@ -469,6 +469,13 @@ private:
     float m_furCurl = 0.20f;
     float m_furCycles = 1.2f;
     float m_furTilt = 38.0f;
+    // Backlit translucency strength (backlit fleece glows when the sun is
+    // behind it). A LOOK constant, tuned to 0.8: at a backlit camera that
+    // lifts the coat's changed pixels +23 luma and shifts R-B -11 -> +4,
+    // confined to the animal (the house view is byte-identical). The default
+    // sun is front/back-side to the reference cameras, so reference shots are
+    // unchanged. VF_FUR_SSS=0 restores the original bit-exact look.
+    float m_furSss = 0.8f;
     // The materials that grow a coat. 21 is `fleece`.
     std::vector<uint8_t> m_furMaterials { 21 };
     // Grow the cards with the current parameters and upload them. The cards

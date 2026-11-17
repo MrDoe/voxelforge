@@ -586,6 +586,7 @@ void App::loadMicroObjects()
     // The fur cards go up last: the pass needs the objects, and the preview
     // mirroring needs the index mapping that was just built.
     m_furPass.setObjects(m_furObjects);
+    m_furPass.setSss(m_furSss);
 
     // Persist a small runtime stats file the MCP (and humans) can read on
     // demand: per-object card counts + build time, plus the total. Runtime
@@ -794,6 +795,7 @@ void App::rebuildFurCards()
             }
         }
         m_furPass.setObjects(m_furObjects);
+        m_furPass.setSss(m_furSss);
     }
 }
 

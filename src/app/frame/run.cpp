@@ -171,6 +171,8 @@ int App::run(const Args& args)
     // is for a headless A/B, the GUI is for the person. VF_FUR=0 is the
     // escape hatch - no cards, the pass never dispatches, the frame is
     // byte-identical.
+    // Units: LEN and WID are METRES (the same FurParams fields the sidebar
+    // converts from mm), so VF_FUR_LEN=0.030 means 30 mm, not 0.03 mm.
     if (const char* e = getenv("VF_FUR"))
         m_furEnabled = finiteEnv(e, 1.0f) != 0.0f;
     if (const char* e = getenv("VF_FUR_PER_CELL"))
@@ -185,6 +187,8 @@ int App::run(const Args& args)
         m_furCycles = std::clamp(finiteEnv(e, m_furCycles), 0.0f, 6.0f);
     if (const char* e = getenv("VF_FUR_TILT"))
         m_furTilt = std::clamp(finiteEnv(e, m_furTilt), 0.0f, 89.0f);
+    if (const char* e = getenv("VF_FUR_SSS"))
+        m_furSss = std::clamp(finiteEnv(e, m_furSss), 0.0f, 4.0f);
     if (args.probeSet)
         return runProbe() ? 1 : 0;
 

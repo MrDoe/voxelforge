@@ -973,6 +973,10 @@ void FurPass::record(VkCommandBuffer cmd, const RaymarchPush& push)
     RaymarchPush cp = push;
     cp.b.z = float(rectMinX);
     cp.b.w = float(rectMinY);
+    // The composite's pc.misc.z is tonemapLook in the shared push, but the
+    // fur composite never reads tonemapLook (post does). Reuse it for the
+    // backlit translucency strength so no shared layout has to change.
+    cp.misc.z = m_sss;
     vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, m_compPipe);
     vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, m_layout, 0, 1, &m_set,
                             0, nullptr);

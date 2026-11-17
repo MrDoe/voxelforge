@@ -85,6 +85,10 @@ public:
     void setTexAtlas(VkImageView view, VkSampler sampler, VkBuffer tableUbo);
     void setIrrVolView(VkImageView view);
     void setLights(const vf::voxel::LightUBO& lights);
+    // Backlit translucency strength for the composite (0 = the original
+    // Lambert-and-sky look, bit-exact). Real fleece transmits light when the
+    // sun is behind it; the body path has foliage SSS but the coat did not.
+    void setSss(float s) { m_sss = s; }
 
     // Record the dispatch. Must run AFTER the micro overlay has written the
     // G-buffer for this frame: the G-buffer is the depth reference this pass
@@ -137,6 +141,7 @@ private:
     Image3D m_blackLut {};
     VkSampler m_blackSampler = VK_NULL_HANDLE;
     VkSampler m_irrSampler = VK_NULL_HANDLE;
+    float m_sss = 0.0f; // backlit translucency strength; 0 keeps the old look
 
     VkImageView m_heightView = VK_NULL_HANDLE;
     VkImageView m_objVolView = VK_NULL_HANDLE;

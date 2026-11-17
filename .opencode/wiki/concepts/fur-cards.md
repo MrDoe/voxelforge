@@ -1,8 +1,8 @@
 ---
 title: Fur cards — a translucent hair layer over the micro objects
 tags: [rendering, micro-voxel, fur, translucency, splats, alpaca]
-sourceRefs: [src/voxel/fur_cards.hpp, src/voxel/fur_cards.cpp, src/render/fur_pass.hpp, src/render/fur_pass.cpp, shaders/fur.vert, shaders/fur.frag, shaders/fur_composite.comp, shaders/common_fur.glsl, src/app/world/micro_objects.cpp, src/app/frame/record_interactive.cpp, tests/fur_check.py, tests/test_micro.cpp, AGENTS.md, docs/rendering.md]
-lastReviewed: 2026-10-21
+sourceRefs: [src/voxel/fur_cards.hpp, src/voxel/fur_cards.cpp, src/render/fur_pass.hpp, src/render/fur_pass.cpp, shaders/fur.vert, shaders/fur.frag, shaders/fur_composite.comp, shaders/common_fur.glsl, src/app/world/micro_objects.cpp, src/app/ui/panel_render.cpp, src/app/frame/run.cpp, src/app/frame/record_interactive.cpp, tests/fur_check.py, tests/test_micro.cpp, AGENTS.md, docs/rendering.md]
+lastReviewed: 2026-11-17
 ---
 
 # Fur cards
@@ -121,6 +121,30 @@ changing something else. A visual complaint is a measurement request.
   hundred milliseconds) and apply on **release**, not per tick. A rebuild
   keeps the live Move/Rotate preview: that state lives on the fur objects
   and rides across the upload.
+- **The Strand length / Clump width sliders read in mm while the parameters
+  are metres** (fixed 2026-11-17). `ImGui::SliderFloat` only *formats* its
+  value with the `"%.0f mm"` string — it never converts units — so feeding
+  it a metre value displayed `0 mm`, and Ctrl+click-typing `1` (meaning 1 mm)
+  stored **1.0 m** and grew metre-long strands. The fix drives the slider in
+  mm through a local proxy (`lenMm = m_furLength * 1000`, range 8..60 mm),
+  converts back at the boundary, and adds `ImGuiSliderFlags_AlwaysClamp` so
+  a typed value stays in range. The `VF_FUR_LEN` / `VF_FUR_WID` env overrides
+  are likewise **metres** (`0.030` = 30 mm).
+- **A Lambert-only coat reads as an opaque cut-out when backlit** (added
+  2026-11-17). Real fleece transmits light: with the sun behind it the fibres
+  scatter a warm glow through the sparse fringe. The body path has foliage
+  SSS (`common_base.glsl`) but the coat's composite had none — just
+  `sunCol·ndl + skyIrradiance`. The fix is one term in `fur_composite.comp`:
+  `towardSun = max(dot(viewRay, kSunDir), 0)^3` times `thin = exp(-sumA)`
+  (the accumulated optical depth — the fringe transmits, the dense body
+  does not), tinted by the coat's own albedo and `sunCol()`. The strength is
+  a LOOK constant `m_furSss = 0.8` (GUI: **Rendering → Backlit glow**,
+  `VF_FUR_SSS` override, `0` = the original bit-exact look). It rides in the
+  composite's private push (`misc.z`, which the fur composite never reads as
+  tonemapLook), so no shared layout changed. Measured: a backlit camera
+  lights 23,760 px, luma 76→99 and R−B −11→+4; the house view and the
+  default-sun reference frame are byte-identical. `fur_check` pins all three
+  (signal, warmth, confinement).
 
 ## What the numbers were
 

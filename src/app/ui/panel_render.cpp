@@ -331,17 +331,33 @@ void App::drawPanelRender()
                 furDirty = true;
         });
         hintLine("Cards per surface cell. Two left gaps at close range.");
+        // The fur parameters are METRES internally (FurParams.length/width),
+        // but these controls read in MILLIMETRES. SliderFloat only FORMATTES
+        // its value with the format string - it never converts it - so feeding
+        // it a metre value with a "mm" label made the readout lie by 1000x:
+        // typing "1" (meaning 1 mm) stored 1.0 m and grew metre-long strands.
+        // Drive the slider in mm and convert at the boundary; AlwaysClamp also
+        // keeps a typed value inside the range instead of trusting Ctrl+click
+        // to stay there.
         controlRow("Strand length", [&] {
             ImGui::SetNextItemWidth(-1.0f);
-            if (ImGui::SliderFloat("##furLen", &m_furLength, 0.008f, 0.060f,
-                                   "%.0f mm", ImGuiSliderFlags_Logarithmic))
+            float lenMm = m_furLength * 1000.0f;
+            if (ImGui::SliderFloat("##furLen", &lenMm, 8.0f, 60.0f,
+                                   "%.0f mm", ImGuiSliderFlags_Logarithmic |
+                                                 ImGuiSliderFlags_AlwaysClamp)) {
+                m_furLength = lenMm * 0.001f;
                 furDirty = true;
+            }
         });
         controlRow("Clump width", [&] {
             ImGui::SetNextItemWidth(-1.0f);
-            if (ImGui::SliderFloat("##furWid", &m_furWidth, 0.001f, 0.012f,
-                                   "%.1f mm", ImGuiSliderFlags_Logarithmic))
+            float widMm = m_furWidth * 1000.0f;
+            if (ImGui::SliderFloat("##furWid", &widMm, 1.0f, 12.0f,
+                                   "%.1f mm", ImGuiSliderFlags_Logarithmic |
+                                                 ImGuiSliderFlags_AlwaysClamp)) {
+                m_furWidth = widMm * 0.001f;
                 furDirty = true;
+            }
         });
         controlRow("Curl", [&] {
             ImGui::SetNextItemWidth(-1.0f);
@@ -365,6 +381,13 @@ void App::drawPanelRender()
         });
         hintLine("How far the strand stands off the surface. A steep strand "
                  "reads as a spike; wool lies close to the body.");
+        controlRow("Backlit glow", [&] {
+            ImGui::SetNextItemWidth(-1.0f);
+            if (ImGui::SliderFloat("##furSss", &m_furSss, 0.0f, 2.0f, "%.2f"))
+                m_furPass.setSss(m_furSss); // a composite uniform: no rebuild
+        });
+        hintLine("Warm light scattering through the fleece when the sun is "
+                 "behind it. 0 = the original opaque look.");
         if (furDirty) {
             rebuildFurCards();
             hintLine("Coat rebuilt.");
