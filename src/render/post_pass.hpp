@@ -14,6 +14,10 @@ public:
     void destroy();
 
     void updateDescriptors(VkImageView hdrView, VkImageView gposView, VkImageView outView);
+    // The auto-exposure meter's SSBO (exposure.comp). Bound as a read-only
+    // storage buffer at binding 4; bit 10 of the render flags decides whether
+    // the shader actually uses it, so the off-state needs no dummy buffer.
+    void setExposureBuffer(VkBuffer buf);
     void record(VkCommandBuffer cmd, const RaymarchPush& push) const;
 
     void setSelection(const glm::vec4& sel) { m_selFeed = sel; }
@@ -48,6 +52,7 @@ private:
     VkDescriptorSetLayout m_setLayout = VK_NULL_HANDLE;
     VkDescriptorPool m_pool = VK_NULL_HANDLE;
     VkDescriptorSet m_set = VK_NULL_HANDLE;
+    VkBuffer m_expoBuf = VK_NULL_HANDLE;
     Buffer m_selection {};
     glm::vec4 m_selFeed { 0.f };
     glm::vec4 m_hovFeed { 0.f };

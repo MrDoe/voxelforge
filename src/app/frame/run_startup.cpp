@@ -605,6 +605,27 @@ void App::applyStartupEnvOverrides(FrameInputs& fx)
         m_motionBlurEnabled = atoi(e) != 0;
     if (const char* e = getenv("VF_DOF"))
         m_dofEnabled = atoi(e) != 0;
+    // Run the photorealism chain on the LINEAR HDR target before the tone map,
+    // instead of in place on the tone-mapped LDR offscreen. See
+    // frame/record_fx.cpp for why the order is a look change and not a cosmetic
+    // one: it moves every effect into a range where it still has headroom, and
+    // onto the image format those five shaders already declare.
+    if (const char* e = getenv("VF_LINEAR_FX"))
+        m_linearFx = atoi(e) != 0;
+    // Auto-exposure: the meter itself is cheap and inert unless dispatched, but
+    // post.comp also needs bit 10 set to multiply by the value it produced.
+    if (const char* e = getenv("VF_AUTOEXPOSE")) {
+        m_autoExposure = atoi(e) != 0;
+        if (m_autoExposure)
+            m_renderFlags |= (1 << 10);
+    }
+    // Backlit transmission through foliage/fleece (render-flag bit 11).
+    if (const char* e = getenv("VF_TRANSMISSION")) {
+        if (atoi(e) != 0)
+            m_renderFlags |= (1 << 11);
+        else
+            m_renderFlags &= ~(1 << 11);
+    }
     // SSAO tuning (world-scale AO; the effect itself stays opt-in via bit 6)
     if (const char* e = getenv("VF_SSAO_STRENGTH"))
         m_ssaoStrength = std::clamp(float(atof(e)), 0.0f, 1.0f);

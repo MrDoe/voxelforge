@@ -67,6 +67,27 @@ layout(location = 9) in float vTex;  // per-surfel texture override (0 = materia
 layout(location = 0) out vec4 oHdr;
 layout(location = 1) out vec4 oGPos;
 layout(location = 2) out vec4 oGNorm; // shading normal (xyz), 0 on sky
+// ---- guidance lanes -------------------------------------------------------
+// Two attachments that carry what the shading CONSUMED, not what it produced.
+// Before these existed the renderer emitted only colour/position/normal, so
+// albedo and roughness — which do arrive per surfel as vMat.y/z and get bound
+// to the triplanar photo inside shadeSurfel — were multiplied into the lighting
+// integral and destroyed. Nothing downstream could recover them, which ruled
+// out every relight, every learned refiner, and every AI upscaler that wants
+// engine guidance rather than a blurry LDR frame.
+//   oGAlb: rgb = the EFFECTIVE material albedo (post-triplanar, pre-flora
+//          tint), a = roughness.
+//   oGLit: rgb = the shaded surface BEFORE the atmosphere composite, a =
+//          reflectance. Distance fog and valley mist are part of the look but
+//          not part of a surface's light response, and folding them in here
+//          would make the lane useless for anything that reasons about light.
+// Both are LINEAR HDR (same rgba16f target format as oHdr) and both never
+// blend — the depth test alone decides which fragment's material survives, as
+// for oGPos/oGNorm. They are written by every pass that writes the G-buffer,
+// and attachment 0 is untouched by this change, so the rendered frame is
+// bit-identical with the lanes unread.
+layout(location = 3) out vec4 oGAlb;
+layout(location = 4) out vec4 oGLit;
 
 layout(constant_id = 0) const int SKY_MODE = 0;
 // Pass split for the depth-resolved composite:
@@ -75,6 +96,12 @@ layout(constant_id = 0) const int SKY_MODE = 0;
 //   3 = depth-only prepass (nearest full-disk plane depth, no shading),
 //   4 = base seal (exact nearest fragment, straight colour, own kernel alpha -
 //       blended, so a lone silhouette splat fades instead of sealing opaque).
+//   5 = OIT accumulation (--mode 3dgs): premultiplied colour + alpha summed
+//       additively into attachment 0, alpha written to attachment 1 where the
+//       blend state multiplies (1-alpha) to accumulate transmittance. No depth
+//       test, so splats BEHIND the nearest surface are shaded too - that is the
+//       whole point: a low-alpha front splat reveals the ones behind it, not
+//       the sky that was painted first.
 layout(constant_id = 1) const int PASS_MODE = 0;
 
 const float kWaterLevel = -0.9;
@@ -120,6 +147,10 @@ void main()
         oHdr = vec4(col, 1.0);
         oGPos = vec4(0.0, 0.0, 0.0, 0.0);
         oGNorm = vec4(0.0, 0.0, 0.0, 0.0);
+        // Sky is not a surface: no albedo, no material, and its colour is
+        // already the lighting term, so it reports zero in both lanes.
+        oGAlb = vec4(0.0);
+        oGLit = vec4(0.0);
         return;
     }
 
@@ -222,12 +253,20 @@ void main()
     }
     // Debug views override alpha to 1.0 below, so skip the alpha discard
     // there (full-coverage flat views).
-    if (PASS_MODE == 1 && sp.uSplat.w < 0.5 && alpha < 0.004)
+    if ((PASS_MODE == 1 || PASS_MODE == 5) && sp.uSplat.w < 0.5 && alpha < 0.004)
         discard;
 
     bool isWater = surfelIsWater(vMat.w);
     float aoBaked = surfelBakedAo(vMat.w);
     vec3 col;
+    // Guidance lane payloads, filled in the branch that knows them. Defaults
+    // are the values a non-material fragment should report: no albedo, no
+    // lighting. The sky path returns before reaching here and is written
+    // explicitly at its own site.
+    vec3 gAlbedo = vec3(0.0);
+    vec3 gLight = vec3(0.0);
+    float gRough = 0.0;
+    float gRefl = 0.0;
     float hitType = 1.0;
     // The shading normal. It equals the surfel's own normal everywhere
     // except on a terrain fragment that lies on the heightfield, where the
@@ -337,6 +376,11 @@ void main()
         vec3 pw = ro + rd * tW;
         float wa = 1.0;
         col = shadeWaterSplat(pw, rd, ro, tW, wa);
+        // Planar water carries no material albedo — the reflection and
+        // absorption march IS its appearance, and the bed is not its surface.
+        // Report albedo 0 and put the composite in the lighting lane; the
+        // hitType 2 already written to oGPos.w is what identifies it.
+        gLight = col;
         // uniform absorption alpha (no kernel falloff): per-disk rim alpha
         // would mottle overlapping translucent layers; the d2 discard above
         // already clips coverage, TAA resolves the 1px shore step
@@ -384,7 +428,15 @@ void main()
         float shB = ((gRenderFlags & 2) != 0 && dot(n, kSunDir) > 0.02) ? surfelBakedShadow(vShade.w) : 1.0;
         float aoB = ((gRenderFlags & 1) != 0) ? clamp(aoBaked, 0.0, 1.0) : 1.0;
         vec3 bentB = normalize(vShade.xyz);
-        col = shadeSurfel(q, rd, alb, rr, ro, nShade, bentB, shB, aoB, mId, vShade.w, vMat.w);
+        vec3 albEff;  // the albedo shadeSurfel actually shaded with
+        col = shadeSurfel(q, rd, alb, rr, ro, nShade, bentB, shB, aoB, mId, vShade.w, vMat.w,
+                          albEff);
+        gAlbedo = albEff;
+        gLight = col;  // captured HERE: the fog/mist composite below is a
+                       // property of the atmosphere between eye and surface,
+                       // not of this surface's light response
+        gRough = rr.y;
+        gRefl = rr.x;
         float fog = 1.0 - exp(-t * 0.0016);
         vec3 fc = fogColor(rd, q);
         // valley mist over the stream + damp hollows (reference river mood)
@@ -438,7 +490,26 @@ void main()
     // lone silhouette splat into a hard-edged opaque blob, and sealing at its
     // own alpha is indistinguishable in the interior - there the band sum
     // reaches 1 either way. Water stays premultiplied.
-    if (PASS_MODE == 4) {
+    if (PASS_MODE == 5) {
+        // Weighted-blended OIT accumulation. Attachment 0 sums premultiplied
+        // colour and alpha; attachment 1 accumulates transmittance by writing
+        // alpha into a target whose blend multiplies the destination by
+        // (1 - alpha). The composite pass later computes
+        //   colour = accum.rgb / accum.a * (1 - T) + backdrop * T
+        // so a low-alpha front splat reveals the accumulated splats behind it
+        // instead of the sky. oGNorm/oGAlb/oGLit are not consumed by the
+        // two-attachment OIT pipeline (the standard record() already filled
+        // the G-buffer lanes this mode needs for the FX chain). oGPos is
+        // written at the shared site below so the reveal value is not
+        // overwritten by the standard G-buffer position write.
+        // Depth weighting: without it every overlapping splat contributes
+        // equally to the average, so the BACK of an object bleeds through its
+        // front and the frame washes out. exp(-t*k) makes near splats dominate
+        // the averaged colour while the reveal sum stays unweighted, which is
+        // the standard weighted-blended OIT shape. k = uSplat3.y (VF_OIT_WEIGHT).
+        float ow = exp(-t * sp.uSplat3.y) * 64.0;
+        oHdr = vec4(col * alpha * ow, alpha * ow);
+    } else if (PASS_MODE == 4) {
         // Edge blend (slider > 0): disable the opaque base seal so the band
         // pass draws the full radial gradient (alpha 1 at centre -> 0 at edge)
         // instead of a hard opaque disk. The seal is what otherwise paints
@@ -490,9 +561,17 @@ void main()
         oHdr = vec4(col, 1.0);
     } else
         oHdr = (PASS_MODE == 1) ? vec4(col, alpha) : vec4(col * alpha, alpha);
-    oGPos = vec4(q, hitType);
+    // PASS_MODE 5 writes alpha into attachment 1 (the reveal target) here, at
+    // the shared site, so the standard G-buffer position write cannot clobber
+    // the transmittance accumulation.
+    oGPos = (PASS_MODE == 5) ? vec4(alpha) : vec4(q, hitType);
     // Shading normal for the screen-space effects (SSAO/SSR). Water writes
     // the flat plane normal: SSR's water reflection must stay plane-stable
     // (the ripple normal is a shading-only detail, applied in-shader).
     oGNorm = vec4(isWater ? vec3(0.0, 1.0, 0.0) : nShade, 0.0);
+    // Guidance lanes. Never blended (see the declaration comment): the base pass
+    // writes them opaquely and the band pass's blend state leaves them alone, so
+    // the surviving value is the same fragment's that won the depth test.
+    oGAlb = vec4(gAlbedo, gRough);
+    oGLit = vec4(gLight, gRefl);
 }

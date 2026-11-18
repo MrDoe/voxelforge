@@ -10,6 +10,14 @@ layout(local_size_x = 8, local_size_y = 8, local_size_z = 1) in;
 layout(set = 0, binding = 0, rgba16f) uniform readonly image2D uHdr;
 layout(set = 0, binding = 1, rgba16f) uniform readonly image2D uGPos;
 layout(set = 0, binding = 2, rgba8)  uniform writeonly image2D uOut;
+// Auto-exposure state from exposure.comp: 64 uint histogram bins (256 B) then
+// a vec4 whose .x is the adapted exposure in stops. Read ONLY — the meter owns
+// the writes. Kept bound even when the feature is off; render-flag bit 10 gates
+// the multiply below so the shipped look (and every gate) stays bit-exact.
+layout(set = 0, binding = 4) buffer ExpoBuf {
+    uint hist[64];
+    vec4 state;
+} uExpo;
 layout(std140, set = 0, binding = 3) uniform SelectionUBO {
     vec4 uSel;   // xyz = selected voxel center, w = active
     vec4 uHover; // xyz = hovered voxel center, w = active (faint preview)
@@ -157,7 +165,14 @@ void main()
     bloom /= max(totalW, 1e-3);
     hdr += bloom * 0.6; // bloom strength
 
-    vec3 col = tonemapAgX(hdr * pc.misc.w, int(pc.misc.z + 0.5));
+    // The meter returns LOG2 stops, so exp2 turns it into the linear multiplier
+    // the scene-referred tone map wants. Applying it where the manual exposure
+    // already applied means bloom (computed above on unscaled HDR) is unaffected
+    // and the off-state is literally the old expression.
+    const float autoMul = ((gRenderFlags & 1024) != 0)
+        ? exp2(clamp(uExpo.state.x, -8.0, 6.0))
+        : 1.0;
+    vec3 col = tonemapAgX(hdr * pc.misc.w * autoMul, int(pc.misc.z + 0.5));
 
     // ---- brush DEPTH indicator (screen space) ----
     // Drawn BEFORE the selection outline block and deliberately NOT gated on

@@ -180,7 +180,7 @@ add_library(vf_render STATIC src/render/svo_pass.cpp src/render/taa_pass.cpp src
     src/render/micro_svo_pass.cpp
     src/render/fur_pass.cpp
     src/render/ssr_pass.cpp src/render/ssao_pass.cpp src/render/volumetric_fog_pass.cpp
-    src/render/motion_blur_pass.cpp src/render/dof_pass.cpp src/render/environment_pass.cpp
+    src/render/motion_blur_pass.cpp src/render/dof_pass.cpp src/render/exposure_pass.cpp src/render/oit_composite_pass.cpp src/render/environment_pass.cpp
     src/render/texture_atlas.cpp)
 target_include_directories(vf_render PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/external)
 target_compile_definitions(vf_render PUBLIC
@@ -195,6 +195,8 @@ file(MAKE_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}/shaders)
 
 set(VF_SHADER_SRCS ${CMAKE_CURRENT_SOURCE_DIR}/shaders/svo_raymarch.comp
     ${CMAKE_CURRENT_SOURCE_DIR}/shaders/post.comp
+    ${CMAKE_CURRENT_SOURCE_DIR}/shaders/exposure.comp
+    ${CMAKE_CURRENT_SOURCE_DIR}/shaders/oit_composite.comp
     ${CMAKE_CURRENT_SOURCE_DIR}/shaders/taa_resolve.comp
     ${CMAKE_CURRENT_SOURCE_DIR}/shaders/splat.vert
     ${CMAKE_CURRENT_SOURCE_DIR}/shaders/splat.frag
@@ -388,6 +390,19 @@ add_test(NAME fog_check
     COMMAND ${Python3_EXECUTABLE} ${GROUP_GATE} fog
             ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/tests/fog_check.py
             $<TARGET_FILE:voxelforge>)
+# Guidance lanes (splat attachments 3/4). Its own check rather than an arm of
+# visual_check because it asserts something visual_check cannot see: that the
+# lanes carry material, and that the visible frame did not move at all.
+add_test(NAME gbuffer_check
+    COMMAND ${Python3_EXECUTABLE} ${GROUP_GATE} visual
+            ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/tests/gbuffer_check.py
+            $<TARGET_FILE:voxelforge>)
+# --mode 3dgs edge-only OIT composite. Labelled visual; needs no baseline to
+# run (the regression arm skips loudly without VF_BASELINE_BIN).
+add_test(NAME dgs_check
+    COMMAND ${Python3_EXECUTABLE} ${GROUP_GATE} visual
+            ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/tests/dgs_check.py
+            $<TARGET_FILE:voxelforge>)
 # Night phase. Its own thresholds because every visual_check metric is
 # calibrated on daylight: is_sky's `b > 120` term reports 0.00% night sky (so
 # obj_frac -> ~1.0 and coverage fails out of range), black-in-silhouette uses an
@@ -458,6 +473,10 @@ set_tests_properties(texture_check
     PROPERTIES LABELS "textures" SKIP_RETURN_CODE 77)
 set_tests_properties(fog_check
     PROPERTIES LABELS "fog" SKIP_RETURN_CODE 77)
+set_tests_properties(gbuffer_check
+    PROPERTIES LABELS "visual" SKIP_RETURN_CODE 77)
+set_tests_properties(dgs_check
+    PROPERTIES LABELS "visual" SKIP_RETURN_CODE 77)
 set_tests_properties(night_check
     PROPERTIES LABELS "night" SKIP_RETURN_CODE 77)
 

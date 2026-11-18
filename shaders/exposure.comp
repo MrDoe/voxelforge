@@ -1,0 +1,133 @@
+#version 450
+#extension GL_GOOGLE_include_directive : require
+// Voxelforge - auto-exposure (camera eye adaptation).
+//
+// A single hand-set exposure means a shot that pans from the lake into a cabin
+// interior keeps the exposure the lake needed, and the interior reads as a
+// black hole. Photographs, and games that want to look like photographs, adapt.
+// It is the cheapest of the photoreal levers: no extra samples in the shading
+// path, one subsampled read per pixel per frame.
+//
+// The meter is SCENE-REFERRED and works on log2 luminance, which is where
+// exposure is linear. A mean of linear luminance would be dragged by one bright
+// specular hit; the geometric mean (the average of log luminance) is what a
+// light meter reports and what the "middle grey" key convention assumes. It is
+// accumulated as a UINT HISTOGRAM, not with float atomics: atomicAdd on floats
+// needs GL_EXT_shader_atomic_float plus a device feature that is not guaranteed
+// here, while uint atomics are core since Vulkan 1.0. A 64-bin histogram in log
+// space has plenty of resolution for one scalar and cannot be poisoned by a
+// single NaN the way a float accumulator can.
+//
+// Two modes, chosen by a push constant, because they run over different grids:
+//   0 = REDUCE. Dispatched over a stride-8 subsample of the frame (one texel per
+//       8x8 block: ~1/64 of the pixels). A workgroup-local histogram is flushed
+//       once per group, so the global counters see 64 additions per group, not
+//       per pixel.
+//   1 = FINALISE. One invocation. Turns the histogram into a target exposure,
+//       adapts the stored exposure toward it, and clears the bins for next frame.
+//
+// The frame measured is the LINEAR HDR image, not the tone-mapped output: a
+// meter reading a compressed range cannot see the headroom it is meant to spend.
+// State lives in an SSBO that post.comp also binds, so the value never visits
+// the CPU and no pipeline stall is introduced to read it back.
+
+#define MODE_REDUCE   0
+#define MODE_FINALISE 1
+
+#define BINS 64
+// The log2-luminance interval the histogram spans: 2^-12 .. 2^6. A pixel past
+// either end is clamped into the end bin, which keeps one sun disc from
+// monopolising the meter without ever making it read infinite exposure.
+#define LO_LOG -12.0
+#define HI_LOG 6.0
+
+layout(local_size_x = 8, local_size_y = 8, local_size_z = 1) in;
+
+layout(set = 0, binding = 0, rgba16f) uniform readonly image2D uHdr;
+
+// hist[] = uint counts (256 B); state.x = current exposure in stops,
+// state.y = the target it is adapting toward, state.zw spare.
+layout(set = 0, binding = 1) buffer ExpoSSBO {
+    uint hist[BINS];
+    vec4 state;
+} expo;
+
+layout(push_constant) uniform PC {
+    vec4 camPos;
+    vec4 camRight;
+    vec4 camUp;
+    vec4 camFwd;
+    vec4 a;        // x=tanHalfFov, y=aspect, z=extentX, w=extentY
+    // Mirror ALL EIGHT vec4s of RaymarchPush before our own fields. C++ pushes
+    // a struct whose first member is the 128-byte RaymarchPush, so params lives
+    // at byte 128; declaring only six vec4s here put it at byte 96 and the
+    // shader read mode/key/rate out of the neighbouring push data — which is
+    // why the meter logged a permanent 0.000 stops while everything else ran.
+    vec4 b;        // padding: worldSize, voxelSize, gridN, frameIdx
+    vec4 sunDir;   // padding
+    vec4 misc;     // padding
+    vec4 params;   // x=mode, y=key (log2), z=adaptation rate 0..1, w=min stops
+    vec4 limits;   // x=max stops
+} pc;
+
+shared uint s_hist[BINS];
+
+int binOf(float luma)
+{
+    const float logL = log2(max(luma, 1e-6));
+    const float f = (logL - LO_LOG) * (float(BINS) * (1.0 / (HI_LOG - LO_LOG)));
+    return clamp(int(f), 0, BINS - 1);
+}
+
+void main()
+{
+    const int mode = int(pc.params.x + 0.5);
+
+    if (mode == MODE_FINALISE) {
+        if (all(equal(gl_GlobalInvocationID.xyz, uvec3(0)))) {
+            uint total = 0u;
+            double weighted = 0.0;
+            for (int i = 0; i < BINS; ++i) {
+                const uint n = expo.hist[i];
+                total += n;
+                // Bin CENTRE in log2 space, not the bin index: using the index
+                // would bias the meter by the 12-stop offset of the interval.
+                weighted += double(n) * (LO_LOG + (double(i) + 0.5) *
+                                         ((HI_LOG - LO_LOG) / double(BINS)));
+            }
+            if (total > 0u) {
+                const float avgLog = float(weighted / double(total));
+                // Exposure is the gain that maps the measured mean to the key.
+                // Do this subtraction in LOG space: exp2(key - avgLog) is the
+                // same answer with half the range and none of the overflow.
+                float target = clamp(pc.params.y - avgLog, pc.params.w, pc.limits.x);
+                const float rate = clamp(pc.params.z, 0.0, 1.0);
+                const float cur = clamp(expo.state.x, pc.params.w, pc.limits.x);
+                expo.state.x = cur + (target - cur) * rate;
+                expo.state.y = target;
+            }
+            // An empty or black frame does not re-adapt: a meter that saw no
+            // samples would otherwise demand +6 stops and white out the frame,
+            // and its NaN would be sticky across every later frame.
+            for (int i = 0; i < BINS; ++i)
+                expo.hist[i] = 0u;
+        }
+        return;
+    }
+
+    // ---- MODE_REDUCE ----
+    const ivec2 extent = imageSize(uHdr);
+    const ivec2 pix = ivec2(gl_WorkGroupID.xy * 8u + gl_LocalInvocationID.xy);
+    if (gl_LocalInvocationIndex < uint(BINS))
+        s_hist[gl_LocalInvocationIndex] = 0u;
+    barrier();
+    if (pix.x < extent.x && pix.y < extent.y) {
+        const vec3 c = imageLoad(uHdr, pix).rgb;
+        // Rec.709 luma on LINEAR values, before any grading.
+        const float luma = max(dot(c, vec3(0.2126, 0.7152, 0.0722)), 1e-6);
+        atomicAdd(s_hist[binOf(luma)], 1u);
+    }
+    barrier();
+    if (gl_LocalInvocationIndex < uint(BINS) && s_hist[gl_LocalInvocationIndex] != 0u)
+        atomicAdd(expo.hist[gl_LocalInvocationIndex], s_hist[gl_LocalInvocationIndex]);
+}

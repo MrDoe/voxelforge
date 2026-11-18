@@ -80,7 +80,8 @@ public:
     // stencil aspect is unused, kept from the removed core/stencil pipes).
     bool recreateDepth(uint32_t w, uint32_t h);
     void updateDescriptors(VkImageView hdrView, VkImageView gposView,
-                           VkImageView gnormView, VkImageView heightView,
+                           VkImageView gnormView, VkImageView galbView,
+                           VkImageView gmatView, VkImageView heightView,
                            VkImageView objVolView);
 
     // Kernel tuning: y = Gaussian variance sigma2 (normalized disk units),
@@ -94,6 +95,12 @@ public:
     // Runtime disk-radius multiplier, hotkeys [/] (0.5..2.0, default 1.0):
     // grows/shrinks every splat disk for coverage-vs-crispness tuning.
     void setRadiusScale(float s) { m_radiusScale = glm::clamp(s, 0.5f, 2.0f); }
+
+    // Coverage-aware transparent edges (D24_S8 stencil). Counts every disk
+    // covering a pixel, then seals only where count > 1, so a lone disk at a
+    // silhouette is blended translucently by the band pass instead of being
+    // painted opaque by the base. Costs one extra full geometry pass.
+    void setCoverage(bool on) { m_coverage = on; }
     float radiusScale() const { return m_radiusScale; }
     // Camera embedded inside solid geometry (probed on the CPU per frame):
     // disables backface collapse so the surrounding shell renders instead
@@ -166,6 +173,17 @@ public:
     // GENERAL and m_depth in DEPTH_ATTACHMENT_OPTIMAL (App transitions).
     void record(VkCommandBuffer cmd, const RaymarchPush& push, VkExtent2D extent);
 
+    // --mode 3dgs: bind the three OIT targets (owned by App::createOffscreen).
+    // `backdrop` receives the sky, `accum` the summed premultiplied colour,
+    // `reveal` the transmittance product. recordOit() runs AFTER a normal
+    // record() this frame (which filled the G-buffer + depth and computed the
+    // culled chunk draws) and draws the sky + all surfels with no depth test
+    // into those targets. App's OitCompositePass then writes the final HDR.
+    void setOitTargets(VkImageView accum, VkImageView reveal, VkImageView backdrop) {
+        m_accumView = accum; m_revealView = reveal; m_backdropView = backdrop;
+    }
+    void recordOit(VkCommandBuffer cmd, const RaymarchPush& push, VkExtent2D extent);
+
     size_t surfelCount() const { return m_count; }
     uint32_t waterStart() const { return m_waterStart; }
     const Image3D& depthImage() const { return m_depth; }
@@ -203,6 +221,17 @@ private:
     VkPipeline m_skyPipe = VK_NULL_HANDLE;
     VkPipeline m_prepassPipe = VK_NULL_HANDLE;
     VkPipeline m_opaqueBasePipe = VK_NULL_HANDLE;
+    // --mode 3dgs OIT pipelines: sky->backdrop (1 attachment) and the
+    // transmittance accumulation (2 attachments: premultiplied colour/alpha
+    // additive, alpha->reveal multiplicative). Neither uses depth.
+    VkPipeline m_oitSkyPipe = VK_NULL_HANDLE;
+    VkPipeline m_oitPipe = VK_NULL_HANDLE;
+    // Transparent-edge path: a stencil coverage count plus a base seal that
+    // only fires where more than one disk covers the pixel, so a lone disk at
+    // a silhouette is composited translucently by the band pass instead of
+    // being sealed opaque by the base. OFF by default (extra geometry pass).
+    VkPipeline m_coveragePipe = VK_NULL_HANDLE;
+    VkPipeline m_opaqueBaseCovPipe = VK_NULL_HANDLE;
     VkPipeline m_opaquePipe = VK_NULL_HANDLE;
     VkPipeline m_waterPipe = VK_NULL_HANDLE;
     // GPU-driven cull pre-pass (splat_cull.comp): compacts each draw
@@ -335,6 +364,7 @@ private:
         float depthTol = -1.0f;
         float edgeStart = -1.0f;
         float sealAlpha = -1.0f;
+        float oitWeight = -1.0f; // <0 = default; VF_OIT_WEIGHT (per-metre falloff)
     };
     EnvCache m_env;
     struct ScratchDraw {
@@ -348,6 +378,7 @@ private:
     float m_splatEdgeStart = 0.0f;
     float m_splatSealAlpha = 0.0f;
     bool m_buried = false;
+    bool m_coverage = false;  // stencil coverage count for transparent edges
 
     size_t m_count = 0;
     uint32_t m_waterStart = 0;
@@ -367,6 +398,15 @@ private:
     VkImageView m_hdrView = VK_NULL_HANDLE;
     VkImageView m_gposView = VK_NULL_HANDLE;
     VkImageView m_gnormView = VK_NULL_HANDLE;
+    // Guidance lanes (attachments 3 and 4): effective albedo + roughness, and
+    // pre-atmosphere lighting + reflectance. Owned by App::createOffscreen,
+    // which recreates them with the extent; the pass only holds views.
+    VkImageView m_galbView = VK_NULL_HANDLE;
+    VkImageView m_gmatView = VK_NULL_HANDLE;
+    // OIT targets (App-owned, recreated with the extent).
+    VkImageView m_accumView = VK_NULL_HANDLE;
+    VkImageView m_revealView = VK_NULL_HANDLE;
+    VkImageView m_backdropView = VK_NULL_HANDLE;
     VkImageView m_heightView = VK_NULL_HANDLE;
     VkImageView m_objVolView = VK_NULL_HANDLE;
 };
