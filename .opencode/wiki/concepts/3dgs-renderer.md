@@ -75,8 +75,17 @@ Runs with **no depth test at all** — every overlapping splat is shaded, which
 is the point. Writes premultiplied depth-weighted colour+alpha into attachment
 0 and alpha into attachment 1 (the reveal target). oGPos is written at the
 shared site so the reveal value is not clobbered by the G-buffer position
-write. The same `shadeSurfel()` lighting, guidance lanes and backlit
-transmission are used as the shipped path.
+write.
+
+**Cheap colour (2026-11-18, commit `d36949e`):** the OIT colour is only ever
+visible at sparse-coverage silhouette pixels (~0.3%); the composite uses the
+base frame everywhere else. So PASS_MODE 5 no longer calls the full
+`shadeSurfel()` (triplanar albedo fetches, detail-normal Sobel, `applyFlora`,
+up to 16 point-light shadow marches, sky-visibility march) on every surfel —
+nearly all of it was thrown away. It uses palette albedo × baked sun
+shadow/AO (`alb * (0.45 + 0.55*shB*aoB)`) instead, which is indistinguishable
+at a feathered edge over the opaque base. This cut 3DGS geo time from ~29 ms
+to ~11 ms at 960×540 (see Performance below).
 
 ### Composite pass (`shaders/oit_composite.comp`, `src/render/oit_composite_pass.{hpp,cpp}`)
 
@@ -117,6 +126,17 @@ Gate: `tests/dgs_check.py` (ctest `dgs_check`, label visual), with
 
 Default `splat`/`svo` paths are byte-identical to HEAD. `VF_OIT_DUMP=<prefix>`
 logs the accum/reveal/base statistics for debugging.
+
+## Performance
+
+At 960×540 (`--smoke 360`, `VF_TRACE`), default `splat` geo is ~9.2 ms.
+Before `d36949e`, `--mode 3dgs` ran at ~29 ms geo — the OIT accumulation
+pass's full `shadeSurfel()` on ~2.8M surfels was the cost centre. With the
+cheap PASS_MODE 5 colour it is ~11 ms geo (avg 29.93 → 11.39 ms total),
+essentially matching the base path → ~90 fps. `dgs_check` re-passed against
+the committed-HEAD baseline after the change (default splat 0.000–0.001,
+interiors ≤0.054/255, edges 0.02–0.29%). Full command and before/after traces
+are filed in [[concepts/framerate-triage]].
 
 ## Photorealism ceiling (measured, not argued)
 

@@ -2,7 +2,7 @@
 title: Reaching DLSS-5-class photorealism
 tags: [rendering, post-processing, neural-rendering, dlss, photorealism, gbuffer, plan]
 sourceRefs: [shaders/splat.frag, shaders/post.comp, src/app/frame/record_fx.cpp, src/render/taa_pass.cpp, shaders/motion_blur.comp, shaders/common_base.glsl, assets/world.json]
-lastReviewed: 2026-11-12
+lastReviewed: 2026-11-18
 ---
 
 # Reaching DLSS-5-class photorealism
@@ -64,12 +64,21 @@ Two things from that list matter for this discussion:
 
 ## The blocking gap: no guidance G-buffer
 
-`shaders/splat.frag` writes exactly three attachments:
+**Status (2026-11-18):** steps **0, 1 and 3 landed** in commit `166e490` (all
+default-off flags, shipped look untouched); only **step 2 (velocity buffer)**
+is still missing. Backlit fleece SSS (`VF_FUR_SSS`, `62378ae`) and the 64³
+irradiance volume also landed. The tables below keep the original plan for
+context — the "Unlocks" column now describes what the landed flags expose.
+
+`shaders/splat.frag` writes **five** attachments (three original + two guidance
+lanes added in step 1):
 
 ```
 layout(location = 0) out vec4 oHdr;    // final shaded colour
 layout(location = 1) out vec4 oGPos;    // world xyz, w = hitType
 layout(location = 2) out vec4 oGNorm;   // shading normal
+layout(location = 3) out vec4 oGAlb;    // EFFECTIVE albedo (post-triplanar, pre-flora), a = roughness
+layout(location = 4) out vec4 oGLit;    // shading BEFORE atmosphere composite, a = reflectance
 ```
 
 Everything the inputs of a neural pass want is **present but destroyed inside shading**:
@@ -88,12 +97,12 @@ interactive-only for us and why a walking shot is not A/B-deterministic
 
 So the honest sequencing is:
 
-| Step | Work | Unlocks |
-|---|---|---|
-| **0** | Move the FX chain **before** tonemap; keep `m_offscreen` linear HDR, tonemap last | all of the below looks right |
-| **1** | Two extra MRT lanes in `splat.frag`: **albedo** (rgba8) and **roughness/spec** (rg8); same for the SVO reference | classical relighting, ML input, DLSS-SR/RR/XeSS input |
-| **2** | A real **velocity buffer**: gpos delta minus the camera-only reprojection, i.e. the residual from the owner transform (`RotUBO`), micro behaviour and the store edit AABB | TAA/blur on moving objects, temporal stability, any ML pass |
-| **3** | Auto-exposure (downsampled log-luma histogram + adaptation) | cave↔exterior, the single biggest "photo" cue we lack |
+| Step | Work | Status | Unlocks |
+|---|---|---|---|
+| **0** | Move the FX chain **before** tonemap; keep `m_offscreen` linear HDR, tonemap last | **LANDED** — `VF_LINEAR_FX=1` runs the chain on `m_hdr` (rgba16f, matching the shaders' declared format) before `post.comp`; `m_linearFx` | all of the below looks right |
+| **1** | Two extra MRT lanes in `splat.frag` | **LANDED** — `oGAlb=(effective albedo, roughness)` and `oGLit=(pre-atmosphere lighting, reflectance)`, both rgba16f; gated by `tests/gbuffer_check.py` + `VF_GBUFFER_DUMP=<prefix>`; tile path still drops them | classical relighting, ML input, DLSS-SR/RR/XeSS input |
+| **2** | A real **velocity buffer**: gpos delta minus camera-only reprojection (owner transform `RotUBO`, micro behaviour, store edit AABB) | **MISSING** — `motion_blur.comp`/`taa_resolve.comp` remain camera-only analytic | TAA/blur on moving objects, temporal stability, any ML pass |
+| **3** | Auto-exposure (downsampled log-luma histogram + adaptation) | **LANDED** — `ExposurePass`, `shaders/exposure.comp` (64-bin histogram, two dispatches, SSBO read by `post.comp` binding 4), `VF_AUTOEXPOSE=1` + render-flag bit 10 | cave↔exterior, the single biggest "photo" cue we lack |
 
 Step 1–2 are cheap and pay for themselves with no model involved. Steps 0–3 are the
 prerequisite work; **do not train or integrate a model before them**, because NVIDIA's own
