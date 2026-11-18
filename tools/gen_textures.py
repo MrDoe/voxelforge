@@ -29,6 +29,10 @@ TARGETS = {
     "grass_dark": (25, 97, 21),     # mat 0  (palette 18,133,15 after accents)
     "grass_light": (45, 129, 32),   # mat 1  (palette 41,173,26 after accents)
     "soil": (155, 90, 35),          # mat 2
+    # mat 22 - wet soil for pit floors and damp shorelines. A dark, saturated
+    # earth photo must mean-match THIS so the wet look survives the texture
+    # swap; the gloss comes from mat 22's low roughness in kMaterialReflection.
+    "wet_soil": (61, 36, 18),       # mat 22 (palette 0.24,0.14,0.07)
     "sand": (210, 180, 95),         # mat 3
     "rock": (115, 103, 90),         # mat 4
     "light_rock": (156, 152, 140),  # mat 5
@@ -322,10 +326,23 @@ def gen_lava(n, rng):
     return np.clip(img, 0.0, 1.0)
 
 
+def gen_wet_soil(n, rng):
+    # Darker, smoother earth than dry soil: broad damp patches, fine silt,
+    # sparse darker puddles. The GLOSS is a material property (mat 22's low
+    # roughness), not baked into the albedo; this texture only supplies the
+    # dark saturated colour a wet surface has.
+    clods = fbm(n, rng, cells=6, octaves=4)
+    silt = fbm(n, rng, cells=48, octaves=2)
+    damp = smoothstep(0.35, 0.80, fbm(n, rng, cells=2, octaves=3))
+    L = (0.55 + 0.62 * clods) * (0.92 + 0.14 * silt) * (1.0 - 0.34 * damp)
+    return colorize(L, TARGETS["wet_soil"])
+
+
 GENERATORS = {
     "grass_dark": lambda n, r: gen_grass(n, r, False),
     "grass_light": lambda n, r: gen_grass(n, r, True),
     "soil": gen_soil,
+    "wet_soil": gen_wet_soil,
     "sand": gen_sand,
     "rock": gen_rock,
     "light_rock": gen_light_rock,

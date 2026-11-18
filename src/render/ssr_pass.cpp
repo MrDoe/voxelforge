@@ -19,13 +19,15 @@ std::vector<uint8_t> loadSpirv(const std::string& path)
 bool SSRPass::init(const Context& ctx)
 {
     m_ctx = &ctx; VkDevice dev = ctx.device();
-    VkDescriptorSetLayoutBinding b[4] = {};
+    VkDescriptorSetLayoutBinding b[5] = {};
     b[0] = {0, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 1, VK_SHADER_STAGE_COMPUTE_BIT, nullptr};
     b[1] = {1, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 1, VK_SHADER_STAGE_COMPUTE_BIT, nullptr};
     b[2] = {2, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 1, VK_SHADER_STAGE_COMPUTE_BIT, nullptr};
     b[3] = {3, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 1, VK_SHADER_STAGE_COMPUTE_BIT, nullptr};
+    // binding 4 = guidance albedo/roughness lane (a = roughness).
+    b[4] = {4, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 1, VK_SHADER_STAGE_COMPUTE_BIT, nullptr};
     VkDescriptorSetLayoutCreateInfo li{ VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO };
-    li.bindingCount = 4; li.pBindings = b;
+    li.bindingCount = 5; li.pBindings = b;
     if (vkCreateDescriptorSetLayout(dev, &li, nullptr, &m_setLayout) != VK_SUCCESS) return false;
     VkPushConstantRange pc{ VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(RaymarchPush) }; // must match the shader PC block (128 B)
     VkPipelineLayoutCreateInfo pli{ VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO };
@@ -42,7 +44,7 @@ bool SSRPass::init(const Context& ctx)
     VkResult r = vkCreateComputePipelines(dev, VK_NULL_HANDLE, 1, &cpi, nullptr, &m_pipeline);
     vkDestroyShaderModule(dev, mod, nullptr);
     if (r != VK_SUCCESS) return false;
-    VkDescriptorPoolSize sizes[1] = { { VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 4 } };
+    VkDescriptorPoolSize sizes[1] = { { VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 5 } };
     VkDescriptorPoolCreateInfo pi{ VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO };
     pi.maxSets=1; pi.poolSizeCount=1; pi.pPoolSizes=sizes;
     if (vkCreateDescriptorPool(dev, &pi, nullptr, &m_pool) != VK_SUCCESS) return false;
@@ -62,19 +64,22 @@ void SSRPass::destroy()
 }
 
 void SSRPass::updateDescriptors(VkImageView hdrView, VkImageView gposView,
-                                VkImageView gnormView, VkImageView outView)
+                                VkImageView gnormView, VkImageView outView,
+                                VkImageView galbView)
 {
     if (!m_set || !m_ctx) return;
     VkDescriptorImageInfo i0{ VK_NULL_HANDLE, hdrView, VK_IMAGE_LAYOUT_GENERAL };
     VkDescriptorImageInfo i1{ VK_NULL_HANDLE, gposView, VK_IMAGE_LAYOUT_GENERAL };
     VkDescriptorImageInfo i3{ VK_NULL_HANDLE, gnormView, VK_IMAGE_LAYOUT_GENERAL };
     VkDescriptorImageInfo i2{ VK_NULL_HANDLE, outView, VK_IMAGE_LAYOUT_GENERAL };
-    VkWriteDescriptorSet w[4] = {};
+    VkDescriptorImageInfo i4{ VK_NULL_HANDLE, galbView, VK_IMAGE_LAYOUT_GENERAL };
+    VkWriteDescriptorSet w[5] = {};
     w[0]={VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,nullptr,m_set,0,0,1,VK_DESCRIPTOR_TYPE_STORAGE_IMAGE,&i0,nullptr,nullptr};
     w[1]={VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,nullptr,m_set,1,0,1,VK_DESCRIPTOR_TYPE_STORAGE_IMAGE,&i1,nullptr,nullptr};
     w[2]={VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,nullptr,m_set,2,0,1,VK_DESCRIPTOR_TYPE_STORAGE_IMAGE,&i2,nullptr,nullptr};
     w[3]={VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,nullptr,m_set,3,0,1,VK_DESCRIPTOR_TYPE_STORAGE_IMAGE,&i3,nullptr,nullptr};
-    vkUpdateDescriptorSets(m_ctx->device(),4,w,0,nullptr);
+    w[4]={VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,nullptr,m_set,4,0,1,VK_DESCRIPTOR_TYPE_STORAGE_IMAGE,&i4,nullptr,nullptr};
+    vkUpdateDescriptorSets(m_ctx->device(),5,w,0,nullptr);
 }
 
 void SSRPass::record(VkCommandBuffer cmd, uint32_t width, uint32_t height, const RaymarchPush& push) const

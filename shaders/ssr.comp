@@ -11,6 +11,10 @@ layout(set = 0, binding = 0, rgba16f) uniform readonly image2D uScene;
 layout(set = 0, binding = 1, rgba16f) uniform readonly image2D uGPos;
 layout(set = 0, binding = 2, rgba16f) uniform writeonly image2D uOut;
 layout(set = 0, binding = 3, rgba16f) uniform readonly image2D uGNorm;
+// Guidance lane: rgb = effective albedo, a = roughness. Wet soil (mat 22) has
+// low roughness, so its reflections are strong; dry soil/matte surfaces keep
+// the historical Fresnel-only amount. Bit 12 opts in; bit 12 off = old behaviour.
+layout(set = 0, binding = 4, rgba16f) uniform readonly image2D uGAlb;
 
 layout(push_constant) uniform PC {
     vec4 camPos;
@@ -142,6 +146,20 @@ void main()
     float fresnel = pow(1.0 - max(dot(viewDir, n), 0.0), 3.0);
     float amt = (hitType > 1.5) ? max(fresnel * kReflStrength, kReflWaterFloor)
                                 : fresnel * kReflStrength;
+    // Wet-surface reflections (render-flag bit 12): use the guidance lane's
+    // roughness (a = 150/55 for wet soil -> ~0.22; dry soil ~0.88). A glossy
+    // wet surface gets a strong specular reflection at all angles; a matte
+    // one keeps the historical Fresnel-only amount. Mirror-like at roughness
+    // -> 0, and a roughness blur via fewer/softer samples is approximated by
+    // scaling the amount so a wet pit reads as reflective without a second pass.
+    if ((gRenderFlags & 4096) != 0 && hitType < 1.5) {
+        float rough = clamp(imageLoad(uGAlb, pix).a, 0.0, 1.0);
+        // Wet soil is ~0.22 roughness; sand ~0.75, rock ~0.59, plaster ~0.53.
+        // Gate narrowly so only genuinely wet (low-roughness) surfaces get the
+        // boost — a broad gate repaints every mildly-glossy material.
+        float gloss = 1.0 - smoothstep(0.20, 0.32, rough);
+        amt = max(amt, gloss * 0.55);
+    }
     vec3 result = mix(baseCol, col, clamp(amt, 0.0, 1.0));
     imageStore(uOut, pix, vec4(result, 1.0));
 }

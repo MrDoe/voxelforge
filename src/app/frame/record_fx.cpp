@@ -134,7 +134,7 @@ void App::recordPhotorealism(VkCommandBuffer cmd, const vf::RaymarchPush& push,
                             VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
                             VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT);
         m_ssrPass.updateDescriptors(tgt.view, m_gpos.view, m_gnorm.view,
-                                    ssrScratch.view);
+                                    ssrScratch.view, m_galb.view);
         m_ssrPass.record(cmd, W, H, push);
         vf::transitionImage(cmd, ssrScratch.img, VK_IMAGE_ASPECT_COLOR_BIT,
                             VK_IMAGE_LAYOUT_GENERAL,

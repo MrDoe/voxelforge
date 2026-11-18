@@ -12,7 +12,8 @@ public:
     bool init(const Context& ctx);
     void destroy();
     void updateDescriptors(VkImageView sceneView, VkImageView gposView,
-                           VkImageView gnormView, VkImageView outView);
+                           VkImageView gnormView, VkImageView outView,
+                           VkImageView galbView);
     void record(VkCommandBuffer cmd, uint32_t width, uint32_t height, const RaymarchPush& push) const;
 
 private:

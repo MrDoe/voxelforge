@@ -21,7 +21,7 @@ constexpr int GRID_N = int(WORLD / CHUNK_M);
 
 // The palette size is load-bearing: the shader tables (kPalette/kMatRefl/
 // matTex) and the atlas layer count must all match it exactly.
-inline constexpr int kPaletteN = 22;
+inline constexpr int kPaletteN = 23;
 
 inline const std::array<glm::vec3, kPaletteN> kPalette {
     glm::vec3 { 0.07f, 0.52f, 0.06f }, // 0 grass dark - vivid
@@ -51,6 +51,11 @@ inline const std::array<glm::vec3, kPaletteN> kPalette {
     // is the unit of texture binding, and a textured material ignores the
     // record's colour).
     glm::vec3 { 0.93f, 0.89f, 0.81f }, // 21 fleece
+    // 22 wet soil - dark, saturated earth for pit floors and damp shorelines.
+    // Its own material so a wet-earth photo can be bound WITHOUT darkening the
+    // dry soil (mat 2), and so its low roughness / raised reflectance can drive
+    // roughness-aware SSR and IBL specular (the wet look).
+    glm::vec3 { 0.24f, 0.14f, 0.07f }, // 22 wet soil
 };
 
 // Self-emission colour per material, MIRROR of kEmissive[] in
@@ -83,6 +88,7 @@ inline const std::array<glm::vec3, kPaletteN> kEmissive {
     glm::vec3 { 0.0f },                   // 19 thatch
     glm::vec3 { 0.0f },                   // 20 plaster
     glm::vec3 { 0.0f },                   // 21 fleece
+    glm::vec3 { 0.0f },                   // 22 wet soil
 };
 // Emission magnitude -> point-light intensity, shared by the bake upload
 // and the live trigger so both sides agree on brightness.
@@ -112,6 +118,7 @@ inline const std::array<glm::vec2, kPaletteN> kMaterialReflection {
     glm::vec2 { 60.f, 170.f },  // 19 thatch
     glm::vec2 { 115.f, 135.f }, // 20 plaster
     glm::vec2 { 20.f, 245.f },  // 21 fleece - matte, almost no specular
+    glm::vec2 { 150.f, 55.f },  // 22 wet soil - glossy: raised refl, low roughness
 };
 
 inline constexpr float WATER_LEVEL = -0.9f;

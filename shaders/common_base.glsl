@@ -16,8 +16,8 @@ const vec3 kHorizon = vec3(0.72, 0.80, 0.90);
 // same `kPaletteN`): a material byte is range-checked against this before it
 // indexes kPalette/kMatRefl, so an out-of-range value can only fall back, never
 // read past the end. Change all three together (0..21 is the shipped set).
-const int kPaletteN = 22;
-const vec3 kPalette[22] = vec3[22](
+const int kPaletteN = 23;
+const vec3 kPalette[23] = vec3[23](
     vec3(0.07,0.52,0.06), vec3(0.16,0.68,0.10), vec3(0.62,0.36,0.14),
     vec3(0.84,0.72,0.38), vec3(0.48,0.42,0.38), vec3(0.66,0.64,0.60),
     vec3(0.62,0.33,0.10), vec3(0.42,0.22,0.10), vec3(0.04,0.52,0.03),
@@ -28,9 +28,10 @@ const vec3 kPalette[22] = vec3[22](
     vec3(0.20,0.38,0.12), // 18 moss
     vec3(0.62,0.50,0.20), // 19 thatch
     vec3(0.80,0.76,0.70), // 20 plaster
-    vec3(0.93,0.89,0.81)  // 21 fleece
+    vec3(0.93,0.89,0.81), // 21 fleece
+    vec3(0.24,0.14,0.07)  // 22 wet soil - dark saturated earth
 );
-const vec2 kMatRefl[22] = vec2[22](
+const vec2 kMatRefl[23] = vec2[23](
     vec2(35,235)/255.0, vec2(40,230)/255.0, vec2(55,225)/255.0,
     vec2(130,190)/255.0, vec2(95,150)/255.0, vec2(115,135)/255.0,
     vec2(70,160)/255.0, vec2(60,170)/255.0, vec2(30,235)/255.0,
@@ -41,7 +42,8 @@ const vec2 kMatRefl[22] = vec2[22](
     vec2(35,235)/255.0,  // 18 moss
     vec2(60,170)/255.0,  // 19 thatch
     vec2(115,135)/255.0, // 20 plaster
-    vec2(20,245)/255.0   // 21 fleece - matte, almost no specular
+    vec2(20,245)/255.0,  // 21 fleece - matte, almost no specular
+    vec2(150,55)/255.0   // 22 wet soil - glossy: raised refl, low roughness
 );
 // emissive (self-illuminating) term per material id; 0-8 are inert, 9-15 glow.
 const vec3 kEmissive[16] = vec3[16](
@@ -148,7 +150,7 @@ float causticAt(vec2 xz, float t)
 // gTexOv (phase 2) overrides the material slot per surfel: > 0 = atlas layer.
 layout(set = 0, binding = 22) uniform sampler2DArray uTexAtlas;
 layout(std140, set = 0, binding = 23) uniform TexTable {
-    vec4 matTex[22]; // x = layer index (-1 = none, palette), y = m/tile,
+    vec4 matTex[23]; // x = layer index (-1 = none, palette), y = m/tile,
                      // z = emissive scale (0 = this texture does not emit)
 } uTex;
 float gTexOv = 0.0;
@@ -202,7 +204,7 @@ vec3 emissiveTerm(vec3 p, vec3 n, uint mId, vec3 alb)
 {
     vec3 e = (mId >= 9u && mId <= 15u) ? kEmissive[mId] : vec3(0.0);
     const float slot = texSlotFor(mId);
-    if (slot >= 0.0 && slot < 21.0) {
+    if (slot >= 0.0 && slot < 23.0) {
         const float em = uTex.matTex[int(slot)].z;
         if (em > 0.0) {
             const vec3 t = sampleTex(p, n, mId);

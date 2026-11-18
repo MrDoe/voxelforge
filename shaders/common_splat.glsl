@@ -169,6 +169,19 @@ vec3 shadeSurfel(vec3 p, vec3 rd, vec3 alb, vec2 rr, vec3 ro, vec3 n,
                  vec3 bent, float sh, float ao, uint mId, float shRaw,
                  float packedAo, out vec3 effAlbedo)
 {
+    // Wet shoreline / pit-floor override (render-flag bit 12): terrain near the
+    // water plane darkens to wet earth and its roughness drops, so the
+    // roughness-aware SSR reflects it. Procedural so the baked world/data and
+    // the authored scene are untouched; OFF keeps the shipped look bit-exact.
+    // Only terrain (not object/scatter surfels) and only soil/sand/rock.
+    if ((gRenderFlags & 4096) != 0 && !surfelIsObject(packedAo) &&
+        (mId == 2u || mId == 3u || mId == 4u)) {
+        float wet = 1.0 - smoothstep(0.0, 0.55, p.y - kWaterLevel);
+        if (wet > 0.0) {
+            alb = mix(alb, kPalette[22] * (0.85 + 0.3 * vnoise(p.xz * 6.0)), wet * 0.85);
+            rr = mix(rr, kMatRefl[22], wet * 0.9);
+        }
+    }
     alb = detailAlbedo(alb, p, n, mId);
     effAlbedo = alb;
     n = detailNormal(n, p, mId);
@@ -345,6 +358,34 @@ float splatReflectBed(vec3 pw, vec3 R)
     return -1.0;
 }
 
+// Simplified reflections: march the COARSE object volume (r8_snorm, 0.4 m
+// texels, ±1.26 m) along the reflected ray. It cannot recover object COLOUR —
+// only distance — so on a hit it returns a dim sky-tinted silhouette. This is
+// the out-of-screen complement to SSR: it lets a pit's water show that the
+// cabin/trees are reflected even when they are off-screen, at near-zero cost
+// (a handful of trilinear volume taps). Gated by render-flag bit 12; OFF keeps
+// the shipped terrain-only reflection bit-exact.
+vec3 splatReflectObjects(vec3 pw, vec3 R)
+{
+    if ((gRenderFlags & 4096) == 0)
+        return vec3(-1.0);
+    float t = 0.2;
+    for (int i = 0; i < 18; ++i) {
+        vec3 sp = pw + R * t;
+        float d = objDist(sp);            // metres, +kObjVolMax when empty
+        if (d < 0.15) {
+            // object silhouette: a dim, desaturated sky reflection reads as a
+            // shape without pretending the coarse volume carries real colour
+            vec3 tint = skyColor(normalize(R)) * vec3(0.32, 0.34, 0.33);
+            return tint;
+        }
+        t += clamp(d * 0.9, 0.2, 2.5);
+        if (t > 50.0)
+            break;
+    }
+    return vec3(-1.0);
+}
+
 // Animated ripple normal shared by every water path (same formula as the
 // SVO main's inline block) plus a fine chop layer for sun glitter.
 vec3 waterRippleN(vec3 p)
@@ -377,6 +418,9 @@ vec3 shadeWaterSplat(vec3 pw, vec3 rd, vec3 ro, float tWater, out float outA)
         float rth = splatReflectBed(pw, R);
         if (rth > 0.0)
             rc = shadeFloorSplat(pw + R * rth, R);
+        vec3 objR = splatReflectObjects(pw, R);
+        if (objR.x >= 0.0)
+            rc = mix(rc, objR, 0.45);
         vec3 skyT = skyColor(vec3(rd.x, abs(rd.y), rd.z));
         skyT *= vec3(0.55, 0.80, 0.85);
         col = mix(skyT, rc * mix(vec3(0.45,0.55,0.55), vec3(1.0), wsh), fres)
@@ -388,6 +432,9 @@ vec3 shadeWaterSplat(vec3 pw, vec3 rd, vec3 ro, float tWater, out float outA)
         float rth = splatReflectBed(pw, R);
         if (rth > 0.0)
             rc = shadeFloorSplat(pw + R * rth, R);
+        vec3 objR = splatReflectObjects(pw, R);
+        if (objR.x >= 0.0)
+            rc = mix(rc, objR, 0.45);
         col = mix(vec3(0.04,0.10,0.09), rc * mix(vec3(0.45,0.55,0.55), vec3(1.0), wsh), clamp(fres+0.25,0.0,1.0))
               + sunCol() * sunGlint * wsh;
     }
