@@ -17,6 +17,7 @@
 - [[entities/hud-sidebar]] — the single opaque, flush left editor panel with a vector-icon rail, one content pane under a `paneBand` header, fixed footer, and user-draggable horizontal splitter
 
 ### Concepts
+- [[concepts/3dgs-renderer]] — in-progress 3DGS/OIT composite backend (`--mode 3dgs`, F-cycle Splats→SVO→3DGS): edge-only weighted-blended transmittance composite T=Π(1-α) over a preserved base frame, three RGBA16F targets + a base copy, PASS_MODE 5 + `oit_composite.comp`; solid interiors byte-identical to `splat`, only ~0.3% silhouette pixels move; gated by `tests/dgs_check.py`
 - [[concepts/sidebar-ui-vocabulary]] — the sidebar's design system: tokens in `ui_types.hpp`, widgets in `ui_primitives.*` (paneBand / groupHeader / keyValue / hintLine / statusPill / controlRow), the six vector rail icons, the rule that the accent means STATE and never a label, and how to capture a panel with `VF_TEST_PANEL` + `VF_HUD_SHOT` (including the PPM's swapped R/B channels)
 - [[concepts/layer-placement]] — exact `.vxw` provenance and selected-layer placement: stable owner IDs, click activation, bounds-centered yaw/pitch/roll rings, canonical-pivot preview across forward/GPU-cull/tile paths
 - [[concepts/load-time-field-build]] — why every run/test pays ~17.6 s: the per-component padded-bbox EDT (72k components, 361M bbox cells ≈ 680× inflation), measured phase table + the batching fix to do next

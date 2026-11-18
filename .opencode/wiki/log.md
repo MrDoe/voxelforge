@@ -7230,3 +7230,23 @@ sidebar" entry appended TWICE, byte for byte (the one hard lint finding). The
 duplicate is now an amendment pointer to the canonical copy, so the timeline
 stays append-only.
 Pages: concepts/animation-studio-bone-editing.md
+
+## [2026-11-17] ingest | 3DGS edge-only OIT render mode
+Added an opt-in `--mode 3dgs` (alias `dgs`, F-cycle Splats→SVO→3DGS): a
+weighted-blended order-independent transmittance composite (T=Π(1-α)) over a
+preserved copy of the standard splat frame, so ONLY sparse-coverage silhouette
+pixels become translucent and solid interiors stay byte-identical. New
+RGBA16F targets (accum/reveal/backdrop/base), `PASS_MODE 5` writes premultiplied
+colour+alpha and alpha-to-reveal, `oit_composite.comp` mixes OIT into the base
+by `smoothstep(0.08,0.6,T)`. Verified on hero/house/water: interior diff 0.000-
+0.046/255, only 0.02-0.28% of pixels move, default splat/svo paths unchanged.
+`tests/dgs_check.py` registered as ctest `dgs_check` (label visual). Measured
+that kernel sweeps (sigma/extent) and photoreal FX do NOT bridge the remaining
+gap: the render still reads as stylized voxel geometry, not photographic.
+Page: concepts/3dgs-renderer.md
+
+## [2026-11-17] fix | fur sliders read mm, store metres — a typed "1" grew 1 m strands
+
+Also: test-fur passes (131s) after the fix; the fx is in src/app/ui/panel_render.cpp + run.cpp comment + wiki/concepts/fur-cards.md. Note test-app has an unrelated stale assertion (kPanelCount==6, now 7 with Panel::Animate) — left alone.
+
+## [2026-11-17] add | backlit fleece translucency — warm glow through the fringe when the sun is behind; VF_FUR_SSS, confined + reference frames bit-exact
