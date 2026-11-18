@@ -428,9 +428,22 @@ void main()
         float shB = ((gRenderFlags & 2) != 0 && dot(n, kSunDir) > 0.02) ? surfelBakedShadow(vShade.w) : 1.0;
         float aoB = ((gRenderFlags & 1) != 0) ? clamp(aoBaked, 0.0, 1.0) : 1.0;
         vec3 bentB = normalize(vShade.xyz);
-        vec3 albEff;  // the albedo shadeSurfel actually shaded with
-        col = shadeSurfel(q, rd, alb, rr, ro, nShade, bentB, shB, aoB, mId, vShade.w, vMat.w,
-                          albEff);
+        vec3 albEff = alb;  // the albedo shadeSurfel actually shaded with
+        if (PASS_MODE == 5) {
+            // Cheap colour for the --mode 3dgs OIT accumulation. This colour is
+            // only ever VISIBLE at sparse-coverage silhouette pixels: the
+            // composite picks the base frame wherever T~0 (solid interiors),
+            // which is >99% of pixels. Running the full shadeSurfel() below on
+            // all surfels meant 3 triplanar albedo fetches + a detail-normal
+            // Sobel + applyFlora + up to 16 point-light shadow marches + the
+            // sky-visibility march, nearly all of it thrown away. At a
+            // feathered edge over the opaque base, palette albedo with the
+            // baked sun shadow/AO is indistinguishable, so skip the integral.
+            col = alb * (0.45 + 0.55 * shB * aoB);
+        } else {
+            col = shadeSurfel(q, rd, alb, rr, ro, nShade, bentB, shB, aoB, mId, vShade.w, vMat.w,
+                              albEff);
+        }
         gAlbedo = albEff;
         gLight = col;  // captured HERE: the fog/mist composite below is a
                        // property of the atmosphere between eye and surface,
