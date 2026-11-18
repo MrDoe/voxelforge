@@ -91,7 +91,9 @@ int App::recordInteractiveFrame(FrameSync& fr, const FrameInputs& fx)
     updateBuriedProbe();
 
     // splat raster or ray-march -> HDR + G-buffer --------------------
-    if (m_renderMode == RenderMode::Splats) {
+    // Dgs shares the splat raster's G-buffer + depth + culled draw list; it
+    // then re-draws the surfels into the OIT targets and composites over HDR.
+    if (m_renderMode == RenderMode::Splats || m_renderMode == RenderMode::Dgs) {
         vf::transitionImage(fr.cmd, m_hdr.img, VK_IMAGE_ASPECT_COLOR_BIT,
                             VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_GENERAL,
                             VK_PIPELINE_STAGE_2_NONE, VK_ACCESS_2_NONE,
@@ -134,6 +136,73 @@ int App::recordInteractiveFrame(FrameSync& fr, const FrameInputs& fx)
                         VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
                         VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT);
     m_svoPass.record(fr.cmd, push);
+    }
+    // --mode 3dgs: accumulate all surfels (no depth rejection) into the OIT
+    // targets, then composite into m_hdr with transmittance. The standard
+    // record() above already filled the G-buffer + depth, which the FX chain
+    // and micro overlay still read.
+    if (m_renderMode == RenderMode::Dgs) {
+        const VkExtent2D shotExtent { m_offscreen.extent.width, m_offscreen.extent.height };
+        auto toAtt = [&](VkImage img) {
+            vf::transitionImage(fr.cmd, img, VK_IMAGE_ASPECT_COLOR_BIT,
+                                VK_IMAGE_LAYOUT_UNDEFINED,
+                                VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+                                VK_PIPELINE_STAGE_2_NONE, VK_ACCESS_2_NONE,
+                                VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT,
+                                VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT);
+        };
+        toAtt(m_oitAccum.img);
+        toAtt(m_oitReveal.img);
+        toAtt(m_oitBackdrop.img);
+        m_splatPass.recordOit(fr.cmd, push, shotExtent);
+        // OIT targets -> GENERAL for the composite's storage-image reads.
+        auto toStorage = [&](VkImage img) {
+            vf::transitionImage(fr.cmd, img, VK_IMAGE_ASPECT_COLOR_BIT,
+                                VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+                                VK_IMAGE_LAYOUT_GENERAL,
+                                VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT,
+                                VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT,
+                                VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
+                                VK_ACCESS_2_SHADER_STORAGE_READ_BIT);
+        };
+        toStorage(m_oitAccum.img);
+        toStorage(m_oitReveal.img);
+        toStorage(m_oitBackdrop.img);
+        // record() wrote m_hdr as a colour attachment. Copy it to m_oitBase so
+        // the composite can keep solid interiors pixel-identical to the shipped
+        // frame; the copy reads m_hdr and the composite overwrites it.
+        VkMemoryBarrier2 hb { VK_STRUCTURE_TYPE_MEMORY_BARRIER_2 };
+        hb.srcStageMask = VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT;
+        hb.srcAccessMask = VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT;
+        hb.dstStageMask = VK_PIPELINE_STAGE_2_TRANSFER_BIT |
+                          VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT;
+        hb.dstAccessMask = VK_ACCESS_2_TRANSFER_READ_BIT |
+                           VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT;
+        VkDependencyInfo hdi { VK_STRUCTURE_TYPE_DEPENDENCY_INFO };
+        hdi.memoryBarrierCount = 1;
+        hdi.pMemoryBarriers = &hb;
+        vkCmdPipelineBarrier2(fr.cmd, &hdi);
+        vf::transitionImage(fr.cmd, m_oitBase.img, VK_IMAGE_ASPECT_COLOR_BIT,
+                            VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_GENERAL,
+                            VK_PIPELINE_STAGE_2_NONE, VK_ACCESS_2_NONE,
+                            VK_PIPELINE_STAGE_2_TRANSFER_BIT,
+                            VK_ACCESS_2_TRANSFER_WRITE_BIT);
+        VkImageCopy ic {};
+        ic.srcSubresource = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1 };
+        ic.dstSubresource = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1 };
+        ic.extent = { shotExtent.width, shotExtent.height, 1 };
+        vkCmdCopyImage(fr.cmd, m_hdr.img, VK_IMAGE_LAYOUT_GENERAL,
+                       m_oitBase.img, VK_IMAGE_LAYOUT_GENERAL, 1, &ic);
+        VkMemoryBarrier2 cb { VK_STRUCTURE_TYPE_MEMORY_BARRIER_2 };
+        cb.srcStageMask = VK_PIPELINE_STAGE_2_TRANSFER_BIT;
+        cb.srcAccessMask = VK_ACCESS_2_TRANSFER_WRITE_BIT;
+        cb.dstStageMask = VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT;
+        cb.dstAccessMask = VK_ACCESS_2_SHADER_STORAGE_READ_BIT;
+        VkDependencyInfo cdi { VK_STRUCTURE_TYPE_DEPENDENCY_INFO };
+        cdi.memoryBarrierCount = 1;
+        cdi.pMemoryBarriers = &cb;
+        vkCmdPipelineBarrier2(fr.cmd, &cdi);
+        m_oitPass.record(fr.cmd, shotExtent.width, shotExtent.height);
     }
     profMark(1);
     // barrier: HDR/G-buffer written -> read by post pass
@@ -200,12 +269,24 @@ int App::recordInteractiveFrame(FrameSync& fr, const FrameInputs& fx)
                         VK_PIPELINE_STAGE_2_NONE, VK_ACCESS_2_NONE,
                         VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
                         VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT);
-    m_postPass.record(fr.cmd, push);
-    profMark(2);
-
-    // photorealism toggles (G/H/J/K/L) run here so they affect what you
-    // see; TAA resolves the effected image afterwards
-    recordPhotorealism(fr.cmd, push);
+    // See record_headless.cpp: one flag chooses the order, and post.comp's input
+    // is uHdr, so the linear path is a reorder rather than a second pipeline.
+    if (m_linearFx) {
+        // photorealism on the linear HDR target, then the tone map
+        recordPhotorealism(fr.cmd, push, true);
+        profMark(2);
+        if (m_autoExposure)
+            m_expoPass.record(fr.cmd, uint32_t(push.a.z), uint32_t(push.a.w), push);
+        m_postPass.record(fr.cmd, push);
+    } else {
+        if (m_autoExposure)
+            m_expoPass.record(fr.cmd, uint32_t(push.a.z), uint32_t(push.a.w), push);
+        m_postPass.record(fr.cmd, push);
+        profMark(2);
+        // photorealism toggles (G/H/J/K/L) run here so they affect what you
+        // see; TAA resolves the effected image afterwards
+        recordPhotorealism(fr.cmd, push);
+    }
     profMark(3);
 
     // TAA resolve (interactive only, not for headless tests) ----------

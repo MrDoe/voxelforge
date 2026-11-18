@@ -271,8 +271,12 @@ void main()
                 bent = R * bent;
             }
             const vec3 bentB = normalize(bent);
+            // The tile path is compute-driven and has no colour attachments to
+            // carry a guidance lane into, so the effective albedo is dropped
+            // here. Wiring it is part of bringing the tile path to parity.
+            vec3 albEff;
             col = shadeSurfel(q, rd, alb, rr, ro, n, bentB, shB, aoB, mId,
-                              s.bent_sh.w, s.mat_ao.w);
+                              s.bent_sh.w, s.mat_ao.w, albEff);
             const float fog = 1.0 - exp(-t * 0.0016);
             vec3 fc = fogColor(rd, q);
             const float mist = mistFactor(ro, q, t);

@@ -31,7 +31,7 @@ struct Args {
     bool sunSet=false;
     float animTime=0.0f;
     int tonemap = 2;    // AgX look: 0=Default 1=Golden 2=Punchy
-    std::string mode = "splat"; // primary renderer: "splat" | "svo" (reference)
+    std::string mode = "splat"; // primary renderer: "splat" | "svo" (reference) | "3dgs" (OIT)
     bool probeSet=false;
     glm::vec3 probe { 0.f };
     // --probe-surfel X Y Z (LATTICE cell): list the splats that make up that

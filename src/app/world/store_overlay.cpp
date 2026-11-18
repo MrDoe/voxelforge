@@ -58,7 +58,7 @@ void App::loadStoreOverlay()
         // exactly the region the edit touched — the same splice a live stamp
         // would have produced, so the restored frame matches the session.
         // (skipped in --mode svo: the splat backend has no surfel data)
-        if (m_renderMode == RenderMode::Splats) {
+        if (m_renderMode == RenderMode::Splats || m_renderMode == RenderMode::Dgs) {
             m_liveEditor.chunkSurfels(ci, sp); // seeds (GPU source or store fallback)
             int lo[3], hi[3];
             if (store.chunkEditBounds(ci, lo, hi)) {

@@ -254,9 +254,9 @@ bool uploadSubImage3D(const Context& ctx, Image3D& im, const void* data,
 }
 
 bool readbackImage2D(const Context& ctx, VkImage src, uint32_t w, uint32_t h,
-                     std::vector<uint8_t>& out)
+                     std::vector<uint8_t>& out, uint32_t bytesPerTexel)
 {
-    VkDeviceSize bytes = static_cast<VkDeviceSize>(w) * h * 4;
+    VkDeviceSize bytes = static_cast<VkDeviceSize>(w) * h * bytesPerTexel;
     out.resize(static_cast<size_t>(bytes));
 
     Buffer dst = makeBuffer(ctx, bytes, VK_BUFFER_USAGE_TRANSFER_DST_BIT,

@@ -37,6 +37,23 @@ VkShaderModule makeModule(VkDevice dev, const std::vector<uint8_t>& spirv)
     return mod;
 }
 
+// One colour-attachment slot, filled the way every G-buffer pass wants it: LOAD
+// (the sky seeds the image and each later pass overwrites what it covers) and
+// STORE (the value must survive the render scope for the post pass and the FX
+// chain). All three attachment sites use this so that growing the G-buffer is
+// one call per lane rather than ten copied struct literals per site: the bug
+// class it guards against is one site quietly left at three attachments while
+// the pipelines declare five, which Vulkan faults at draw time, not at
+// pipeline creation, and so escapes every build.
+void attachColour(VkRenderingAttachmentInfo& a, VkImageView view)
+{
+    a.sType = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO;
+    a.imageView = view;
+    a.imageLayout = VK_IMAGE_LAYOUT_GENERAL;
+    a.loadOp = VK_ATTACHMENT_LOAD_OP_LOAD;
+    a.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
+}
+
 } // namespace
 
 bool SplatPass::init(const Context& ctx)
@@ -499,9 +516,14 @@ bool SplatPass::createPipelines(VkFormat hdrFormat)
     };
     ms.rasterizationSamples = VK_SAMPLE_COUNT_1_BIT;
 
-    VkFormat colorFmts[3] = { hdrFormat, hdrFormat, hdrFormat };
+    // Five colour attachments: HDR, G-buffer position, G-buffer normal, then the
+    // two guidance lanes. They share the HDR target format deliberately, so the
+    // guidance values stay linear HDR like the colour they were consumed to
+    // produce — an 8-bit lane would re-quantise exactly the material response
+    // it exists to preserve.
+    VkFormat colorFmts[5] = { hdrFormat, hdrFormat, hdrFormat, hdrFormat, hdrFormat };
     VkPipelineRenderingCreateInfo prc { VK_STRUCTURE_TYPE_PIPELINE_RENDERING_CREATE_INFO };
-    prc.colorAttachmentCount = 3;
+    prc.colorAttachmentCount = 5;
     prc.pColorAttachmentFormats = colorFmts;
 
     VkDynamicState dyn[] = { VK_DYNAMIC_STATE_VIEWPORT, VK_DYNAMIC_STATE_SCISSOR,
@@ -524,7 +546,8 @@ bool SplatPass::createPipelines(VkFormat hdrFormat)
     auto makePipe = [&](int skyMode, int passMode, bool depthTest,
                         bool depthWrite, VkCompareOp depthOp, bool blend,
                         bool depthBias, bool colorWrite,
-                        VkFormat depthFmt, VkPipeline* out) {
+                        VkFormat depthFmt, VkPipeline* out,
+                        bool stencilCount = false, bool stencilSeal = false) {
         VkSpecializationMapEntry entries[2] = { { 0, 0, sizeof(int32_t) },
                                                 { 1, sizeof(int32_t), sizeof(int32_t) } };
         int32_t specData[2] = { skyMode, passMode };
@@ -540,8 +563,43 @@ bool SplatPass::createPipelines(VkFormat hdrFormat)
         ds.depthWriteEnable = depthWrite ? VK_TRUE : VK_FALSE;
         ds.depthCompareOp = depthOp;
         ds.stencilTestEnable = VK_FALSE;
+        if (stencilCount) {
+            // Every disk that survives the fragment's d2 discard increments the
+            // stencil byte. Depth test is ALWAYS in this pipe and depth writes
+            // are off, so this counts COVERAGE, not the nearest-surface race
+            // the real depth prepass resolves. INCR_WRAP cannot get stuck at a
+            // saturated value: even 300 overlapping grass disks wrap around
+            // harmlessly, and all we ask later is "is this > 1?".
+            ds.stencilTestEnable = VK_TRUE;
+            VkStencilOpState op {};
+            op.failOp = VK_STENCIL_OP_KEEP;
+            op.passOp = VK_STENCIL_OP_INCREMENT_AND_WRAP;
+            op.depthFailOp = VK_STENCIL_OP_KEEP;
+            op.compareOp = VK_COMPARE_OP_ALWAYS;
+            op.compareMask = 0xFF;
+            op.writeMask = 0xFF;
+            op.reference = 0;
+            ds.front = op;
+            ds.back = op;
+        } else if (stencilSeal) {
+            // The opaque base seal is only allowed where >= 2 disks cover the
+            // pixel. Interior surfaces keep their opaque replacement (and the
+            // depth band's reference), while a lone disk at the silhouette is
+            // left translucent for the band pass to composite over the sky.
+            ds.stencilTestEnable = VK_TRUE;
+            VkStencilOpState op {};
+            op.failOp = VK_STENCIL_OP_KEEP;
+            op.passOp = VK_STENCIL_OP_KEEP;
+            op.depthFailOp = VK_STENCIL_OP_KEEP;
+            op.compareOp = VK_COMPARE_OP_GREATER;
+            op.compareMask = 0xFF;
+            op.writeMask = 0x00;  // read-only: do not disturb the count
+            op.reference = 8;  // probe value; tune against interior bleed
+            ds.front = op;
+            ds.back = op;
+        }
 
-        VkPipelineColorBlendAttachmentState cba[3] = {};
+        VkPipelineColorBlendAttachmentState cba[5] = {};
         const VkColorComponentFlags mask =
             colorWrite ? (VK_COLOR_COMPONENT_R_BIT | VK_COLOR_COMPONENT_G_BIT |
                           VK_COLOR_COMPONENT_B_BIT | VK_COLOR_COMPONENT_A_BIT)
@@ -549,9 +607,12 @@ bool SplatPass::createPipelines(VkFormat hdrFormat)
         cba[0].colorWriteMask = mask;
         cba[1].colorWriteMask = mask;
         cba[2].colorWriteMask = mask;
+        cba[3].colorWriteMask = mask;
+        cba[4].colorWriteMask = mask;
         // att0 (HDR): source-over for the translucent Gaussian/water paths.
-        // att1 (G-buffer world pos) and att2 (G-buffer shading normal) must
-        // never blend.
+        // att1 (G-buffer world pos), att2 (G-buffer shading normal), att3
+        // (albedo/roughness) and att4 (lighting/reflectance) must never blend:
+        // a material is not something you interpolate between two surfaces.
         cba[0].blendEnable = blend ? VK_TRUE : VK_FALSE;
         cba[0].srcColorBlendFactor = VK_BLEND_FACTOR_SRC_ALPHA;
         cba[0].dstColorBlendFactor = VK_BLEND_FACTOR_ONE_MINUS_SRC_ALPHA;
@@ -562,7 +623,7 @@ bool SplatPass::createPipelines(VkFormat hdrFormat)
         VkPipelineColorBlendStateCreateInfo cb {
             VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO
         };
-        cb.attachmentCount = 3;
+        cb.attachmentCount = 5;
         cb.pAttachments = cba;
 
         VkPipelineRenderingCreateInfo lprc = prc;
@@ -612,7 +673,98 @@ bool SplatPass::createPipelines(VkFormat hdrFormat)
         // Depth-only prepass (PASS_MODE=3): full-disk nearest plane depth
         // (fixed-function depth, no colour outputs).
         makePipe(0, 3, true, true, VK_COMPARE_OP_LESS, false,
-                 false, false, kDepthFmt, &m_prepassPipe);
+                 false, false, kDepthFmt, &m_prepassPipe) &&
+        // Coverage count: the SAME depth-only shader, but with depth ALWAYS and
+        // no depth write, so every disk that survives the d2 discard increments
+        // the stencil byte. This is the missing measurement that the old
+        // sealAlpha heuristic was guessing at: it could only see the single
+        // nearest fragment, so it darkened interiors to get soft silhouettes.
+        makePipe(0, 3, true, false, VK_COMPARE_OP_ALWAYS, false,
+                 false, false, kDepthFmt, &m_coveragePipe, true, false) &&
+        // Base seal, but only where >= 2 disks cover the pixel: interiors keep
+        // their opaque replacement, lone silhouette disks stay transparent.
+        makePipe(0, 4, true, false, VK_COMPARE_OP_EQUAL, false,
+                 false, true, kDepthFmt, &m_opaqueBaseCovPipe, false, true);
+
+    // --mode 3dgs OIT pipelines. Same shader + descriptor layout, but a
+    // different render-target contract:
+    //   sky -> one attachment (the backdrop), no blend, no depth;
+    //   splats -> attachment 0 sums premultiplied (colour*alpha, alpha),
+    //             attachment 1 multiplies the destination by (1-alpha).
+    // No depth test anywhere: every overlapping splat is shaded, which is how
+    // a low-alpha front splat can reveal the ones behind it.
+    auto makeOitPipe = [&](int skyMode, int passMode, bool isSky, VkPipeline* out) {
+        VkSpecializationMapEntry entries[2] = { { 0, 0, sizeof(int32_t) },
+                                                { 1, sizeof(int32_t), sizeof(int32_t) } };
+        int32_t specData[2] = { skyMode, passMode };
+        VkSpecializationInfo spec { 2, entries, sizeof(specData), &specData };
+        VkPipelineShaderStageCreateInfo st[2] = { stages[0], stages[1] };
+        st[0].pSpecializationInfo = &spec;
+        st[1].pSpecializationInfo = &spec;
+
+        VkPipelineDepthStencilStateCreateInfo ds {
+            VK_STRUCTURE_TYPE_PIPELINE_DEPTH_STENCIL_STATE_CREATE_INFO
+        };
+        ds.depthTestEnable = VK_FALSE;
+        ds.depthWriteEnable = VK_FALSE;
+        ds.stencilTestEnable = VK_FALSE;
+
+        const uint32_t nAtt = isSky ? 1u : 2u;
+        VkFormat fmts[2] = { hdrFormat, hdrFormat };
+        VkPipelineRenderingCreateInfo poit { VK_STRUCTURE_TYPE_PIPELINE_RENDERING_CREATE_INFO };
+        poit.colorAttachmentCount = nAtt;
+        poit.pColorAttachmentFormats = fmts;
+
+        VkPipelineColorBlendAttachmentState cba[2] = {};
+        for (uint32_t i = 0; i < nAtt; ++i)
+            cba[i].colorWriteMask = VK_COLOR_COMPONENT_R_BIT | VK_COLOR_COMPONENT_G_BIT |
+                                    VK_COLOR_COMPONENT_B_BIT | VK_COLOR_COMPONENT_A_BIT;
+        if (!isSky) {
+            // att0: additive premultiplied colour + alpha (Σc*a, Σa).
+            cba[0].blendEnable = VK_TRUE;
+            cba[0].srcColorBlendFactor = VK_BLEND_FACTOR_ONE;
+            cba[0].dstColorBlendFactor = VK_BLEND_FACTOR_ONE;
+            cba[0].colorBlendOp = VK_BLEND_OP_ADD;
+            cba[0].srcAlphaBlendFactor = VK_BLEND_FACTOR_ONE;
+            cba[0].dstAlphaBlendFactor = VK_BLEND_FACTOR_ONE;
+            cba[0].alphaBlendOp = VK_BLEND_OP_ADD;
+            // att1: reveal *= (1-alpha). The fragment writes alpha to all
+            // channels; ZERO src + ONE_MINUS_SRC_COLOR dst gives dst*(1-src).
+            cba[1].blendEnable = VK_TRUE;
+            cba[1].srcColorBlendFactor = VK_BLEND_FACTOR_ZERO;
+            cba[1].dstColorBlendFactor = VK_BLEND_FACTOR_ONE_MINUS_SRC_COLOR;
+            cba[1].colorBlendOp = VK_BLEND_OP_ADD;
+            cba[1].srcAlphaBlendFactor = VK_BLEND_FACTOR_ZERO;
+            cba[1].dstAlphaBlendFactor = VK_BLEND_FACTOR_ONE_MINUS_SRC_ALPHA;
+            cba[1].alphaBlendOp = VK_BLEND_OP_ADD;
+        }
+        VkPipelineColorBlendStateCreateInfo cb {
+            VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO
+        };
+        cb.attachmentCount = nAtt;
+        cb.pAttachments = cba;
+
+        VkPipelineRasterizationStateCreateInfo rp = rs;
+        rp.depthBiasEnable = VK_FALSE;
+        VkGraphicsPipelineCreateInfo gpi { VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO };
+        gpi.pNext = &poit;
+        gpi.stageCount = 2;
+        gpi.pStages = st;
+        gpi.pVertexInputState = &vi;
+        gpi.pInputAssemblyState = &ia;
+        gpi.pViewportState = &vp;
+        gpi.pRasterizationState = &rp;
+        gpi.pMultisampleState = &ms;
+        gpi.pDepthStencilState = &ds;
+        gpi.pColorBlendState = &cb;
+        gpi.pDynamicState = &dy;
+        gpi.layout = m_layout;
+        return vkCreateGraphicsPipelines(dev, VK_NULL_HANDLE, 1, &gpi, nullptr, out) ==
+               VK_SUCCESS;
+    };
+    ok = ok &&
+         makeOitPipe(1, 0, true, &m_oitSkyPipe) &&
+         makeOitPipe(0, 5, false, &m_oitPipe);
     vkDestroyShaderModule(dev, vsm, nullptr);
     vkDestroyShaderModule(dev, fsm, nullptr);
     if (!ok)
@@ -1291,26 +1443,16 @@ void SplatPass::recordTile(VkCommandBuffer cmd, const RaymarchPush& push,
     // sky first (same fullscreen triangle as the forward path; the tile
     // pass initializes per-pixel state from the settled sky)
     {
-        VkRenderingAttachmentInfo colors[3] = {};
-        colors[0].sType = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO;
-        colors[0].imageView = m_hdrView;
-        colors[0].imageLayout = VK_IMAGE_LAYOUT_GENERAL;
-        colors[0].loadOp = VK_ATTACHMENT_LOAD_OP_LOAD;
-        colors[0].storeOp = VK_ATTACHMENT_STORE_OP_STORE;
-        colors[1].sType = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO;
-        colors[1].imageView = m_gposView;
-        colors[1].imageLayout = VK_IMAGE_LAYOUT_GENERAL;
-        colors[1].loadOp = VK_ATTACHMENT_LOAD_OP_LOAD;
-        colors[1].storeOp = VK_ATTACHMENT_STORE_OP_STORE;
-        colors[2].sType = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO;
-        colors[2].imageView = m_gnormView;
-        colors[2].imageLayout = VK_IMAGE_LAYOUT_GENERAL;
-        colors[2].loadOp = VK_ATTACHMENT_LOAD_OP_LOAD;
-        colors[2].storeOp = VK_ATTACHMENT_STORE_OP_STORE;
+        VkRenderingAttachmentInfo colors[5] = {};
+        attachColour(colors[0], m_hdrView);
+        attachColour(colors[1], m_gposView);
+        attachColour(colors[2], m_gnormView);
+        attachColour(colors[3], m_galbView);
+        attachColour(colors[4], m_gmatView);
         VkRenderingInfo ri { VK_STRUCTURE_TYPE_RENDERING_INFO };
         ri.renderArea = { { 0, 0 }, extent };
         ri.layerCount = 1;
-        ri.colorAttachmentCount = 3;
+        ri.colorAttachmentCount = 5;
         ri.pColorAttachments = colors;
         vkCmdBeginRendering(cmd, &ri);
         VkViewport vp { 0.0f, 0.0f, float(extent.width), float(extent.height),
@@ -1543,7 +1685,8 @@ bool SplatPass::recreateDepth(uint32_t w, uint32_t h)
 }
 
 void SplatPass::updateDescriptors(VkImageView hdrView, VkImageView gposView,
-                                  VkImageView gnormView, VkImageView heightView,
+                                  VkImageView gnormView, VkImageView galbView,
+                                  VkImageView gmatView, VkImageView heightView,
                                   VkImageView objVolView)
 {
     if (!m_set || !m_ctx)
@@ -1551,6 +1694,10 @@ void SplatPass::updateDescriptors(VkImageView hdrView, VkImageView gposView,
     m_hdrView = hdrView;
     m_gposView = gposView;
     m_gnormView = gnormView;
+    // Attachments, not descriptors: the guidance lanes are colour targets of the
+    // same raster passes, so they only need to be remembered for record().
+    m_galbView = galbView;
+    m_gmatView = gmatView;
     m_heightView = heightView;
     m_objVolView = objVolView;
     VkDescriptorImageInfo hi { VK_NULL_HANDLE, heightView, VK_IMAGE_LAYOUT_GENERAL };
@@ -1686,6 +1833,8 @@ void SplatPass::refreshEnvCache()
         m_env.edgeStart = glm::clamp(float(atof(e)), 0.0f, 0.999f);
     if (const char* e = getenv("VF_SPLAT_SEAL_ALPHA"))
         m_env.sealAlpha = glm::clamp(float(atof(e)), 0.0f, 1.0f);
+    if (const char* e = getenv("VF_OIT_WEIGHT"))
+        m_env.oitWeight = glm::clamp(float(atof(e)), 0.0f, 2.0f);
     if (const char* e = getenv("VF_TILE"))
         m_env.tile = atoi(e) != 0;
     m_drawScratch.reserve(1024);
@@ -1926,10 +2075,11 @@ void SplatPass::record(VkCommandBuffer cmd, const RaymarchPush& push, VkExtent2D
     // cleared in both render scopes, and recreateDepth's comment names this
     // exact use ("stencil to tell interior rims apart from silhouette rims").
     float sealAlpha = m_env.sealAlpha >= 0.0f ? m_env.sealAlpha : 0.0f;
+    float oitWeight = m_env.oitWeight >= 0.0f ? m_env.oitWeight : 0.02f;
     if (m_paramsBuf.mapped) {
         glm::vec4 words[3] = { params,
                                glm::vec4(m_radiusScale, opacity, depthTol, edgeStart),
-                               glm::vec4(sealAlpha, 0.0f, 0.0f, 0.0f) };
+                               glm::vec4(sealAlpha, oitWeight, 0.0f, 0.0f) };
         memcpy(m_paramsBuf.mapped, words, sizeof(words));
     }
     // brush hover preview feed (fragment tint of the splats the edit brush
@@ -2029,28 +2179,81 @@ void SplatPass::record(VkCommandBuffer cmd, const RaymarchPush& push, VkExtent2D
                                  VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
                                  VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT);
         }
+        // === STENCIL COVERAGE COUNT (opt-in) ===
+        // Same depth-only shader as the prepass, but depth ALWAYS with no depth
+        // write: every disk that survives its d2 discard increments the stencil
+        // byte. This is the measurement the old sealAlpha heuristic could only
+        // guess at from the nearest fragment — it gives the base pass a real
+        // "how many disks cover this pixel?" answer, so interiors stay sealed
+        // while a lone disk at a silhouette can be translucent.
+        if (m_coverage && nDraws > 0) {
+            static bool s_loggedCoverage = false;
+            if (!s_loggedCoverage) {
+                spdlog::info("splat: coverage pass dispatched ({} draws)", nDraws);
+                s_loggedCoverage = true;
+            }
+            VkRenderingAttachmentInfo cv[5] = {};
+            attachColour(cv[0], m_hdrView);
+            attachColour(cv[1], m_gposView);
+            attachColour(cv[2], m_gnormView);
+            attachColour(cv[3], m_galbView);
+            attachColour(cv[4], m_gmatView);
+            VkRenderingAttachmentInfo cdp { VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO };
+            cdp.imageView = m_depth.view;
+            cdp.imageLayout = VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL;
+            // One loadOp covers BOTH depth and stencil in dynamic rendering on
+            // this SDK: the coverage pass clears both, so the prepass can load
+            // them and keep the count while still starting from depth = 1.
+            cdp.loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;
+            cdp.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
+            cdp.clearValue.depthStencil = { 1.0f, 0 };
+            VkRenderingInfo cri { VK_STRUCTURE_TYPE_RENDERING_INFO };
+            cri.renderArea = { { 0, 0 }, extent };
+            cri.layerCount = 1;
+            cri.colorAttachmentCount = 5;
+            cri.pColorAttachments = cv;
+            cri.pDepthAttachment = &cdp;
+            cri.pStencilAttachment = &cdp;
+            vkCmdBeginRendering(cmd, &cri);
+            VkViewport cvp { 0.0f, 0.0f, float(extent.width), float(extent.height),
+                             0.0f, 1.0f };
+            VkRect2D csc { { 0, 0 }, extent };
+            vkCmdSetViewport(cmd, 0, 1, &cvp);
+            vkCmdSetScissor(cmd, 0, 1, &csc);
+            vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, m_layout, 0, 1,
+                                    &m_set, 0, nullptr);
+            vkCmdPushConstants(cmd, m_layout,
+                               VkShaderStageFlags(VK_SHADER_STAGE_VERTEX_BIT |
+                                                  VK_SHADER_STAGE_FRAGMENT_BIT),
+                               0, sizeof(push), &push);
+            vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, m_coveragePipe);
+            if (direct) {
+                for (uint32_t i = 0; i < nDraws; ++i) {
+                    const auto& d = m_cpuDraws[i];
+                    vkCmdDraw(cmd, d.vertexCount, d.instanceCount, d.firstVertex,
+                              d.firstInstance);
+                }
+            } else {
+                vkCmdDrawIndirect(cmd, m_drawCmds[m_cmdSlot].buf, 0, nDraws, stride);
+            }
+            vkCmdEndRendering(cmd);
+        }
         // === PREPASS: depth-only full disks ===
         {
-            VkRenderingAttachmentInfo colrs[3] = {};
-            colrs[0].sType = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO;
-            colrs[0].imageView = m_hdrView;
-            colrs[0].imageLayout = VK_IMAGE_LAYOUT_GENERAL;
-            colrs[0].loadOp = VK_ATTACHMENT_LOAD_OP_LOAD;
-            colrs[0].storeOp = VK_ATTACHMENT_STORE_OP_STORE;
-            colrs[1].sType = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO;
-            colrs[1].imageView = m_gposView;
-            colrs[1].imageLayout = VK_IMAGE_LAYOUT_GENERAL;
-            colrs[1].loadOp = VK_ATTACHMENT_LOAD_OP_LOAD;
-            colrs[1].storeOp = VK_ATTACHMENT_STORE_OP_STORE;
-            colrs[2].sType = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO;
-            colrs[2].imageView = m_gnormView;
-            colrs[2].imageLayout = VK_IMAGE_LAYOUT_GENERAL;
-            colrs[2].loadOp = VK_ATTACHMENT_LOAD_OP_LOAD;
-            colrs[2].storeOp = VK_ATTACHMENT_STORE_OP_STORE;
+            VkRenderingAttachmentInfo colrs[5] = {};
+            attachColour(colrs[0], m_hdrView);
+            attachColour(colrs[1], m_gposView);
+            attachColour(colrs[2], m_gnormView);
+            attachColour(colrs[3], m_galbView);
+            attachColour(colrs[4], m_gmatView);
             VkRenderingAttachmentInfo dp { VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO };
             dp.imageView = m_depth.view;
             dp.imageLayout = VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL;
-            dp.loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;
+            // LOAD when the coverage pass ran: it cleared depth to 1 and never
+            // wrote it, and the stencil byte holds the disk count the base seal
+            // needs. CLEAR otherwise, as the historical path did.
+            dp.loadOp = m_coverage ? VK_ATTACHMENT_LOAD_OP_LOAD
+                                   : VK_ATTACHMENT_LOAD_OP_CLEAR;
             // STORE: the opaque/water passes LOAD this depth for the resolve
             // test, so the prepass result must survive the render scope.
             dp.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
@@ -2058,7 +2261,7 @@ void SplatPass::record(VkCommandBuffer cmd, const RaymarchPush& push, VkExtent2D
             VkRenderingInfo ri { VK_STRUCTURE_TYPE_RENDERING_INFO };
             ri.renderArea = { { 0, 0 }, extent };
             ri.layerCount = 1;
-            ri.colorAttachmentCount = 3;
+            ri.colorAttachmentCount = 5;
             ri.pColorAttachments = colrs;
             ri.pDepthAttachment = &dp;
             ri.pStencilAttachment = &dp;
@@ -2228,22 +2431,12 @@ void SplatPass::record(VkCommandBuffer cmd, const RaymarchPush& push, VkExtent2D
         vkCmdPipelineBarrier2(cmd, &di);
     }
 
-    VkRenderingAttachmentInfo colors[3] = {};
-    colors[0].sType = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO;
-    colors[0].imageView = m_hdrView;
-    colors[0].imageLayout = VK_IMAGE_LAYOUT_GENERAL;
-    colors[0].loadOp = VK_ATTACHMENT_LOAD_OP_LOAD;
-    colors[0].storeOp = VK_ATTACHMENT_STORE_OP_STORE;
-    colors[1].sType = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO;
-    colors[1].imageView = m_gposView;
-    colors[1].imageLayout = VK_IMAGE_LAYOUT_GENERAL;
-    colors[1].loadOp = VK_ATTACHMENT_LOAD_OP_LOAD;
-    colors[1].storeOp = VK_ATTACHMENT_STORE_OP_STORE;
-    colors[2].sType = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO;
-    colors[2].imageView = m_gnormView;
-    colors[2].imageLayout = VK_IMAGE_LAYOUT_GENERAL;
-    colors[2].loadOp = VK_ATTACHMENT_LOAD_OP_LOAD;
-    colors[2].storeOp = VK_ATTACHMENT_STORE_OP_STORE;
+    VkRenderingAttachmentInfo colors[5] = {};
+    attachColour(colors[0], m_hdrView);
+    attachColour(colors[1], m_gposView);
+    attachColour(colors[2], m_gnormView);
+    attachColour(colors[3], m_galbView);
+    attachColour(colors[4], m_gmatView);
     VkRenderingAttachmentInfo depth { VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO };
     depth.imageView = m_depth.view;
     depth.imageLayout = VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL;
@@ -2257,7 +2450,7 @@ void SplatPass::record(VkCommandBuffer cmd, const RaymarchPush& push, VkExtent2D
     VkRenderingInfo ri { VK_STRUCTURE_TYPE_RENDERING_INFO };
     ri.renderArea = { { 0, 0 }, extent };
     ri.layerCount = 1;
-    ri.colorAttachmentCount = 3;
+    ri.colorAttachmentCount = 5;
     ri.pColorAttachments = colors;
     ri.pDepthAttachment = &depth;
     ri.pStencilAttachment = &depth;
@@ -2330,7 +2523,7 @@ void SplatPass::record(VkCommandBuffer cmd, const RaymarchPush& push, VkExtent2D
             memcpy(wdst, m_cpuWaterDraws.data(), m_cpuWaterDraws.size() * stride);
     }
     if (nDraws > 0) {
-        drawOpaque(m_opaqueBasePipe, 0);
+        drawOpaque(m_coverage ? m_opaqueBaseCovPipe : m_opaqueBasePipe, 0);
         // Front-surface depth band: pull the band fragments toward the camera
         // by depthTol via the dynamic rasterizer depth bias. The shader no
         // longer writes gl_FragDepth, so early-Z rejects everything farther
@@ -2354,6 +2547,80 @@ void SplatPass::record(VkCommandBuffer cmd, const RaymarchPush& push, VkExtent2D
     }
     m_cmdSlot = (m_cmdSlot + 1) % 3;
 
+    vkCmdEndRendering(cmd);
+}
+
+void SplatPass::recordOit(VkCommandBuffer cmd, const RaymarchPush& push, VkExtent2D extent)
+{
+    if (!m_oitPipe || !m_oitSkyPipe || !m_accumView || !m_revealView || !m_backdropView)
+        return;
+    // Called AFTER record() this frame, which already ran computeDraws(), the
+    // GPU cull and filled m_cpuDraws/m_cpuWaterDraws. We draw from the CPU draw
+    // list directly (not the compacted indirect stream): OIT shades every
+    // overlapping splat anyway, so ignoring the cull's instance compaction
+    // costs a little vertex work but keeps this pass independent of the
+    // rotating indirect command slots.
+    const VkViewport vp { 0.0f, 0.0f, float(extent.width), float(extent.height), 0.0f, 1.0f };
+    const VkRect2D sc { { 0, 0 }, extent };
+
+    // ---- Scope A: sky -> backdrop (one attachment, opaque, no depth) ----
+    VkRenderingAttachmentInfo skyColor { VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO };
+    skyColor.imageView = m_backdropView;
+    skyColor.imageLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+    skyColor.loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;
+    skyColor.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
+    skyColor.clearValue.color = { 0.0f, 0.0f, 0.0f, 0.0f };
+    VkRenderingInfo skyRi { VK_STRUCTURE_TYPE_RENDERING_INFO };
+    skyRi.renderArea = { { 0, 0 }, extent };
+    skyRi.layerCount = 1;
+    skyRi.colorAttachmentCount = 1;
+    skyRi.pColorAttachments = &skyColor;
+    vkCmdBeginRendering(cmd, &skyRi);
+    vkCmdSetViewport(cmd, 0, 1, &vp);
+    vkCmdSetScissor(cmd, 0, 1, &sc);
+    vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, m_layout, 0, 1, &m_set,
+                            0, nullptr);
+    vkCmdPushConstants(cmd, m_layout,
+                       VkShaderStageFlags(VK_SHADER_STAGE_VERTEX_BIT |
+                                          VK_SHADER_STAGE_FRAGMENT_BIT),
+                       0, sizeof(push), &push);
+    vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, m_oitSkyPipe);
+    vkCmdDraw(cmd, 3, 1, 0, 0);
+    vkCmdEndRendering(cmd);
+
+    // ---- Scope B: OIT accumulation (premultiplied colour + alpha, reveal) ----
+    VkRenderingAttachmentInfo acc[2] = {};
+    attachColour(acc[0], m_accumView);
+    acc[0].imageLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+    acc[0].loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;
+    acc[0].storeOp = VK_ATTACHMENT_STORE_OP_STORE;
+    acc[0].clearValue.color = { 0.0f, 0.0f, 0.0f, 0.0f };
+    attachColour(acc[1], m_revealView);
+    acc[1].imageLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+    acc[1].loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;
+    acc[1].storeOp = VK_ATTACHMENT_STORE_OP_STORE;
+    // Reveal starts fully transparent-to-the-stack: Π(1-α) = 1.
+    acc[1].clearValue.color = { 1.0f, 1.0f, 1.0f, 1.0f };
+    VkRenderingInfo accRi { VK_STRUCTURE_TYPE_RENDERING_INFO };
+    accRi.renderArea = { { 0, 0 }, extent };
+    accRi.layerCount = 1;
+    accRi.colorAttachmentCount = 2;
+    accRi.pColorAttachments = acc;
+    vkCmdBeginRendering(cmd, &accRi);
+    vkCmdSetViewport(cmd, 0, 1, &vp);
+    vkCmdSetScissor(cmd, 0, 1, &sc);
+    vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, m_layout, 0, 1, &m_set,
+                            0, nullptr);
+    vkCmdPushConstants(cmd, m_layout,
+                       VkShaderStageFlags(VK_SHADER_STAGE_VERTEX_BIT |
+                                          VK_SHADER_STAGE_FRAGMENT_BIT),
+                       0, sizeof(push), &push);
+    vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, m_oitPipe);
+    for (const auto& d : m_cpuDraws)
+        vkCmdDraw(cmd, d.vertexCount, d.instanceCount, d.firstVertex, d.firstInstance);
+    if (!m_env.noWater)
+        for (const auto& d : m_cpuWaterDraws)
+            vkCmdDraw(cmd, d.vertexCount, d.instanceCount, d.firstVertex, d.firstInstance);
     vkCmdEndRendering(cmd);
 }
 
@@ -2395,6 +2662,14 @@ void SplatPass::destroy()
         vkDestroyPipeline(dev, m_cullPipe, nullptr);
     if (m_prepassPipe)
         vkDestroyPipeline(dev, m_prepassPipe, nullptr);
+    if (m_coveragePipe)
+        vkDestroyPipeline(dev, m_coveragePipe, nullptr);
+    if (m_opaqueBaseCovPipe)
+        vkDestroyPipeline(dev, m_opaqueBaseCovPipe, nullptr);
+    if (m_oitSkyPipe)
+        vkDestroyPipeline(dev, m_oitSkyPipe, nullptr);
+    if (m_oitPipe)
+        vkDestroyPipeline(dev, m_oitPipe, nullptr);
     if (m_compactBuf.buf)
         destroyBuffer(*m_ctx, m_compactBuf);
     for (auto& c : m_selBufs)
@@ -2455,6 +2730,9 @@ void SplatPass::destroy()
     m_setLayout = VK_NULL_HANDLE;
     m_layout = VK_NULL_HANDLE;
     m_skyPipe = m_opaqueBasePipe = m_opaquePipe = m_waterPipe = VK_NULL_HANDLE;
+    m_prepassPipe = m_coveragePipe = m_opaqueBaseCovPipe = VK_NULL_HANDLE;
+    m_oitSkyPipe = m_oitPipe = VK_NULL_HANDLE;
+    m_accumView = m_revealView = m_backdropView = VK_NULL_HANDLE;
 }
 
 } // namespace vf

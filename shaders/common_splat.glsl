@@ -151,14 +151,26 @@ vec3 splatHeightNormal(vec3 p)
 }
 
 // Surfel shading: shadeTerrain's exact twin, but the normal comes from the
-// surfel (already smooth) and sun shadow + bent AO are baked per-surfel on
+// surfel (already smooth) and sun shadow + baked AO are baked per-surfel on
 // the CPU from the exact oracle (zero march cost per fragment); the flora
 // shadow re-evaluation reuses the baked value.
+//
+// `effAlbedo` returns the albedo this surface ACTUALLY has. It is not a
+// convenience: the caller's `alb` is still the bare palette colour at the call
+// site, because the triplanar photo sample happens on the line below, so
+// nothing outside this function can observe the material colour the shading
+// used. A guidance buffer (see `oGAlb` in splat.frag) needs exactly that value,
+// and re-deriving it at the call site would grow a second copy of the
+// slot/override rule — the same divergence the live-edit surfel parity note
+// forbids for normals. Captured AFTER detailAlbedo (the material colour the
+// photo binds) and BEFORE applyFlora (which tints for shading, not for
+// material identity).
 vec3 shadeSurfel(vec3 p, vec3 rd, vec3 alb, vec2 rr, vec3 ro, vec3 n,
                  vec3 bent, float sh, float ao, uint mId, float shRaw,
-                 float packedAo)
+                 float packedAo, out vec3 effAlbedo)
 {
     alb = detailAlbedo(alb, p, n, mId);
+    effAlbedo = alb;
     n = detailNormal(n, p, mId);
     applyFlora(p, rd, ro, mId, true, sh, alb, n, sh, ao);
 

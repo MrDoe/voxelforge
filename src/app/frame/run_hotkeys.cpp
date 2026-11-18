@@ -132,10 +132,17 @@ void App::handleHotkeys(bool textCaptures, bool headlessRun)
             spdlog::info("tonemap look -> {}", m_tonemapLook);
         }
         if (edge(GLFW_KEY_F, hw)) {
-            m_renderMode = (m_renderMode == RenderMode::Splats) ? RenderMode::Svo
-                                                                : RenderMode::Splats;
+            // Splats -> SVO -> 3DGS -> Splats. The OIT mode is opt-in but once
+            // entered via F it behaves like a normal render mode.
+            if (m_renderMode == RenderMode::Splats)
+                m_renderMode = RenderMode::Svo;
+            else if (m_renderMode == RenderMode::Svo)
+                m_renderMode = RenderMode::Dgs;
+            else
+                m_renderMode = RenderMode::Splats;
             spdlog::info("render mode -> {}",
-                         m_renderMode == RenderMode::Splats ? "splats" : "svo");
+                         m_renderMode == RenderMode::Splats ? "splats"
+                         : m_renderMode == RenderMode::Svo ? "svo" : "3dgs (OIT)");
         }
         if (edge(GLFW_KEY_N, hw)) {
             m_taaEnabled = !m_taaEnabled;

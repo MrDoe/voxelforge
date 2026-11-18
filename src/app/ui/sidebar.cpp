@@ -221,7 +221,8 @@ void App::drawSidebarFooter()
 {
     ImGui::Separator();
     const float w = ImGui::GetContentRegionAvail().x;
-    const char* mode = m_renderMode == RenderMode::Splats ? "SPLAT" : "SVO";
+    const char* mode = m_renderMode == RenderMode::Splats ? "SPLAT"
+                     : m_renderMode == RenderMode::Svo ? "SVO" : "3DGS";
 
     if (w < 90.0f) {                       // rail-only sidebar
         ImGui::Text("%.0f", m_lastFrameMs);

@@ -25,14 +25,15 @@ bool PostPass::init(const Context& ctx)
     m_ctx = &ctx;
     VkDevice dev = ctx.device();
 
-    VkDescriptorSetLayoutBinding b[4] = {};
+    VkDescriptorSetLayoutBinding b[5] = {};
     b[0] = { 0, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 1, VK_SHADER_STAGE_COMPUTE_BIT, nullptr };
     b[1] = { 1, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 1, VK_SHADER_STAGE_COMPUTE_BIT, nullptr };
     b[2] = { 2, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 1, VK_SHADER_STAGE_COMPUTE_BIT, nullptr };
     b[3] = { 3, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, 1, VK_SHADER_STAGE_COMPUTE_BIT, nullptr };
+    b[4] = { 4, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, VK_SHADER_STAGE_COMPUTE_BIT, nullptr };
 
     VkDescriptorSetLayoutCreateInfo li { VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO };
-    li.bindingCount = 4;
+    li.bindingCount = 5;
     li.pBindings = b;
     if (vkCreateDescriptorSetLayout(dev, &li, nullptr, &m_setLayout) != VK_SUCCESS)
         return false;
@@ -67,8 +68,9 @@ bool PostPass::init(const Context& ctx)
         return false;
     }
 
-    VkDescriptorPoolSize sizes[2] = { { VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 3 },
-                                      { VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, 1 } };
+    VkDescriptorPoolSize sizes[3] = { { VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 3 },
+                                      { VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, 1 },
+                                      { VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1 } };
     VkDescriptorPoolCreateInfo pi { VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO };
     pi.maxSets = 1;
     pi.poolSizeCount = 2;
@@ -113,6 +115,25 @@ void PostPass::updateDescriptors(VkImageView hdrView, VkImageView gposView, VkIm
     w[2] = { VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, nullptr, m_set, 2, 0, 1,
              VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, &oi, nullptr, nullptr };
     vkUpdateDescriptorSets(m_ctx->device(), 3, w, 0, nullptr);
+    if (m_expoBuf) {
+        VkDescriptorBufferInfo ei { m_expoBuf, 0, VK_WHOLE_SIZE };
+        VkWriteDescriptorSet ew { VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, nullptr, m_set, 4,
+                                  0, 1, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, nullptr, &ei,
+                                  nullptr };
+        vkUpdateDescriptorSets(m_ctx->device(), 1, &ew, 0, nullptr);
+    }
+}
+
+void PostPass::setExposureBuffer(VkBuffer buf)
+{
+    m_expoBuf = buf;
+    if (buf && m_set && m_ctx) {
+        VkDescriptorBufferInfo ei { buf, 0, VK_WHOLE_SIZE };
+        VkWriteDescriptorSet ew { VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, nullptr, m_set, 4,
+                                  0, 1, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, nullptr, &ei,
+                                  nullptr };
+        vkUpdateDescriptorSets(m_ctx->device(), 1, &ew, 0, nullptr);
+    }
 }
 
 void PostPass::record(VkCommandBuffer cmd, const RaymarchPush& push) const

@@ -1106,6 +1106,22 @@ float softShadowSplat(vec3 ro, vec3 rd);
 void applyFlora(vec3 p, vec3 rd, vec3 ro, uint mId, bool useBaked, float shBaked,
                 inout vec3 alb, inout vec3 n, inout float sh, inout float ao)
 {
+    // ---- backlit transmission (render-flag bit 11) ------------------------
+    // Thin organic matter passes light: the "hair and leaves glow when the sun
+    // is behind them" cue that a more physically-correct diffuse lobe still
+    // cannot produce, because when a leaf faces away from the sun N.L is zero
+    // and no gain on that lobe lights it. This adds a warm tint to the material
+    // that the existing terms then carry. Strongest when looking toward the sun
+    // (rd is camera -> surface, kSunDir is surface -> sun) and when the surface
+    // normal faces away from it. OFF by default so the shipped look and every
+    // gate stay bit-exact until this has been measured.
+    if ((gRenderFlags & 2048) != 0 &&
+        (mId <= 1u || mId == 8u || mId == 21u)) {
+        const float back = pow(max(dot(rd, -kSunDir), 0.0), 3.0);
+        const float away = 1.0 - max(dot(n, kSunDir), 0.0);
+        alb += vec3(0.30, 0.20, 0.08) * (back * away) * alb;
+    }
+
     if ((gRenderFlags & 4) != 0 && alb.g > alb.r * 1.15) { // vegetation micro detail
         alb = grassDetail(alb, p, n);
         float shR = 1.0;

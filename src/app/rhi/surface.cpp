@@ -77,15 +77,57 @@ bool App::createOffscreen(uint32_t w, uint32_t h)
         m_ctx, w, h, VK_FORMAT_R16G16B16A16_SFLOAT,
         VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT |
             VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT);
+    // Guidance lanes. Same format as the HDR target they sit beside on purpose:
+    // a material response quantised to 8 bits is the exact information these
+    // lanes exist to preserve. TRANSFER_SRC so a headless run can read them
+    // back and a gate can assert on them, not just look at them.
+    vf::destroyImage3D(m_ctx, m_galb);
+    vf::destroyImage3D(m_ctx, m_gmat);
+    m_galb = vf::makeImage2D(
+        m_ctx, w, h, VK_FORMAT_R16G16B16A16_SFLOAT,
+        VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT |
+            VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT);
+    m_gmat = vf::makeImage2D(
+        m_ctx, w, h, VK_FORMAT_R16G16B16A16_SFLOAT,
+        VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT |
+            VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT);
+    // --mode 3dgs OIT targets. All are colour-attachment + storage images:
+    // the splat pass renders into them, the composite pass reads them as
+    // storage. TRANSFER_SRC keeps a headless dump possible. These are created
+    // for every run but only touched by the opt-in 3dgs mode.
+    vf::destroyImage3D(m_ctx, m_oitAccum);
+    vf::destroyImage3D(m_ctx, m_oitReveal);
+    vf::destroyImage3D(m_ctx, m_oitBackdrop);
+    vf::destroyImage3D(m_ctx, m_oitBase);
+    const VkImageUsageFlags oitUsage = VK_IMAGE_USAGE_STORAGE_BIT |
+                                       VK_IMAGE_USAGE_TRANSFER_SRC_BIT |
+                                       VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT;
+    m_oitAccum = vf::makeImage2D(m_ctx, w, h, VK_FORMAT_R16G16B16A16_SFLOAT, oitUsage);
+    m_oitReveal = vf::makeImage2D(m_ctx, w, h, VK_FORMAT_R16G16B16A16_SFLOAT, oitUsage);
+    m_oitBackdrop = vf::makeImage2D(m_ctx, w, h, VK_FORMAT_R16G16B16A16_SFLOAT, oitUsage);
+    // The base copy needs TRANSFER_DST (m_hdr -> m_oitBase) and STORAGE (read
+    // by the composite); no colour attachment usage.
+    m_oitBase = vf::makeImage2D(m_ctx, w, h, VK_FORMAT_R16G16B16A16_SFLOAT,
+                                VK_IMAGE_USAGE_STORAGE_BIT |
+                                VK_IMAGE_USAGE_TRANSFER_DST_BIT |
+                                VK_IMAGE_USAGE_TRANSFER_SRC_BIT);
     vf::destroyImage3D(m_ctx, m_ssaoAo);
     m_ssaoAo = vf::makeImage2D(
         m_ctx, w, h, VK_FORMAT_R16G16B16A16_SFLOAT,
         VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT);
+    // FX scratch: the gathering passes' destination and the copy-back source, so
+    // it needs both transfer directions as well as storage.
+    vf::destroyImage3D(m_ctx, m_fxScratch);
+    m_fxScratch = vf::makeImage2D(
+        m_ctx, w, h, VK_FORMAT_R16G16B16A16_SFLOAT,
+        VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT |
+            VK_IMAGE_USAGE_TRANSFER_DST_BIT);
     if (!m_splatPass.recreateDepth(w, h))
         return false;
     if (!m_offscreen.img || !m_taaHistory[0].img || !m_taaHistory[1].img ||
         !m_taaResolved.img || !m_hdr.img || !m_gpos.img || !m_gnorm.img ||
-        !m_ssaoAo.img)
+        !m_galb.img || !m_gmat.img || !m_oitAccum.img || !m_oitReveal.img ||
+        !m_oitBackdrop.img || !m_oitBase.img || !m_ssaoAo.img)
         return false;
     m_svoPass.updateDescriptors(m_hdr, m_gpos, m_gnorm);
     // The micro overlay composites into the SAME three images, so it must be
@@ -94,9 +136,25 @@ bool App::createOffscreen(uint32_t w, uint32_t h)
     // magenta-diagnostic dispatch produced no pixels at all.
     m_microSvoPass.updateDescriptors(m_hdr, m_gpos, m_gnorm);
     m_furPass.updateDescriptors(m_hdr, m_gpos);
+    // NOTE on coverage: the micro overlay and the fur pass composite into
+    // hdr/gpos/gnorm but do NOT fill the guidance lanes, so a pixel covered by
+    // a micro object or the coat reads back as whatever the world pass left
+    // there (zeros over sky). The lanes currently describe the WORLD splat
+    // surface only; oGPos.w and the micro/fur coverage are what tell a consumer
+    // when a lane is not authoritative. Filling them is the remaining parity
+    // work, tracked with the SVO reference backend.
     m_splatPass.updateDescriptors(m_hdr.view, m_gpos.view, m_gnorm.view,
+                                  m_galb.view, m_gmat.view,
                                   m_heightImg.view, m_objVolImg.view);
+    m_splatPass.setOitTargets(m_oitAccum.view, m_oitReveal.view, m_oitBackdrop.view);
+    // The composite writes m_hdr, so its descriptor must follow m_hdr too.
+    m_oitPass.updateDescriptors(m_oitAccum.view, m_oitReveal.view,
+                                m_oitBackdrop.view, m_hdr.view, m_oitBase.view);
     m_postPass.updateDescriptors(m_hdr.view, m_gpos.view, m_offscreen.view);
+    // The meter holds a view of m_hdr, so it must be rebound whenever that
+    // image is recreated — otherwise it keeps metering a freed image.
+    if (m_expoPass.exposureBuffer())
+        m_expoPass.updateDescriptors(m_hdr.view);
     m_taaFirstFrame = true;
     m_taaHistoryIdx = 0;
     return true;
@@ -273,6 +331,14 @@ bool App::initVulkan()
         return false;
     if (!m_splatPass.init(m_ctx))
         return false;
+    // Coverage-aware transparent edges, opt-in: one extra full geometry pass
+    // counting overlapping disks in the stencil byte so the opaque base seal
+    // can skip lone silhouette disks and let the band composite them over sky.
+    if (const char* e = getenv("VF_SPLAT_COVERAGE")) {
+        const bool on = atoi(e) != 0;
+        m_splatPass.setCoverage(on);
+        spdlog::info("splat: stencil coverage edges {}", on ? "ON" : "off");
+    }
     // Micro-voxel overlay: its OWN pass + buffers, holding separate fine-lattice
     // SVO worlds. Initialised here so its descriptor set exists before any
     // setter writes to it (the same ordering trap that makes a silently unbound
@@ -302,6 +368,14 @@ bool App::initVulkan()
     if (!m_volFogPass.init(m_ctx)) return false;
     if (!m_motionBlurPass.init(m_ctx)) return false;
     if (!m_dofPass.init(m_ctx)) return false;
+    if (!m_expoPass.init(m_ctx)) return false;
+    if (!m_oitPass.init(m_ctx)) return false;
+    m_expoPass.updateDescriptors(m_hdr.view);
+    // post.comp reads the meter's SSBO at binding 4. Set it after BOTH passes
+    // exist: writing a descriptor of a set that has not been created yet is a
+    // silent no-op, and a meter whose value never reaches the shader looks
+    // exactly like a flag that does nothing.
+    m_postPass.setExposureBuffer(m_expoPass.exposureBuffer());
     if (!m_envPass.init(m_ctx)) return false;
 
     // optional PNG texture atlas (world.json "textures" table; a missing
@@ -362,15 +436,23 @@ bool App::initVulkan()
         m_cornerFill = atoi(e) != 0;
 
     // splat backend owns the primary view: build surfels from the live field
-    m_renderMode = (m_args.mode == "svo") ? RenderMode::Svo : RenderMode::Splats;
-    if (m_args.mode != "splat" && m_args.mode != "svo")
-        spdlog::warn("--mode '{}' unknown (use splat|svo), defaulting to splat", m_args.mode);
+    if (m_args.mode == "svo")
+        m_renderMode = RenderMode::Svo;
+    else if (m_args.mode == "3dgs" || m_args.mode == "dgs")
+        m_renderMode = RenderMode::Dgs;
+    else
+        m_renderMode = RenderMode::Splats;
+    if (m_args.mode != "splat" && m_args.mode != "svo" &&
+        m_args.mode != "3dgs" && m_args.mode != "dgs")
+        spdlog::warn("--mode '{}' unknown (use splat|svo|3dgs), defaulting to splat",
+                     m_args.mode);
     // A headless --mode svo run never rasterizes surfels, so the ~2 s bake is
     // skipped (interactive SVO still builds them: the F flip to splats needs
     // a valid buffer to draw).
     const bool headlessAtInit = m_args.selftest || m_args.smokeFrames > 0 ||
                                 !m_args.shot.empty() || !m_args.shots.empty();
-    if (m_renderMode == RenderMode::Splats || !headlessAtInit)
+    // Both Splats and Dgs rasterize surfels; only SVO can skip the bake.
+    if (m_renderMode != RenderMode::Svo || !headlessAtInit)
         rebuildSurfels();
 
     // LiveEditor first-touch seeding: splice from the GPU's current chunk run
@@ -479,6 +561,9 @@ void App::destroy()
     m_splatPass.destroy();
     m_taaPass.destroy();
     m_postPass.destroy();
+    m_expoPass.destroy();  // owns an SSBO + descriptors (the other FX passes'
+                            // destroy() calls are a pre-existing shutdown gap)
+    m_oitPass.destroy();
     if (m_profPool)
         vkDestroyQueryPool(m_ctx.device(), m_profPool, nullptr);
     vf::destroyImage3D(m_ctx, m_objVolImg);
@@ -488,6 +573,13 @@ void App::destroy()
     vf::destroyImage3D(m_ctx, m_hdr);
     vf::destroyImage3D(m_ctx, m_gpos);
     vf::destroyImage3D(m_ctx, m_gnorm);
+    vf::destroyImage3D(m_ctx, m_galb);
+    vf::destroyImage3D(m_ctx, m_gmat);
+    vf::destroyImage3D(m_ctx, m_oitAccum);
+    vf::destroyImage3D(m_ctx, m_oitReveal);
+    vf::destroyImage3D(m_ctx, m_oitBackdrop);
+    vf::destroyImage3D(m_ctx, m_oitBase);
+    vf::destroyImage3D(m_ctx, m_fxScratch);
     vf::destroyImage3D(m_ctx, m_ssaoAo);
     vf::destroyImage3D(m_ctx, m_taaHistory[0]);
     vf::destroyImage3D(m_ctx, m_taaHistory[1]);

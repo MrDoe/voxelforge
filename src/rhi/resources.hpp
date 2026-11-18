@@ -51,9 +51,15 @@ bool uploadSubImage3D(const Context& ctx, Image3D& im, const void* data,
                       uint32_t x0, uint32_t y0, uint32_t w, uint32_t h,
                       uint32_t bytesPerTexel);
 
-// Copies a 2D region of `src` (currently in GENERAL layout) into `out` (row-major, tightly packed).
+// Copies a 2D region of `src` (currently in GENERAL layout) into `out` (row-major,
+// tightly packed). `bytesPerTexel` must match the image's actual format: the size
+// of the staging buffer IS the copy size, so asking for 4 on an R16G16B16A16 image
+// hands vkCmdCopyImageToBuffer a destination half the size it will write into.
+// It defaulted to 4 because every caller so far read the rgba8 offscreen; the
+// G-buffer guidance lanes are rgba16f and need 8. No validation layer is
+// installed here to catch the mismatch, which is exactly how it stays invisible.
 bool readbackImage2D(const Context& ctx, VkImage src, uint32_t w, uint32_t h,
-                     std::vector<uint8_t>& out);
+                     std::vector<uint8_t>& out, uint32_t bytesPerTexel = 4);
 
 // Sync flags are the 64-bit Vk*Flags2 types: the VK_*_2 stage/access bits
 // live above bit 31 and silently truncate to 0 in the legacy 32-bit types.

@@ -31,6 +31,8 @@
 #include "rhi/resources.hpp"
 #include "rhi/swapchain.hpp"
 #include "render/dof_pass.hpp"
+#include "render/exposure_pass.hpp"
+#include "render/oit_composite_pass.hpp"
 #include "render/environment_pass.hpp"
 #include "render/motion_blur_pass.hpp"
 #include "render/post_pass.hpp"
@@ -416,7 +418,8 @@ private:
     // In-place photorealism chain on m_offscreen (post-tonemap LDR):
     // SSR/SSAO/volumetric-fog/motion-blur/DoF per the G/H/J/K/L toggles.
     // Shared by the headless and interactive frame paths so they can't drift.
-    void recordPhotorealism(VkCommandBuffer cmd, const vf::RaymarchPush& push);
+    void recordPhotorealism(VkCommandBuffer cmd, const vf::RaymarchPush& push,
+                            bool linearHdr = false);
 
     // Write the live camera basis into m_prevCam so the NEXT frame's reprojection
     // (TAA history + motion-blur velocity) sees this frame's camera. Called at
@@ -438,7 +441,29 @@ private:
     vf::Image3D m_hdr;     // ray-march linear HDR output
     vf::Image3D m_gpos;    // ray-march G-buffer: world pos + hit type
     vf::Image3D m_gnorm;   // G-buffer: shading normal (xyz), 0 on sky
+    // G-buffer guidance lanes (splat attachments 3 and 4). These exist because
+    // the renderer otherwise emits only colour/position/normal: albedo and
+    // roughness arrive per surfel and are consumed into the lighting integral,
+    // so nothing downstream can recover a surface's material. rgb = effective
+    // albedo / a = roughness, and rgb = pre-atmosphere lighting / a =
+    // reflectance. Linear HDR like m_hdr, and unread by the shipped chain, so
+    // the visible frame does not change when they are written.
+    vf::Image3D m_galb;
+    vf::Image3D m_gmat;
+    // --mode 3dgs OIT targets (all linear HDR). `m_oitAccum` sums premultiplied
+    // colour + alpha, `m_oitReveal` accumulates transmittance Π(1-α), and
+    // `m_oitBackdrop` holds the sky. OitCompositePass turns them into m_hdr.
+    vf::Image3D m_oitAccum;
+    vf::Image3D m_oitReveal;
+    vf::Image3D m_oitBackdrop;
+    vf::Image3D m_oitBase;   // copy of the standard frame; interiors come from here
     vf::Image3D m_ssaoAo;  // SSAO scratch: raw AO term (ssao.comp -> ssao_apply.comp)
+    // Linear-HDR scratch for the FX chain. Two purposes, both load-bearing: it
+    // is the destination the gathering passes (SSR, motion blur, DoF) write,
+    // because a pass that reads NEIGHBOUR pixels must not read the image it is
+    // overwriting, and it is the format those five shaders already declare
+    // (rgba16f), which the rgba8 offscreen they were being bound to is not.
+    vf::Image3D m_fxScratch;
     vf::Image3D m_heightImg;
     vf::Image3D m_objVolImg;
     vf::Image3D m_irrImg; // 64^3 irradiance volume (binding 26): created once,
@@ -465,11 +490,15 @@ private:
     vf::VolumetricFogPass m_volFogPass;
     vf::MotionBlurPass m_motionBlurPass;
     vf::DepthOfFieldPass m_dofPass;
+    vf::ExposurePass m_expoPass;  // scene-referred meter feeding post.comp
+    vf::OitCompositePass m_oitPass; // --mode 3dgs final transmittance composite
+    bool m_autoExposure = false;  // render-flag bit 10 + VF_AUTOEXPOSE
     vf::EnvironmentPass m_envPass;
     vf::TexAtlas m_texAtlas;   // optional PNG overrides (world.json "textures")
     std::string m_manifestPath; // world.json path (for atlas reloads)
-    // primary visibility renderer; SVO kept as the pixel reference
-    enum class RenderMode { Splats, Svo };
+    // primary visibility renderer; SVO kept as the pixel reference;
+    // Dgs = opt-in 3DGS-style weighted-blended OIT transmittance composite.
+    enum class RenderMode { Splats, Svo, Dgs };
     RenderMode m_renderMode = RenderMode::Splats;
     vf::Image3D m_taaHistory[2];
     vf::Image3D m_taaResolved;
@@ -599,6 +628,12 @@ private:
     float m_ssaoRadius = 0.8f; // far-band world radius (m)
     int m_ssaoDebug = 0;       // 1 = raw AO, 2 = G-buffer normal
     bool m_ssaoBlur = true;    // cross-bilateral denoise before applying
+    // Run the photorealism chain on the linear HDR target BEFORE the tone map
+    // instead of in place on the tone-mapped LDR offscreen. Default off: this is
+    // a look change on every effect in the chain (an AO multiply in linear space
+    // is not the same multiply in compressed space), so it ships behind an
+    // escape hatch until each effect has been re-measured where it now runs.
+    bool m_linearFx = false;
     bool m_volFogEnabled = false;
     // Tighten only genuine hard-edge object parents; small tangent-aligned
     // bridge splats preserve crease coverage. Both are baked, so changing
