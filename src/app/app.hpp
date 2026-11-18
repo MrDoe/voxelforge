@@ -117,6 +117,10 @@ private:
     bool initVulkan();
     void destroy();
     bool createOffscreen(uint32_t w, uint32_t h);
+    // 3DGS OIT targets are created on first use, not for every run: four
+    // full-res RGBA16F images are ~16 MiB at 960x540 and ~46 MiB at 1600x900.
+    // Called at startup for --mode 3dgs, on F-cycle into Dgs, and on resize.
+    bool ensureOitTargets();
     void ensureAcquireSemaphores();
     void handleResize();
     void drawHud();

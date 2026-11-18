@@ -140,6 +140,12 @@ void App::handleHotkeys(bool textCaptures, bool headlessRun)
                 m_renderMode = RenderMode::Dgs;
             else
                 m_renderMode = RenderMode::Splats;
+            // First entry into 3DGS creates the four OIT targets; every later
+            // F-cycle reuses them, so the default path pays nothing for them.
+            if (m_renderMode == RenderMode::Dgs && !ensureOitTargets()) {
+                spdlog::error("3dgs: OIT target creation failed - staying on splats");
+                m_renderMode = RenderMode::Splats;
+            }
             spdlog::info("render mode -> {}",
                          m_renderMode == RenderMode::Splats ? "splats"
                          : m_renderMode == RenderMode::Svo ? "svo" : "3dgs (OIT)");

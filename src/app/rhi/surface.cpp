@@ -93,24 +93,15 @@ bool App::createOffscreen(uint32_t w, uint32_t h)
             VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT);
     // --mode 3dgs OIT targets. All are colour-attachment + storage images:
     // the splat pass renders into them, the composite pass reads them as
-    // storage. TRANSFER_SRC keeps a headless dump possible. These are created
-    // for every run but only touched by the opt-in 3dgs mode.
+    // storage. LAZY: the 3dgs mode is opt-in, so these four full-res RGBA16F
+    // images are created by ensureOitTargets() on first use (startup
+    // --mode 3dgs, F-cycle, or resize) instead of on every run. A resize
+    // invalidates the old views, so drop them here; ensureOitTargets() at the
+    // end of this function recreates them for an active Dgs session.
     vf::destroyImage3D(m_ctx, m_oitAccum);
     vf::destroyImage3D(m_ctx, m_oitReveal);
     vf::destroyImage3D(m_ctx, m_oitBackdrop);
     vf::destroyImage3D(m_ctx, m_oitBase);
-    const VkImageUsageFlags oitUsage = VK_IMAGE_USAGE_STORAGE_BIT |
-                                       VK_IMAGE_USAGE_TRANSFER_SRC_BIT |
-                                       VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT;
-    m_oitAccum = vf::makeImage2D(m_ctx, w, h, VK_FORMAT_R16G16B16A16_SFLOAT, oitUsage);
-    m_oitReveal = vf::makeImage2D(m_ctx, w, h, VK_FORMAT_R16G16B16A16_SFLOAT, oitUsage);
-    m_oitBackdrop = vf::makeImage2D(m_ctx, w, h, VK_FORMAT_R16G16B16A16_SFLOAT, oitUsage);
-    // The base copy needs TRANSFER_DST (m_hdr -> m_oitBase) and STORAGE (read
-    // by the composite); no colour attachment usage.
-    m_oitBase = vf::makeImage2D(m_ctx, w, h, VK_FORMAT_R16G16B16A16_SFLOAT,
-                                VK_IMAGE_USAGE_STORAGE_BIT |
-                                VK_IMAGE_USAGE_TRANSFER_DST_BIT |
-                                VK_IMAGE_USAGE_TRANSFER_SRC_BIT);
     vf::destroyImage3D(m_ctx, m_ssaoAo);
     m_ssaoAo = vf::makeImage2D(
         m_ctx, w, h, VK_FORMAT_R16G16B16A16_SFLOAT,
@@ -133,8 +124,7 @@ bool App::createOffscreen(uint32_t w, uint32_t h)
         return false;
     if (!m_offscreen.img || !m_taaHistory[0].img || !m_taaHistory[1].img ||
         !m_taaResolved.img || !m_hdr.img || !m_gpos.img || !m_gnorm.img ||
-        !m_galb.img || !m_gmat.img || !m_oitAccum.img || !m_oitReveal.img ||
-        !m_oitBackdrop.img || !m_oitBase.img || !m_ssaoAo.img || !m_ssrOut.img ||
+        !m_galb.img || !m_gmat.img || !m_ssaoAo.img || !m_ssrOut.img ||
         !m_fxScratch.img)
         return false;
     m_svoPass.updateDescriptors(m_hdr, m_gpos, m_gnorm);
@@ -154,17 +144,54 @@ bool App::createOffscreen(uint32_t w, uint32_t h)
     m_splatPass.updateDescriptors(m_hdr.view, m_gpos.view, m_gnorm.view,
                                   m_galb.view, m_gmat.view,
                                   m_heightImg.view, m_objVolImg.view);
-    m_splatPass.setOitTargets(m_oitAccum.view, m_oitReveal.view, m_oitBackdrop.view);
-    // The composite writes m_hdr, so its descriptor must follow m_hdr too.
-    m_oitPass.updateDescriptors(m_oitAccum.view, m_oitReveal.view,
-                                m_oitBackdrop.view, m_hdr.view, m_oitBase.view);
+    // OIT targets + their descriptors are bound by ensureOitTargets() only
+    // when 3DGS is actually used (or on resize of an active 3DGS session).
     m_postPass.updateDescriptors(m_hdr.view, m_gpos.view, m_offscreen.view);
     // The meter holds a view of m_hdr, so it must be rebound whenever that
     // image is recreated — otherwise it keeps metering a freed image.
     if (m_expoPass.exposureBuffer())
         m_expoPass.updateDescriptors(m_hdr.view);
+    // A resize during an active 3DGS session must bring the lazy targets back
+    // at the new extent before the next frame renders.
+    if (m_renderMode == RenderMode::Dgs && !ensureOitTargets())
+        return false;
     m_taaFirstFrame = true;
     m_taaHistoryIdx = 0;
+    return true;
+}
+
+bool App::ensureOitTargets()
+{
+    if (m_oitAccum.img != VK_NULL_HANDLE)
+        return true;
+    const uint32_t w = m_offscreen.extent.width;
+    const uint32_t h = m_offscreen.extent.height;
+    if (!w || !h)
+        return false;
+    // Colour attachment + storage; TRANSFER_SRC keeps a headless dump possible.
+    const VkImageUsageFlags oitUsage = VK_IMAGE_USAGE_STORAGE_BIT |
+                                       VK_IMAGE_USAGE_TRANSFER_SRC_BIT |
+                                       VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT;
+    m_oitAccum = vf::makeImage2D(m_ctx, w, h, VK_FORMAT_R16G16B16A16_SFLOAT, oitUsage);
+    m_oitReveal = vf::makeImage2D(m_ctx, w, h, VK_FORMAT_R16G16B16A16_SFLOAT, oitUsage);
+    m_oitBackdrop = vf::makeImage2D(m_ctx, w, h, VK_FORMAT_R16G16B16A16_SFLOAT, oitUsage);
+    // The base copy needs TRANSFER_DST (m_hdr -> m_oitBase) and STORAGE (read
+    // by the composite); no colour attachment usage.
+    m_oitBase = vf::makeImage2D(m_ctx, w, h, VK_FORMAT_R16G16B16A16_SFLOAT,
+                                VK_IMAGE_USAGE_STORAGE_BIT |
+                                VK_IMAGE_USAGE_TRANSFER_DST_BIT |
+                                VK_IMAGE_USAGE_TRANSFER_SRC_BIT);
+    if (!m_oitAccum.img || !m_oitReveal.img || !m_oitBackdrop.img || !m_oitBase.img) {
+        spdlog::critical("3dgs: OIT target allocation failed");
+        return false;
+    }
+    // The splat pass's OIT pipelines and the composite read these views; bind
+    // them here, at the same point the images come into existence.
+    m_splatPass.setOitTargets(m_oitAccum.view, m_oitReveal.view, m_oitBackdrop.view);
+    m_oitPass.updateDescriptors(m_oitAccum.view, m_oitReveal.view,
+                                m_oitBackdrop.view, m_hdr.view, m_oitBase.view);
+    spdlog::info("3dgs: created OIT targets {}x{} ({} MiB)", w, h,
+                 double(w) * h * 8.0 * 4.0 / (1024.0 * 1024.0));
     return true;
 }
 
@@ -497,6 +524,10 @@ bool App::initVulkan()
         m_args.mode != "3dgs" && m_args.mode != "dgs")
         spdlog::warn("--mode '{}' unknown (use splat|svo|3dgs), defaulting to splat",
                      m_args.mode);
+    // createOffscreen() ran before the mode was parsed, so a startup --mode
+    // 3dgs is the one path where the lazy targets must be created explicitly.
+    if (m_renderMode == RenderMode::Dgs && !ensureOitTargets())
+        return false;
     // A headless --mode svo run never rasterizes surfels, so the ~2 s bake is
     // skipped (interactive SVO still builds them: the F flip to splats needs
     // a valid buffer to draw).

@@ -242,8 +242,14 @@ bool SplatPass::init(const Context& ctx)
                              VMA_MEMORY_USAGE_AUTO_PREFER_HOST, true);
     if (!m_planesBuf.buf || !m_planesBuf.mapped)
         return false;
-    if (!initTileResources(ctx))
-        return false;
+    // The tile path is WIP and opt-in (VF_TILE=1). Its resources are large -
+    // a 12M-entry dup stream alone is 48 MiB - so the default forward path
+    // must not pay for them. m_tileReady stays false and record() keeps the
+    // forward raster path (its tile branch already checks m_tileReady).
+    if (const char* tileEnv = getenv("VF_TILE")) {
+        if (atoi(tileEnv) != 0 && !initTileResources(ctx))
+            return false;
+    }
     return true;
 }
 
@@ -802,10 +808,14 @@ void SplatPass::setTexAtlas(VkImageView view, VkSampler sampler, VkBuffer tableU
              VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, nullptr, &buf, nullptr };
     vkUpdateDescriptorSets(m_ctx->device(), 2, w, 0, nullptr);
     // same bindings in the tile set (the compute path shares the shader
-    // declarations, so both sets must carry them)
-    w[0].dstSet = m_tileSet;
-    w[1].dstSet = m_tileSet;
-    vkUpdateDescriptorSets(m_ctx->device(), 2, w, 0, nullptr);
+    // declarations, so both sets must carry them) - but only when the opt-in
+    // tile path was actually created. Writing a null VkDescriptorSet crashes
+    // the driver at startup with VF_TILE off.
+    if (m_tileReady) {
+        w[0].dstSet = m_tileSet;
+        w[1].dstSet = m_tileSet;
+        vkUpdateDescriptorSets(m_ctx->device(), 2, w, 0, nullptr);
+    }
 }
 
 void SplatPass::setLights(const vf::voxel::LightUBO& lights)
@@ -870,9 +880,11 @@ void SplatPass::setIrrVolView(VkImageView view)
                              nullptr, nullptr };
     vkUpdateDescriptorSets(m_ctx->device(), 1, &w, 0, nullptr);
     // same binding in the tile set: the tile compute path includes the same
-    // common_base.glsl declaration, so both sets must carry it
-    w.dstSet = m_tileSet;
-    vkUpdateDescriptorSets(m_ctx->device(), 1, &w, 0, nullptr);
+    // common_base.glsl declaration, so both sets must carry it - when it exists.
+    if (m_tileReady) {
+        w.dstSet = m_tileSet;
+        vkUpdateDescriptorSets(m_ctx->device(), 1, &w, 0, nullptr);
+    }
 }
 
 void SplatPass::setSurfels(const void* data, size_t bytes, size_t count,
@@ -1016,10 +1028,13 @@ void SplatPass::setSurfels(const void* data, size_t bytes, size_t count,
     if (!ok)
         return;
     bindSurfelBuffer();
-    // compaction indirection: identity (slot == surfel index). The GPU cull
-    // pre-pass rewrites each entry's range per frame; with culling disabled
-    // the identity keeps the VS path equivalent to the direct index.
-    const size_t need = up; // bytes of the surfel stream
+    // Compaction indirection: ONE uint32 per slot (slot -> surfel index). The
+    // GPU cull pre-pass rewrites each entry's range per frame; with culling
+    // disabled identity keeps the VS path equivalent to the direct index.
+    // It used to be sized from `up` (the 80 B surfel stream), a 20x
+    // over-allocation: ~261 MiB of the ~0.9 GiB renderer footprint. The
+    // growth path below now resizes it explicitly.
+    const size_t need = size_t(m_bufSlots) * sizeof(uint32_t);
     if (need > m_compactBytes) {
         if (m_compactBuf.buf)
             destroyBuffer(*m_ctx, m_compactBuf);
@@ -1151,6 +1166,28 @@ bool SplatPass::growOpaque(uint32_t minExtra){
     m_opaqueCap += extra;
     m_bufSlots += extra;
     m_count += extra;
+    // The compaction indirection is 4 B per slot, so it must grow with the
+    // slot count (the old 80 B/slot allocation hid this need). Re-identity
+    // the whole buffer: the cull pass rewrites the drawn ranges each frame,
+    // and a slot whose entry is stale would draw the wrong surfel.
+    const size_t compactBytes = size_t(m_bufSlots) * sizeof(uint32_t);
+    if (compactBytes > m_compactBytes) {
+        if (m_compactBuf.buf)
+            destroyBuffer(*m_ctx, m_compactBuf);
+        m_compactBuf = makeBuffer(*m_ctx, compactBytes,
+                                  VK_BUFFER_USAGE_STORAGE_BUFFER_BIT |
+                                      VK_BUFFER_USAGE_TRANSFER_DST_BIT,
+                                  VMA_MEMORY_USAGE_AUTO_PREFER_DEVICE, false);
+        m_compactBytes = m_compactBuf.buf ? compactBytes : 0;
+        if (!m_compactBuf.buf)
+            return false;
+        VkDescriptorBufferInfo ci { m_compactBuf.buf, 0, VK_WHOLE_SIZE };
+        VkWriteDescriptorSet wc { VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, nullptr,
+                                  m_set, 4, 0, 1, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
+                                  nullptr, &ci, nullptr };
+        vkUpdateDescriptorSets(m_ctx->device(), 1, &wc, 0, nullptr);
+        writeCompactIdentity(0, m_bufSlots);
+    }
     bindSurfelBuffer();
     return true;
 }
@@ -1644,11 +1681,14 @@ bool SplatPass::createDepthResources(uint32_t w, uint32_t h)
         vkDestroyShaderModule(dev, mod, nullptr);
         if (r != VK_SUCCESS) { spdlog::critical("splat: hiz pipeline failed"); return false; }
     }
-    // (tile x entry) counts matrix for the tile path
-    const uint32_t nTiles = ((w + kTilePx - 1) / kTilePx) *
-                            ((h + kTilePx - 1) / kTilePx);
-    const VkDeviceSize bytes = VkDeviceSize(nTiles) * kMaxChunkDraws * 4;
-    if (bytes != m_tileCountsBytes) {
+    // (tile x entry) counts matrix for the tile path. With VF_TILE off the
+    // tile set was never created, so allocating this matrix would be a pure
+    // waste (up to ~59 MiB at 720p).
+    const VkDeviceSize bytes = m_tileReady
+        ? VkDeviceSize(((w + kTilePx - 1) / kTilePx) *
+                       ((h + kTilePx - 1) / kTilePx)) * kMaxChunkDraws * 4
+        : 0;
+    if (m_tileReady && bytes != m_tileCountsBytes) {
         if (m_tileCounts.buf)
             destroyBuffer(*m_ctx, m_tileCounts);
         m_tileCounts = makeBuffer(*m_ctx, bytes,
