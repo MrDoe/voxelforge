@@ -6,6 +6,7 @@
 #include "app/app.hpp"
 #include "voxel/grass_cards.hpp"
 
+#include <chrono>
 #include <filesystem>
 
 #include "voxel/heightmap.hpp"
@@ -23,6 +24,20 @@ bool App::reloadTexAtlas()
 {
     if (!m_texAtlas.valid())
         return false;
+    // Coalesce rapid reloads: churning the manifest (GUI swaps, peer writes)
+    // can otherwise re-enter this path before the previous GPU work is fully
+    // retired, racing the in-flight frames that sample the atlas (SIGSEGV,
+    // see quirk 83d662a1). A reload that arrives within the cooldown is
+    // deferred to the next poll via m_texReloadPending instead of running now.
+    static double lastReload = 0.0;
+    const double ts = (double)std::chrono::duration_cast<std::chrono::milliseconds>(
+                          std::chrono::steady_clock::now().time_since_epoch())
+                          .count() / 1000.0;
+    if (lastReload > 0.0 && (ts - lastReload) < 1.0) {
+        m_texReloadPending = true;
+        return true;
+    }
+    lastReload = ts;
     // In-flight frames still sample the atlas image: idle before rewriting
     // its pixels + layout. Callers that already idled pay nothing extra.
     vkDeviceWaitIdle(m_ctx.device());
@@ -34,22 +49,25 @@ bool App::reloadTexAtlas()
     // callers come through here, so re-deriving once here keeps the rule
     // un-forgettable; the wait above also makes the descriptor write safe.
     uploadLightSources();
-    // The foliage-card SSBO is derived from the atlas's material bindings.
-    // Rebuild ONLY when the foliageCards table actually changed: rebuilding on
-    // every texture reload (e.g. a peer churning the textures key) re-uploads
-    // a ~16 MB SSBO under rapid cycling and races the in-flight frames that
-    // still reference the previous buffer (SIGSEGV, see quirk 83d662a1).
-    // A texture-only edit never changes the card set, so skipping is safe and
-    // keeps the cards in sync on a real foliageCards edit.
-    std::vector<vf::voxel::worldfile::FoliageCardBinding> now;
-    vf::voxel::worldfile::loadFoliageCardBindings(m_manifestPath, now);
+    // The foliage-card SSBO is derived from the atlas's texture bindings (the
+    // "card" field on each row). Rebuild ONLY when the card set actually
+    // changed: rebuilding on every texture reload (e.g. a peer churning the
+    // textures key) re-uploads a ~16 MB SSBO under rapid cycling and races
+    // the in-flight frames that still reference the previous buffer (SIGSEGV,
+    // see quirk 83d662a1). A texture-only edit with no card change skips.
+    std::vector<std::pair<int, std::string>> now;
+    for (const auto& b : m_texBindings)
+        if (!b.card.empty())
+            now.emplace_back(b.mat, b.card);
     bool changed = now.size() != m_cardBindings.size();
     if (!changed)
         for (size_t i = 0; i < now.size(); ++i)
-            if (now[i].mat != m_cardBindings[i].mat ||
-                now[i].card != m_cardBindings[i].card) { changed = true; break; }
+            if (now[i].first != m_cardBindings[i].mat ||
+                now[i].second != m_cardBindings[i].card) { changed = true; break; }
     if (changed) {
-        m_cardBindings = now;
+        m_cardBindings.clear();
+        for (const auto& p : now)
+            m_cardBindings.push_back({ p.first, p.second });
         m_cardThumbsDirty = true;
         vkDeviceWaitIdle(m_ctx.device());
         rebuildGrassCards();
@@ -64,7 +82,36 @@ bool App::rebuildGrassCards()
         return true;
     }
     std::vector<voxel::GrassCard> cards = voxel::buildGrassCards(
-        [this](int mat) { return m_texAtlas.cardLayer(mat); });
+        [this](float x, float z, int mat) {
+            int tex = 0;
+            if (m_layers.loaded()) {
+                // terrain height at this point (CPU mirror of the height tex)
+                float H = -1e9f;
+                {
+                    const auto& hf = m_layers.field().heightTexture();
+                    const int sz = m_layers.field().latN();
+                    if (sz > 0 && !hf.empty()) {
+                        glm::vec2 tc = glm::clamp(glm::vec2(x, z) / vf::voxel::WORLD + 0.5f,
+                                                 glm::vec2(0.0f), glm::vec2(1.0f)) *
+                                       glm::vec2(sz - 1);
+                        glm::ivec2 i0(glm::floor(tc)), i1(glm::min(i0 + 1, sz - 1));
+                        glm::vec2 f = tc - glm::vec2(i0);
+                        H = glm::mix(glm::mix(hf[size_t(i0.y)*sz + i0.x].r,
+                                              hf[size_t(i0.y)*sz + i1.x].r, f.x),
+                                     glm::mix(hf[size_t(i1.y)*sz + i0.x].r,
+                                              hf[size_t(i1.y)*sz + i1.x].r, f.x), f.y);
+                    }
+                }
+                if (H > -1e8f) {
+                    auto s = m_layers.field().sampleWorld(glm::vec3(x, H, z));
+                    if (s.mat != 0 || s.tex != 0) {
+                        mat = s.mat;
+                        tex = s.tex;
+                    }
+                }
+            }
+            return m_texAtlas.cardLayerForSampled(mat, tex);
+        });
     return m_furPass.setGrassCards(cards);
 }
 
@@ -113,6 +160,7 @@ void App::setTextureBinding(int mat, const std::string& file)
             m_texBindings.erase(it);
     } else if (it != m_texBindings.end()) {
         it->file = file;
+        it->card.clear(); // card belonged to the previous texture
     } else {
         m_texBindings.push_back({ file, mat, 0.5f });
     }
@@ -225,28 +273,32 @@ void App::rescanCardFiles()
     m_cardFiles.clear();
     const std::string cardsJson = std::string(VOXELFORGE_ASSET_DIR) + "/textures/cards/cards.json";
     vf::voxel::worldfile::loadCardLibrary(cardsJson, m_cardFiles);
-    // load current bindings
+    // card bindings now live on the textures table; mirror them into
+    // m_cardBindings for the picker's current-card lookup.
     m_cardBindings.clear();
-    vf::voxel::worldfile::loadFoliageCardBindings(m_manifestPath, m_cardBindings);
+    std::vector<vf::voxel::worldfile::TextureBinding> bs;
+    vf::voxel::worldfile::loadTextureManifest(m_manifestPath, bs);
+    for (const auto& b : bs)
+        if (!b.card.empty())
+            m_cardBindings.push_back({ b.mat, b.card });
     m_cardThumbsDirty = true;
 }
 
 void App::setCardBinding(int mat, const std::string& card)
 {
-    auto it = std::find_if(m_cardBindings.begin(), m_cardBindings.end(),
-                           [&](const vf::voxel::worldfile::FoliageCardBinding& b) { return b.mat == mat; });
-    if (card.empty()) {
-        if (it != m_cardBindings.end()) m_cardBindings.erase(it);
-    } else if (it != m_cardBindings.end()) {
-        it->card = card;
-    } else {
-        m_cardBindings.push_back({ mat, card });
+    auto it = std::find_if(m_texBindings.begin(), m_texBindings.end(),
+                           [&](const vf::voxel::worldfile::TextureBinding& b) { return b.mat == mat; });
+    if (it == m_texBindings.end()) {
+        spdlog::warn("card binding: material {} has no texture binding - bind a texture first", mat);
+        return;
     }
+    it->card = card;
 }
 
 void App::applyCardBindings()
 {
-    if (!vf::voxel::worldfile::writeFoliageCardManifest(m_manifestPath, m_cardBindings))
+    // card now lives on the textures binding; the writer preserves it.
+    if (!vf::voxel::worldfile::writeTextureManifest(m_manifestPath, m_texBindings))
         spdlog::warn("card picker: could not write '{}'", m_manifestPath);
     reloadTexAtlas(); // rebuilds grass cards
 }
