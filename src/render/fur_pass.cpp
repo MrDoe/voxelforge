@@ -237,24 +237,66 @@ bool FurPass::setObjects(const std::vector<voxel::FurObject>& objects)
 
 bool FurPass::setGrassCards(const std::vector<voxel::GrassCard>& cards)
 {
-    // The grass-card SSBO is read by every in-flight frame; never destroy it
-    // while the device may still be sampling it. The caller (reloadTexAtlas)
-    // already waits, but this guards direct callers and rapid re-entry.
-    if (m_ctx)
-        vkDeviceWaitIdle(m_ctx->device());
+    if (!m_ctx)
+        return false;
+    // The grass-card SSBO is read by every in-flight frame. Wait for the
+    // device to be idle BEFORE touching the buffer, then build the new buffer
+    // fully (create + upload + descriptor update) BEFORE destroying the old
+    // one, so a frame that still references the old handle can never deref
+    // freed memory. (Destroy-first ordering raced under rapid cycling and
+    // SIGSEGV'd; see quirk 83d662a1.)
+    vkDeviceWaitIdle(m_ctx->device());
+
+    const size_t bytes = cards.size() * sizeof(voxel::GrassCard);
     m_grassCount = cards.size();
-    if (m_grassCount == 0) {
+
+    if (bytes == 0) {
         destroySsbo(m_grassCards);
         return true;
     }
-    if (!uploadSsbo(m_grassCards, cards.data(), cards.size() * sizeof(cards[0])))
+
+    // Create the new buffer first (old buffer stays alive).
+    VkBufferCreateInfo bi { VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO };
+    bi.size = bytes;
+    bi.usage = VK_BUFFER_USAGE_TRANSFER_DST_BIT | VK_BUFFER_USAGE_STORAGE_BUFFER_BIT;
+    VmaAllocationCreateInfo ai {};
+    ai.usage = VMA_MEMORY_USAGE_AUTO_PREFER_DEVICE;
+    VkBuffer newBuf = VK_NULL_HANDLE;
+    VmaAllocation newAlloc = VK_NULL_HANDLE;
+    if (vmaCreateBuffer(m_ctx->allocator(), &bi, &ai, &newBuf, &newAlloc, nullptr) !=
+        VK_SUCCESS)
         return false;
-    if (m_ctx) {
-        VkDescriptorBufferInfo info { m_grassCards.buf, 0, VK_WHOLE_SIZE };
-        VkWriteDescriptorSet w { VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, nullptr, m_set, 31, 0, 1,
-                                 VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, nullptr, &info, nullptr };
-        vkUpdateDescriptorSets(m_ctx->device(), 1, &w, 0, nullptr);
+
+    // Upload via a staging buffer.
+    Buffer staging = makeBuffer(*m_ctx, bytes, VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
+                                VMA_MEMORY_USAGE_AUTO_PREFER_HOST, true);
+    if (!staging.buf || !staging.mapped) {
+        vmaDestroyBuffer(m_ctx->allocator(), newBuf, newAlloc);
+        return false;
     }
+    std::memcpy(staging.mapped, cards.data(), bytes);
+    const bool ok = m_ctx->immediateSubmit([&](VkCommandBuffer cmd) {
+        VkBufferCopy c { 0, 0, bytes };
+        vkCmdCopyBuffer(cmd, staging.buf, newBuf, 1, &c);
+    });
+    destroyBuffer(*m_ctx, staging);
+    if (!ok) {
+        vmaDestroyBuffer(m_ctx->allocator(), newBuf, newAlloc);
+        return false;
+    }
+
+    // Update the descriptor to the new buffer BEFORE destroying the old one.
+    VkDescriptorBufferInfo info { newBuf, 0, VK_WHOLE_SIZE };
+    VkWriteDescriptorSet w { VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, nullptr, m_set, 31, 0, 1,
+                             VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, nullptr, &info, nullptr };
+    vkUpdateDescriptorSets(m_ctx->device(), 1, &w, 0, nullptr);
+
+    // Now safe to destroy the previous buffer.
+    destroySsbo(m_grassCards);
+    m_grassCards.buf = newBuf;
+    m_grassCards.alloc = newAlloc;
+    m_grassCards.bytes = bytes;
+
     spdlog::info("fur: {} ground foliage cards, {:.1f} KB gpu",
                  m_grassCount, double(m_grassCards.bytes) / 1024.0);
     return true;
