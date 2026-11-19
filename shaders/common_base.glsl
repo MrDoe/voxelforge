@@ -150,7 +150,7 @@ float causticAt(vec2 xz, float t)
 // gTexOv (phase 2) overrides the material slot per surfel: > 0 = atlas layer.
 layout(set = 0, binding = 22) uniform sampler2DArray uTexAtlas;
 layout(std140, set = 0, binding = 23) uniform TexTable {
-    vec4 matTex[23]; // x = layer index (-1 = none, palette), y = m/tile,
+    vec4 matTex[28]; // x = layer index (-1 = none, palette), y = m/tile,
                      // z = emissive scale (0 = this texture does not emit)
 } uTex;
 float gTexOv = 0.0;
@@ -474,6 +474,42 @@ float tuftAlpha(vec2 uv, float s1, float s2, out float tint)
     return a;
 }
 
+// Photoreal foliage cards (render-flag bit 13, ON by default). A card is a pair
+// of CROSSED VERTICAL quads standing on the ground surface: its plane contains
+// world +Y and a horizontal tangent, so the plant grows UP out of the texture
+// it is bound to. The photo is a CC0 cutout packed by tools/pack_foliage_cards.py
+// into atlas layers 23..27 (RGB = photo, A = silhouette); the procedural
+// tuftAlpha pattern is the bit-13-off escape hatch.
+//
+// A card is BOUND TO THE GROUND TEXTURE under the hit: the layer it samples is
+// authored in world.json's "foliageCards" table (ground material -> card name),
+// resolved to an atlas layer by the shared cards/cards.json and uploaded by
+// TexAtlas into matTex[groundMat].w. Nothing about a specific material or card
+// is hardcoded here - a material with no binding reads -1 and grows no card.
+// The atlas sampler is REPEAT, so cardSample clamps UVs to avoid edge-wrap
+// fringes. Returns alpha; `tint`/`photoAlb`/`photoMix` carry the albedo
+// modulation (photo RGB when on, procedural tint when off) for the caller.
+float groundCardLayer(vec2 xz)
+{
+    return uTex.matTex[heightMatNearest(xz)].w;
+}
+
+float cardSample(vec2 uv, float s1, float s2, float cardLayer,
+                 out float tint, out vec3 photoAlb, out float photoMix)
+{
+    if ((gRenderFlags & 8192) != 0) {
+        vec2 cuv = clamp(uv, vec2(0.0), vec2(1.0));
+        vec4 c = textureLod(uTexAtlas, vec3(cuv, cardLayer), 0.0);
+        photoAlb = c.rgb;
+        tint = 1.0;
+        photoMix = 1.0;
+        return c.a;
+    }
+    photoAlb = vec3(1.0);
+    photoMix = 0.0;
+    return tuftAlpha(uv, s1, s2, tint);
+}
+
 struct Card {
     bool  hit;
     float alpha;
@@ -482,7 +518,7 @@ struct Card {
     float tip;
 };
 
-void cardPass(vec3 ro, vec3 rd, float tMax, float gh,
+void cardPass(vec3 ro, vec3 rd, float tMax, float gh, float cardLayer,
               float cell, float dens, float wBase, float wSpan, float hBase, float hSpan,
               float seedK, float passPhase, inout float bestT, inout Card c0)
 {
@@ -512,7 +548,8 @@ void cardPass(vec3 ro, vec3 rd, float tMax, float gh,
         vec2 uvH = vec2(dot(pHit - ctr, e1) / halfW * 0.5 + 0.5, (pHit.y - ctr.y) / h);
         if (uvH.y >= -0.02 && uvH.y <= 1.0) {
             float ttH;
-            float aaH = tuftAlpha(uvH, s1 * 97.3 + float(cx) * 7.7 + passPhase, s2 * 53.1 + float(cz) * 3.1, ttH);
+            vec3 paH; float pmH;
+            float aaH = cardSample(uvH, s1 * 97.3 + float(cx) * 7.7 + passPhase, s2 * 53.1 + float(cz) * 3.1, cardLayer, ttH, paH, pmH);
             if (aaH > c0.alpha) {
                 float v1h = hashN(vec2(float(cx) * 71.9 * seedK, float(cz) * 83.7 * seedK));
                 vec3 gDk = vec3(0.07, 0.36, 0.06) * (0.70 + 0.45 * v1h);
@@ -522,7 +559,8 @@ void cardPass(vec3 ro, vec3 rd, float tMax, float gh,
                 c0.alpha = aaH;
                 c0.n = nCard;
                 c0.tip = 0.75;
-                c0.alb = min(mix(gDk, gLt, tgh) * ttH * (0.72 + 0.55 * aaH), vec3(0.90));
+                vec3 procH = mix(gDk, gLt, tgh) * ttH * (0.72 + 0.55 * aaH);
+                c0.alb = mix(procH, min(paH * (0.85 + 0.30 * aaH), vec3(0.90)), pmH);
             }
         }
         float denom = dot(rd, nCard);
@@ -535,7 +573,8 @@ void cardPass(vec3 ro, vec3 rd, float tMax, float gh,
         float dv = q.y - ctr.y;
         if (dv < -0.02 || dv > h) continue;
         vec2 uv = vec2(du / halfW * 0.5 + 0.5, dv / h);
-        float tt; float aa = tuftAlpha(uv, s1 * 97.3 + float(cx) * 7.7 + passPhase, s2 * 53.1 + float(cz) * 3.1, tt);
+        float tt; vec3 pa; float pm;
+        float aa = cardSample(uv, s1 * 97.3 + float(cx) * 7.7 + passPhase, s2 * 53.1 + float(cz) * 3.1, cardLayer, tt, pa, pm);
         if (aa < 0.04) continue;
         bestT = tc;
         c0.hit = true;
@@ -546,19 +585,28 @@ void cardPass(vec3 ro, vec3 rd, float tMax, float gh,
         vec3 gDark = vec3(0.07, 0.36, 0.06) * (0.70 + 0.45 * v1);
         vec3 gLit = vec3(0.36, 0.70, 0.22) * (0.85 + 0.35 * hashN(vec2(float(cx) * 91.3 + passPhase, float(cz) * 97.1)));
         float tg = uv.y * uv.y * (3.0 - 2.0 * uv.y);
-        c0.alb = min(mix(gDark, gLit, tg) * tt * (0.72 + 0.55 * aa), vec3(0.90));
+        vec3 procC = min(mix(gDark, gLit, tg) * tt * (0.72 + 0.55 * aa), vec3(0.90));
+        c0.alb = mix(procC, min(pa * (0.85 + 0.30 * aa), vec3(0.90)), pm);
     }
 }
 
-Card grassCard(vec3 ro, vec3 rd, float tMax, float gh)
+Card grassCard(vec3 ro, vec3 rd, float tMax, float gh, float cardLayer, bool photo)
 {
     Card c0;
     c0.hit = false; c0.alpha = 0.0; c0.n = vec3(0.0, 1.0, 0.0);
     c0.alb = vec3(0.0); c0.tip = 0.0;
     float bestT = tMax;
-    // coarse meadow tufts + fine filler cards (decorrelated grids)
-    cardPass(ro, rd, tMax, gh, 0.42, 0.66, 0.50, 0.38, 0.28, 0.40, 1.000, 0.0, bestT, c0);
-    cardPass(ro, rd, tMax, gh, 0.17, 0.88, 0.14, 0.16, 0.12, 0.18, 0.618, 13.37, bestT, c0);
+    // Two decorrelated grids of crossed VERTICAL cards standing on gh.
+    // Photo cards are a dense TALL meadow: finer cells, higher coverage, and
+    // roughly 2-3x the blade height of the sparse procedural tufts. The
+    // procedural parameter set is kept EXACTLY as-is for the bit-13-off hatch.
+    if (photo) {
+        cardPass(ro, rd, tMax, gh, cardLayer, 0.30, 0.92, 0.58, 0.42, 0.55, 0.45, 1.000, 0.0, bestT, c0);
+        cardPass(ro, rd, tMax, gh, cardLayer, 0.14, 0.96, 0.20, 0.20, 0.26, 0.24, 0.618, 13.37, bestT, c0);
+    } else {
+        cardPass(ro, rd, tMax, gh, cardLayer, 0.42, 0.66, 0.50, 0.38, 0.28, 0.40, 1.000, 0.0, bestT, c0);
+        cardPass(ro, rd, tMax, gh, cardLayer, 0.17, 0.88, 0.14, 0.16, 0.12, 0.18, 0.618, 13.37, bestT, c0);
+    }
     return c0;
 }
 
@@ -1144,8 +1192,22 @@ void applyFlora(vec3 p, vec3 rd, vec3 ro, uint mId, bool useBaked, float shBaked
         sh = min(sh, shR + 0.15);
     }
 
-    // ---- flora field: grass cards / leaf clusters (near-field) ----
-    if ((gRenderFlags & 4) != 0 && (mId <= 1u || mId == 8u)) {
+    // ---- flora field: ground-bound foliage cards + leaf clusters (near-field) ----
+    // A card stands vertically on the ground and is bound to the GROUND TEXTURE
+    // under the hit, by the authored "foliageCards" table (groundCardLayer).
+    // Small-voxel plants are gone; these photo cutouts are the ground cover for
+    // every bound ground material. The bit-13-off path is the byte-exact
+    // procedural escape hatch.
+    // Bit 13 now drives the RASTER ground-foliage cards in FurPass (real
+    // quads, per-fragment alpha, G-buffer depth test - the micro-object card
+    // approach). The old shading-level photo path is disabled so the two do
+    // not stack; keeping `photoOn` false also keeps this block byte-identical
+    // to the pre-card renderer for every view.
+    bool photoOn = false;
+    float cardLayer = groundCardLayer(p.xz); // authored binding, -1 = no card
+    bool cardGround = cardLayer >= 0.0;
+    if ((gRenderFlags & 4) != 0 &&
+        ((mId <= 1u) || (mId == 8u) || (photoOn && cardGround))) {
         float lod = 1.0 - smoothstep(12.0, 40.0, length(p - ro));
         if (lod > 0.001) {
             if (mId <= 1u) {
@@ -1163,21 +1225,49 @@ void applyFlora(vec3 p, vec3 rd, vec3 ro, uint mId, bool useBaked, float shBaked
                      + 0.45 * vec3(fract(streak * 7.31) - 0.5, 0.0, fract(streak * 11.7) - 0.5));
                 n = normalize(mix(n, bn, 0.60 * lod * hgt * smoothstep(0.20, 0.85, streak)));
                 ao *= mix(0.55, 1.05, hgt);          // dark roots, lit tips
-                // silhouette cards (ray-space crossed alpha sprites)
-                Card cd = grassCard(ro, rd, length(p - ro), ghS);
+                // silhouette cards (ray-space crossed alpha sprites) -- the
+                // procedural escape hatch. Also the fallback when bit 13 is on
+                // but this ground material has no foliage-card binding.
+                if (!photoOn || !cardGround) {
+                    Card cd = grassCard(ro, rd, length(p - ro), ghS, 23.0, false);
+                    if (cd.hit) {
+                        float m = cd.alpha * lod;
+                        vec3 bn2 = normalize(cd.n * 0.50 + vec3(0.0, 0.80, 0.0));
+                        bn2 = normalize(bn2 + 0.40 * vec3(fract(streak * 7.31) - 0.5, 0.0, fract(streak * 3.17) - 0.5));
+                        n = normalize(mix(n, bn2, m * 0.92));
+                        alb *= cd.alb * (0.90 + 0.20 * streak);
+                        float tg = cd.tip * cd.tip * (3.0 - 2.0 * cd.tip);
+                        ao *= mix(0.50, 1.05, tg);
+                    }
+                }
+            }
+            // Ground-bound photographic cards (bit 13): crossed VERTICAL quads
+            // standing on the ground texture, sampled by the card layer the
+            // author bound to that ground material in world.json. Skipped
+            // entirely with bit 13 off, so the escape hatch is byte-exact.
+            if (photoOn && cardGround) {
+                float ghC = heightAt(p.xz);
+                float sc = 0.5 + 0.5 * fract(hashN(p.xz * 31.7));
+                Card cd = grassCard(ro, rd, length(p - ro), ghC, cardLayer, true);
                 if (cd.hit) {
                     float m = cd.alpha * lod;
                     vec3 bn2 = normalize(cd.n * 0.50 + vec3(0.0, 0.80, 0.0));
-                    bn2 = normalize(bn2 + 0.40 * vec3(fract(streak * 7.31) - 0.5, 0.0, fract(streak * 3.17) - 0.5));
+                    bn2 = normalize(bn2 + 0.40 * vec3(fract(sc * 7.31) - 0.5, 0.0, fract(sc * 3.17) - 0.5));
                     n = normalize(mix(n, bn2, m * 0.92));
-                    alb *= cd.alb * (0.90 + 0.20 * streak);
+                    // A photo card CARRIES its own green/straw colour: blend
+                    // the photographic blade over the ground rather than
+                    // multiply (brown floodplain soil * green photo = mud).
+                    alb = mix(alb, cd.alb, clamp(m * 1.15, 0.0, 1.0));
                     float tg = cd.tip * cd.tip * (3.0 - 2.0 * cd.tip);
                     ao *= mix(0.50, 1.05, tg);
                 }
             }
             float gh = (mId == 8u) ? p.y - 0.12 : heightAt(p.xz);
             FloraInfo fi = floraField(p, gh, (mId == 8u) ? 1u : 0u);
-            if (fi.mask * lod > 0.02) {
+            // Photo cards own a bound ground material when enabled; keep
+            // procedural tufts for the escape hatch, unbound ground, and
+            // canopy leaf clusters.
+            if (fi.mask * lod > 0.02 && (!photoOn || !cardGround || mId == 8u)) {
                 vec3 bn = fi.n;
                 if (mId == 8u) {               // two-sided leaves: face the viewer
                     if (dot(bn, rd) > 0.0) bn = -bn;

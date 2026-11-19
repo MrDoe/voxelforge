@@ -189,6 +189,20 @@ one costs a whole turn, because the bad call is rejected before any work runs.
   existed). Confirm the instrument before believing the number.
 
 ## Sceneries — the world now lives in `scenery/<name>/`
+- **NEVER hardcode scenery items.** No material id, layer name, object/scatter
+  file, ground-texture binding, foliage-card name, or world position may be
+  baked into C++ or GLSL as a "special case". Scenery-specific facts live in
+  DATA: the active scenery's `world.json` (layers, `textures`, `lights`,
+  `foliageCards`, poses/behaviours) and the shared library's manifests
+  (`assets/textures/cards/cards.json`, etc.), resolved at load time. Code
+  provides generic mechanisms that READ those tables; it must work unchanged
+  for a new scenery or a re-bound material. Example: a foliage card is bound
+  to a ground material by a `{"mat":N,"card":"name"}` entry in world.json,
+  joined with the shared cards.json (name -> atlas layer + PNG) and uploaded
+  in `matTex[N].w` — the shader samples `matTex[groundMat].w` and knows no
+  material or card by name. The old `mId <= 1u`/`mId == 8u` checks in the
+  flora path are legacy procedural shading, NOT a pattern to copy for new
+  scenery content.
 - A **scenery** is a self-contained world folder under `scenery/<name>/`
   holding the manifest (`world.json`), the terrain (`heightmap.png`,
   `landscape.vxw`), every object/scatter/micro `.vxw`, the `micro/` tree (with

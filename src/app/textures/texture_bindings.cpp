@@ -4,6 +4,7 @@
 // are preserved verbatim, so a texture swap can never unbind the atlas or drop
 // a layer).
 #include "app/app.hpp"
+#include "voxel/grass_cards.hpp"
 
 #include <filesystem>
 
@@ -33,7 +34,22 @@ bool App::reloadTexAtlas()
     // callers come through here, so re-deriving once here keeps the rule
     // un-forgettable; the wait above also makes the descriptor write safe.
     uploadLightSources();
+    // The foliage-card SSBO is derived from the atlas's material bindings, so
+    // rebuild it here: a world.json "foliageCards" edit or a scenery switch
+    // then takes effect on the same reload as the textures it binds.
+    rebuildGrassCards();
     return true;
+}
+
+bool App::rebuildGrassCards()
+{
+    if ((m_renderFlags & (1 << 13)) == 0) {
+        m_furPass.setGrassCards({});
+        return true;
+    }
+    std::vector<voxel::GrassCard> cards = voxel::buildGrassCards(
+        [this](int mat) { return m_texAtlas.cardLayer(mat); });
+    return m_furPass.setGrassCards(cards);
 }
 
 void App::rescanTextureFiles()

@@ -99,6 +99,7 @@ add_library(vf_core STATIC src/core/camera.cpp
                           src/voxel/micro_clip.cpp
                           src/voxel/micro_mesh.cpp
                           src/voxel/fur_cards.cpp
+                          src/voxel/grass_cards.cpp
                           src/voxel/heightmap.cpp src/voxel/worldfile.cpp
                           src/voxel/scenery.cpp
                           src/voxel/picking.cpp src/voxel/editable_world.cpp
@@ -205,6 +206,8 @@ set(VF_SHADER_SRCS ${CMAKE_CURRENT_SOURCE_DIR}/shaders/svo_raymarch.comp
     ${CMAKE_CURRENT_SOURCE_DIR}/shaders/fur.vert
     ${CMAKE_CURRENT_SOURCE_DIR}/shaders/fur.frag
     ${CMAKE_CURRENT_SOURCE_DIR}/shaders/fur_composite.comp
+    ${CMAKE_CURRENT_SOURCE_DIR}/shaders/grass.vert
+    ${CMAKE_CURRENT_SOURCE_DIR}/shaders/grass.frag
     ${CMAKE_CURRENT_SOURCE_DIR}/shaders/splat_cull.comp
     ${CMAKE_CURRENT_SOURCE_DIR}/shaders/splat_hiz.comp
     ${CMAKE_CURRENT_SOURCE_DIR}/shaders/splat_tile_bin.comp

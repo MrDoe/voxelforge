@@ -33,7 +33,8 @@ namespace vf {
 class TexAtlas {
 public:
     static constexpr uint32_t kTexSize = 512;   // texels per atlas layer side
-    static constexpr uint32_t kLayers = 23;     // one per palette material id
+    static constexpr uint32_t kLayers = 28;     // 23 palette materials (0..22) + 5 foliage cards (23..27)
+    static constexpr uint32_t kCardBase = 23;   // first foliage-card layer (see assets/textures/cards/cards.json)
     static constexpr float kDefaultScale = 0.5f; // metres per tile
 
     TexAtlas()
@@ -64,12 +65,20 @@ public:
 
     // mat -> (slot, scale) packed as the shader's matTex[mId]: x = layer or
     // -1 (no texture), y = metres per tile, z = emissive scale (0 = the
-    // texture does not emit).
+    // texture does not emit), w = authored foliage-card layer or -1 (none).
+    // w comes from world.json "foliageCards" joined with cards/cards.json,
+    // so a scenery binds ground materials to photo cards without code edits.
     void fillTable(float* outNx4) const;
 
     // Emission strength of the texture bound to `mat` (0 = none). The shader
     // reads the same value from the table's .z; the CPU side needs it to turn
     // emissive materials into point lights.
+    // Atlas layer of the foliage card bound to `ground material` (-1 = none),
+    // authored in world.json "foliageCards" joined with cards/cards.json.
+    int cardLayer(int mat) const {
+        return (mat >= 0 && mat < int(kLayers)) ? m_cardLayer[mat] : -1;
+    }
+
     float emissiveScale(int mat) const {
         return (mat >= 0 && mat < int(kLayers)) ? m_emis[mat] : 0.0f;
     }
@@ -105,6 +114,8 @@ private:
     // texture, both fed from the manifest's "emissive"/"emissiveScale"
     float m_emis[kLayers] = { 0.0f };
     glm::vec3 m_mean[kLayers] = {};
+    // ground material -> foliage-card atlas layer (-1 = no card bound)
+    int m_cardLayer[kLayers] = { -1 };
 };
 
 } // namespace vf

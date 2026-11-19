@@ -345,8 +345,9 @@ void App::handleHotkeys(bool textCaptures, bool headlessRun)
             }
         }
         if (edge(GLFW_KEY_0, hw)) {
-            m_renderFlags = 31;
-            spdlog::info("render flags reset -> 31");
+            // Reset to the default look, which includes photo foliage cards.
+            m_renderFlags = 31 | (1 << 13);
+            spdlog::info("render flags reset -> default");
         }
         // photorealism feature toggles
         if (edge(GLFW_KEY_G, hw)) {

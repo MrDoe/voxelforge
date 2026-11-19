@@ -608,6 +608,110 @@ bool loadTextureManifest(const std::string& path, std::vector<TextureBinding>& o
     return true;
 }
 
+// Photoreal foliage-card bindings: world.json "foliageCards" (mat -> name)
+// joined with the shared cards.json (name -> layer + file). No material or card
+// is hardcoded here - both sides are authored data files.
+bool loadFoliageCardManifest(const std::string& manifestPath,
+                             const std::string& cardsJsonPath,
+                             std::vector<ResolvedFoliageCard>& out)
+{
+    out.clear();
+    auto readFile = [](const std::string& p, std::string& txt) {
+        std::FILE* f = std::fopen(p.c_str(), "rb");
+        if (!f) return false;
+        char buf[4096];
+        size_t n;
+        while ((n = std::fread(buf, 1, sizeof(buf), f)) > 0) txt.append(buf, n);
+        std::fclose(f);
+        return true;
+    };
+    std::string sceneText, cardsText;
+    if (!readFile(manifestPath, sceneText) || !readFile(cardsJsonPath, cardsText))
+        return false;
+
+    // card name -> (atlas layer, PNG file) from the shared card library
+    struct CardDef { std::string name, file; int layer = -1; };
+    std::vector<CardDef> lib;
+    {
+        Json j{ cardsText };
+        if (!j.eat('{')) return false;
+        while (!j.peek('}') && j.i < cardsText.size()) {
+            std::string key;
+            if (!j.str(key) || !j.eat(':')) return false;
+            if ((key == "cards" || key == "files") && j.eat('{')) {
+                while (!j.peek('}') && j.i < cardsText.size()) {
+                    std::string name;
+                    if (!j.str(name) || !j.eat(':')) return false;
+                    if (key == "cards") {
+                        float v = -1.f; j.num(v);
+                        CardDef* d = nullptr;
+                        for (auto& c : lib) if (c.name == name) { d = &c; break; }
+                        if (!d) { lib.push_back(CardDef{}); d = &lib.back(); d->name = name; }
+                        d->layer = int(v);
+                    } else {
+                        std::string file; j.str(file);
+                        CardDef* d = nullptr;
+                        for (auto& c : lib) if (c.name == name) { d = &c; break; }
+                        if (!d) { lib.push_back(CardDef{}); d = &lib.back(); d->name = name; }
+                        d->file = file;
+                    }
+                    if (!j.eat(',')) break;
+                }
+                j.eat('}');
+            } else {
+                j.skipValue();
+            }
+            if (!j.eat(',')) break;
+        }
+    }
+
+    // ground material -> card name from the scenery manifest
+    {
+        Json j{ sceneText };
+        if (!j.eat('{')) return false;
+        while (!j.peek('}') && j.i < sceneText.size()) {
+            std::string key;
+            if (!j.str(key) || !j.eat(':')) return false;
+            if (key == "foliageCards" && j.eat('[')) {
+                while (!j.peek(']') && j.i < sceneText.size()) {
+                    FoliageCardBinding b;
+                    if (!j.eat('{')) return false;
+                    while (!j.peek('}') && j.i < sceneText.size()) {
+                        std::string k;
+                        if (!j.str(k) || !j.eat(':')) return false;
+                        if (k == "mat") {
+                            float v = -1.f; j.num(v); b.mat = int(v);
+                        } else if (k == "card") {
+                            j.str(b.card);
+                        } else {
+                            j.skipValue();
+                        }
+                        if (!j.eat(',')) break;
+                    }
+                    j.eat('}');
+                    for (const auto& c : lib) {
+                        if (c.name == b.card && b.mat >= 0 && b.mat < int(kPaletteN) &&
+                            c.layer >= 0 && !c.file.empty()) {
+                            ResolvedFoliageCard r;
+                            r.mat = b.mat;
+                            r.layer = c.layer;
+                            r.file = c.file;
+                            out.push_back(std::move(r));
+                            break;
+                        }
+                    }
+                    if (!j.eat(',')) break;
+                }
+                j.eat(']');
+            } else {
+                j.skipValue();
+            }
+            if (!j.eat(',')) break;
+        }
+    }
+    return !out.empty();
+}
+
 bool loadLightManifest(const std::string& path, std::vector<LightSource>& out)
 {
     out.clear();

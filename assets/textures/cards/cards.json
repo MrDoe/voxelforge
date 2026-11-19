@@ -1,0 +1,18 @@
+{
+ "layerBase": 23,
+ "size": 512,
+ "cards": {
+  "grass": 23,
+  "jungle": 24,
+  "oak": 25,
+  "laurel": 26,
+  "nandina": 27
+ },
+ "files": {
+  "grass": "card_23_grass.png",
+  "jungle": "card_24_jungle.png",
+  "oak": "card_25_oak.png",
+  "laurel": "card_26_laurel.png",
+  "nandina": "card_27_nandina.png"
+ }
+}

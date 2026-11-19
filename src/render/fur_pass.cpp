@@ -235,6 +235,26 @@ bool FurPass::setObjects(const std::vector<voxel::FurObject>& objects)
     return true;
 }
 
+bool FurPass::setGrassCards(const std::vector<voxel::GrassCard>& cards)
+{
+    m_grassCount = cards.size();
+    if (m_grassCount == 0) {
+        destroySsbo(m_grassCards);
+        return true;
+    }
+    if (!uploadSsbo(m_grassCards, cards.data(), cards.size() * sizeof(cards[0])))
+        return false;
+    if (m_ctx) {
+        VkDescriptorBufferInfo info { m_grassCards.buf, 0, VK_WHOLE_SIZE };
+        VkWriteDescriptorSet w { VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, nullptr, m_set, 31, 0, 1,
+                                 VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, nullptr, &info, nullptr };
+        vkUpdateDescriptorSets(m_ctx->device(), 1, &w, 0, nullptr);
+    }
+    spdlog::info("fur: {} ground foliage cards, {:.1f} KB gpu",
+                 m_grassCount, double(m_grassCards.bytes) / 1024.0);
+    return true;
+}
+
 void FurPass::setWorldPreview(size_t worldIndex, glm::vec3 offset, bool active)
 {
     if (!m_table.mapped || worldIndex >= size_t(m_objectCount))
@@ -422,7 +442,7 @@ bool FurPass::init(const Context& ctx)
     if (!createBlackEnv(ctx))
         return false;
 
-    VkDescriptorSetLayoutBinding b[19] = {};
+    VkDescriptorSetLayoutBinding b[20] = {}; // 19 original + binding 31 (grass cards)
     int n = 0;
     // Every binding is declared for all three stages: the same set feeds the
     // vertex+fragment draw and the composite dispatch, so a per-stage split
@@ -456,6 +476,9 @@ bool FurPass::init(const Context& ctx)
     b[n++] = { 26, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1, gfx, nullptr };
     // 30: the per-object table (cards/grid ranges, the transforms, the bones).
     b[n++] = { 30, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, 1, gfx, nullptr };
+    // 31: the ground foliage-card SSBO (grass.vert reads it). Empty when no
+    // material has a foliage binding, so the grass draw stays inert.
+    b[n++] = { 31, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, gfx, nullptr };
     // 40-43: the raster accumulation targets the composite stage folds into
     // HDR (alpha, alpha*light, alpha*ao, alpha*mat | alpha*p | alpha*n | alpha*alb).
     for (uint32_t i = 40; i <= 44; ++i)
@@ -488,8 +511,10 @@ bool FurPass::init(const Context& ctx)
 
     // ---- the raster pipeline: one instanced quad per card -----------------
     VkShaderModule vs = VK_NULL_HANDLE, fs = VK_NULL_HANDLE, cs = VK_NULL_HANDLE;
+    VkShaderModule gvs = VK_NULL_HANDLE, gfs = VK_NULL_HANDLE;
     if (!makeModule("fur.vert.spv", &vs) || !makeModule("fur.frag.spv", &fs) ||
-        !makeModule("fur_composite.comp.spv", &cs)) {
+        !makeModule("fur_composite.comp.spv", &cs) ||
+        !makeModule("grass.vert.spv", &gvs) || !makeModule("grass.frag.spv", &gfs)) {
         spdlog::critical("fur: shader module load failed");
         return false;
     }
@@ -593,6 +618,78 @@ bool FurPass::init(const Context& ctx)
         }
     }
 
+    // ---- the ground foliage-card pipeline: same accumulators, grass shaders
+    {
+        VkPipelineShaderStageCreateInfo st[2] = {};
+        st[0] = { VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO };
+        st[0].stage = VK_SHADER_STAGE_VERTEX_BIT;
+        st[0].module = gvs;
+        st[0].pName = "main";
+        st[1] = { VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO };
+        st[1].stage = VK_SHADER_STAGE_FRAGMENT_BIT;
+        st[1].module = gfs;
+        st[1].pName = "main";
+
+        VkPipelineVertexInputStateCreateInfo vi { VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO };
+        VkPipelineInputAssemblyStateCreateInfo ia { VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO };
+        ia.topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_STRIP;
+        VkPipelineViewportStateCreateInfo vp { VK_STRUCTURE_TYPE_PIPELINE_VIEWPORT_STATE_CREATE_INFO };
+        vp.viewportCount = 1;
+        vp.scissorCount = 1;
+        VkPipelineRasterizationStateCreateInfo rs { VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO };
+        rs.polygonMode = VK_POLYGON_MODE_FILL;
+        rs.cullMode = VK_CULL_MODE_NONE; // grass cards are two-sided
+        rs.frontFace = VK_FRONT_FACE_COUNTER_CLOCKWISE;
+        rs.lineWidth = 1.0f;
+        VkPipelineMultisampleStateCreateInfo ms { VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO };
+        ms.rasterizationSamples = VK_SAMPLE_COUNT_1_BIT;
+        const VkFormat accFmt = VK_FORMAT_R16G16B16A16_SFLOAT;
+        VkPipelineRenderingCreateInfo prc { VK_STRUCTURE_TYPE_PIPELINE_RENDERING_CREATE_INFO };
+        VkFormat fmts[kAccCount] = { accFmt, accFmt, accFmt, accFmt, accFmt };
+        prc.colorAttachmentCount = kAccCount;
+        prc.pColorAttachmentFormats = fmts;
+        VkPipelineColorBlendAttachmentState cba[kAccCount] = {};
+        for (int i = 0; i < kAccCount; ++i) {
+            cba[i].blendEnable = VK_TRUE;
+            cba[i].srcColorBlendFactor = VK_BLEND_FACTOR_ONE;
+            cba[i].dstColorBlendFactor = VK_BLEND_FACTOR_ONE;
+            cba[i].colorBlendOp = VK_BLEND_OP_ADD;
+            cba[i].srcAlphaBlendFactor = VK_BLEND_FACTOR_ONE;
+            cba[i].dstAlphaBlendFactor = VK_BLEND_FACTOR_ONE;
+            cba[i].alphaBlendOp = VK_BLEND_OP_ADD;
+            cba[i].colorWriteMask = VK_COLOR_COMPONENT_R_BIT | VK_COLOR_COMPONENT_G_BIT |
+                                    VK_COLOR_COMPONENT_B_BIT | VK_COLOR_COMPONENT_A_BIT;
+        }
+        VkPipelineColorBlendStateCreateInfo cb { VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO };
+        cb.attachmentCount = kAccCount;
+        cb.pAttachments = cba;
+        VkDynamicState dyn[] = { VK_DYNAMIC_STATE_VIEWPORT, VK_DYNAMIC_STATE_SCISSOR };
+        VkPipelineDynamicStateCreateInfo dy { VK_STRUCTURE_TYPE_PIPELINE_DYNAMIC_STATE_CREATE_INFO };
+        dy.dynamicStateCount = 2;
+        dy.pDynamicStates = dyn;
+
+        VkGraphicsPipelineCreateInfo gpi { VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO };
+        gpi.pNext = &prc;
+        gpi.stageCount = 2;
+        gpi.pStages = st;
+        gpi.pVertexInputState = &vi;
+        gpi.pInputAssemblyState = &ia;
+        gpi.pViewportState = &vp;
+        gpi.pRasterizationState = &rs;
+        gpi.pMultisampleState = &ms;
+        gpi.pColorBlendState = &cb;
+        gpi.pDynamicState = &dy;
+        gpi.layout = m_layout;
+        const VkResult r = vkCreateGraphicsPipelines(dev, VK_NULL_HANDLE, 1, &gpi,
+                                                     nullptr, &m_grassDrawPipe);
+        if (r != VK_SUCCESS) {
+            spdlog::critical("fur: grass raster pipeline failed ({})", int(r));
+            vkDestroyShaderModule(dev, gvs, nullptr);
+            vkDestroyShaderModule(dev, gfs, nullptr);
+            return false;
+        }
+    }
+
     // ---- the composite pipeline: sums -> the lit pixel --------------------
     {
         VkComputePipelineCreateInfo cpi { VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO };
@@ -614,12 +711,14 @@ bool FurPass::init(const Context& ctx)
     vkDestroyShaderModule(dev, vs, nullptr);
     vkDestroyShaderModule(dev, fs, nullptr);
     vkDestroyShaderModule(dev, cs, nullptr);
+    vkDestroyShaderModule(dev, gvs, nullptr);
+    vkDestroyShaderModule(dev, gfs, nullptr);
 
     // The pool covers every binding above: STORAGE_IMAGE 8/9/13/14 +40-43 (8),
-    // STORAGE_BUFFER 0/1/2 (3), UNIFORM_BUFFER 23/25/30 (3),
+    // STORAGE_BUFFER 0/1/2/31 (4), UNIFORM_BUFFER 23/25/30 (3),
     // COMBINED_IMAGE_SAMPLER 11/12/22/26 (4).
     VkDescriptorPoolSize sizes[4] = { { VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 9 },
-                                       { VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 3 },
+                                       { VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 4 },
                                        { VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, 3 },
                                        { VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 4 } };
     VkDescriptorPoolCreateInfo pi { VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO };
@@ -793,7 +892,9 @@ void FurPass::record(VkCommandBuffer cmd, const RaymarchPush& push)
     // No fur -> nothing to draw and nothing to composite. This is the whole
     // cost of the feature when it is off, and it guarantees the frame is
     // byte-identical to the frame without it.
-    if (m_objectCount == 0 || m_cardCount == 0 || !m_drawPipe || !m_compPipe || !m_set)
+    const bool hasFur = m_objectCount != 0 && m_cardCount != 0;
+    const bool hasGrassCards = m_grassCount != 0 && m_grassDrawPipe != VK_NULL_HANDLE;
+    if ((!hasFur && !hasGrassCards) || !m_compPipe || !m_set)
         return;
     if (!m_acc[0].img)
         return;
@@ -870,8 +971,14 @@ void FurPass::record(VkCommandBuffer cmd, const RaymarchPush& push)
                 rectMaxY = std::max(rectMaxY, sy + 16);
             }
         }
-        if (rectMaxX <= rectMinX || rectMaxY <= rectMinY)
-            return; // no object is on screen
+        if (rectMaxX <= rectMinX || rectMaxY <= rectMinY || hasGrassCards) {
+            // Ground grass covers the whole world, so when it is present the
+            // render area (and the composite) must be the full frame - the
+            // alpaca's small screen bounds would otherwise clip every blade.
+            rectMinX = rectMinY = 0;
+            rectMaxX = int(W);
+            rectMaxY = int(H);
+        }
         rectMinX = std::max(0, std::min(rectMinX, int(W) - 1));
         rectMinY = std::max(0, std::min(rectMinY, int(H) - 1));
         rectMaxX = std::max(rectMinX + 1, std::min(rectMaxX, int(W)));
@@ -942,7 +1049,6 @@ void FurPass::record(VkCommandBuffer cmd, const RaymarchPush& push)
         const VkViewport vp { 0.0f, 0.0f, float(W), float(H), 0.0f, 1.0f };
         vkCmdSetViewport(cmd, 0, 1, &vp);
         vkCmdSetScissor(cmd, 0, 1, &rect);
-        vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, m_drawPipe);
         vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, m_layout, 0, 1,
                                 &m_set, 0, nullptr);
         vkCmdPushConstants(cmd, m_layout,
@@ -952,7 +1058,16 @@ void FurPass::record(VkCommandBuffer cmd, const RaymarchPush& push)
         // 4 vertices (a strip) per card, one instance per card, EVERY object
         // in one draw: the vertex shader recovers the owner from the card
         // ranges in the table.
-        vkCmdDraw(cmd, 4, uint32_t(m_cardCount), 0, 0);
+        if (hasFur) {
+            vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, m_drawPipe);
+            vkCmdDraw(cmd, 4, uint32_t(m_cardCount), 0, 0);
+        }
+        // Ground foliage cards: same accumulators, same composite, grass
+        // shaders. One draw over the whole world's card set.
+        if (hasGrassCards) {
+            vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, m_grassDrawPipe);
+            vkCmdDraw(cmd, 4, uint32_t(m_grassCount), 0, 0);
+        }
         vkCmdEndRendering(cmd);
     }
 
@@ -993,12 +1108,15 @@ void FurPass::destroy()
     destroySsbo(m_cards);
     destroySsbo(m_cellStart);
     destroySsbo(m_cellItems);
+    destroySsbo(m_grassCards);
     if (m_irrSampler)
         vkDestroySampler(dev, m_irrSampler, nullptr);
     if (m_blackSampler)
         vkDestroySampler(dev, m_blackSampler, nullptr);
     if (m_drawPipe)
         vkDestroyPipeline(dev, m_drawPipe, nullptr);
+    if (m_grassDrawPipe)
+        vkDestroyPipeline(dev, m_grassDrawPipe, nullptr);
     if (m_compPipe)
         vkDestroyPipeline(dev, m_compPipe, nullptr);
     for (int i = 0; i < kAccCount; ++i)
@@ -1014,6 +1132,7 @@ void FurPass::destroy()
     destroyImage3D(*m_ctx, m_blackCube);
     destroyImage3D(*m_ctx, m_blackLut);
     m_drawPipe = VK_NULL_HANDLE;
+    m_grassDrawPipe = VK_NULL_HANDLE;
     m_compPipe = VK_NULL_HANDLE;
     m_accExtent = { 0, 0 };
     m_layout = VK_NULL_HANDLE;
@@ -1024,6 +1143,7 @@ void FurPass::destroy()
     m_blackSampler = VK_NULL_HANDLE;
     m_objectCount = 0;
     m_cardCount = 0;
+    m_grassCount = 0;
 }
 
 }  // namespace vf

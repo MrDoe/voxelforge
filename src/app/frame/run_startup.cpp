@@ -598,6 +598,9 @@ void App::applyStartupEnvOverrides(FrameInputs& fx)
     // debug/CI override for the render-flag bitmask (AO/shadow/flora/water/outline)
     if (const char* rf = getenv("VF_RENDER_FLAGS"))
         m_renderFlags = atoi(rf);
+    // Bit 13 gates the raster ground-foliage cards; rebuild the SSBO after
+    // the final flag value is known (surface init built it for the default).
+    rebuildGrassCards();
     // headless/CI overrides for the photorealism toggles (default off = deterministic)
     if (const char* e = getenv("VF_VOLFOG"))
         m_volFogEnabled = atoi(e) != 0;
