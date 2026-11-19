@@ -26,10 +26,28 @@ bool App::runSelftest()
     }
     float geoRatio = float(geometryPixels) / float(total);
 
-    // sky probe: upper-right area, clear of the default HUD window position
+    // sky probe: upper-right area, clear of the default HUD window position.
+    // Photo-foliage cards (render bit 13, default ON) are tall vertical quads,
+    // so a close blade can poke into ANY one pixel of this area. The probe
+    // asks whether sky is VISIBLE here, not whether one exact texel is sky:
+    // sample a small patch and take its bluest pixel (max b-r). A patch that
+    // is wholly grass still fails, so the test keeps its teeth.
     uint32_t sx = W * 15 / 16, sy = H / 8;
-    size_t sIdx = (size_t(sy) * W + sx) * 4;
-    uint8_t tr = pixels[sIdx], tg = pixels[sIdx + 1], tb = pixels[sIdx + 2];
+    uint8_t tr = 0, tg = 0, tb = 0;
+    int bestBlue = -1000;
+    const int rad = 12;
+    for (int dy = -rad; dy <= rad; ++dy) {
+        const int yy = int(sy) + dy;
+        if (yy < 0 || yy >= int(H)) continue;
+        for (int dx = -rad; dx <= rad; ++dx) {
+            const int xx = int(sx) + dx;
+            if (xx < 0 || xx >= int(W)) continue;
+            const size_t i = (size_t(yy) * W + xx) * 4;
+            const uint8_t r = pixels[i], g = pixels[i + 1], b = pixels[i + 2];
+            const int blue = int(b) - int(r);
+            if (blue > bestBlue) { bestBlue = blue; tr = r; tg = g; tb = b; }
+        }
+    }
     bool skyOk = tb >= tr;
 
     spdlog::info("selftest[voxel]: geometry coverage {:.1f}%, sky probe ({},{},{})",
