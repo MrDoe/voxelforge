@@ -34,3 +34,4 @@ scenery/*/micro/*.skin
 /voxelforge
 .opencode/scratch/
 .opencode/sidebar-*.png
+scenery/*/bin/

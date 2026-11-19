@@ -302,12 +302,14 @@
   {
    "file": "textures/dark_green_grass_dense_natural_meadow_topdown_vie_1_seamless.png",
    "mat": 0,
-   "scale": 2.6
+   "scale": 2.6,
+   "card": "grass"
   },
   {
    "file": "textures/grass_light_high_res.png",
    "mat": 1,
-   "scale": 2.6
+   "scale": 2.6,
+   "card": "grass"
   },
   {
    "file": "textures/sand_highres.png",
@@ -330,7 +332,7 @@
    "scale": 1.2
   },
   {
-   "file": "textures/brown_tree_bark_rough_vertical_ridges_natural_1_seamless.png",
+   "file": "textures/dark_wooden_planks_aged_oak_horizontal_grain_1_seamless.png",
    "mat": 6,
    "scale": 1.0
   },
@@ -340,9 +342,10 @@
    "scale": 0.9
   },
   {
-   "file": "textures/green_foliage_leaves_dense_vegetation_plant_textur_1_seamless.png",
+   "file": "textures/green_foliage_leaves_dense_vegetation_plant_textur_1.png",
    "mat": 8,
-   "scale": 1.65
+   "scale": 1.65,
+   "card": "jungle"
   },
   {
    "file": "textures/gravel.png",

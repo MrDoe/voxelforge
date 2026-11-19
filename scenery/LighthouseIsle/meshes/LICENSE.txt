@@ -1,0 +1,5 @@
+These OBJ/MTL files are Quaternius (CC0, public domain):
+  Ships, Buildings and Farm Buildings packs,
+  https://quaternius.com (Drive folders linked from the pack pages).
+Renamed to isle_* with rewritten mtllib references; geometry otherwise
+unmodified. Imported via tools/.. > scenery/LighthouseIsle/isle_meshes.sh.
