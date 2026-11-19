@@ -46,11 +46,11 @@
 
 using namespace vf;
 
-static const char* kMatNames[22] = {
+static const char* kMatNames[int(vf::voxel::kPaletteN)] = {
     "grass dark", "grass light", "soil", "sand", "rock", "light rock", "wood",
     "roof shingles", "foliage", "lava", "ember", "glow cyan", "glow green",
     "glow purple", "glow blue", "white-hot", "snow", "bark", "moss", "thatch",
-    "plaster", "fleece"};
+    "plaster", "fleece", "wet soil"};
 
 // --- tiny JSON writers -------------------------------------------------------
 static std::string jsonEscape(const std::string& s)

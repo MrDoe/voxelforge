@@ -19,10 +19,10 @@ void App::drawPanelTextures()
 {
     sectionHeader("Drop files into assets/textures/  ·  changes save to world.json");
     bool textureChanged = false;
-    // The loop runs over the WHOLE palette: material 21 is `fleece`, the one
-    // that ships with a fur coat, and a material the panel cannot show is a
-    // material the user cannot configure.
-    for (int material = 0; material < 22; ++material) {
+    // The loop runs over the WHOLE palette: material 21 is `fleece` (fur coat)
+    // and 22 is `wet soil`. A material the panel cannot show is a material the
+    // user cannot configure — so this bound tracks vf::voxel::kPaletteN.
+    for (int material = 0; material < int(vf::voxel::kPaletteN); ++material) {
         if (material >= 10 && material <= 15)
             continue;
         auto binding = std::find_if(

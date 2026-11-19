@@ -106,11 +106,11 @@ void App::drawPanelMesh()
             ImGui::SetNextItemWidth(-1.0f);
             ImGui::InputFloat("##meshRotY", &m_meshRotY, 1.0f, 0.1f, "%.1f");
         });
-        const char* materialName = kMatNames[std::clamp(m_meshMaterial, 0, 21)];
+        const char* materialName = kMatNames[std::clamp(m_meshMaterial, 0, int(vf::voxel::kPaletteN) - 1)];
         ImGui::SetNextItemWidth(-1.0f);
         if (ImGui::BeginCombo("Material##meshMaterial", materialName)) {
             for (int mat = 0; mat < int(vf::voxel::kPaletteN); ++mat)
-                if (ImGui::Selectable(kMatNames[std::min(mat, 21)], mat == m_meshMaterial))
+                if (ImGui::Selectable(kMatNames[std::min(mat, int(vf::voxel::kPaletteN) - 1)], mat == m_meshMaterial))
                     m_meshMaterial = mat;
             ImGui::EndCombo();
         }

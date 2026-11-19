@@ -269,8 +269,8 @@ void App::drawPanelEdit()
             int mat = int(m_editMat);
             controlRow("Material", [&] {
                 ImGui::SetNextItemWidth(-40.0f);
-                if (ImGui::BeginCombo("##material", kMatNames[std::min(mat, 21)])) {
-                    for (int i = 0; i < 22; ++i)
+                if (ImGui::BeginCombo("##material", kMatNames[std::min(mat, int(vf::voxel::kPaletteN) - 1)])) {
+                    for (int i = 0; i < int(vf::voxel::kPaletteN); ++i)
                         if (ImGui::Selectable(kMatNames[i], mat == i))
                             m_editMat = uint8_t(i);
                     ImGui::EndCombo();

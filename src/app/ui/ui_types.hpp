@@ -121,12 +121,14 @@ const ImVec4 kSurfaceKeycap(0.110f, 0.137f, 0.173f, 1.0f);
 // unreachable from every combo - which is how material 21 (fleece) stayed
 // invisible: the array stopped at 20 while the palette had 22 entries.
 // kPalette names (src/voxel/common.hpp) for the material combo.
-inline constexpr const char* kMatNames[22] = {
+// Keep this array's length in step with vf::voxel::kPaletteN (common.hpp):
+// a material missing here is a material unreachable from every combo. 23 = 0..22.
+inline constexpr const char* kMatNames[23] = {
     "0 grass dark", "1 grass light", "2 soil", "3 sand", "4 rock",
     "5 light rock", "6 wood", "7 roof", "8 foliage", "9 lava", "10 ember",
     "11 glow cyan", "12 glow green", "13 glow purple", "14 glow blue",
     "15 white-hot", "16 snow", "17 bark", "18 moss", "19 thatch", "20 plaster",
-    "21 fleece",
+    "21 fleece", "22 wet soil",
 };
 
 } // namespace app
