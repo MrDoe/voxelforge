@@ -19,6 +19,24 @@ and hot-reloads them while running.
 live. See the full [renderer comparison](docs/rendering-comparison.md) for
 side-by-side views, pixel-level zooms and measured timings.*
 
+### Lighting and night
+
+The renderer is time-of-day aware: the sun's elevation/azimuth drive day, dusk
+and night, with a blue moon, authored + emissive-material-derived light
+sources (up to a 256-light budget, 8 shaded per pixel) and an irradiance
+volume for indirect bounce. Enclosed spaces (caves/rooms) keep their own
+darkness via sky-visibility occlusion. Drag the sun in the **Render** section
+of the sidebar, or pass `--sun ELEV AZIM`.
+
+| Day | Night (moon + authored/derived lights) |
+|---|---|
+| ![Daytime lakeside hamlet](docs/images/hero_day.png) | ![Nighttime lakeside hamlet with moonlight and lamp glow](docs/images/hero_night.png) |
+
+*Cabin close-up at night — emissive materials (hearth, lanterns) read as real
+light sources and lift the interior:*
+
+![Cabin at night, lit by emissive materials](docs/images/house_night.png)
+
 ## Features
 
 - **Gaussian-surfel rendering (primary backend, `--mode splat`, default)**: the
@@ -47,11 +65,27 @@ side-by-side views, pixel-level zooms and measured timings.*
 - **TAA** in interactive mode.
 - **Live world editing**: layer toggles, MCP appends and chat edits land as
   `.vxw` file changes; the app polls mtimes and swaps freshly synthesized SVO
-  buffers in-place (~0.5 s). Chat edits trigger the reload immediately.
+  buffers in-place (~0.5 s). Chat edits trigger the reload immediately. A
+  docked sidebar (Edit / World / Render / Textures / Mesh / AI) arms a
+  voxel brush (Carve / Add / Delete / Paint / Smooth / Rotate / Move) with
+  undo and a persistent live-edit overlay.
+- **Lighting & night**: sun elevation/azimuth drive day/dusk/night with a
+  blue moon; authored lights plus lights derived from emissive materials
+  (palette 9-15 and `"emissive"` texture bindings), an irradiance volume
+  for indirect bounce, and enclosed-space sky occlusion so caves stay dark.
+  Up to a 256-light budget, 8 shaded per pixel.
+- **Micro-voxel objects**: high-detail assets (e.g. a 5 mm alpaca) get
+  their own fine lattice + SVO overlay pass and composite over the world
+  distance-wise; they cast/receive shadows via coarse representations.
+  Derived skeletons animate grazers; fur is a translucent hair-card layer.
+- **Photo textures**: per-material PNG/JPG bindings in a 512² atlas, triplanar
+  world-space sampling, per-cell overrides, and a GUI texture swapper.
+- **Sceneries**: self-contained world folders under `scenery/<name>/`; switch
+  in-session from the sidebar or `--scenery`/`VF_SCENERY`.
 - **AI tooling**: in-app chat window plus a stdio **MCP server**
   (`vf_mcp`) exposing `add_box / add_cylinder / add_ellipsoid / add_stamp /
   list_layers / enable_layer / probe / ground / clear_edits`.
-- **STL/OBJ authoring in the GUI**: Dashboard/World Layers → **Import STL /
+- **STL/OBJ authoring in the GUI**: sidebar → **Mesh** section → **Import STL /
   OBJ** scans `assets/models/`, voxelizes a selected mesh onto the 10 cm
   lattice, and writes a named `.vxw` layer. Fit/scale, source-axis/winding,
   material, solid/shell, and anchor controls are exposed; replacing a placed
@@ -113,27 +147,30 @@ OBJ** in the same panel; the current `hamlet_cabin` is reimported from
 
 | input | action |
 |---|---|
-| `WASD` / `Q` `E` | move down/up |
+| `WASD` / `Q` `E` | move / fly up/down |
 | `RMB` + mouse | look |
 | wheel | scroll the sidebar |
-| `Shift` / `Ctrl` | fly 3.5x faster / 4x slower (base speed: Render panel -> View -> Speed) |
-| `Ctrl+LMB` | pick a voxel → becomes the bottom-center anchor for AI builds |
-| `C` → Rotate | select the rotation tool |
-| plain LMB in Rotate | activate the exact object under the cursor |
-| click-drag trackball ring | local Y (outer), local X (wide), or local Z (tall); release stages, then press Apply |
-| `C` → Move | grab the exact object under the cursor |
-| `C` → Smooth | relax nearby terrain column heights; Size sets the footprint and Strength sets relaxation per stamp |
-| drag in Move | translate along the selected world X/Y/Z handle; release stages, then press Apply |
+| `Shift` / `Ctrl` | fly 3.5x faster / 4x slower (base speed: Render panel → View → Speed) |
+| `Tab` | arm/disarm the edit brush (also switches sidebar to Edit) |
+| `C` / `A` / `D` / `S` / `M` | Carve / Add / Delete / Smooth / Move mode (while armed) |
+| `+` / `-` | brush width ±1 voxel (`Shift` for depth) |
+| `Ctrl+LMB` | pick a voxel → anchor for AI builds / brush |
+| `Shift+LMB` drag | define a bounding box to scope the brush |
+| `X` | clear the bounding box |
+| `F` | toggle splat / SVO renderer |
+| `B` / `G` / `H` / `J` | texture detail normals / SSR / SSAO / volumetric fog |
+| `Ctrl+B` | collapse sidebar to the icon rail |
+| `Ctrl+1..6` | jump to a sidebar section |
 | window close button | quit (`Esc` is reserved and does not exit) |
 
 ## AI editing
 
 ### In-app chat
-The **AI Chat** window talks to any Ollama/OpenAI-compatible server. Pick an
-anchor voxel with Ctrl+LMB and ask for *"a 3×3 wood crate"*, *"a small rock"*,
-*"a stamp shaped like an arch"*… The model's tool calls are normalized (fuzzy
-names, inline JSON, escaped args), executed against `EditableWorld`, and the
-world reloads instantly.
+The **AI** section of the sidebar talks to any Ollama/OpenAI-compatible
+server. Pick an anchor voxel with Ctrl+LMB and ask for *"a 3×3 wood crate"*,
+*"a small rock"*, *"a stamp shaped like an arch"*… The model's tool calls are
+normalized (fuzzy names, inline JSON, escaped args), executed against
+`EditableWorld`, and the world reloads instantly.
 
 ```sh
 VF_LLM_URL=http://127.0.0.1:11434 VF_LLM_MODEL=qwen2.5 ./build/voxelforge
@@ -165,9 +202,11 @@ Edits are visible to a running instance within ~0.5 s — no repack, no rebuild.
 --smoke N               run N frames headless, report timings
 --shot out.ppm          render one frame and exit
 --cam X Y Z TX TY TZ    camera placement
---sun ELEV AZIM         sun direction (degrees)
+--sun ELEV AZIM         sun direction (degrees); elevation drives day/dusk/night
 --animtime S            deterministic water/grass animation clock
 --probe X Y Z           print field distance/material at a point, exit
+--scenery NAME          select a scenery for this launch (no pointer write)
+--mode splat|svo        render backend (default splat)
 --width/--height        offscreen resolution for headless modes
 --llm-url/--llm-model   chat backend override
 ```
@@ -200,21 +239,27 @@ the hero/house/water shots and asserts coverage, silhouette and sky probes.
 
 ```
 src/
-  voxel/voxel_field.{hpp,cpp}  records-derived geometry oracle:
-                               terrain columns, EDT-flood-filled object grids,
-                               sparse object SDF hash, coarse shadow volume
+  voxel/voxel_field.{hpp,cpp}   records-derived geometry oracle (terrain, EDT
+                                object grids, sparse object SDF, shadow volume)
   voxel/layered_world.{hpp,cpp} manifest load/poll, priority merge, SVO synthesis
+  voxel/chunk_store.{hpp,cpp}   runtime sparse voxel store (live edits)
+  voxel/live_editor.{hpp,cpp}    instant-feedback brush driver
   voxel/editable_world.{hpp,cpp} ai_edits.vxw writer (box/cylinder/ellipsoid/stamp)
+  voxel/micro_field.*            fine lattice for micro-voxel objects
+  voxel/micro_svo.*              micro object SVO + overlay pass
+  voxel/fur_cards.{hpp,cpp}      translucent hair-card coat generation
   voxel/worldfile.{hpp,cpp}     VXW v1 container (64 B header + CRC32)
   voxel/common.hpp              constants, palette, BAKER-side analytic shapes
   ai/ollama_client.cpp          HTTP chat client + tool-call parsing
   ai/mcp_server.cpp             vf_mcp stdio JSON-RPC server
-  app/chat_ui.cpp               ImGui chat window + tool dispatch
-  app/main.cpp                  Vulkan app: swapchain, frames, HUD, picking
-  render/svo_pass.cpp           SVO compute pipeline (+ push block, descriptors)
-  render/taa_pass.cpp           temporal anti-aliasing resolve
+  app/                          Vulkan app: sidebar UI, frame loop, picking,
+                                world/edit/mesh/texture subsystems
+  render/splat_pass.*           Gaussian-surfel raster backend (primary)
+  render/svo_pass.*             SVO reference compute pipeline
+  render/fur_pass.*             translucent fur-card raster pass
+  render/taa_pass.*             temporal anti-aliasing resolve
   rhi/*                         context, buffers/images, swapchain
-tools/heightmap_gen.cpp         offline asset baker (terrain + authored layers)
+tools/heightmap_gen.cpp         offline asset baker (terrain shell)
 tools/scene_slice.cpp           ASCII cross-sections of the baked field
 ```
 
