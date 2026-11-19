@@ -57,7 +57,7 @@ void App::useMeshImportLayer(const std::string& file)
     std::snprintf(m_meshLayerName, sizeof(m_meshLayerName), "%s", safe.c_str());
 
     vf::voxel::WorldFileData data;
-    const std::string path = std::string(VOXELFORGE_ASSET_DIR) + "/" + file;
+    const std::string path = vf::voxel::scenery::root() + "/" + file;
     glm::vec3 pivot(0.f);
     if (!vf::voxel::worldfile::read(path, data) ||
         !vf::voxel::worldfile::recordBottomCenter(data.voxels, data.meta, pivot)) {
@@ -96,7 +96,7 @@ void App::prepareMeshImport()
         if (selectedIsReplaceable) {
             useMeshImportLayer(m_selectedLayer);
             usedLayerPivot = m_meshStatus.find("Anchor set") != std::string::npos;
-        } else if (std::filesystem::exists(std::string(VOXELFORGE_ASSET_DIR) +
+        } else if (std::filesystem::exists(vf::voxel::scenery::root() +
                                             "/hamlet_cabin.vxw")) {
             // The authored hamlet uses the imported cabin layer.  Starting
             // with that target makes a re-import a replacement, not a second

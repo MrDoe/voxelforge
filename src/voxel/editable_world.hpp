@@ -1,6 +1,7 @@
 #pragma once
 #include "voxel/worldfile.hpp"
 #include "voxel/common.hpp"
+#include "voxel/scenery.hpp"
 #include <glm/glm.hpp>
 #include <algorithm>
 #include <cmath>
@@ -27,7 +28,9 @@ struct EditableWorld {
     static constexpr const char* kRaiseLayerName = "raise_edits";
     static constexpr float kBand = 0.20f; // surface band like heightmap_gen sweep
 
-    EditableWorld(std::string assetDir = std::string(VOXELFORGE_ASSET_DIR),
+    // The layer + manifest live in the CURRENT scenery (ai_edits.vxw is that
+    // scene's edit session, world.json is that scene's manifest).
+    EditableWorld(std::string assetDir = scenery::root(),
                   std::string fileName = std::string(kFileName),
                   std::string layerName = std::string(kLayerName),
                   std::string role = std::string("object"));

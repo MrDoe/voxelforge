@@ -209,9 +209,10 @@ TEST_CASE("the sidebar layout metrics agree with each other")
 
 TEST_CASE("the rail table matches the panel enum")
 {
-    // Order is the rail order AND the Ctrl+1..6 order; kPanels is indexed by
-    // Panel, so a mismatch desynchronises the button from its shortcut.
-    CHECK(kPanelCount == 6);
+    // Order is the rail order AND the Ctrl+1..N order (N = the panel count,
+    // 7 since the Animate studio joined); kPanels is indexed by Panel, so a
+    // mismatch desynchronises the button from its shortcut.
+    CHECK(kPanelCount == 7);
     CHECK(kPanels[int(Panel::Edit)].label[0] == 'E');
     CHECK(kPanels[int(Panel::World)].label[0] == 'W');
     CHECK(kPanels[int(Panel::Render)].label[0] == 'R');

@@ -48,14 +48,14 @@ void App::persistWorldLayers()
                              return e.file == l.file;
                          }))
             out.push_back(l);
-    vf::voxel::worldfile::writeManifest(std::string(VOXELFORGE_ASSET_DIR) + "/world.json",
+    vf::voxel::worldfile::writeManifest(vf::voxel::scenery::root() + "/world.json",
                                         out);
 }
 
 void App::rescanWorldLayers()
 {
     namespace fs = std::filesystem;
-    const fs::path dir = std::string(VOXELFORGE_ASSET_DIR);
+    const fs::path dir = vf::voxel::scenery::root();
     std::error_code ec;
     for (fs::directory_iterator it(dir, ec), end; !ec && it != end; it.increment(ec)) {
         std::string f = it->path().filename().string();
@@ -126,7 +126,7 @@ void App::applyWorldReload()
     m_overlayLoaded = false;
     loadStoreOverlay();
     syncWorldLayerList();
-    rescanWorldLayers(); // layers dropped into assets/ while running show up too
+    rescanWorldLayers(); // layers dropped into the scenery while running show up too
     // Keep m_rotateLayer alive across the rebuild: it is the selected
     // interaction target, not a transient mouse-down state.
     if (m_rotationPreviewPending) {

@@ -1,5 +1,6 @@
 #include "voxel/heightmap.hpp"
 #include "voxel/common.hpp"
+#include "voxel/scenery.hpp"
 #include <spdlog/spdlog.h>
 #include <algorithm>
 #include <cmath>
@@ -85,7 +86,8 @@ const HeightMap& sharedHeightmap()
         return *g_override;
     static HeightMap instance = [] {
         HeightMap m;
-        if (!m.loadFromFile(std::string(VOXELFORGE_ASSET_DIR) + "/heightmap.png"))
+        // the terrain belongs to the CURRENT scenery
+        if (!m.loadFromFile(scenery::root() + "/heightmap.png"))
             spdlog::critical("terrain heightmap missing - run heightmap_gen");
         return m;
     }();

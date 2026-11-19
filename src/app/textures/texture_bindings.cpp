@@ -48,8 +48,9 @@ void App::rescanTextureFiles()
     std::sort(m_texFiles.begin(), m_texFiles.end());
 }
 
-// Resolve a manifest texture path the same way TexAtlas::load does: absolute
-// paths verbatim, anything else against the manifest directory (assets/).
+// Resolve a manifest texture path: absolute paths verbatim; anything else
+// against the manifest directory first, then the shared asset dir (the
+// library lives in assets/ even though the manifest lives in a scenery).
 std::string resolveTexPath(const std::string& manifestPath,
                                   const std::string& file)
 {
@@ -59,7 +60,7 @@ std::string resolveTexPath(const std::string& manifestPath,
     std::string dir = manifestPath;
     const size_t slash = dir.find_last_of("/\\");
     dir = slash == std::string::npos ? std::string() : dir.substr(0, slash + 1);
-    return dir + file;
+    return vf::voxel::scenery::resolveShared(dir + "/", file);
 }
 
 void App::setTextureBinding(int mat, const std::string& file)

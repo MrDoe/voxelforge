@@ -221,7 +221,7 @@ int main(int argc, char** argv)
         return 1;
     }
 
-    EditableWorld ew(std::string(VOXELFORGE_ASSET_DIR), "mesh_scratch.vxw",
+    EditableWorld ew(vf::voxel::scenery::root(), "mesh_scratch.vxw",
                      "mesh_scratch", "object");
     if (!ew.writeObjectLayer(o.outName, recs)) {
         std::fprintf(stderr, "mesh_to_voxel: failed to write layer '%s'\n",

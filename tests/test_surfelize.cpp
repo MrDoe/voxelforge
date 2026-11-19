@@ -2,6 +2,7 @@
 #include <doctest/doctest.h>
 #include "voxel/surfelize.hpp"
 #include "voxel/layered_world.hpp"
+#include "voxel/scenery.hpp"
 #include <cmath>
 #include <numeric>
 #include <string>
@@ -16,7 +17,7 @@ LayeredWorld& allLayersWorld()
 {
     static LayeredWorld lw;
     static bool ok = [] {
-        return lw.load(std::string(VOXELFORGE_ASSET_DIR) + "/world_all.json");
+        return lw.load(vf::voxel::scenery::root() + "/world_all.json");
     }();
     (void)ok;
     return lw;

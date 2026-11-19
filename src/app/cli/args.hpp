@@ -46,6 +46,10 @@ struct Args {
     glm::ivec3 probeSurfel { 0, 0, 0 };
     std::string llmUrl = "http://127.0.0.1:11434";
     std::string llmModel = "gemma4:12b";
+    // --scenery NAME: run this one launch against that scenery folder.
+    // Overrides the last-used pointer WITHOUT writing it (a CLI run is not
+    // a switch; the interactive app keeps its own memory).
+    std::string scenery;
 };
 
 Args parseArgs(int argc, char** argv);

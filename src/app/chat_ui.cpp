@@ -2,6 +2,7 @@
 #include "ai/system_prompt.hpp"
 #include "ai/tools.hpp"
 #include "voxel/common.hpp"
+#include "voxel/scenery.hpp"
 #include "voxel/worldfile.hpp"
 #include <spdlog/spdlog.h>
 #include <glm/glm.hpp>
@@ -165,7 +166,7 @@ int ChatUi::executeToolCalls(const std::vector<ToolCall>& calls, glm::ivec3 anch
         } else if(name=="list_world"){
             std::vector<vf::voxel::worldfile::WorldLayer> layers;
             std::string out = "layers:";
-            if(vf::voxel::worldfile::loadManifest(std::string(VOXELFORGE_ASSET_DIR)+"/world.json", layers))
+            if(vf::voxel::worldfile::loadManifest(vf::voxel::scenery::root()+"/world.json", layers))
                 for(auto &l : layers)
                     if(l.role!="packed") out += " "+l.name+"["+std::string(l.enabled?"on":"off")+"]";
             out += " | ai_edits voxels this session: "+std::to_string(editable.size());

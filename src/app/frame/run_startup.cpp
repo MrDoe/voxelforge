@@ -31,7 +31,7 @@ bool App::runProbe()
     const Args& args = m_args;
     // probes read the live layered world (ai_edits included as a layer)
     vf::voxel::LayeredWorld probeWorld;
-    const std::string manifest = std::string(VOXELFORGE_ASSET_DIR) + "/world.json";
+    const std::string manifest = vf::voxel::scenery::root() + "/world.json";
     if (!probeWorld.load(manifest)) {
         spdlog::critical("probe: cannot load world.json");
     return true;

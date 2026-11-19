@@ -19,8 +19,9 @@
 - `ninja -C build` builds binaries + compiles shaders to `build/shaders/*.spv`
   (target `vf_shaders`, `--target-env vulkan1.3`). Shader dir injected via
   `VOXELFORGE_SHADER_DIR`; `VOXELFORGE_ASSET_DIR` points to `assets`.
-- `ninja -C build world` bakes assets (heightmap + `.vxw` layers +
-  `world.json`) via `tools/heightmap_gen.cpp`. Purely an explicit extra tool:
+- `ninja -C build world` bakes the DEFAULT scenery (heightmap +
+  `landscape.vxw` + `world.json` into `scenery/LakesideHamlet/`) via
+  `tools/heightmap_gen.cpp`. Purely an explicit extra tool:
   never wired into the default build, tests, or `start.sh` — after a clean
   checkout or deleting assets you must run it, or the app/tests exit with
   "run ninja -C build world".
@@ -35,12 +36,64 @@
 - **Skeleton before read.** `get_file_skeleton(filePath)` before `read` on any file.
 - **Usages before edit.** `find_usages(symbolName)` before modifying any function/class/variable.
 - **Images via describe.** `describe_image(filePath)` — never read raw image bytes.
-- **Quirks.** `recall_quirks(query)` when you hit an error or need a known pitfall;
-  `add_quirk(content)` when you discover a non-obvious fact, gotcha, or workaround;
-  `update_quirk`/`delete_quirk` when a stored quirk is outdated or wrong.
-  **Plan phase / start of new work:** run `recall_quirks` for the area you're about to touch
-  and `search_semantic` for the relevant symbols before writing any code. This prevents
-  repeating known mistakes and surfaces conventions you'd otherwise miss.
+- **Quirks.** The quirk store is the project's experiential memory — it is
+  searchable, persistent, and shared across sessions. Use it aggressively:
+  - `recall_quirks(query)` at the START of any task and whenever you hit an error,
+    a failing test, a confusing code path, or need a known pitfall. Query by area
+    ("live edit", "micro voxel", "scenery", "build", "shader") — not by symptom.
+  - `add_quirk(content)` whenever you discover a non-obvious fact, gotcha, workaround,
+    undocumented constraint, design decision, or anything that cost more than one
+    attempt. A quirk that saves ONE future session from repeating a mistake is
+    worth writing. Include the symptom, the cause, and the fix; tag it with the
+    relevant area. Err on the side of recording — a stale quirk can be updated or
+    deleted, but a lost insight cannot be recovered.
+  - `update_quirk(id, ...)` when a stored quirk is outdated, partially wrong, or
+    needs new context (e.g. a path changed, a feature landed, a workaround was
+    superseded). Never leave a contradicting duplicate — fix or delete the old one.
+  - `delete_quirk(id)` when a quirk is fully obsolete (the bug was fixed, the
+    workaround is no longer needed, the feature shipped). Dead quirks pollute
+    recall results and waste tokens.
+  - **Mandatory capture (do not skip):** a build/test/type-check failure you
+    resolve; an undocumented library constraint, peer dep, or workaround; an
+    environment-specific requirement (OS, tool version, GPU quirk); a design
+    decision that future sessions should remember; a gotcha that cost more than
+    one attempt. If you resolved an error and did not add a quirk, the session
+    is incomplete.
+  - **Mandatory hygiene:** if a recalled quirk is outdated, wrong, or superseded,
+    update or delete it instead of adding a contradicting duplicate. The store
+    should converge, not accumulate.
+  - **Plan phase / start of new work:** run `recall_quirks` for the area you're
+    about to touch AND `search_semantic` for the relevant symbols before writing
+    any code. This prevents repeating known mistakes and surfaces conventions
+    you'd otherwise miss. If recall returns nothing useful, that is itself
+    information — the area may be undocumented, and your discoveries should be
+    added as new quirks before the session ends.
+
+## Quirk discipline (experiential memory)
+The quirk store (`recall_quirks` / `add_quirk` / `update_quirk` / `delete_quirk`)
+is the project's institutional memory. It persists across sessions and is searchable.
+Treat it as a first-class deliverable, not an afterthought.
+
+- **Recall before you act.** Every task starts with `recall_quirks(area)` + `search_semantic`.
+  A session that skips recall repeats mistakes the project already paid for.
+- **Capture as you go.** Do not batch quirk-writing to the end — by then details are
+  lost. Write a quirk the moment you resolve a non-obvious issue, while the
+  symptom/cause/fix are fresh. Include numbers, file paths, and the wrong approach
+  that failed (so the next session does not retry it).
+- **Update, don't duplicate.** If a recalled quirk is stale or wrong, `update_quirk`
+  it in place. A contradicting duplicate is worse than no quirk — it makes recall
+  unreliable. If the old quirk is fully obsolete, `delete_quirk` it.
+- **Tag for discoverability.** Tags (area, subsystem, feature name) determine
+  whether a future `recall_quirks` finds the quirk. Use the same vocabulary as
+  the codebase (e.g. "live-edit", "micro-voxel", "scenery", "splat", "svo").
+- **Quirks are not wiki pages.** A quirk is a short, specific, actionable note
+  ("X does Y because Z; workaround is W"). A wiki page is a synthesized concept
+  with cross-references. If a quirk grows beyond a paragraph, promote it to a
+  wiki page and delete or thin the quirk.
+- **End-of-session checklist.** Before finishing, ask: did I hit any error, discover
+  any gotcha, make any design decision, or learn any environment constraint? If
+  yes, add quirks. A session that produced code but no quirks is either trivial
+  or incomplete.
 
 ## Crosstalk (multi-session coordination)
 - **Declare yourself early.** Call `crosstalk_status` with a unique human `name` (e.g. "Fur Fixer")
@@ -50,8 +103,8 @@
 - **Talk before you collide.** `crosstalk_send` a short ask; replies are injected into live turns.
   Never force a claim.
 - **Lease what you edit.** `crosstalk_claim` on exact paths (no globs). Renew if long, release when done.
-- **Shared surfaces:** GPU/display, `build/` tree, `shaders/*.glsl`, `assets/runtime_edits.vxw`,
-  `assets/*.vxw`/`world.json`. Use `VF_OVERLAY_PATH=/tmp/…` for scratch renders.
+- **Shared surfaces:** GPU/display, `build/` tree, `shaders/*.glsl`, `scenery/<name>/runtime_edits.vxw`,
+  `scenery/<name>/*.vxw`/`world.json`. Use `VF_OVERLAY_PATH=/tmp/…` for scratch renders.
 - **Don't destroy what you didn't create.** Never `ninja clean`, never `rm` globs near peer files,
   never kill processes you didn't start.
 
@@ -135,20 +188,45 @@ one costs a whole turn, because the bad call is rejected before any work runs.
   (a mis-indexed array, a stale window, a baseline captured before the scene
   existed). Confirm the instrument before believing the number.
 
+## Sceneries — the world now lives in `scenery/<name>/`
+- A **scenery** is a self-contained world folder under `scenery/<name>/`
+  holding the manifest (`world.json`), the terrain (`heightmap.png`,
+  `landscape.vxw`), every object/scatter/micro `.vxw`, the `micro/` tree (with
+  its `.rig`/`.skin`/`.anim` side-cars), the `ai_edits.vxw` chat/MCP layer, the
+  shipped `world_all.json`, and the per-scenery live-edit overlay
+  (`runtime_edits.vxw`). The shipped default is `scenery/LakesideHamlet/`.
+- **`assets/` is now only the SHARED LIBRARY**: `textures/` and `models/`.
+  These are bound per MATERIAL (atlas) or per import (STL/OBJ), not per scene,
+  so they are material identity, not scenery content, and every scenery shares
+  them. The manifest's `textures` table still names files `textures/…`
+  relative to the shared dir (`scenery::resolveShared` tries the scenery dir
+  first, then the shared library).
+- **Runtime path resolution is `vf::voxel::scenery::root()`**, NOT the
+  compile-time `VOXELFORGE_ASSET_DIR` (which stays the shared library).
+  Resolution order: an explicit `setCurrent`/`--scenery` override, `VF_SCENERY`,
+  the pointer file `scenery/last.json` (written on the last switch — the last
+  scenery IS the default), the shipped `kDefaultScenery`, first discovered,
+  else the shared dir. `--scenery NAME` selects for one launch without
+  touching the pointer. The app's manifest/overlay/heightmap/AI-edits and every
+  `.vxw` resolve against `root()`; only `textures/` and `models/` use
+  `VOXELFORGE_ASSET_DIR`. Phase 1 switches scenery by RESTART (`--scenery`).
+
 ## Assets — tracked (one exception)
-- `assets/` is **versioned** (textures, layer `.vxw` files, `world.json`): the
-  authored scene is the source of truth and is not reproducible from code.
-  The only ignored file is `assets/runtime_edits.vxw` — the live-edit session
-  overlay the app rewrites on every brush stroke (state, not content; the app
-  loads it explicitly, it is never a `world.json` layer).
-- **The app REWRITES `assets/world.json` from its own layer list.** Every
+- Each `scenery/<name>/` is **versioned** (textures via the shared `assets/`
+  library, layer `.vxw` files, `world.json`): the authored scene is the source
+  of truth and is not reproducible from code. The only ignored file per scenery
+  is `runtime_edits.vxw` — the live-edit session overlay the app rewrites on
+  every brush stroke (state, not content; the app loads it explicitly, it is
+  never a `world.json` layer). The shared `assets/micro/*.rig` caches are also
+  ignored (derived, regenerable).
+- **The app REWRITES `scenery/<name>/world.json` from its own layer list.** Every
   app run rewrites the manifest, so a run that started with a toggled layer
   writes that toggle back — and a write can land AFTER a test restored the
   file. Measured 2026-10-21: `tests/micro_check.py` left all three micro
   layers disabled and `git diff assets/` was not empty, because the app's
   write beat the gate's restore. Three rules follow: a test that toggles
   manifest layers must **verify** the restore (re-read the file, retry, and
-  say so loudly if it cannot); `git diff assets/` is the check that the
+  say so loudly if it cannot); `git diff scenery/` is the check that the
   shipped scene survived; and a test must **never suppress a feature by
   deleting its manifest key** — write a real no-op value instead (the gate
   writes `"behaviour": "stop"`). A deleted key comes back only if the
@@ -162,15 +240,15 @@ one costs a whole turn, because the bad call is rejected before any work runs.
   overlay is gitignored and the manifests are tracked, so damage is invisible
   in `git status`; check there before blaming a build.
   1. **Never `ninja -C build clean` (or `ninja clean`).** `build.ninja`
-     registers `assets/heightmap.png`, `assets/world.json` and
-     `assets/landscape.vxw` as OUTPUTS of the heightmap_gen custom command
+     registers `scenery/LakesideHamlet/heightmap.png`, `world.json` and
+     `landscape.vxw` as OUTPUTS of the heightmap_gen custom command
      (targets `world` / `vf_heightmap`), so the versioned authored scene lives
      in the SOURCE tree while being registered as a build product — a clean
-     deletes tracked files. Recover with `git checkout -- assets/…`, **not**
+     deletes tracked files. Recover with `git checkout -- scenery/…`, **not**
      `ninja -C build world`: a regen rewrites the authored hamlet and is a
      different, unrecoverable change. To force a recompile, `touch` the
      sources (that is also the stale-object fix in Build).
-  2. **A headless run is NOT read-only against `assets/runtime_edits.vxw`.**
+  2. **A headless run is NOT read-only against `scenery/<name>/runtime_edits.vxw`.**
      With neither `VF_NO_OVERLAY=1` nor `VF_OVERLAY_PATH=<tmp>` set, the app
      loads the overlay and then *writes it back*: `loadStoreOverlay`
      re-derives chunks via `LiveEditor::refreshRegion`, which sets
@@ -191,7 +269,7 @@ one costs a whole turn, because the bad call is rejected before any work runs.
   4. **"Clear live edits" is irreversible** (`src/app/edit/live_edit.cpp`):
      it flushes the writer, then `std::filesystem::remove(overlayPath())`,
      with no backup step anywhere. Same for `VF_TEST_CLEAR=1`.
-  5. `assets/world_all.json` is **tracked** and rewritten by
+  5. `world_all.json` (in the default scenery) is **tracked** and rewritten by
      `tests/test_authoring.cpp` and `tests/test_world.cpp` through a bare
      `std::ofstream` with no temp+rename, so an interrupted `test-world` /
      `test-unit` leaves a truncated manifest — the same reason `OverlayWriter`
@@ -202,7 +280,7 @@ one costs a whole turn, because the bad call is rejected before any work runs.
   `assets/` for the interactive app. Do **not** make the default per-process:
   the interactive app is one long-lived process, so a PID-scoped default would
   discard a user's edits on restart — the one consumer who wants persistence.
-- `assets/heightmap.png` and `assets/*.vxw` + `assets/world.json` are baked by
+- The default scenery's `heightmap.png`, `landscape.vxw` and `world.json` are baked by
   `heightmap_gen`, which now emits **only the terrain shell** (`landscape.vxw`)
   plus the preserved highest-priority `ai_edits.vxw`; object layers are
   runtime-authored with `vf_mcp` (write_object/add_*). The manifest writer
@@ -251,7 +329,7 @@ one costs a whole turn, because the bad call is rejected before any work runs.
   list). Toggling
   triggers an incremental rebuild and refreshes SVO + terrain texture + shadow
   volume together (`applyWorldReload`). Content tests generate their own
-  all-enabled manifest (`world_all.json`) from `assets/*.vxw`, so new layers
+  all-enabled manifest (`world_all.json`) from the current scenery's `*.vxw`, so new layers
   join the test world automatically.
   **Keep-out rule**: `tests/live_edit_check.py` carves at world (0.05, 2.05)
   and (0.05, 3.05) and asserts the newly-exposed water matches open water
@@ -279,7 +357,7 @@ one costs a whole turn, because the bad call is rejected before any work runs.
   `tools/heightmap_gen.cpp:terrainHeightAt()`, then `ninja -C build world`.
   Object content goes through the `voxel-object` skill / `vf_mcp`
   (`write_object`, `add_*`) — data-only, no recompile.
-- `assets/ai_edits.vxw` is the live layer for chat/MCP edits; `vf_mcp`
+- `ai_edits.vxw` (inside the active scenery) is the live layer for chat/MCP edits; `vf_mcp`
   appends + saves immediately.
 
 ## Run
@@ -442,7 +520,9 @@ one costs a whole turn, because the bad call is rejected before any work runs.
   (`-1.0f`) or ≤ pane width; the default pane is ≈300 px wide (the full
   sidebar is 334 px at 960×540) and the user can drag it wider or narrower.
   See `.opencode/wiki/entities/hud-sidebar.md`.
-- Headless: `--selftest`, `--smoke N`, `--shot out.ppm --cam …`,
+- Headless: `--scenery NAME` selects the scenery for one launch (no pointer
+  write); `VF_SCENERY=<name|path>` does the same for any process (gates set
+  it; unit tests pin it to the default). `--selftest`, `--smoke N`, `--shot out.ppm --cam …`,
   `--probe X Y Z`, `--sun <elev> <azim>`, `--animtime <s>`, `--width/--height`,
   `--mode splat|svo` (default `splat`; SVO is the pixel reference).
 - Splat perf knobs (all env, default tuned): `VF_LOD=0` disables the baked
@@ -597,7 +677,7 @@ one costs a whole turn, because the bad call is rejected before any work runs.
   chunk — the freshly seeded run is the *pre-edit* GPU state, so `stamp()`
   must refresh the edited AABB ±3 on top of it or the first stamp in a chunk
   patches the old surface back and looks like a no-op. On mouse release the
-  stroke is **saved asynchronously** to `assets/runtime_edits.vxw` (VXW v2
+  stroke is **saved asynchronously** to `scenery/<name>/runtime_edits.vxw` (VXW v2
   store section, schema 3 = per-chunk edit AABB + texture tags) and restored at the next
   startup / world reload (GPU-seed + refresh the saved AABB, so the restored
   frame matches the session). Patched chunks keep their full run —
@@ -798,7 +878,7 @@ one costs a whole turn, because the bad call is rejected before any work runs.
   untouched blocks verbatim (unit test pins localized == full rebuild).
   Adopted lazily from the resident pools by `LayeredWorld::store()`. Touched
   chunks are flagged `edited` and serialized by `OverlayWriter` into the VXW
-  v2 store section (`assets/runtime_edits.vxw`, temp+rename, debounced, not
+  v2 store section (`scenery/<name>/runtime_edits.vxw`, temp+rename, debounced, not
   listed in world.json — the app loads it explicitly at startup/reload).
 - `src/voxel/live_editor.{hpp,cpp}` — instant-feedback brush driver: applies
   edits, refreshes per-chunk surfel caches (`buildChunkSurfelsRange`, only
@@ -883,7 +963,7 @@ one costs a whole turn, because the bad call is rejected before any work runs.
 ## Micro-voxel objects — separate SVO worlds
 - A high-detail object (a 30 cm vase at 5 mm) gets **its own lattice, its own
   SVO world and its own overlay pass**. The world lattice stays 0.1 m and is
-  never subdivided. Pipeline: `assets/world.json` `role: "micro"` →
+  never subdivided. Pipeline: the scenery's `world.json` `role: "micro"` →
   `App::loadMicroObjects()` (`src/app/world/micro_objects.cpp`) → `MicroField`
   (dense fine lattice, `src/voxel/micro_field.*`) → `MicroWorld` (its own SVO,
   `src/voxel/micro_svo.*`) → `MicroSvoPass` (`src/render/micro_svo_pass.*`) →
@@ -892,7 +972,7 @@ one costs a whole turn, because the bad call is rejected before any work runs.
   `layered_world.cpp` **refuses** to resample a finer-than-world layer onto
   the world lattice (a silent downsample was the old behaviour). Authoring
   tool: `tools/micro_voxel.cpp` (`vf_microvox`, lathe profiles) →
-  `assets/micro/<name>.vxw`.
+  `micro/<name>.vxw` (inside the active scenery).
 - The overlay composites into the main backend's **existing** G-buffer
   (`hdr`/`gpos`/`gnorm`) and overwrites a pixel only where a micro surface is
   nearer — so the world/micro boundary is a distance comparison, and no depth
@@ -1160,7 +1240,7 @@ one costs a whole turn, because the bad call is rejected before any work runs.
   Y (the strands hang) and its finest octave sits AT the lattice pitch, which
   breaks the silhouette into tufts. Regenerate with
   `vf_microvox --alpaca --voxel 0.008 --out alpaca`; it writes into
-  `VOXELFORGE_ASSET_DIR/assets/micro/`, NOT the working directory.
+  the ACTIVE SCENERY's `micro/` (see Sceneries), NOT the working directory.
 - **The AI can tell an animal what to do.** `set_behaviour` is a chat tool:
   "let the alpaca run" becomes `{"name":"alpaca","command":"run"}` and
   `App::setMicroBehaviour` puts the animal into that command. The commands
@@ -1692,7 +1772,7 @@ one costs a whole turn, because the bad call is rejected before any work runs.
   per-chunk regions: payload and childBase share the node-index space (both
   must be grown together), and bricks are counted in `BRICK_WORDS` (the SSBO
   size is ×4096 bytes, not ×4).
-- Live edits (M1–M3): `assets/runtime_edits.vxw` holds the persisted edited
+- Live edits (M1–M3): `scenery/<name>/runtime_edits.vxw` holds the persisted edited
   chunks (VXW v2 store section); it is **not** in `world.json`, so the layer
   poll ignores it — the app loads it explicitly at startup / after every world
   reload (`App::loadStoreOverlay`) and patches the chunks. Patched chunks keep
@@ -1747,8 +1827,8 @@ a real collision.
   work runs long, `release` when done; a refusal names the holder.
 - **Check the shared surfaces here.** `crosstalk_peers` before a render or rebuild:
   the GPU/display, the `build/` tree, `shaders/*.glsl` (hot-reloaded into a peer's
-  running render), the live-edit overlay `assets/runtime_edits.vxw`, and the authored
-  `assets/*.vxw` / `world.json` are shared — concurrent renders, rebuilds or writes
+  running render), the live-edit overlay `scenery/<name>/runtime_edits.vxw`, and the authored
+  `scenery/<name>/*.vxw` / `world.json` are shared — concurrent renders, rebuilds or writes
   there corrupt a peer's state. Use `VF_OVERLAY_PATH=/tmp/…` for every scratch render
   and label scratch/backup files so ownership is obvious.
 - **Do not destroy what you did not create.** Never `ninja -C build clean` (it
@@ -1766,60 +1846,25 @@ workspace with `"plugins": ["-opencode.crosstalk"]`; no permission rule is requi
 <!-- BEGIN opencode-rag -->
 ## Code Navigation
 
-ALWAYS use OpenCodeRAG tools before reading or editing:
-- **Search first** — `search_semantic(query)` instead of grep/glob
-- **Skeleton before read** — `get_file_skeleton(filePath)` then read specific lines
-- **Usages before edit** — `find_usages(symbolName)` before modifying any symbol
-- **Images via describe** — `describe_image(filePath, systemPrompt?)` — never read raw bytes
-- **Recall quirks** — `recall_quirks(query)` when you hit a known pitfall
-- **Add quirks** — `add_quirk(content)` when you discover a non-obvious fact
-- **Fix quirks** — `update_quirk(id, ...)` / `delete_quirk(id)` when a stored quirk is outdated or wrong
+OpenCodeRAG indexes this workspace.
 
-If no results, run `opencode-rag index`.
+- First move, every task: `search_semantic` goes IN the first tool batch - an orientation call may share that batch, it never precedes it.
+- Re-search when the working area changes: one search per area, not one per task.
+- Authoritative elsewhere? When another system owns the current copy (source control, an MCP server, a database, an API), fetch it there first - `search_semantic` covers the local mirror and cross-cutting questions.
+- A weak result is a lead, not an answer: read the printed relevance, then verify with `read` before concluding.
 
-### Decision model (`make_decision`)
+Tools: `search_semantic` finds code by meaning - use it before grep; `get_file_skeleton` before reading a file; `find_usages` before editing a symbol; `describe_image` for images, never raw bytes; `recall_quirks` / `add_quirk` / `update_quirk` / `delete_quirk` for experiential memory. Signatures live in the tool schema, not here.
 
-- Classify, route, or score short text with the local tev1 model (`state` + 1-64 questions).
-- Question types: `choice` (options map to descriptions), `noul` (true/false probability), `score` (ordered rubric levels, lowest first).
-- Keep `state` short (~2k-token context); add a `none` option when no listed option may fit.
-- Never use it as the only check for a high-stakes decision.
-- With `decision.routeBeforeAsking` enabled: route option choices through `make_decision` before asking the user; ask the user only when the model is undecided (low confidence) or the choice is preference-based.
+A search that returns nothing useful usually means the workspace is not indexed: run `opencode-rag index` (or `opencode-rag status` to check).
 
-### Decision tree — ALWAYS follow this order
-1. User mentions code behavior/architecture → `search_semantic(query)`
-2. User mentions a file path → `get_file_skeleton(filePath)` THEN `read` on specific lines
-3. User mentions a function/class/variable to edit → `find_usages(symbolName)` THEN `search_semantic` THEN `edit`
-4. User asks a code question → `search_semantic` to gather context before answering
-5. User asks about an image or visual asset → `describe_image(filePath)` (optionally pass `systemPrompt` to focus on specific features) to retrieve its generated description, then optionally `search_semantic` for related code
-6. You encounter an error or need to recall a known pitfall → `recall_quirks(query)`
-7. You discover a non-obvious fact or workaround → `add_quirk(content)` to persist it for future sessions
-8. A recalled quirk is outdated or wrong → `update_quirk(id, ...)` to fix it, or `delete_quirk(id)` if it no longer applies
+`make_decision(state, questions)` classifies/routes/scores short text with the local decision model; with `decision.routeBeforeAsking` set, route option choices through it before asking the user.
 
-### Proactive triggers — you MUST call these tools when
-- User asks about code behavior, architecture, or implementation details
-- User asks to edit, refactor, or fix code — call `find_usages` first
-- User references files or functions you haven't read yet
-- User says "find", "search", "look up", "where is", "how does"
-- User refers to an image, screenshot, diagram, or visual asset
-- Before answering ANY code-related question, retrieve context first
-- Before reading ANY file, call `get_file_skeleton` to orient first
+Quirks: call `add_quirk` after resolving a failed build/test/type-check, an undocumented constraint, or a gotcha that cost more than one attempt; `update_quirk`/`delete_quirk` instead of storing a contradicting duplicate.
 
-### Anti-patterns — NEVER do these
-- Reading full files without calling `get_file_skeleton` first (wastes tokens)
-- Editing a function without calling `find_usages` first (breaks call sites)
-- Answering code questions without calling `search_semantic` first (you guess at behavior)
-- Using `grep`/`glob` when `search_semantic` would find the answer faster
-- Treating image files as text — use `describe_image` instead of reading raw bytes
-- Using `npx opencode-rag quirk` shell commands instead of the built-in quirk tools (`add_quirk` / `recall_quirks` / `update_quirk` / `delete_quirk`) (the tools are faster, already loaded in-process, and go through the trust monitor)
+### Long-running commands
+- Any `shell` call expected to take more than 30s MUST set `background: true` (returns immediately; the session is notified on completion) or set an explicit `timeout` (ms).
+- Default foreground timeout: 120000ms. Never run builds/tests/indexes in the foreground beyond 30s; if a call is already running, press Ctrl+B to background it (OpenCode: `session.background`).
+- OpenCodeRAG measures foreground shell duration and records a quirk when a call exceeds the threshold, so repeated foreground runs become visible.
 
-### MANDATORY quirk capture rules — you MUST call `add_quirk` when
-- A build, test, or type-check command fails and you resolve it
-- You discover an undocumented library constraint, peer dep, or workaround
-- You learn an environment-specific requirement (OS, tool version, etc.)
-- You make a design decision that future sessions should remember
-- You resolve a gotcha that cost more than one attempt
-
-### MANDATORY quirk hygiene — you MUST call `update_quirk` or `delete_quirk` when
-- A stored quirk is outdated, wrong, or has been fixed — update it or delete it instead of adding a contradicting duplicate
-- NEVER finish a coding session without adding quirks for resolved errors.
+The full protocol (decision tree, proactive triggers, anti-patterns) is injected into the system prompt by the plugin - `openCode.injectSystemPrompt`. Do not restate it here.
 <!-- END opencode-rag -->

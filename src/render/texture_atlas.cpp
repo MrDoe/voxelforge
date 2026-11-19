@@ -1,5 +1,6 @@
 #include "render/texture_atlas.hpp"
 #include "voxel/heightmap.hpp"
+#include "voxel/scenery.hpp"
 #include "voxel/worldfile.hpp"
 #include <spdlog/spdlog.h>
 #include <algorithm>
@@ -107,11 +108,12 @@ bool TexAtlas::load(const Context& ctx, const std::string& manifestPath)
         std::vector<uint8_t> raw;
         int w = 0, h = 0;
         // absolute paths (tests) are used verbatim; relative ones resolve
-        // against the manifest directory (assets/)
+        // against the manifest directory, then the SHARED asset dir (the
+        // texture library is material-identity, not scenery content)
         const std::string path =
             (!b.file.empty() && (b.file[0] == '/' || b.file[1] == ':'))
                 ? b.file
-                : dir + b.file;
+                : voxel::scenery::resolveShared(dir + "/", b.file);
         if (!voxel::loadPngRGBA8(path, raw, w, h)) {
             spdlog::warn("texture atlas: '{}' for material {} failed - palette fallback",
                          b.file, b.mat);

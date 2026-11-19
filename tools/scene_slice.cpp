@@ -11,6 +11,7 @@
 // descend along v (screen-like). Solid cells print their material glyph,
 // empty cells within --band of the surface print '+', deep air prints ' '.
 #include "voxel/layered_world.hpp"
+#include "voxel/scenery.hpp"
 
 #include <cmath>
 #include <cstdio>
@@ -61,7 +62,7 @@ int main(int argc, char** argv)
         return 2;
     }
     LayeredWorld lw;
-    if (!lw.load(std::string(VOXELFORGE_ASSET_DIR) + "/world.json")) {
+    if (!lw.load(vf::voxel::scenery::root() + "/world.json")) {
         std::fprintf(stderr,
                      "assets/world.json missing/unreadable - run: ninja -C build world\n");
         return 1;

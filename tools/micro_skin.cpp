@@ -35,6 +35,7 @@
 #include "voxel/micro_field.hpp"
 #include "voxel/micro_mesh.hpp"
 #include "voxel/micro_rig.hpp"
+#include "voxel/scenery.hpp"
 #include "voxel/worldfile.hpp"
 
 #include <array>
@@ -106,7 +107,9 @@ std::vector<int32_t> readExisting(const std::string& path, size_t verts)
 
 int main(int argc, char** argv)
 {
-    const std::string assets = VOXELFORGE_ASSET_DIR;
+    const std::string shared = VOXELFORGE_ASSET_DIR;
+    // layer/skin files are WORLD content: they live in the current scenery
+    const std::string assets = vf::voxel::scenery::root();
     // `--up y|z` names the axis the MESH FILE was authored in. It must match
     // the layer's `meshUp`, because the capsule test compares mesh vertices
     // against the rig's Y-up segments: a Z-up file measured as if it were
@@ -132,7 +135,7 @@ int main(int argc, char** argv)
     const std::string layerPath =
         pos.size() > 0 ? pos[0] : assets + "/micro/alpaca.vxw";
     const std::string meshPath =
-        pos.size() > 1 ? pos[1] : assets + "/models/alpaca_mesh.stl";
+        pos.size() > 1 ? pos[1] : shared + "/models/alpaca_mesh.stl";
     const std::string skinPath =
         pos.size() > 2 ? pos[2] : assets + "/micro/alpaca.skin";
     // Optional: the file to DIFF against (defaults to the output path, which

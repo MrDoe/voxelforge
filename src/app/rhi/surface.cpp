@@ -330,7 +330,7 @@ bool App::initVulkan()
     // layered world is the single source: the SVO is synthesized directly
     // from the enabled layer files (no merged cache, no procedural fallback)
     {
-        m_manifestPath = std::string(VOXELFORGE_ASSET_DIR) + "/world.json";
+        m_manifestPath = vf::voxel::scenery::root() + "/world.json";
         const std::string& manifestPath = m_manifestPath;
         if (!m_studio.active) {
             if (!m_layers.load(manifestPath)) {

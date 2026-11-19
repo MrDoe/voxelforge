@@ -26,6 +26,7 @@
 #include "voxel/heightmap.hpp"
 #include "voxel/mesh_import.hpp"
 #include "voxel/mesh_voxel.hpp"
+#include "voxel/scenery.hpp"
 #include "voxel/worldfile.hpp"
 #include "voxel/micro_field.hpp"
 #include "voxel/micro_rig.hpp"
@@ -337,7 +338,7 @@ struct ToolResult {
 };
 
 struct Server {
-    voxel::EditableWorld editable{ VOXELFORGE_ASSET_DIR };
+    voxel::EditableWorld editable{ voxel::scenery::root() };
 
     void init() { editable.load(); }
 
@@ -345,7 +346,7 @@ struct Server {
     {
         std::vector<voxel::worldfile::WorldLayer> layers;
         std::ostringstream o;
-        if (!voxel::worldfile::loadManifest(std::string(VOXELFORGE_ASSET_DIR) + "/world.json",
+        if (!voxel::worldfile::loadManifest(voxel::scenery::root() + "/world.json",
                                      layers)) {
             return { "no world.json manifest found", true };
         }
@@ -368,7 +369,7 @@ struct Server {
         ai::jsonGetInt(args, "enabled", enabledInt);
         std::vector<voxel::worldfile::WorldLayer> layers;
         const std::string manifestPath =
-            std::string(VOXELFORGE_ASSET_DIR) + "/world.json";
+            voxel::scenery::root() + "/world.json";
         if (!voxel::worldfile::loadManifest(manifestPath, layers))
             return { "manifest unreadable", true };
         bool found = false;
@@ -397,7 +398,7 @@ struct Server {
         static voxel::LayeredWorld w;
         static bool init = false;
         if (!init) {
-            w.load(std::string(VOXELFORGE_ASSET_DIR) + "/world.json");
+            w.load(voxel::scenery::root() + "/world.json");
             init = true;
         }
         return w;
@@ -680,7 +681,7 @@ struct Server {
             return { "illegal layer name", true };
         voxel::WorldFileData d;
         if (!voxel::worldfile::read(
-                std::string(VOXELFORGE_ASSET_DIR) + "/" + safe + ".vxw", d))
+                voxel::scenery::root() + "/" + safe + ".vxw", d))
             return { "cannot read layer (missing or corrupt .vxw)", true };
         std::ostringstream o;
         // AABB + physical size: a CPU-side sanity check (no GPU needed) so an
@@ -816,7 +817,7 @@ struct Server {
         return -1;
     }
 
-    std::string manifestPath() const { return std::string(VOXELFORGE_ASSET_DIR) + "/world.json"; }
+    std::string manifestPath() const { return voxel::scenery::root() + "/world.json"; }
 
     ToolResult getLayer(const std::string& args)
     {
@@ -844,7 +845,7 @@ struct Server {
                 o << " behaviour=" << l.behaviour;
             // voxel count if readable
             voxel::WorldFileData d;
-            if (voxel::worldfile::read(std::string(VOXELFORGE_ASSET_DIR) + "/" + l.file, d))
+            if (voxel::worldfile::read(voxel::scenery::root() + "/" + l.file, d))
                 o << " voxels=" << d.voxels.size();
             return { o.str(), false };
         }
@@ -1067,7 +1068,7 @@ struct Server {
         if (file.find(".vxw") == std::string::npos)
             file += ".vxw";
         voxel::WorldFileData d;
-        if (!voxel::worldfile::read(std::string(VOXELFORGE_ASSET_DIR) + "/" + file, d))
+        if (!voxel::worldfile::read(voxel::scenery::root() + "/" + file, d))
             return { "cannot read layer file: " + file, true };
         if (d.voxels.empty())
             return { file + ": 0 voxels", false };
@@ -1117,10 +1118,10 @@ struct Server {
         if (srcFile.find(".vxw") == std::string::npos)
             srcFile += ".vxw";
         std::string dstFile = safe + ".vxw";
-        std::ifstream in(std::string(VOXELFORGE_ASSET_DIR) + "/" + srcFile, std::ios::binary);
+        std::ifstream in(voxel::scenery::root() + "/" + srcFile, std::ios::binary);
         if (!in)
             return { "cannot read source layer: " + srcFile, true };
-        std::ofstream out(std::string(VOXELFORGE_ASSET_DIR) + "/" + dstFile, std::ios::binary);
+        std::ofstream out(voxel::scenery::root() + "/" + dstFile, std::ios::binary);
         if (!out)
             return { "cannot write target layer", true };
         out << in.rdbuf();
@@ -1188,8 +1189,8 @@ struct Server {
         std::string oldFile = layers[idx].file;
         std::string newFile = safe + ".vxw";
         // rename file on disk if present
-        std::string oldPath = std::string(VOXELFORGE_ASSET_DIR) + "/" + oldFile;
-        std::string newPath = std::string(VOXELFORGE_ASSET_DIR) + "/" + newFile;
+        std::string oldPath = voxel::scenery::root() + "/" + oldFile;
+        std::string newPath = voxel::scenery::root() + "/" + newFile;
         std::error_code ec;
         if (std::filesystem::exists(oldPath, ec))
             std::filesystem::rename(oldPath, newPath, ec);
@@ -1415,7 +1416,7 @@ struct Server {
         if (file.find(".vxw") == std::string::npos)
             file += ".vxw";
         voxel::WorldFileData d;
-        if (!voxel::worldfile::read(std::string(VOXELFORGE_ASSET_DIR) + "/" + file, d))
+        if (!voxel::worldfile::read(voxel::scenery::root() + "/" + file, d))
             return { "cannot read layer file: " + file, true };
         if (d.voxels.empty())
             return { file + ": 0 voxels", false };
@@ -1526,7 +1527,7 @@ struct Server {
         if (file.find(".vxw") == std::string::npos)
             file += ".vxw";
         // micro layers live under micro/ possibly; if not found try as-is
-        std::string fullPath = std::string(VOXELFORGE_ASSET_DIR) + "/" + file;
+        std::string fullPath = voxel::scenery::root() + "/" + file;
         voxel::WorldFileData d;
         if (!voxel::worldfile::read(fullPath, d))
             return { "cannot read layer file: " + file, true };

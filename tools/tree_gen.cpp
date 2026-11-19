@@ -492,7 +492,7 @@ int main(int argc, char** argv)
         std::printf("dry run: %zu voxels total\n", all.size());
         return 0;
     }
-    EditableWorld ew(std::string(VOXELFORGE_ASSET_DIR), "tree_gen_scratch.vxw",
+    EditableWorld ew(vf::voxel::scenery::root(), "tree_gen_scratch.vxw",
                      "tree_gen_scratch", "object");
     if (!ew.writeObjectLayer(outName, all)) {
         std::fprintf(stderr, "tree_gen: failed to write layer '%s'\n", outName.c_str());

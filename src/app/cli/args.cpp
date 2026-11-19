@@ -102,6 +102,7 @@ Args parseArgs(int argc, char** argv)
             a.animWorld = true;
         } else if ((s=="--llm-url" || s=="--ollama-url") && i+1<argc) a.llmUrl = argv[++i];
         else if ((s=="--llm-model" || s=="--ollama-model") && i+1<argc) a.llmModel = argv[++i];
+        else if (s == "--scenery" && i + 1 < argc) a.scenery = argv[++i];
     }
     if (const char* e = getenv("VF_LLM_URL")) a.llmUrl = e;
     if (const char* e = getenv("VF_LLM_MODEL")) a.llmModel = e;

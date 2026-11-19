@@ -10,6 +10,10 @@ int main(int argc, char** argv)
 {
     vf::initLogging();
     vf::app::Args args = vf::app::parseArgs(argc, argv);
+    // The --scenery choice must land BEFORE App is constructed: its member
+    // initialisers resolve the scenery paths (ai_edits layer, overlay).
+    if (!args.scenery.empty())
+        vf::voxel::scenery::setCliScenery(args.scenery);
     vf::app::App app;
     return app.run(args);
 }

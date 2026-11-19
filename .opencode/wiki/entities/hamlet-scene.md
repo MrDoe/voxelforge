@@ -1,19 +1,19 @@
 ---
 title: Lakeside hamlet (default world)
 tags: [world, authoring, layers, vf-mcp, scenery]
-sourceRefs: [assets/world.json, assets/models/Forrest_Hunting_Cabin.stl, src/ai/mcp_server.cpp, src/app/main.cpp, tools/heightmap_gen.cpp, tests/test_world.cpp]
-lastReviewed: 2026-09-25
+sourceRefs: [scenery/LakesideHamlet/world.json, assets/models/Forrest_Hunting_Cabin.stl, src/ai/mcp_server.cpp, src/app/main.cpp, tools/heightmap_gen.cpp, tests/test_world.cpp]
+lastReviewed: 2026-11-19
 ---
 
 # Lakeside hamlet
 
 The default world since 2026-09-16: a runtime-authored village on the north
 shore of the valley lake, built with the `vf_mcp` object tools and the GUI
-mesh importer (no baker sweeps, no recompile). `assets/world.json` lists
+mesh importer (no baker sweeps, no recompile). `scenery/LakesideHamlet/world.json` lists
 `landscape` + the `hamlet_*` layers, including the imported `hamlet_cabin`.
 The old baked scenery (old cabin, trees, rocks, alpaca, fence, bridge,
 forest, dock, shore, ferns, bushes, winter assets, carve/raise edits) was
-deleted.
+deleted. See [[concepts/sceneries]] for the scenery system.
 
 ## Layers
 
@@ -64,7 +64,7 @@ first among the object layers so `tests/visual_check.py`'s ownership subject
   ~36k voxels; roof skin 5 cells deep for the same thin-rule reason.
 - `tools/hamlet_nature.py` — the two new nature layers (all solid masses:
   thin rule + flood-fill safety). Terrain heights were sampled from
-  `assets/heightmap.png` before placing; nothing lands in the live-edit
+  `scenery/LakesideHamlet/heightmap.png` before placing; nothing lands in the live-edit
   keep-out (world x −3…3, z −1…6).
 
 Anchors (game metres): hall (11, 14), tower (20, 18), pier (14, 9), boat at the

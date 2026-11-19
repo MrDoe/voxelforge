@@ -100,6 +100,7 @@ add_library(vf_core STATIC src/core/camera.cpp
                           src/voxel/micro_mesh.cpp
                           src/voxel/fur_cards.cpp
                           src/voxel/heightmap.cpp src/voxel/worldfile.cpp
+                          src/voxel/scenery.cpp
                           src/voxel/picking.cpp src/voxel/editable_world.cpp
                           src/ai/ollama_client.cpp)
 target_include_directories(vf_core PUBLIC src PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/external)
@@ -108,6 +109,10 @@ target_compile_definitions(vf_core PUBLIC
 target_link_libraries(vf_core PUBLIC vf_glm spdlog::spdlog vf_platform)
 
 # ---- heightmap + world assets ---------------------------------------------------
+# Name of the shipped default scenery. Keep in sync with
+# scenery::kDefaultScenery (src/voxel/scenery.hpp) — it is the compile-time
+# fallback; the runtime pointer file and --scenery win over it.
+set(VF_DEFAULT_SCENERY LakesideHamlet)
 add_executable(heightmap_gen tools/heightmap_gen.cpp)
 target_include_directories(heightmap_gen PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
 target_link_libraries(heightmap_gen PRIVATE vf_core)
@@ -154,22 +159,16 @@ add_executable(vf_mcp src/ai/mcp_server.cpp)
 target_include_directories(vf_mcp PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
 target_link_libraries(vf_mcp PRIVATE vf_core)
 
-set(VF_HEIGHTMAP_PNG ${CMAKE_CURRENT_SOURCE_DIR}/assets/heightmap.png)
-set(VF_WORLD_LAYERS ${CMAKE_CURRENT_SOURCE_DIR}/assets/world.json
-    ${CMAKE_CURRENT_SOURCE_DIR}/assets/landscape.vxw
-    ${CMAKE_CURRENT_SOURCE_DIR}/assets/house.vxw
-    ${CMAKE_CURRENT_SOURCE_DIR}/assets/tree1.vxw ${CMAKE_CURRENT_SOURCE_DIR}/assets/tree2.vxw
-    ${CMAKE_CURRENT_SOURCE_DIR}/assets/tree3.vxw ${CMAKE_CURRENT_SOURCE_DIR}/assets/tree4.vxw
-    ${CMAKE_CURRENT_SOURCE_DIR}/assets/tree5.vxw ${CMAKE_CURRENT_SOURCE_DIR}/assets/tree6.vxw
-    ${CMAKE_CURRENT_SOURCE_DIR}/assets/rock1.vxw ${CMAKE_CURRENT_SOURCE_DIR}/assets/rock2.vxw
-    ${CMAKE_CURRENT_SOURCE_DIR}/assets/rock3.vxw
-    ${CMAKE_CURRENT_SOURCE_DIR}/assets/bushes.vxw
-    ${CMAKE_CURRENT_SOURCE_DIR}/assets/alpaca.vxw
-    ${CMAKE_CURRENT_SOURCE_DIR}/assets/fence1.vxw)
+# The baker (re)emits the DEFAULT scenery's terrain shell; the baked outputs
+# live inside that scenery folder, which is tracked authored content.
+set(VF_SCENERY_DIR ${CMAKE_CURRENT_SOURCE_DIR}/scenery/${VF_DEFAULT_SCENERY})
+set(VF_HEIGHTMAP_PNG ${VF_SCENERY_DIR}/heightmap.png)
+set(VF_WORLD_LAYERS ${VF_SCENERY_DIR}/world.json
+    ${VF_SCENERY_DIR}/landscape.vxw)
 add_custom_command(OUTPUT ${VF_HEIGHTMAP_PNG} ${VF_WORLD_LAYERS}
-    COMMAND heightmap_gen ${VF_HEIGHTMAP_PNG} ${CMAKE_CURRENT_SOURCE_DIR}/assets/world.vxw
+    COMMAND heightmap_gen ${VF_HEIGHTMAP_PNG} ${VF_SCENERY_DIR}/world.vxw
     DEPENDS heightmap_gen
-    COMMENT "heightmap_gen -> assets/heightmap.png + layer family + world.json"
+    COMMENT "heightmap_gen -> ${VF_DEFAULT_SCENERY}/heightmap.png + landscape.vxw + world.json"
     VERBATIM)
 add_custom_target(vf_heightmap DEPENDS ${VF_HEIGHTMAP_PNG} ${VF_WORLD_LAYERS})
 

@@ -3,6 +3,7 @@
 // centres), so rayPick must detect sign flips - a thin |d| window never fires.
 #include "voxel/picking.hpp"
 #include "voxel/layered_world.hpp"
+#include "voxel/scenery.hpp"
 #include "voxel/heightmap.hpp"
 #include "voxel/common.hpp"
 #include "voxel/worldfile.hpp"
@@ -27,7 +28,7 @@ int iz0(float wz) { return int((wz + 0.5f * WORLD) / VOXEL); }
 
 
 struct TempLayer {
-    std::string dir = std::string(VOXELFORGE_ASSET_DIR);
+    std::string dir = vf::voxel::scenery::root();
     std::string vxw = dir + "/picktest_obj.vxw";
     std::string json = dir + "/picktest.json";
     ~TempLayer()
@@ -36,13 +37,25 @@ struct TempLayer {
         std::remove(json.c_str());
     }
 };
+
+// One shipped-world build per process instead of one per TEST_CASE: both
+// cases below read THE SAME file (world.json, one manifest order - so the
+// fixture is not changing any geometry a single-case build would produce),
+// and rayPick only reads the field. A full load is ~13-17 s (the per-
+// component padded-bbox EDT), so the second load was pure duplicated cost.
+const VoxelField& shippedField()
+{
+    static LayeredWorld lw;
+    static const bool loaded =
+        lw.load(vf::voxel::scenery::root() + "/world.json");
+    REQUIRE(loaded);
+    return lw.field();
+}
 } // namespace
 
 TEST_CASE("rayPick hits the hero camera, and terrain faces up")
 {
-    LayeredWorld lw;
-    REQUIRE(lw.load(std::string(VOXELFORGE_ASSET_DIR) + "/world.json"));
-    const VoxelField& f = lw.field();
+    const VoxelField& f = shippedField();
     REQUIRE(f.valid());
 
     // centre-of-screen ray toward the cabin target crosses terrain
@@ -85,9 +98,7 @@ TEST_CASE("rayPick hits the hero camera, and terrain faces up")
 
 TEST_CASE("rayPick straight down matches the field's own top solid cell")
 {
-    LayeredWorld lw;
-    REQUIRE(lw.load(std::string(VOXELFORGE_ASSET_DIR) + "/world.json"));
-    const VoxelField& f = lw.field();
+    const VoxelField& f = shippedField();
     REQUIRE(f.valid());
 
     const float wx = 6.5f, wz = 11.f;

@@ -55,6 +55,7 @@
 #include "voxel/mesh_voxel.hpp"
 #include "voxel/micro_behaviour.hpp"
 #include "voxel/picking.hpp"
+#include "voxel/scenery.hpp"
 #include "voxel/surfelize.hpp"
 #include "voxel/worldfile.hpp"
 #include "ai/ollama_client.hpp"
@@ -850,15 +851,15 @@ private:
     uint32_t m_nextAcquire = 0;
 
     // AI chat + picking + editable world
-    vf::voxel::EditableWorld m_editable { std::string(VOXELFORGE_ASSET_DIR) };
+    vf::voxel::EditableWorld m_editable { vf::voxel::scenery::root() };
     // Carve/raise rasterizer providers: the edit tool only calls their
     // makeXxx() shape builders (the carving/raising layers themselves are
     // legacy - every brush stamp now patches the runtime store instead).
-    vf::voxel::EditableWorld m_carve { std::string(VOXELFORGE_ASSET_DIR),
+    vf::voxel::EditableWorld m_carve { vf::voxel::scenery::root(),
                                        std::string(vf::voxel::EditableWorld::kCarveFileName),
                                        std::string(vf::voxel::EditableWorld::kCarveLayerName),
                                        std::string("carve") };
-    vf::voxel::EditableWorld m_add { std::string(VOXELFORGE_ASSET_DIR),
+    vf::voxel::EditableWorld m_add { vf::voxel::scenery::root(),
                                      std::string(vf::voxel::EditableWorld::kRaiseFileName),
                                      std::string(vf::voxel::EditableWorld::kRaiseLayerName),
                                      std::string("raise") };

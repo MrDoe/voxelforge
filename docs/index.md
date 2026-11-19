@@ -48,6 +48,7 @@ pixel-level zooms and measured timings.*
 | [`rendering.md`](rendering.md) | contributors | descriptor/bindings, `GpuWorld` handle encoding, brick packing, push block, textures, shading overview |
 | [`rendering-comparison.md`](rendering-comparison.md) | users, contributors | Gaussian surfels vs SVO: screenshot gallery, pixel zooms, measured timings, when to use which |
 | [`ai-editing.md`](ai-editing.md) | users, contributors | chat env vars, tool normalization, `EditableWorld` API, `vf_mcp` JSON-RPC reference |
+| [`sceneries.md`](sceneries.md) | users, contributors | scenery folder layout, `assets/` as the shared library, path resolution & selection, what moves on a switch |
 | [`tooling.md`](tooling.md) | users, contributors | full CLI/env reference (`voxelforge`, `vf_mcp`, `vf_slice`, `heightmap_gen`), `start.sh` |
 | [`testing.md`](testing.md) | contributors | test gates in order, suite breakdown, `visual_check` internals, debugging workflows |
 | [`contributing.md`](contributing.md) | contributors | project invariants, code conventions, gotcha catalog, how-to recipes |

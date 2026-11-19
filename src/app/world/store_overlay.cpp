@@ -15,7 +15,8 @@ std::string overlayPath()
 {
     if (const char* p = getenv("VF_OVERLAY_PATH"); p && *p)
         return p;
-    return std::string(VOXELFORGE_ASSET_DIR) + "/runtime_edits.vxw";
+    // the live-edit session belongs to the CURRENT scenery
+    return vf::voxel::scenery::root() + "/runtime_edits.vxw";
 }
 
 void App::loadStoreOverlay()

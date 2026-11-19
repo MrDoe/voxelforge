@@ -31,8 +31,8 @@ if [[ ! -x "$ROOT/$BUILD_DIR/voxelforge" ]]; then
 fi
 
 # 2) world assets are NOT generated here — baking is an explicit extra tool.
-if [[ ! -f "$ROOT/assets/world.json" ]]; then
-  echo "[start] assets/world.json missing - run 'ninja -C $BUILD_DIR world' first" >&2
+if [[ ! -f "$ROOT/scenery/${VF_SCENERY:-LakesideHamlet}/world.json" ]]; then
+  echo "[start] scenery/${VF_SCENERY:-LakesideHamlet}/world.json missing - run 'ninja -C $BUILD_DIR world' first" >&2
   exit 1
 fi
 

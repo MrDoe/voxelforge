@@ -82,17 +82,23 @@ offline baker (`tools/heightmap_gen.cpp`), which writes:
 
 | asset | role |
 |---|---|
-| `assets/heightmap.png` | baker-side terrain source (2048², 5 cm/texel) |
-| `assets/landscape.vxw` | terrain shell records (per lattice column) |
-| `assets/hamlet_*.vxw` | runtime-authored object layers (hall, imported cabin, tower, pier, boat, well, market, garden, pines, props) written by `vf_mcp` or the GUI mesh importer |
-| `assets/world.json` | layer manifest — order = dedupe priority, first wins a cell |
-| `assets/ai_edits.vxw` | highest-priority live layer for chat/MCP edits |
+| `scenery/LakesideHamlet/heightmap.png` | baker-side terrain source (2048², 5 cm/texel) |
+| `scenery/LakesideHamlet/landscape.vxw` | terrain shell records (per lattice column) |
+| `scenery/LakesideHamlet/hamlet_*.vxw` | runtime-authored object layers (hall, imported cabin, tower, pier, boat, well, market, garden, pines, props) written by `vf_mcp` or the GUI mesh importer |
+| `scenery/LakesideHamlet/world.json` | layer manifest — order = dedupe priority, first wins a cell |
+| `scenery/LakesideHamlet/ai_edits.vxw` | highest-priority live layer for chat/MCP edits |
+
+A **scenery** is a self-contained world folder under `scenery/<name>/`; the
+baker writes the shipped default (`LakesideHamlet`). `assets/` holds only the
+shared library (`textures/`, `models/`) that every scenery draws on. Select a
+scenery with `--scenery NAME` (one launch) or `VF_SCENERY`; the last-used one
+is the default (see [docs](docs/sceneries.md)).
 
 The app starts in the **lakeside hamlet**: `landscape` + the `hamlet_*`
 object layers (plus your AI edits) are loaded. The "World layers" panel in-app
 lists every `.vxw` file as a checkbox — tick `hamlet_tower.vxw`, … to load it
-into the running world; untick to remove it. New files dropped into `assets/`
-appear after a rescan.
+into the running world; untick to remove it. New files dropped into the
+scenery folder appear after a rescan.
 
 Layers store absolute world coordinates, so a checkbox materializes the object
 exactly where it was baked. To place a copy somewhere else, pick an anchor with

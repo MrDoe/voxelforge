@@ -32,7 +32,7 @@ private:
     uint32_t w_ = 0, h_ = 0;
 };
 
-// Lazily loads VOXELFORGE_ASSET_DIR "/heightmap.png" on first use.
+// Lazily loads <scenery root>/heightmap.png on first use (see voxel/scenery.hpp).
 const HeightMap& sharedHeightmap();
 
 // Offline tools can inject their own instance before building worlds.

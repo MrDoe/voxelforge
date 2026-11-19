@@ -1,6 +1,7 @@
 // Tests for the layered world synthesis: chunked-SVO structure, VoxelField
 // point queries against the analytic authoring truth, and determinism.
 #include "voxel/layered_world.hpp"
+#include "voxel/scenery.hpp"
 #include "voxel/common.hpp"
 #include "voxel/irradiance_volume.hpp"
 #include <filesystem>
@@ -25,7 +26,7 @@ LayeredWorld& allLayersWorld()
     static std::string manifestPath;
     static bool ok = [] {
         namespace fs = std::filesystem;
-        std::string dir = std::string(VOXELFORGE_ASSET_DIR);
+        std::string dir = vf::voxel::scenery::root();
         std::vector<std::pair<std::string, std::string>> files; // file, role
         for (fs::directory_iterator it(dir), end; it != end; ++it) {
             std::string f = it->path().filename().string();

@@ -203,8 +203,9 @@ void App::drawPanelAnimate()
     }
     if (ImGui::Button("Save clip")) {
         if (editClip) {
+            const std::string def = vf::voxel::scenery::root() + "/micro/studio_clip.anim";
             const char* path = m_studio.clipFile.empty()
-                ? "assets/micro/studio_clip.anim" : m_studio.clipFile.c_str();
+                ? def.c_str() : m_studio.clipFile.c_str();
             if (vf::voxel::writeMicroClip(path, *editClip))
                 spdlog::info("studio: saved clip to {}", path);
             else

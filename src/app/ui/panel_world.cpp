@@ -137,7 +137,7 @@ void App::drawPanelWorld()
             const bool canImport = m_hasSelection && selected->role != "landscape";
             ImGui::BeginDisabled(!canImport);
             if (ImGui::Button("Import copy at anchor##import", ImVec2(-1.0f, kUiRowH))) {
-                const std::string path = std::string(VOXELFORGE_ASSET_DIR) + "/" +
+                const std::string path = vf::voxel::scenery::root() + "/" +
                                          selected->file;
                 if (m_editable.importLayer(path, m_selectedHit.voxel) > 0)
                     requestWorldReload();

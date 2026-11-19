@@ -20,6 +20,7 @@
 #include "voxel/common.hpp"
 #include "voxel/heightmap.hpp"
 #include "voxel/micro_field.hpp"
+#include "voxel/scenery.hpp"
 #include "voxel/worldfile.hpp"
 
 #include <algorithm>
@@ -463,13 +464,14 @@ int main(int argc, char** argv)
     meta.gridN = uint32_t(std::max(nx, std::max(ny, nz)));
     meta.brickN = 8;
 
-    const std::filesystem::path dir(std::string(VOXELFORGE_ASSET_DIR) + "/micro");
+    // micro layers are WORLD content: they live in the current scenery
+    const std::filesystem::path dir(vf::voxel::scenery::root() + "/micro");
     const std::string file = o.outName + ".vxw";
 
     if (o.dryRun) {
-        std::printf("dry run: would write assets/micro/%s (%zu records, %.1f KB) "
+        std::printf("dry run: would write %s (%zu records, %.1f KB) "
                     "placed at (%.2f, %.2f, %.2f)\n",
-                    file.c_str(), recs.size(), recs.size() * 16.0 / 1024.0,
+                    (dir / file).string().c_str(), recs.size(), recs.size() * 16.0 / 1024.0,
                     o.at.x, o.at.y, o.at.z);
         return 0;
     }
@@ -484,11 +486,11 @@ int main(int argc, char** argv)
         std::printf("micro_voxel: failed to write %s\n", path.c_str());
         return 1;
     }
-    std::printf("micro_voxel: wrote %zu voxels to assets/micro/%s\n", recs.size(),
-                file.c_str());
+    std::printf("micro_voxel: wrote %zu voxels to %s\n", recs.size(),
+                path.c_str());
 
     if (o.append) {
-        const std::string manifest = std::string(VOXELFORGE_ASSET_DIR) + "/world.json";
+        const std::string manifest = vf::voxel::scenery::root() + "/world.json";
         std::vector<vf::voxel::worldfile::WorldLayer> layers;
         if (!worldfile::loadManifest(manifest, layers)) {
             std::printf("micro_voxel: cannot read %s - file written, not appended\n",

@@ -119,7 +119,7 @@ int App::run(const Args& args)
 
     // --sun elevation/azimuth, in degrees, into a direction TOWARD the sun.
     {
-        m_manifestPath = std::string(VOXELFORGE_ASSET_DIR) + "/world.json";
+        m_manifestPath = vf::voxel::scenery::root() + "/world.json";
         float e = args.sunElev, a = args.sunAzim;
         // The scene's own "sun" block wins unless --sun was given, so an
         // authored evening/night persists across runs instead of needing a
@@ -192,8 +192,9 @@ int App::run(const Args& args)
     if (args.probeSet)
         return runProbe() ? 1 : 0;
 
-    if (!std::filesystem::exists(std::string(VOXELFORGE_ASSET_DIR) + "/world.json")) {
-        spdlog::critical("assets/world.json missing - run 'ninja -C build world' to bake assets first");
+    if (!std::filesystem::exists(vf::voxel::scenery::root() + "/world.json")) {
+        spdlog::critical("{} missing - run 'ninja -C build world' to bake assets first",
+                         vf::voxel::scenery::root() + "/world.json");
         return 1;
     }
     if (!initWindow(args)) {

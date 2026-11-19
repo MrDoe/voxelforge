@@ -18,7 +18,7 @@ std::string allLayersManifest()
     namespace fs = std::filesystem;
     static std::string path;
     if (path.empty()) {
-        std::string dir = std::string(VOXELFORGE_ASSET_DIR);
+        std::string dir = vf::voxel::scenery::root();
         std::vector<std::pair<std::string, std::string>> files;
         for (fs::directory_iterator it(dir), end; it != end; ++it) {
             std::string f = it->path().filename().string();
@@ -200,7 +200,7 @@ TEST_CASE("alpaca: wool body, dark legs and muzzle")
 TEST_CASE("carve: subtractive cylinder cuts a hole through terrain and objects")
 {
     // generate carve cells with the same rasterizer the app uses
-    EditableWorld carver(std::string(VOXELFORGE_ASSET_DIR),
+    EditableWorld carver(vf::voxel::scenery::root(),
                          std::string(EditableWorld::kCarveFileName),
                          std::string(EditableWorld::kCarveLayerName),
                          std::string("carve"));
@@ -243,7 +243,7 @@ TEST_CASE("carve: subtractive cylinder cuts a hole through terrain and objects")
 
 TEST_CASE("raise: the dome lifts the whole footprint to the brush depth")
 {
-    EditableWorld raiser(std::string(VOXELFORGE_ASSET_DIR),
+    EditableWorld raiser(vf::voxel::scenery::root(),
                          std::string(EditableWorld::kRaiseFileName),
                          std::string(EditableWorld::kRaiseLayerName),
                          std::string("raise"));

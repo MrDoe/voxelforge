@@ -4,6 +4,7 @@
 #include "voxel/chunk_index.hpp"
 #include "voxel/chunk_store.hpp"
 #include "voxel/layered_world.hpp"
+#include "voxel/scenery.hpp"
 #include "voxel/live_editor.hpp"
 #include "voxel/surfelize.hpp"
 #include <doctest/doctest.h>
@@ -2087,7 +2088,7 @@ TEST_CASE("chunk store: collectEmissive covers the field variant")
     // Production room, derived from the manifests, never hardcoded: budget
     // minus the world.json authored count (the courtyard lamps eat slots).
     std::vector<worldfile::LightSource> authoredProd;
-    worldfile::loadLightManifest(std::string(VOXELFORGE_ASSET_DIR) +
+    worldfile::loadLightManifest(vf::voxel::scenery::root() +
                                      "/world.json",
                                  authoredProd);
     const size_t prodRoom =
