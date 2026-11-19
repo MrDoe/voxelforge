@@ -300,76 +300,76 @@
  ],
  "textures": [
   {
-   "file": "textures/dark_green_grass_dense_natural_meadow_topdown_vie_1_seamless.png",
    "mat": 0,
+   "file": "textures/grass_meadow_prepared.png",
    "scale": 2.6,
    "card": "grass"
   },
   {
-   "file": "textures/grass_light_high_res.png",
    "mat": 1,
+   "file": "textures/grass_light_high_res.png",
    "scale": 2.6,
    "card": "grass"
   },
   {
-   "file": "textures/sand_highres.png",
    "mat": 2,
+   "file": "textures/soil_ground037.png",
    "scale": 1.8
   },
   {
-   "file": "textures/sand_highres.png",
    "mat": 3,
+   "file": "textures/isle_sand.png",
    "scale": 0.9
   },
   {
-   "file": "textures/grey_gravel_pebbles_small_stones_ground_texture_1_seamless.png",
    "mat": 4,
+   "file": "textures/rock.jpeg",
    "scale": 1.2
   },
   {
-   "file": "textures/white_plaster_smooth_wall_surface_subtle_texture_1_seamless.png",
    "mat": 5,
+   "file": "textures/rock_grey.png",
    "scale": 1.2
   },
   {
-   "file": "textures/dark_wooden_planks_aged_oak_horizontal_grain_1_seamless.png",
    "mat": 6,
+   "file": "textures/wood_highres.png",
    "scale": 1.0
   },
   {
-   "file": "textures/dark_wooden_planks_aged_oak_horizontal_grain_1_seamless.png",
    "mat": 7,
+   "file": "textures/wooden_planks_dark.jpeg",
    "scale": 0.9
   },
   {
-   "file": "textures/green_foliage_leaves_dense_vegetation_plant_textur_1.png",
    "mat": 8,
-   "scale": 1.65,
+   "file": "textures/foliage_foliage006.png",
+   "scale": 0.5,
    "card": "jungle"
   },
   {
-   "file": "textures/gravel.png",
    "mat": 15,
+   "file": "textures/gravel.png",
    "scale": 0.9
   },
   {
-   "file": "textures/bark_brown.png",
    "mat": 17,
+   "file": "textures/bark_brown.png",
    "scale": 0.4
   },
   {
-   "file": "textures/foilage.png",
    "mat": 18,
+   "file": "textures/proc_moss.png",
    "scale": 0.4
   },
   {
-   "file": "textures/thatch_straw_woven_dry_golden_brown_1_seamless.png",
    "mat": 19,
+   "file": "textures/thatch_straw_prepared.png",
    "scale": 0.6
   },
   {
-   "file": "textures/stone_plaster.png",
    "mat": 20,
+   "file": "textures/stone_plaster.png",
    "scale": 1.0
   }
  ]

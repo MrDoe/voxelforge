@@ -9,6 +9,9 @@ Do not infer causation from vertical position in the file itself.
 
 ## Index
 
+### 2026-11-19
+- **query** — How could we change this engine to render arbitrary large landscapes? Filed analysis as [[concepts/large-landscape-streaming]]
+
 ### 2026-10-24
 - **verification** — The neck defect as a number: 10.1% see-through vs 1.0% in the same crop (vision model retired; ascii_view + masks instead)
 - **ingest** — Fur ownership decided in the REST frame; the Move preview is a field transform; the neck is a 3-link chain
@@ -7250,3 +7253,247 @@ Page: concepts/3dgs-renderer.md
 Also: test-fur passes (131s) after the fix; the fx is in src/app/ui/panel_render.cpp + run.cpp comment + wiki/concepts/fur-cards.md. Note test-app has an unrelated stale assertion (kPanelCount==6, now 7 with Panel::Animate) — left alone.
 
 ## [2026-11-17] add | backlit fleece translucency — warm glow through the fringe when the sun is behind; VF_FUR_SSS, confined + reference frames bit-exact
+
+## [2026-11-18] ingest | framerate triage
+Q&A synthesis: separated startup (~17.6 s EDT-bound world load) from steady-state
+frame time, established the measurement path (`VF_TRACE` marks, `--smoke` avg ms,
+HUD GPU ms — a 3-frame `--shot` emits no trace), and ranked the measured cost
+centres (fur 183 ms→0.1 ms, near-geometry overdraw 55→5.9 ms, tile path slower
+and only ~64 % parity, optional FX +0.65/+1.34 ms, micro animation 0.011 ms/f).
+Recorded the live 2026-11-18 GPU contention snapshot (qwen3-vl 7688 MiB) as the
+first check before any diagnosis. Page: concepts/framerate-triage.md
+
+## [2026-11-18] ingest | measured splat vs 3dgs frame cost (Vega)
+Added the peer's 960x540 / 360-frame `VF_TRACE` + smoke numbers to the triage
+page: default splat geo 9.23/9.27 ms, avg 9.55 ms (~100 fps); `--mode 3dgs`
+geo 28.72/29.36 ms, avg 29.93 ms (~33 fps) — the whole 3x gap is `geo`.
+Verified in record_headless.cpp / record_interactive.cpp that the Dgs branch
+calls m_splatPass.record() AND recordOit() (a second full surfel pass), plus an
+m_hdr->m_oitBase copy and the composite; the copy/composite are negligible.
+Provenance: /tmp/opencode/fps-default.log, /tmp/opencode/fps-3dgs.log.
+Page: concepts/framerate-triage.md (now cross-links concepts/3dgs-renderer)
+
+## [2026-11-18] ingest | renderer VRAM budget (VRAM Tuner)
+Catalogued concepts/vram-budget.md: ~0.89 GiB steady-state renderer footprint
+at 960x540, allocation table with measured surfel/SVO/fur counts; verdict that
+the ~7.7 GiB VLM worker, not renderer bloat, explains the dark-window symptom;
+safe reclaim ~97 MiB (lazy OIT + VF_TILE-gated tile resources) and the
+correctness-sensitive 20x oversized compaction buffer (~248 MiB) as the big
+item. Added index entry and a reciprocal link from framerate-triage.md.
+
+## [2026-11-18] fix | resolved a contradiction: stencil coverage count is REFUTED
+The improvement roadmap (P2) and two index lines still described the D24_S8
+coverage count as "the planned fix" / "the real fix" for splat silhouettes,
+while splat-canopy-parity and splat-base-seal had MEASURED it dead on
+2026-10-21 (1.4-cell disks overlap everywhere; no stencil read in the fragment
+shader). Updated all three to say REFUTED with links, and added a "Rejected
+angle" note to framerate-triage.md after nearly recommending the same idea for
+OIT fragment gating. Judgment check the deterministic lint cannot do.
+
+## [2026-11-18] fix | renderer VRAM waste reclaimed (~0.89 -> ~0.55 GiB)
+Gated tile resource init on VF_TILE (~81 MiB at 960x540), made the four 3DGS
+OIT targets lazy (created at startup for --mode 3dgs, on F-cycle, and on resize
+-- ~16 MiB saved in the default path), and shrank the compaction indirection
+from 80 B/slot to 4 B/slot with explicit growth in growOpaque (~248 MiB).
+Fixing the tile gate required guarding two unguarded m_tileSet descriptor
+writes (setTexAtlas, setIrrVolView) that segfaulted the default path.
+Verified: clean build; default/--mode 3dgs/VF_TILE=1 640x360 shots all rc=0;
+3dgs differs from default on 0.48% of pixels (edge-only contract). Page:
+concepts/vram-budget.md updated to ~0.55 GiB; index entry corrected.
+
+## [2026-11-18] ship | cheap OIT fragment colour — 3DGS geo 29 ms -> 11 ms
+Filed commit d36949e (shader-only, shaders/splat.frag) in framerate-triage.md
+as SHIPPED with full provenance: command with VF_TRACE/VF_OVERLAY_PATH, before
+(/tmp/opencode/fps-3dgs.log) and after (/tmp/opencode/fps-3dgs-real.log) traces,
+geo 28.72/29.36 -> 11.09/10.86 ms and avg 29.93 -> 11.39 ms at 960x540;
+dgs_check PASS (interiors <=0.054/255). Cause was full shadeSurfel() in
+PASS_MODE 5 for every surfel though the composite uses that colour at only
+~0.3% sparse-coverage pixels; it now uses palette albedo x baked shadow/AO.
+Corrected the earlier "second full geometry pass is the cost" framing: the
+expensive part was the fragment shading, not the extra draw. The stencil
+coverage-count idea remains marked REFUTED.
+
+## [2026-11-19] ingest | Wet-surface reflections (stunning pits)
+Added a default-off (render-flag bit 12) feature set in c0789ed: material 22
+wet soil (dark earth, refl 150 / rough 55) with all palette/atlas/texture
+tables bumped 22->23 and existing ids stable; procedural wet terrain near
+WATER_LEVEL feeding oGAlb.a; SSR gains a 5th binding (m_galb) and a narrow
+low-roughness gloss gate so only wet surfaces get stronger reflections; coarse
+object-volume reflected-ray march (objDist) gives pits off-screen object
+silhouettes. Verified default look byte-identical (0.000/255), bit-12 effect
+confined to near-water surfaces, smoke 120f avg 4.23ms. Page:
+concepts/wet-surface-reflections.md. Note: assets/world.json had been gutted
+157 vs 473 lines by an app/test rewrite; restored with git checkout.
+
+## [2026-11-19] ingest | Sceneries — the world lives in scenery/<name>/
+
+Phase 1 of scenery support landed: world content moved from `assets/` to
+`scenery/LakesideHamlet/` (manifest, terrain, layers, micro/, per-scenery
+overlay); `assets/` is now only the shared textures/models library. Runtime
+path resolution is `vf::voxel::scenery::root()` (`--scenery`/`VF_SCENERY`/
+`scenery/last.json` pointer — last-used is the default). Gates and the unit
+binary pin `VF_SCENERY=LakesideHamlet`. Page: concepts/sceneries.md; README +
+docs/sceneries.md + AGENTS.md updated; three path quirks updated to match.
+Phase 2 (World-panel switcher, in-session reload) and Phase 3 (vf_mcp
+pointer-follow, second demo scenery) are open.
+
+## 2026-11-19 ingest | Wiki documentation cleanup: scenery path migration + dead sourceRefs + orphans
+
+Fixed all dead `sourceRefs` (assets/world.json → scenery/LakesideHamlet/world.json) in
+`concepts/uncommitted-edit-is-not-yours`, `concepts/geometry-format-policy`,
+`concepts/texture-resolution`, `concepts/photoreal-neural-postprocess`,
+`concepts/sky-probe-is-a-camera-assertion`, `entities/hamlet-scene`,
+`concepts/world-detail-content`, `concepts/micro-voxel-svo-overlay`,
+`concepts/wet-surface-reflections`. Swept all scenery-moved paths (world.json,
+runtime_edits.vxw, heightmap.png, landscape.vxw, world_all.json, ai_edits.vxw,
+micro/, hamlet_*.vxw, vase.vxw) from `assets/` to `scenery/LakesideHamlet/` across
+concepts/ and entities/. Left `assets/textures/` and `assets/models/` (shared
+library, unchanged). Added cross-references: hamlet-scene → sceneries, photoreal-
+neural-postprocess → wet-surface-reflections, sceneries → authored-assets-are-
+build-outputs + uncommitted-edit-is-not-yours. Fixed narrative references in
+authored-assets-are-build-outputs, measurement-discipline, overlay-silent-write-trap,
+mesh-to-voxel, live-edit-brush, app-subsystems, clang-lsp-setup. Orphans: 0,
+dead sourceRefs: 0, dangling links: 1 (known water-flooding, allowlisted).
+
+## [2026-11-19] op | sceneries Phase 1 committed; test-suite state
+
+e8ee6a9 landed (72 files, renames 100% similarity). ctest -L unit green at 390 s
+(baseline 380 s before the kPanelCount fix; net -1 load per full run from
+test_picking dedupe). Four app gates (textures/micro/live-edit/visual) run
+against the migrated paths as the closing check. User decision: the EDT
+batching pass (load 13.2 s -> est. 3-5 s, byte-identical design: band-limited
+pass 1 at kStore=6, solid-domain pass 2 with shell seeding, enclosure-free
+shortcut for components < 26 cells, seeds from cellIdx) is queued as its own
+focused session - design + code sites recorded in this log for the next pass:
+src/voxel/voxel_field.cpp processComp lambda (hot) and the carve-path
+processComponent (mirror the cutoff), kStore/kPad at the file top.
+
+## [2026-11-19] ingest | LighthouseIsle v2 — mountain, cave mesa, open-door interiors
+Scope grew tropical (mountain/caves/waterfalls/dense wood) plus building
+interiors with all doors authored open. concepts/lighthouse-isle updated in
+place (v2 landform, interiors + flood-fill contract, palette-dependent mesh
+material mapping). New/changed tools: tools/isle_gen.cpp (v2 terrain: cone
+11.8 m, cenote, tidal pool, mesa footplate kept LOW so cave air sits above
+the heightfield), tools/isle_nature.py (palms + cave-mesa shell layer +
+greedy forest/isle_jungle split under the 200k write_object cap — a
+truncated layer reports EXACTLY 200000), tools/isle_interiors.py (furniture
+from inspect_layer bounds, authored-OPEN door cuts, idempotent cave lights),
+tools/isle_opendoor.cpp (standalone VXW box-delete + --remap + --stats; door
+boxes must reach ~1.8 m into the bounds because --rot-y moves the wall off
+the AABB edge — a 0.8 m window silently removed 0 of 33160 records).
+The mat-10 ember roof glow (2104 clusters) turned out to be
+palette-VERSION-dependent: with mat 22 wet soil in the importer's palette,
+red Kd nearest-maps there (non-emissive) — --stats before you remap.
+Waterfalls stay dry chutes: no flow representation on the fixed plane.
+
+## [2026-11-19] op | Emissive follows the CELL MATERIAL, not the texture — isle gravel fix
+The isle's 2020-emitter budget overrun survived the mesh remap because the
+real emitters were GRAVEL cells authored as material 15 (white-hot is mat
+15!): path terrain + pebble bands. kEmissive/kMatRefl lookups key on the
+cell's material id; binding the gravel photo to slot 15 changes what a mat-
+15 cell SAMPLES, not whether it GLOWS. Convention (mirrored from the hamlet
+override trick): gravel look = material 5 + tex-override 15; intended
+emitters (lamps, hearth, beacon) all ride mat 10 (slot unbound -> record RGB
+shows; mat 15 would sample the gravel photo). Fixed: isle_gen footpath+
+collar -> mat 5 (re-baked), layer files patched with `isle_opendoor
+--remap 15,5/15,10` (rocks 271, lighthouse 1009, jetty 1, interiors 2).
+Landscapes must hold ZERO mats 9-15 unless intended. Audit: `--stats`.
+Texture upgrade (user request): tools/upgrade_textures.py swapped four
+BOUND files to ambientCG 2K sources mean-matched to slot identity
+(Bark015->bark_brown, Plaster005->stone_plaster, Gravel027->gravel,
+Ground019->proc_moss); API existence probe = full_json?id=X, key foundAssets.
+
+## [2026-11-19] op | Cave mesa dome REMOVED by user order (v2.1)
+"What is this ugly dome? remove it!" — isle_mountain deleted (layer file +
+manifest + baker footplate + clear-keep + its two cave lights), chute went
+with it. Landform lesson filed in concepts/lighthouse-isle: a smooth
+ellipsoidal shell on a flat plate reads as a lentil from any camera; a
+future walk-in cave must be cut into a CLIFF, not parked on flat ground.
+The flood-fill/air-above-column contracts it proved remain.
+
+## [2026-11-19] ingest | scenery-generation skill + landscape rule (refined)
+New .opencode/skills/scenery-generation/SKILL.md codifies the authoring
+rules paid for across the isle sessions. User rule refined: landscape =
+heightmap-generated terrain edited for detail; **caves and stones may be
+part of the terrain file** (natural features); buildings/props/vegetation
+are always separate layer files, each building bringing its own footing —
+no baked pads or carved support dishes. v3 of the isle landed with this:
+pads + cenote + tidal-pool dish removed from the baker, headland knoll made
+organic, lighthouse stands on a rock plinth IN ITS OWN LAYER, house/barn/
+windmill on stone footings in isle_interiors, lights parametric from
+measured bounds (6 authored, ground levels now 2.12/3.47/1.94 m).
+
+## [2026-11-19] op | Texture round 2 (buildings) + roof material correction
+User asked to keep upgrading, "especially house, barn and lighthouse":
+rock.jpeg←Rock064, rock_grey.png←Rock063, wood_highres.png←Wood030,
+wooden_planks_dark.jpeg←RoofingTiles012B (mat 7 = clay tiles now in BOTH
+sceneries — mean-matched to the shingles identity). Isle building layers
+remapped mat 22→7 (wet soil was an accidental Kd landing, not roofing);
+isle_meshes.sh safety net now does `--remap 10,16 --remap 22,7`. Note:
+bound files are SHARED — the hamlet's roofs follow this look change by
+design; verification render gated behind Wren's gate batch (crosstalk).
+
+## [2026-11-19] ingest | scenery Phase 2 — in-session switcher + a migration bug it caught
+World panel SCENERY group: combo of `scenery::list()` + Switch → `App::switchScenery`
+(heightmap abort → overlay flush + ai_edits save into the LEAVING scene → manifest/layers
+re-home → authored sun re-read → `applyWorldReload()`; full rollback on any failure;
+pointer written so the GUI pick IS next start's default). Studio mode and an active
+stroke disable it. Three fatal-ordering rules captured as a quirk. The headless smoke
+(`VF_TEST_PANEL=world VF_HUD_SHOT`) caught a real Phase-1 migration bug: micro
+`meshSource` resolved against the manifest dir only, so the alpaca's shared-library STL
+broke after the move — now `scenery::resolveShared` (scenery dir first, `assets/models/`
+second), same contract as textures. `VF_TEST_PANEL` also gained the missing "animate"
+name + a static_assert so the next panel addition cannot index past the array.
+Gate attribution this batch: live-edit 4 reds are the DOCUMENTED known-reds verbatim;
+visual's only red is the sky probe (recorded failing since 2026-10-06, flag-independent);
+fur_check's shape arm fails on pristine git textures too (peer swaps exonerated by a
+stash A/B: 15.53/18.00 vs 15.31/17.58) — signature matches the gate's own recorded
+precedent: body-detail rose ~13.5→~17.6 (wet-soil/SSR era), the coat barely moved
+(14.76→15.3), and a directional `fur >= body` claim dies when the BODY improves.
+Amended in-commit: the switch gained the headless hook `VF_TEST_SCENERY_SWITCH="a,b"`
+(no mouse-only features) and the round-trip was PROVEN byte-identical to a plain
+re-render (md5, all shots VF_TEXTURES=0 so concurrent texture writes could not
+touch the comparison); the first post-relink shot is an unreliable baseline —
+use two, compare B to the re-run, not to the cold first frame.
+
+## [2026-11-19] op | Texture war settled: 8 gate-passing promotions + contract corrected
+A parallel ComfyUI batch (texture-pack session) wrote bound names unmean-
+matched mid-gate; controlled fork (stash experiment by scenery-migrator)
+exonerated both sides; joint protocol agreed (new filenames + check_texture
+gate + per-slot A/B, pre-announced timestamped writes). Final promoted set
+ALL PASS the gate in place: bark_brown←Bark015, gravel←Gravel027, proc_moss←
+Ground019, rock_grey←Rock063, wood_highres←Wood030, stone_plaster←Plaster003
+(Plaster005 failed baked-light), rock.jpeg←Rock058 (Rock064 failed seam),
+wooden_planks_dark←Planks037A (RoofingTiles012B failed seam twice — clay-
+tile photo is out, wood-shingle is in). CONTRACT FIXED: mean-match is
+IDENTITY not CONFORMANCE — promotion order is 2K → 512 → prepare_texture →
+mean_match → check_texture PASS → only then a bound filename; a passing
+pre-existing bound file is an A/B TIE, not a free swap.
+
+## [2026-11-19] op | Crash fixed by picker (3ce96e9); close-batch restore staged
+SIGSEGV root cause: rebuildGrassCards() ran in EVERY reloadTexAtlas — now
+gated on foliageCards actually changing + defensive waitIdle (quirk
+83d662a1 RESOLVED; churn-contract stands regardless). Gate reality check
+found THREE more non-compliant files beyond the churn set — the September
+originals proc_thatch (256^2, seam 2.14) and foliage (baked-light 1.36),
+and incumbent sand_highres (seam 1.50 at mat 2). All slots now have
+gate-PASS mean-matched candidates staged in /tmp/opencode/isle_tex;
+tools/isle_tex_finalize.py lands them + the manifest textures key in ONE
+announced burst on window-close (preserves foliageCards + lights), and
+tools/isle_textures.py SHARED table updated so a re-bake cannot resurrect
+the failing bindings.
+
+## [2026-11-19] ingest | foliage cards become a property of the texture binding
+
+Moved the card binding from a separate `foliageCards:[{mat,card}]` table onto a `"card"` field of each row in the `textures` table. Cards now grow only where the effectively-sampled atlas slot (per-cell override included) carries a card; palette materials grow nothing. Shader `groundCardLayer` follows `texSlotFor()`. Legacy manifests still fold. Sceneries migrated (LakesideHamlet drops mat 22; LighthouseIsle keeps its rows). GUI picker writes the textures key. photo_cards_check.py arm D strips the `card` field instead of the whole table.
+
+## [2026-11-19] op | Finalize burst landed: live texture set 100% gate-compliant
+isle_tex_finalize.py executed after window-close (single announced burst):
+12 staged files into assets/textures/, isle manifest textures key rewritten
+with foreign-key carry (card rows grass@0 grass@1 jungle@8 preserved —
+verified live). Caught+fixed mid-flight: FILES map initially pointed at the
+gate-FAILED round-1 staging (Rock064/RoofingTiles/Plaster005) — corrected to
+the cand_* winners (Rock058/Planks037A/Plaster003) + JPEG re-encode step.
+Final check_texture over ALL 14 bound files: ALL PASS. Schema note: the
+foliageCards key migrated to per-row "card" fields on textures entries
+(cards stay = row-field carry in any table rebuild).

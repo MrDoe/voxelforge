@@ -40,8 +40,12 @@ FILES = [
     ("promote_wood_highres.png", "wood_highres.png"),
     ("promote_rock_grey.png", "rock_grey.png"),
     ("promote_stone_plaster.png", "stone_plaster.png"),
-    ("promote_rock.jpeg", "rock.jpeg"),
-    ("promote_wooden_planks_dark.jpeg", "wooden_planks_dark.jpeg"),
+    # mat 4/7 winners are the cand_* round-2 files (first-pass candidates
+    # FAILED the gate: Rock064 seam, RoofingTiles012B seam, Plaster005
+    # baked-light+corner stamp):
+    ("cand_rock_Rock058.png", "rock.jpeg"),
+    ("cand_shingles_Planks037A.png", "wooden_planks_dark.jpeg"),
+    ("cand_plaster_Plaster003.png", "stone_plaster.png"),
     ("promote2_foliage_Foliage006.png", "foliage_foliage006.png"),
     ("promote2_thatch_AI.png", "thatch_straw_prepared.png"),
     ("promote2_grass_AI.png", "grass_meadow_prepared.png"),
@@ -82,10 +86,26 @@ def main():
         if os.path.exists(dst):
             shutil.copy2(dst, os.path.join(bak, asset_name + ".pre-finalize"))
         shutil.copy2(src, dst)
+        if asset_name.endswith((".jpeg", ".jpg")):
+            from PIL import Image
+            Image.open(dst).convert("RGB").save(dst, format="JPEG", quality=92)
     with open(MAN, encoding="utf-8") as f:
         man = json.load(f)
-    man["textures"] = [
-        {"mat": m, "file": fn, "scale": sc} for m, fn, sc in TABLE]
+    old = {t.get("mat"): t for t in man.get("textures", [])}
+    rows = []
+    for m, fn, sc in TABLE:
+        row = {"mat": m, "file": fn, "scale": sc}
+        # CARRY every foreign key the old row had (schema 2026-11-19+: the
+        # card field lives on textures rows — {"card":"grass"} — and a table
+        # rebuild that drops it silently kills the foliage cards; unknown
+        # future keys ride along too). file/scale stay ours (that IS the
+        # promotion), everything else is theirs.
+        prev = old.get(m, {})
+        for k, v in prev.items():
+            if k not in ("mat", "file", "scale"):
+                row[k] = v
+        rows.append(row)
+    man["textures"] = rows
     with open(MAN, "w", encoding="utf-8") as f:
         json.dump(man, f, indent=1)
     # verify the bound set gates
