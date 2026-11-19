@@ -188,6 +188,9 @@ private:
     // the descriptor (once); reloads only re-upload pixels.
     void uploadIrradianceVolume(const vf::voxel::worldfile::LightUBO& lights);
     bool reloadTexAtlas();
+    // Rebuild + upload the raster ground-foliage cards from the atlas's
+    // material bindings. Called after every atlas load/world reload.
+    bool rebuildGrassCards();
     void persistWorldLayers();
     void rescanWorldLayers();
     void rescanMeshFiles();
@@ -804,7 +807,10 @@ private:
     // open-sky daylight; authored lights (world.json "lights") take over there.
     // VolFog / motion blur / DoF stay opt-in (separate toggles; volfog is WIP -
     // see shaders/volumetric_fog.comp).
-    int m_renderFlags = 511;
+    // Photo foliage cards (bit 13) ON by default: photographic CC0 grass/leaf
+    // cards replace procedural blades at silhouettes. VF_RENDER_FLAGS still
+    // overrides wholesale (e.g. 511 = pre-card look) for A/B gates.
+    int m_renderFlags = 511 | (1 << 13);
     float m_exposure = 1.15f;
     // SSAO tuning (VF_SSAO_*): world-scale two-band AO, opt-in via H / bit 6.
     float m_ssaoStrength = 0.6f;

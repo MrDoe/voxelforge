@@ -469,6 +469,10 @@ bool App::initVulkan()
                                m_texAtlas.tableUbo());
     m_furPass.setTexAtlas(m_texAtlas.view(), m_texAtlas.sampler(),
                           m_texAtlas.tableUbo());
+    // Ground foliage cards are generated from the atlas bindings and drawn
+    // by the fur pass's raster pipeline. Built here so the first frame has
+    // them; rebuilt by reloadTexAtlas on a scenery/texture change.
+    rebuildGrassCards();
     // seed the GUI picker from the manifest + whatever is on disk
     vf::voxel::worldfile::loadTextureManifest(m_manifestPath, m_texBindings);
     rescanTextureFiles();

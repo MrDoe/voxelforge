@@ -35,6 +35,7 @@
 #include "rhi/resources.hpp"
 #include "render/svo_pass.hpp" // RaymarchPush (the same camera push layout)
 #include "voxel/fur_cards.hpp"
+#include "voxel/grass_cards.hpp"
 
 #include <cstdint>
 #include <vector>
@@ -50,6 +51,12 @@ public:
     // fur, in the SAME order as the micro overlay's worlds (so the preview
     // and the rotation preview can be mirrored onto them one for one).
     bool setObjects(const std::vector<voxel::FurObject>& objects);
+
+    // Ground foliage cards (raster blades over the terrain). They use the
+    // SAME accumulation targets and composite as the fur, so no extra pass is
+    // needed. An empty vector leaves the grass draw inert and byte-exact.
+    bool setGrassCards(const std::vector<voxel::GrassCard>& cards);
+    bool hasGrass() const { return m_grassCount != 0; }
 
     // The live preview state, mirrored from the micro overlay so the fur
     // follows the object it belongs to.
@@ -71,7 +78,7 @@ public:
                          const std::vector<glm::vec3>& b,
                          const std::vector<float>& radius);
 
-    bool empty() const { return m_objectCount == 0; }
+    bool empty() const { return m_objectCount == 0 && m_grassCount == 0; }
     size_t objectCount() const { return m_objectCount; }
     size_t cardCount() const { return m_cardCount; }
     size_t gpuBytes() const;
@@ -128,11 +135,13 @@ private:
     VkDescriptorPool m_pool = VK_NULL_HANDLE;
     VkDescriptorSet m_set = VK_NULL_HANDLE;
     VkPipeline m_drawPipe = VK_NULL_HANDLE; // the instanced card quads
+    VkPipeline m_grassDrawPipe = VK_NULL_HANDLE; // ground foliage card quads
     VkPipeline m_compPipe = VK_NULL_HANDLE; // the accumulate-and-light pass
 
     Ssbo m_cards {};
     Ssbo m_cellStart {};
     Ssbo m_cellItems {};
+    Ssbo m_grassCards {};
 
     Buffer m_table {};   // the per-object table (std140)
     Buffer m_lightsBuf {};
@@ -148,6 +157,7 @@ private:
 
     size_t m_objectCount = 0;
     size_t m_cardCount = 0;
+    size_t m_grassCount = 0;
 };
 
 }  // namespace vf

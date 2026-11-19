@@ -162,6 +162,27 @@ struct TextureBinding {
 };
 bool loadTextureManifest(const std::string& path, std::vector<TextureBinding>& out);
 
+// Photoreal foliage-card bindings. A scenery authors these in world.json as a
+// top-level "foliageCards" array of { "mat": <ground material>, "card": "<name>" }
+// - e.g. grass ground grows the "grass" card. Nothing about a particular
+// material or card is hardcoded in code: the name -> atlas-layer / PNG-file
+// mapping lives in the SHARED card library's cards.json (resolved by the
+// caller), so adding a card or rebinding a ground material is a data edit.
+struct FoliageCardBinding {
+    int mat = -1;                  // ground material id that grows the card
+    std::string card;              // card name in the shared library
+};
+struct ResolvedFoliageCard {
+    int mat = -1;                  // ground material id
+    int layer = -1;                // shared atlas layer for the card
+    std::string file;              // card PNG, relative to the shared asset dir
+};
+// Reads world.json "foliageCards" (mat -> name) and the shared cards.json
+// (name -> layer + file). Returns one resolved entry per valid binding.
+bool loadFoliageCardManifest(const std::string& manifestPath,
+                             const std::string& cardsJsonPath,
+                             std::vector<ResolvedFoliageCard>& out);
+
 // Point light sources from the same world.json manifest. A light is a
 // position, colour, radius (soft falloff to zero at radius) and intensity.
 // Example:

@@ -55,7 +55,7 @@
       "rot": 0.0,
       "rotX": 0.0,
       "rotZ": 0.0,
-      "enabled": true
+      "enabled": false
     },
     {
       "file": "hamlet_forest.vxw",
@@ -223,7 +223,7 @@
       "rot": 0.0,
       "rotX": 0.0,
       "rotZ": 0.0,
-      "enabled": true
+      "enabled": false
     },
     {
       "file": "hamlet_trees.vxw",
@@ -265,7 +265,7 @@
       "rot": 0.0,
       "rotX": 0.0,
       "rotZ": 0.0,
-      "enabled": true
+      "enabled": false
     },
     {
       "file": "hamlet_reeds_far.vxw",
@@ -279,7 +279,7 @@
       "rot": 0.0,
       "rotX": 0.0,
       "rotZ": 0.0,
-      "enabled": true
+      "enabled": false
     },
     {
       "file": "micro/vase.vxw",
@@ -384,9 +384,9 @@
       "scale": 2.6
     },
     {
-      "file": "textures/sand_highres.png",
+      "file": "textures/grass_dark.png",
       "mat": 2,
-      "scale": 1.8
+      "scale": 2.6
     },
     {
       "file": "textures/proc_sand.png",
@@ -469,6 +469,32 @@
       "file": "textures/fur.jpeg",
       "mat": 21,
       "scale": 0.2
+    }
+  ],
+  "foliageCards": [
+    {
+      "mat": 0,
+      "card": "grass"
+    },
+    {
+      "mat": 1,
+      "card": "grass"
+    },
+    {
+      "mat": 2,
+      "card": "grass"
+    },
+    {
+      "mat": 8,
+      "card": "jungle"
+    },
+    {
+      "mat": 18,
+      "card": "laurel"
+    },
+    {
+      "mat": 22,
+      "card": "grass"
     }
   ]
 }

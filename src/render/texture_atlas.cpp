@@ -81,6 +81,7 @@ bool TexAtlas::load(const Context& ctx, const std::string& manifestPath)
         m_scale[m] = kDefaultScale;
         m_emis[m] = 0.0f;
         m_mean[m] = glm::vec3(0.0f);
+        m_cardLayer[m] = -1;
     }
     m_tableDirty = true;
     const bool disabled = haveTable && bindings.empty() ? false :
@@ -130,6 +131,49 @@ bool TexAtlas::load(const Context& ctx, const std::string& manifestPath)
                      b.mat, b.file, w, h, m_scale[b.mat],
                      m_emis[b.mat] > 0.0f ? ", emissive" : "");
     }
+    // Photoreal foliage cards. Nothing here is hardcoded scenery: world.json
+    // authors a "foliageCards" table (ground material -> card name) and the
+    // shared card library's cards.json maps each name to an atlas layer + PNG.
+    // The shader samples a card only for bit-13-on pixels on a bound ground
+    // material. VF_TEXTURES=0 skips the load and leaves m_cardLayer at -1, so
+    // the bit-exact hatch holds even with cards enabled by default.
+    if (!disabled) {
+        const std::string cardsJson =
+            voxel::scenery::resolveShared(dir + "/", "textures/cards/cards.json");
+        std::string cardDir = cardsJson;
+        {
+            const size_t s = cardDir.find_last_of("/\\");
+            cardDir = s == std::string::npos ? std::string() : cardDir.substr(0, s + 1);
+        }
+        std::vector<voxel::worldfile::ResolvedFoliageCard> cards;
+        if (voxel::worldfile::loadFoliageCardManifest(manifestPath, cardsJson, cards)) {
+            for (const auto& c : cards) {
+                if (c.layer < 0 || c.layer >= int(kLayers))
+                    continue;
+                // several materials may bind the same card: decode each PNG once
+                bool alreadyLoaded = false;
+                for (const auto& other : cards) {
+                    if (&other == &c) break;
+                    if (other.layer == c.layer) { alreadyLoaded = true; break; }
+                }
+                if (!alreadyLoaded) {
+                    const std::string path = cardDir + c.file;
+                    std::vector<uint8_t> raw;
+                    int cw = 0, ch = 0;
+                    if (!voxel::loadPngRGBA8(path, raw, cw, ch)) {
+                        spdlog::warn("texture atlas: foliage card '{}' missing - "
+                                     "no card for ground material {}", c.file, c.mat);
+                        continue;
+                    }
+                    resample(raw, cw, ch, layers[size_t(c.layer)]);
+                    spdlog::info("texture atlas: foliage card '{}' -> layer {} "
+                                 "(ground material {})", c.file, c.layer, c.mat);
+                }
+                m_cardLayer[c.mat] = c.layer;
+            }
+        }
+    }
+
     if (disabled)
         for (int& s : m_slot)
             s = -1;
@@ -276,7 +320,7 @@ void TexAtlas::fillTable(float* outNx4) const
         r[0] = float(m_slot[m]);
         r[1] = m_scale[m];
         r[2] = m_emis[m]; // emissive scale, 0 = the texture does not emit
-        r[3] = 0.0f;
+        r[3] = float(m_cardLayer[m]); // authored foliage card, -1 = none
     }
 }
 
