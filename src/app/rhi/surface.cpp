@@ -667,6 +667,7 @@ void App::destroy()
     vf::destroyImage3D(m_ctx, m_taaHistory[0]);
     vf::destroyImage3D(m_ctx, m_taaHistory[1]);
     vf::destroyImage3D(m_ctx, m_taaResolved);
+    destroyTextureThumbnails();
     m_texAtlas.destroy(); // atlas owns a sampler + a 2D-array image + a UBO
     m_swapchain.destroy();
     m_ctx.shutdown();

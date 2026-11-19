@@ -7,6 +7,7 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdio>
+#include <functional>
 
 #include <imgui.h>
 
@@ -18,6 +19,7 @@ namespace app {
 void App::drawPanelTextures()
 {
     sectionHeader("Drop files into assets/textures/  ·  changes save to world.json");
+    refreshTextureThumbnails();
     bool textureChanged = false;
     // The loop runs over the WHOLE palette: material 21 is `fleece` (fur coat)
     // and 22 is `wet soil`. A material the panel cannot show is a material the
@@ -51,22 +53,64 @@ void App::drawPanelTextures()
                 ImGui::TextColored(kWarn, "File is not in the scanned folder");
             continue;
         }
-        ImGui::SetNextItemWidth(-1.0f);
-        std::string label = current.empty() ? "(palette)" : current;
-        if (missing)
-            label += "  [missing]";
-        if (ImGui::BeginCombo("##textureSource", label.c_str())) {
-            if (ImGui::Selectable("(palette)", current.empty())) {
+        // Texture picker: a gallery of thumbnails instead of a text dropdown.
+        // First tile = palette (no texture); then one tile per file in
+        // assets/textures/. Clicking a tile binds it to this material.
+        const float tileSize = 44.0f;
+        const float avail = ImGui::GetContentRegionAvail().x;
+        int cols = std::max(1, int(avail / (tileSize + 6.0f)));
+        int tileIdx = 0;
+        auto afterTile = [&]() {
+            ++tileIdx;
+            if (tileIdx % cols != 0)
+                ImGui::SameLine(0.0f, 6.0f);
+        };
+        auto tile = [&](const char* id, ImTextureID tex, const char* tooltip,
+                        bool selected, const std::function<void()>& onClick) {
+            ImVec2 pos = ImGui::GetCursorScreenPos();
+            if (ImGui::InvisibleButton(id, ImVec2(tileSize, tileSize)))
+                onClick();
+            ImDrawList* dl = ImGui::GetWindowDrawList();
+            if (tex) {
+                dl->AddImage(tex, pos, ImVec2(pos.x + tileSize, pos.y + tileSize));
+            } else {
+                dl->AddRectFilled(pos, ImVec2(pos.x + tileSize, pos.y + tileSize),
+                                  IM_COL32(40, 44, 52, 255));
+                dl->AddText(ImVec2(pos.x + 6, pos.y + tileSize * 0.5f - 6),
+                            IM_COL32(180, 180, 180, 255), "none");
+            }
+            ImU32 border = selected ? IM_COL32(50, 200, 230, 255)
+                                    : IM_COL32(70, 80, 95, 255);
+            dl->AddRect(pos, ImVec2(pos.x + tileSize, pos.y + tileSize), border,
+                        0.0f, 0, selected ? 2.0f : 1.0f);
+            if (ImGui::IsItemHovered())
+                ImGui::SetTooltip("%s", tooltip);
+            afterTile();
+        };
+        // palette tile
+        {
+            char pid[32];
+            snprintf(pid, sizeof(pid), "pal.%d", material);
+            tile(pid, 0, "(palette)", current.empty(), [&]() {
                 setTextureBinding(material, std::string());
                 textureChanged = true;
-            }
-            for (const std::string& file : m_texFiles)
-                if (ImGui::Selectable(file.c_str(), file == current)) {
-                    setTextureBinding(material, file);
-                    textureChanged = true;
-                }
-            ImGui::EndCombo();
+            });
         }
+        // file tiles
+        for (size_t fi = 0; fi < m_texFiles.size(); ++fi) {
+            const std::string& file = m_texFiles[fi];
+            ImTextureID tid = 0;
+            for (const auto& t : m_texThumbs)
+                if (t.file == file) { tid = t.id; break; }
+            char fid[64];
+            snprintf(fid, sizeof(fid), "texfile.%d.%zu", material, fi);
+            std::string tip = file.substr(file.find_last_of('/') + 1);
+            tile(fid, tid, tip.c_str(), file == current, [&]() {
+                setTextureBinding(material, file);
+                textureChanged = true;
+            });
+        }
+        ImGui::NewLine();
         // A COAT is a property of the MATERIAL: a material that grows fur
         // gets a coat of hair cards wherever a micro object uses it. The
         // fleece (21) is the one that ships with one.

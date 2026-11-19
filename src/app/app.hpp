@@ -190,6 +190,11 @@ private:
     bool reloadTexAtlas();
     void persistWorldLayers();
     void rescanWorldLayers();
+    // In-session scenery switch: re-home the live world at another
+    // scenery/<name>/ folder (heightmap, manifest, layers, AI-edits, overlay,
+    // textures, micro, surfels all follow) and persist it as the new default.
+    // False when the target is unusable or the switch was rolled back.
+    bool switchScenery(const std::string& name);
     void rescanMeshFiles();
     void prepareMeshImport();
     void useMeshImportLayer(const std::string& file);
@@ -198,6 +203,10 @@ private:
     void rescanTextureFiles();
     void setTextureBinding(int mat, const std::string& file);
     void applyTextureBindings();
+    // Texture picker gallery: load/refresh thumbnail images for m_texFiles and
+    // release them. Called from drawPanelTextures when the file list changed.
+    void refreshTextureThumbnails();
+    void destroyTextureThumbnails();
     // hot-swap watch: folder drop-ins + mtime of every bound image file
     void pollTextureFiles();
     void applyWorldReload();
@@ -742,6 +751,15 @@ private:
     // assets/textures/ (paths relative to the manifest dir, e.g. "textures/x.png")
     std::vector<vf::voxel::worldfile::TextureBinding> m_texBindings;
     std::vector<std::string> m_texFiles;
+    // Texture picker gallery thumbnails: one small Vulkan image + ImGui
+    // descriptor per file in m_texFiles. Rebuilt when the file list changes.
+    struct TexThumb {
+        std::string file;
+        vf::Image3D img {};
+        ImTextureID id = 0;
+    };
+    std::vector<TexThumb> m_texThumbs;
+    bool m_texThumbsDirty = true;
     // hot-swap: a GUI edit (write manifest + re-upload) and a bound file's
     // on-disk change (re-upload only) both land between frames, never inside
     // a recorded command buffer. m_texSig = resolved path -> mtime+size.

@@ -7,7 +7,13 @@
 
 #include <filesystem>
 
+#include "voxel/heightmap.hpp"
+
+#include <imgui.h>
+#include <imgui_impl_vulkan.h>
+
 #include <spdlog/spdlog.h>
+#include <vector>
 
 namespace vf {
 namespace app {
@@ -46,6 +52,7 @@ void App::rescanTextureFiles()
         m_texFiles.push_back("textures/" + e.path().filename().string());
     }
     std::sort(m_texFiles.begin(), m_texFiles.end());
+    m_texThumbsDirty = true;
 }
 
 // Resolve a manifest texture path: absolute paths verbatim; anything else
@@ -95,8 +102,10 @@ void App::pollTextureFiles()
         files.push_back("textures/" + e.path().filename().string());
     }
     std::sort(files.begin(), files.end());
-    if (files != m_texFiles)
+    if (files != m_texFiles) {
         m_texFiles = std::move(files);
+        m_texThumbsDirty = true;
+    }
 
     std::map<std::string, unsigned long long> sigs;
     for (const auto& b : m_texBindings) {
@@ -135,6 +144,62 @@ void App::applyTextureBindings()
     // the atlas now matches disk: seed the mtime watch so the next poll does
     // not re-upload what the pick itself just uploaded
     pollTextureFiles();
+}
+
+void App::refreshTextureThumbnails()
+{
+    if (!m_texThumbsDirty)
+        return;
+    destroyTextureThumbnails();
+    const int thumb = 64;
+    for (const std::string& f : m_texFiles) {
+        std::string path = resolveTexPath(m_manifestPath, f);
+        std::vector<uint8_t> raw;
+        int w = 0, h = 0;
+        bool ok = vf::voxel::loadPngRGBA8(path, raw, w, h);
+        TexThumb t;
+        t.file = f;
+        if (ok && w > 0 && h > 0) {
+            std::vector<uint8_t> px(size_t(thumb) * thumb * 4);
+            for (int y = 0; y < thumb; ++y)
+                for (int x = 0; x < thumb; ++x) {
+                    int sx = x * w / thumb;
+                    int sy = y * h / thumb;
+                    if (sx >= w) sx = w - 1;
+                    if (sy >= h) sy = h - 1;
+                    for (int k = 0; k < 4; ++k)
+                        px[size_t((y * thumb + x) * 4 + k)] =
+                            raw[size_t((sy * w + sx) * 4 + k)];
+                }
+            t.img = vf::makeImage2D(m_ctx, uint32_t(thumb), uint32_t(thumb),
+                                     VK_FORMAT_R8G8B8A8_UNORM,
+                                     VK_IMAGE_USAGE_TRANSFER_DST_BIT |
+                                         VK_IMAGE_USAGE_SAMPLED_BIT);
+            if (t.img.img)
+                vf::uploadToImage3D(m_ctx, t.img, px.data(), px.size());
+            if (t.img.view)
+                t.id = (ImTextureID)ImGui_ImplVulkan_AddTexture(
+                    m_uiSampler, t.img.view,
+                    VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+        }
+        m_texThumbs.push_back(std::move(t));
+    }
+    m_texThumbsDirty = false;
+}
+
+void App::destroyTextureThumbnails()
+{
+    if (!m_ctx.device())
+        return;
+    // avoid destroying while in-flight; idle first
+    vkDeviceWaitIdle(m_ctx.device());
+    for (auto& t : m_texThumbs) {
+        if (t.id)
+            ImGui_ImplVulkan_RemoveTexture((VkDescriptorSet)t.id);
+        t.id = 0;
+        vf::destroyImage3D(m_ctx, t.img);
+    }
+    m_texThumbs.clear();
 }
 
 } // namespace app
