@@ -237,6 +237,11 @@ bool FurPass::setObjects(const std::vector<voxel::FurObject>& objects)
 
 bool FurPass::setGrassCards(const std::vector<voxel::GrassCard>& cards)
 {
+    // The grass-card SSBO is read by every in-flight frame; never destroy it
+    // while the device may still be sampling it. The caller (reloadTexAtlas)
+    // already waits, but this guards direct callers and rapid re-entry.
+    if (m_ctx)
+        vkDeviceWaitIdle(m_ctx->device());
     m_grassCount = cards.size();
     if (m_grassCount == 0) {
         destroySsbo(m_grassCards);

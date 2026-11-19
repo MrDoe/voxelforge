@@ -34,10 +34,26 @@ bool App::reloadTexAtlas()
     // callers come through here, so re-deriving once here keeps the rule
     // un-forgettable; the wait above also makes the descriptor write safe.
     uploadLightSources();
-    // The foliage-card SSBO is derived from the atlas's material bindings, so
-    // rebuild it here: a world.json "foliageCards" edit or a scenery switch
-    // then takes effect on the same reload as the textures it binds.
-    rebuildGrassCards();
+    // The foliage-card SSBO is derived from the atlas's material bindings.
+    // Rebuild ONLY when the foliageCards table actually changed: rebuilding on
+    // every texture reload (e.g. a peer churning the textures key) re-uploads
+    // a ~16 MB SSBO under rapid cycling and races the in-flight frames that
+    // still reference the previous buffer (SIGSEGV, see quirk 83d662a1).
+    // A texture-only edit never changes the card set, so skipping is safe and
+    // keeps the cards in sync on a real foliageCards edit.
+    std::vector<vf::voxel::worldfile::FoliageCardBinding> now;
+    vf::voxel::worldfile::loadFoliageCardBindings(m_manifestPath, now);
+    bool changed = now.size() != m_cardBindings.size();
+    if (!changed)
+        for (size_t i = 0; i < now.size(); ++i)
+            if (now[i].mat != m_cardBindings[i].mat ||
+                now[i].card != m_cardBindings[i].card) { changed = true; break; }
+    if (changed) {
+        m_cardBindings = now;
+        m_cardThumbsDirty = true;
+        vkDeviceWaitIdle(m_ctx.device());
+        rebuildGrassCards();
+    }
     return true;
 }
 
