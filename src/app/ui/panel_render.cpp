@@ -241,14 +241,22 @@ void App::drawPanelRender()
                 m_taaFirstFrame = true;
             ImGui::EndTable();
         }
-        // Photoreal foliage cards (render-flag bit 13): CC0 photo cutouts
-        // replace the procedural grass/leaf card silhouette. Off by default so
-        // the shipped look and all gates stay bit-exact. Needs textures enabled.
+        // Backlit transmission through foliage/fleece (render-flag bit 11).
+        // Off by default; enable for the "leaves glow when backlit" cue.
+        {
+            bool tx = (m_renderFlags & (1 << 11)) != 0;
+            if (ImGui::Checkbox("Transmission (foliage)", &tx)) {
+                if (tx) m_renderFlags |= (1 << 11);
+                else    m_renderFlags &= ~(1 << 11);
+            }
+        }
+        // Photoreal foliage cards (render-flag bit 13): photographic CC0
+        // cutouts grown as real raster cards over the ground. ON by default;
+        // VF_RENDER_FLAGS=511 restores the procedural look. Needs textures enabled.
         flagToggle("Photo foliage cards", 1 << 13);
         if (ImGui::IsItemHovered())
             ImGui::SetTooltip("Photographic grass/leaf cards from the shared "
-                              "texture library. Off = procedural blades (default). "
-                              "Requires textures enabled.");
+                              "texture library. Needs textures enabled.");
         // Fog / motion blur / DoF are separate opt-in members, not render-flag
         // bits (bit 4 is the unused outline flag and stays unexposed).
         ImGui::Checkbox("Volumetric fog (J)", &m_volFogEnabled);
