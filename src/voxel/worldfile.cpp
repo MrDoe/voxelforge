@@ -586,6 +586,8 @@ bool loadTextureManifest(const std::string& path, std::vector<TextureBinding>& o
                         j.boolean(b.emissive);
                     } else if (k == "emissiveScale") {
                         j.num(b.emissiveScale);
+                    } else if (k == "card") {
+                        j.str(b.card);
                     } else {
                         j.skipValue();
                     }
@@ -606,6 +608,58 @@ bool loadTextureManifest(const std::string& path, std::vector<TextureBinding>& o
             break;
     }
     return true;
+}
+
+bool loadCardLibraryFull(const std::string& cardsJsonPath,
+                        std::vector<CardLibEntry>& out)
+{
+    out.clear();
+    std::string text;
+    {
+        std::FILE* f = std::fopen(cardsJsonPath.c_str(), "rb");
+        if (!f) return false;
+        char buf[4096];
+        size_t n;
+        while ((n = std::fread(buf, 1, sizeof(buf), f)) > 0)
+            text.append(buf, n);
+        std::fclose(f);
+    }
+    Json j{ text };
+    if (!j.eat('{')) return false;
+    while (!j.peek('}') && j.i < text.size()) {
+        std::string key;
+        if (!j.str(key) || !j.eat(':')) return false;
+        if ((key == "cards" || key == "files") && j.eat('{')) {
+            while (!j.peek('}') && j.i < text.size()) {
+                std::string name;
+                if (!j.str(name) || !j.eat(':')) break;
+                if (key == "cards") {
+                    float v = -1.f; j.num(v);
+                    CardLibEntry* d = nullptr;
+                    for (auto& c : out) if (c.name == name) { d = &c; break; }
+                    if (!d) { out.push_back(CardLibEntry{}); d = &out.back(); d->name = name; }
+                    d->layer = int(v);
+                } else {
+                    std::string file; j.str(file);
+                    CardLibEntry* d = nullptr;
+                    for (auto& c : out) if (c.name == name) { d = &c; break; }
+                    if (!d) { out.push_back(CardLibEntry{}); d = &out.back(); d->name = name; }
+                    d->file = file;
+                }
+                if (!j.eat(',')) break;
+            }
+            j.eat('}');
+        } else {
+            j.skipValue();
+        }
+        if (!j.eat(',')) break;
+    }
+    std::vector<CardLibEntry> good;
+    for (const auto& c : out)
+        if (c.layer >= 0 && !c.file.empty())
+            good.push_back(c);
+    out = std::move(good);
+    return !out.empty();
 }
 
 // Photoreal foliage-card bindings: world.json "foliageCards" (mat -> name)
@@ -1160,19 +1214,26 @@ bool writeTextureManifest(const std::string& path,
         std::fprintf(f, "%s\n  \"textures\": [\n", sep);
         for (size_t i = 0; i < textures.size(); ++i) {
             const TextureBinding& b = textures[i];
-            // emissive travels only when set: manifests that never used it
-            // round-trip byte-identically (same rule as writeManifest's scale).
-            if (b.emissive)
-                std::fprintf(f,
-                             "    { \"file\": \"%s\", \"mat\": %d, \"scale\": %.2f, "
-                             "\"emissive\": true, \"emissiveScale\": %.2f }%s\n",
-                             b.file.c_str(), b.mat, b.scale, b.emissiveScale,
-                             i + 1 < textures.size() ? "," : "");
-            else
-                std::fprintf(f,
-                             "    { \"file\": \"%s\", \"mat\": %d, \"scale\": %.2f }%s\n",
-                             b.file.c_str(), b.mat, b.scale,
-                             i + 1 < textures.size() ? "," : "");
+            // emissive travels only when set, card travels only when set: manifests
+            // that never used them round-trip byte-identically (same rule as
+            // writeManifest's scale). The card is a property of THIS texture
+            // binding (its atlas slot), not of the cell material id.
+            std::string extras;
+            if (b.emissive) {
+                char eb[128];
+                std::snprintf(eb, sizeof(eb), ", \"emissive\": true, \"emissiveScale\": %.2f",
+                              b.emissiveScale);
+                extras += eb;
+            }
+            if (!b.card.empty()) {
+                extras += ", \"card\": \"";
+                extras += b.card;
+                extras += "\"";
+            }
+            std::fprintf(f,
+                         "    { \"file\": \"%s\", \"mat\": %d, \"scale\": %.2f%s }%s\n",
+                         b.file.c_str(), b.mat, b.scale, extras.c_str(),
+                         i + 1 < textures.size() ? "," : "");
         }
         std::fprintf(f, "  ]\n}\n");
     }

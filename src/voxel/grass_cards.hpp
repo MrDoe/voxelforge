@@ -28,9 +28,10 @@ struct alignas(16) GrassCard {
 };
 
 // Build crossed cards over every terrain cell whose ground material has a
-// foliage-card binding. `layerForMat(mat)` returns the atlas layer or -1.
+// foliage-card binding. `layerForCard(x, z, mat)` returns the atlas layer or
+// -1, resolving the material + per-cell texture override against the atlas.
 // Returns an empty vector when no material is bound (the pass stays inert).
-std::vector<GrassCard> buildGrassCards(const std::function<int(int)>& layerForMat,
+std::vector<GrassCard> buildGrassCards(const std::function<int(float, float, int)>& layerForCard,
                                        float spacing = 0.15f, int perCell = 3);
 
 } // namespace vf::voxel

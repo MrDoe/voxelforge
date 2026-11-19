@@ -7,20 +7,13 @@
 
 namespace vf::voxel {
 
-std::vector<GrassCard> buildGrassCards(const std::function<int(int)>& layerForMat,
+std::vector<GrassCard> buildGrassCards(const std::function<int(float, float, int)>& layerForCard,
                                        float spacing, int perCell)
 {
     std::vector<GrassCard> out;
     const HeightMap& hm = sharedHeightmap();
     if (!hm.loaded() || perCell <= 0)
         return out;
-
-    // Cache the layer lookup for the small palette: one call per material,
-    // not one per terrain cell.
-    int layerOf[256];
-    for (int& l : layerOf) l = -1;
-    for (int m = 0; m < 256; ++m)
-        layerOf[m] = layerForMat(m);
 
     const float half = WORLD * 0.5f;
     // UNGRIDDED placement. A regular cell grid - even with jitter - leaves a
@@ -36,7 +29,7 @@ std::vector<GrassCard> buildGrassCards(const std::function<int(int)>& layerForMa
         const float z = unit() * WORLD - half;
         const float H = hm.sample(x, z);
         const int mat = int(materialAt(x, z, H));
-        const int layer = layerOf[mat & 255];
+        const int layer = layerForCard(x, z, mat);
         if (layer < 0 || H < WATER_LEVEL + 0.02f)
             continue;
 

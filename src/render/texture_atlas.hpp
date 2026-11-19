@@ -73,10 +73,21 @@ public:
     // Emission strength of the texture bound to `mat` (0 = none). The shader
     // reads the same value from the table's .z; the CPU side needs it to turn
     // emissive materials into point lights.
-    // Atlas layer of the foliage card bound to `ground material` (-1 = none),
-    // authored in world.json "foliageCards" joined with cards/cards.json.
+    // Atlas layer of the foliage card bound to a TEXTURE (its binding's
+    // material slot), authored on the "textures" row ("card") or, for legacy
+    // manifests, via "foliageCards". -1 = none.
     int cardLayer(int mat) const {
         return (mat >= 0 && mat < int(kLayers)) ? m_cardLayer[mat] : -1;
+    }
+    // Card layer for the texture that is actually SAMPLED at a ground point:
+    // the per-cell override (tex byte) wins, else the material's own slot.
+    // Returns -1 when the sampled texture has no card (or is palette). This
+    // is the CPU mirror of the shader rule `matTex[texSlotFor(mId)].w`.
+    int cardLayerForSampled(int cellMat, int cellTexOverride) const {
+        int slot = (cellTexOverride > 0) ? cellTexOverride : m_slot[cellMat >= 0 && cellMat < int(kLayers) ? cellMat : 0];
+        if (slot < 0 || slot >= int(kLayers))
+            return -1;
+        return m_cardLayer[slot];
     }
 
     float emissiveScale(int mat) const {

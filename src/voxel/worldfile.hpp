@@ -159,6 +159,8 @@ struct TextureBinding {
     float scale = 0.5f;               // metres per tile
     bool emissive = false;            // derived-light emitter (atlas emissiveScale/meanColor)
     float emissiveScale = 1.0f;       // emission gain; <= 0 reads as 1.0 downstream
+    std::string card;                 // foliage card that grows over THIS texture (binding's
+                                      // atlas slot), by name in cards.json. Empty = no card.
 };
 bool loadTextureManifest(const std::string& path, std::vector<TextureBinding>& out);
 
@@ -192,6 +194,10 @@ bool writeFoliageCardManifest(const std::string& path,
 // Shared card library loader: cards.json -> list of (name, png file).
 bool loadCardLibrary(const std::string& cardsJsonPath,
                      std::vector<std::pair<std::string, std::string>>& out);
+// Extended loader: cards.json -> list of (name, png file, atlas layer).
+struct CardLibEntry { std::string name; std::string file; int layer = -1; };
+bool loadCardLibraryFull(const std::string& cardsJsonPath,
+                        std::vector<CardLibEntry>& out);
 
 // Point light sources from the same world.json manifest. A light is a
 // position, colour, radius (soft falloff to zero at radius) and intensity.

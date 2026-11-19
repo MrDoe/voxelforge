@@ -131,12 +131,13 @@ bool TexAtlas::load(const Context& ctx, const std::string& manifestPath)
                      b.mat, b.file, w, h, m_scale[b.mat],
                      m_emis[b.mat] > 0.0f ? ", emissive" : "");
     }
-    // Photoreal foliage cards. Nothing here is hardcoded scenery: world.json
-    // authors a "foliageCards" table (ground material -> card name) and the
-    // shared card library's cards.json maps each name to an atlas layer + PNG.
-    // The shader samples a card only for bit-13-on pixels on a bound ground
-    // material. VF_TEXTURES=0 skips the load and leaves m_cardLayer at -1, so
-    // the bit-exact hatch holds even with cards enabled by default.
+    // Photoreal foliage cards. The card is a property of the TEXTURE binding:
+    // a row in the "textures" table may carry a "card" name (e.g. "grass"),
+    // and the card grows only over that binding's atlas slot (which is the
+    // material index of the row). The shader follows the effectively-sampled
+    // slot (per-cell override included), so a card rides the texture it
+    // belongs to rather than the cell's material id. VF_TEXTURES=0 skips the
+    // load and leaves m_cardLayer at -1, so the bit-exact hatch holds.
     if (!disabled) {
         const std::string cardsJson =
             voxel::scenery::resolveShared(dir + "/", "textures/cards/cards.json");
@@ -145,29 +146,85 @@ bool TexAtlas::load(const Context& ctx, const std::string& manifestPath)
             const size_t s = cardDir.find_last_of("/\\");
             cardDir = s == std::string::npos ? std::string() : cardDir.substr(0, s + 1);
         }
-        std::vector<voxel::worldfile::ResolvedFoliageCard> cards;
-        if (voxel::worldfile::loadFoliageCardManifest(manifestPath, cardsJson, cards)) {
-            for (const auto& c : cards) {
-                if (c.layer < 0 || c.layer >= int(kLayers))
-                    continue;
-                // several materials may bind the same card: decode each PNG once
-                bool alreadyLoaded = false;
-                for (const auto& other : cards) {
-                    if (&other == &c) break;
-                    if (other.layer == c.layer) { alreadyLoaded = true; break; }
+        std::vector<vf::voxel::worldfile::CardLibEntry> lib;
+        vf::voxel::worldfile::loadCardLibraryFull(cardsJson, lib);
+
+        // For each texture binding that carries a card, resolve its layer/file.
+        struct Resolved { int mat = -1; int layer = -1; std::string file; };
+        std::vector<Resolved> resolved;
+        for (const auto& b : bindings) {
+            if (b.card.empty() || b.mat < 0 || b.mat >= int(kLayers))
+                continue;
+            for (const auto& c : lib) {
+                if (c.name == b.card && c.layer >= 0 && c.layer < int(kLayers)
+                    && !c.file.empty()) {
+                    Resolved r;
+                    r.mat = b.mat;
+                    r.layer = c.layer;
+                    r.file = c.file;
+                    resolved.push_back(std::move(r));
+                    break;
                 }
+            }
+        }
+        // decode each distinct card layer once
+        for (const auto& r : resolved) {
+            if (r.layer < 0 || r.layer >= int(kLayers))
+                continue;
+            bool alreadyLoaded = false;
+            for (const auto& other : resolved) {
+                if (&other == &r) break;
+                if (other.layer == r.layer) { alreadyLoaded = true; break; }
+            }
+            if (!alreadyLoaded) {
+                const std::string path = cardDir + r.file;
+                std::vector<uint8_t> raw;
+                int cw = 0, ch = 0;
+                if (!voxel::loadPngRGBA8(path, raw, cw, ch)) {
+                    spdlog::warn("texture atlas: foliage card '{}' missing - "
+                                 "no card for texture on material {}", r.file, r.mat);
+                    continue;
+                }
+                resample(raw, cw, ch, layers[size_t(r.layer)]);
+                spdlog::info("texture atlas: foliage card '{}' -> layer {} "
+                             "(texture on material {})", r.file, r.layer, r.mat);
+            }
+            m_cardLayer[r.mat] = r.layer;
+        }
+    }
+
+    // Legacy fallback: old manifests carry a top-level "foliageCards" table
+    // keyed by ground material. Treat each entry as a card on that material's
+    // (possibly absent) texture binding, so existing sceneries keep rendering
+    // while migrating. The shader's sampled-slot gate still decides whether
+    // the card actually grows, so an untextured material's card is inert.
+    if (!disabled) {
+        std::vector<voxel::worldfile::ResolvedFoliageCard> legacy;
+        const std::string cardsJson2 =
+            voxel::scenery::resolveShared(dir + "/", "textures/cards/cards.json");
+        std::string cardDir2 = cardsJson2;
+        {
+            const size_t s = cardDir2.find_last_of("/\\");
+            cardDir2 = s == std::string::npos ? std::string() : cardDir2.substr(0, s + 1);
+        }
+        if (voxel::worldfile::loadFoliageCardManifest(manifestPath, cardsJson2, legacy)) {
+            for (const auto& c : legacy) {
+                if (c.mat < 0 || c.mat >= int(kLayers) || c.layer < 0 || c.layer >= int(kLayers))
+                    continue;
+                if (m_cardLayer[c.mat] >= 0)
+                    continue; // already bound via the textures table
+                bool alreadyLoaded = (layers[size_t(c.layer)].size() > 0);
                 if (!alreadyLoaded) {
-                    const std::string path = cardDir + c.file;
+                    // find the file in the library again - loadFoliageCardManifest
+                    // already gave us c.file
+                    const std::string path = cardDir2 + c.file;
                     std::vector<uint8_t> raw;
                     int cw = 0, ch = 0;
-                    if (!voxel::loadPngRGBA8(path, raw, cw, ch)) {
-                        spdlog::warn("texture atlas: foliage card '{}' missing - "
-                                     "no card for ground material {}", c.file, c.mat);
-                        continue;
+                    if (voxel::loadPngRGBA8(path, raw, cw, ch)) {
+                        resample(raw, cw, ch, layers[size_t(c.layer)]);
+                        spdlog::info("texture atlas: legacy foliage card '{}' -> layer {} "
+                                     "(ground material {})", c.file, c.layer, c.mat);
                     }
-                    resample(raw, cw, ch, layers[size_t(c.layer)]);
-                    spdlog::info("texture atlas: foliage card '{}' -> layer {} "
-                                 "(ground material {})", c.file, c.layer, c.mat);
                 }
                 m_cardLayer[c.mat] = c.layer;
             }
