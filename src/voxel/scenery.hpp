@@ -35,9 +35,10 @@ std::string root();
 std::string current();
 // Subfolders of base() that hold a world.json, sorted by name.
 std::vector<std::string> list();
-// Adopt `<base>/<name>` as the current scenery and persist the pointer.
-// False when that folder has no world.json.
-bool setCurrent(const std::string& name);
+// Adopt a scenery as the current one and persist the pointer. Accepts a
+// folder name under base() or a direct path (same grammar as VF_SCENERY).
+// False when the target has no world.json.
+bool setCurrent(const std::string& nameOrPath);
 // Apply a --scenery command-line selection BEFORE the first root() call
 // (App member initialisers resolve paths during construction). Does not
 // touch the pointer file: a CLI override is one-run, not a switch.

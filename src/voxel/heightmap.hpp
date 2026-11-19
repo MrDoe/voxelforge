@@ -35,6 +35,13 @@ private:
 // Lazily loads <scenery root>/heightmap.png on first use (see voxel/scenery.hpp).
 const HeightMap& sharedHeightmap();
 
+// Re-load the shared instance from the CURRENT scenery root. The in-session
+// scenery switch calls this BEFORE the world reload so the ground-clamp /
+// probe / collision users of sharedHeightmap() see the new terrain (a switch
+// to a folder without a heightmap.png fails and leaves the old instance -
+// the caller aborts the switch).
+bool reloadSharedHeightmap();
+
 // Offline tools can inject their own instance before building worlds.
 void setSharedHeightmap(const HeightMap* m);
 

@@ -176,19 +176,24 @@ std::vector<std::string> list()
     return names;
 }
 
-bool setCurrent(const std::string& name)
+bool setCurrent(const std::string& nameOrPath)
 {
     std::lock_guard<std::mutex> lk(g_mtx);
-    const fs::path dir = fs::path(base()) / name;
-    if (!usableDir(dir)) {
-        spdlog::warn("scenery: cannot switch to '{}': no world.json under {}",
-                     name, dir.string());
+    const std::string dir = resolve(nameOrPath);
+    if (dir.empty()) {
+        spdlog::warn("scenery: cannot switch to '{}': no world.json there",
+                     nameOrPath);
         return false;
     }
-    g_override = dir.string();
-    g_memo = g_override;
-    writePointer(name);
-    spdlog::info("scenery: switched to '{}'", dir.string());
+    g_override = dir;
+    g_memo = dir;
+    // The pointer stores a bare folder name when the target is under base()
+    // (portable across checkouts); a foreign path is stored as given.
+    const fs::path p(dir);
+    const fs::path b(base());
+    const bool underBase = std::equal(b.begin(), b.end(), p.begin());
+    writePointer(underBase ? p.filename().string() : dir);
+    spdlog::info("scenery: switched to '{}'", dir);
     return true;
 }
 

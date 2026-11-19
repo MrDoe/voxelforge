@@ -67,11 +67,15 @@ redirect the test suite, and `tests/main.cpp` pins it for the unit tests.
 
 - **Phase 1 (landed 2026-11-19):** the resolver, the migration of the shipped
   hamlet, the CLI flag + env override, the gates, and the bake-target path.
-  Switching happens by relaunch (`--scenery NAME`).
-- **Phase 2:** an in-session switcher in the [[entities/hud-sidebar|World
-  panel]] driving the full-reload path (`applyWorldReload` already reloads
-  layers/SVO/surfels/micro/atlas/lights together; the new work is pointing it
-  at a different root, reloading the heightmap singleton, and swapping the
-  overlay + pointer).
-- **Phase 3:** pointer-following inside one long-running `vf_mcp`, and a
-  second authored scenery to prove the format.
+- **Phase 2 (landed 2026-11-19):** the in-session switcher — World panel
+  SCENERY group (combo + Switch), `App::switchScenery` with full rollback,
+  overlay/ai_edits flushed to the LEFT scene before paths move, authored sun
+  re-read, `last.json` written so the GUI selection IS the next default.
+  Follow-up ticket: a `VF_TEST_SCENERY_SWITCH` headless hook so the switch
+  itself can be gated (the repo's no-mouse-only-features rule).
+  Bug found by the Phase-2 smoke test and fixed in the same pass: micro
+  `meshSource` refs (shared-library STLs) resolved against the MANIFEST dir
+  and broke the alpaca's mesh actor after the move — now scenery-dir-first /
+  shared-library-second via `resolveShared`, same contract as textures.
+- **Phase 3:** pointer-following inside one long-running `vf_mcp`, and the
+  second authored scenery to prove the format (in flight: LighthouseIsle).

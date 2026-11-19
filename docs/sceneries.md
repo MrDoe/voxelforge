@@ -43,10 +43,15 @@ loads the heightmap.
 
 ## Switching
 
-Phase 1 switches by **relaunch**: `./build/voxelforge --scenery MyScene`, or
-delete/edit `scenery/last.json`. In-app (World panel) and in-session switching
-drive the same `root()` and the full-reload path; that is tracked as Phase 2 in
-[`.opencode/wiki/concepts/sceneries.md`](../.opencode/wiki/concepts/sceneries.md).
+The World panel's **SCENERY** group is the primary switcher: pick a folder,
+press Switch — the app reloads the whole world in place (same path layer
+toggles use) and writes `scenery/last.json`, so the selection persists as the
+next start's default. Live edits flush to the scenery you LEAVE before paths
+move, so sessions never cross tenants.
+
+For scripts and headless runs: `--scenery NAME` selects for one launch (no
+pointer write); `VF_SCENERY` for any process. A failed switch (no heightmap,
+manifest won't parse) rolls every pointer back to the previous scenery.
 
 ## What moves with a switch
 

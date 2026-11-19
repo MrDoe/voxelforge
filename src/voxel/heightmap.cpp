@@ -4,6 +4,7 @@
 #include <spdlog/spdlog.h>
 #include <algorithm>
 #include <cmath>
+#include <mutex>
 
 #define STB_IMAGE_IMPLEMENTATION
 #define STBI_ONLY_PNG
@@ -78,20 +79,40 @@ glm::vec2 HeightMap::gradient(float x, float z) const
 
 namespace {
 const HeightMap* g_override = nullptr;
+// The shared instance lives at file scope (not in the accessor's local
+// static) so a scenery switch can re-load it in place; first_use guards the
+// lazy-load semantics sharedHeightmap() has always had.
+HeightMap g_instance;
+bool g_first_use = true;
+std::mutex g_hm_mtx;
 } // namespace
 
 const HeightMap& sharedHeightmap()
 {
     if (g_override)
         return *g_override;
-    static HeightMap instance = [] {
-        HeightMap m;
+    std::lock_guard<std::mutex> lk(g_hm_mtx);
+    if (g_first_use)
+    {
+        g_first_use = false;
         // the terrain belongs to the CURRENT scenery
-        if (!m.loadFromFile(scenery::root() + "/heightmap.png"))
+        if (!g_instance.loadFromFile(scenery::root() + "/heightmap.png"))
             spdlog::critical("terrain heightmap missing - run heightmap_gen");
-        return m;
-    }();
-    return instance;
+    }
+    return g_instance;
+}
+
+bool reloadSharedHeightmap()
+{
+    if (g_override)
+        return true; // a tool injected its own instance; nothing to reload
+    std::lock_guard<std::mutex> lk(g_hm_mtx);
+    HeightMap next;
+    if (!next.loadFromFile(scenery::root() + "/heightmap.png"))
+        return false;
+    g_instance = std::move(next);
+    g_first_use = false;
+    return true;
 }
 
 void setSharedHeightmap(const HeightMap* m) { g_override = m; }

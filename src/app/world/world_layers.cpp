@@ -76,6 +76,75 @@ void App::rescanWorldLayers()
     }
 }
 
+// Switch the live world to another scenery folder, in session.
+//
+// Ordering rules baked into this sequence:
+//  - the pending overlay stroke is flushed while the OLD root still resolves
+//    (overlayPath() follows the resolver, so flushing after the switch would
+//    write the old scene's session into the NEW scene's file);
+//  - the heightmap re-loads first: if the target has no terrain PNG the
+//    switch is aborted before anything else moved;
+//  - applyWorldReload() at the end is the same full-reload path layer
+//    toggles use (SVO + terrain/objvol textures + atlas + lights + micro +
+//    surfels + store re-adoption + NEW overlay file + re-listed layers), so
+//    the switch reuses verified machinery instead of duplicating it.
+bool App::switchScenery(const std::string& name)
+{
+    if (m_studio.active)
+        return false; // the studio never owns world.json
+    const std::string oldRoot = vf::voxel::scenery::root();
+    if (!vf::voxel::scenery::setCurrent(name))
+        return false;
+    const std::string newRoot = vf::voxel::scenery::root();
+    if (newRoot == oldRoot)
+        return true; // already there
+    if (!vf::voxel::reloadSharedHeightmap()) {
+        spdlog::warn("scenery: '{}' has no loadable heightmap.png - switch aborted",
+                     name);
+        vf::voxel::scenery::setCurrent(oldRoot);
+        vf::voxel::reloadSharedHeightmap();
+        return false;
+    }
+    // Old scene: persist its session before the paths move under it.
+    m_overlayWriter.flush();
+    if (m_editable.size() > 0)
+        m_editable.save(); // ai_edits belongs to the scene being left
+    m_manifestPath = newRoot + "/world.json";
+    if (!m_layers.load(m_manifestPath)) {
+        spdlog::warn("scenery: '{}' manifest would not load - switch aborted", name);
+        m_manifestPath = oldRoot + "/world.json";
+        m_layers.load(m_manifestPath);
+        vf::voxel::scenery::setCurrent(oldRoot); // restore the root FIRST,
+        vf::voxel::reloadSharedHeightmap();      // then the terrain follows it
+        return false;
+    }
+    // The AI-edits layer follows the scene (setAssetDir alone never re-reads,
+    // so old-scene records can never save into the new scene's file).
+    m_editable.setAssetDir(newRoot);
+    m_editable.load();
+    m_editable.ensureManifest();
+    m_carve.setAssetDir(newRoot);
+    m_add.setAssetDir(newRoot);
+    // Selection/undo state is scene-scoped: drop it before the reload.
+    m_selectedLayer.clear();
+    m_rotateLayer.clear();
+    m_moveLayer.clear();
+    m_undo.clear();
+    m_undoPending.clear();
+    m_hasStamp = false;
+    m_worldLayers.clear(); // rescan below rebuilds from the new folder
+    // An authored sun belongs to its scene: re-read it (a --sun flag still wins).
+    {
+        float e = 0.f, a = 0.f;
+        if (!m_args.sunSet &&
+            vf::voxel::worldfile::loadSunManifest(m_manifestPath, e, a))
+            setSunAngles(e, a);
+    }
+    applyWorldReload();
+    spdlog::info("scenery: switched live to '{}'", newRoot);
+    return true;
+}
+
 void App::applyWorldReload()
 {
     if (!m_layers.loaded())

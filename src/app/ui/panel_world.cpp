@@ -19,6 +19,55 @@ void App::drawPanelWorld()
 {
     sectionHeader("Picking resolves cell provenance, not AABBs");
 
+    // The scenery selector (docs/sceneries.md): a folder under scenery/ with
+    // a world.json is switchable live; the last choice persists in
+    // scenery/last.json and is what the NEXT start opens. Studio mode never
+    // owns the world manifest, so it cannot switch.
+    if (groupHeader("world.scenery", "SCENERY")) {
+        const std::string current = vf::voxel::scenery::current();
+        const std::vector<std::string> sceneries = vf::voxel::scenery::list();
+        int curIdx = -1;
+        for (size_t i = 0; i < sceneries.size(); ++i)
+            if (sceneries[i] == current)
+                curIdx = int(i);
+        static int s_pick = -1;
+        if (s_pick < 0 && curIdx >= 0)
+            s_pick = curIdx; // (re)sync after a switch or a first open
+        if (!sceneries.empty()) {
+            ImGui::SetNextItemWidth(-1.0f);
+            if (ImGui::BeginCombo("##sceneryPick",
+                                  curIdx >= 0 ? sceneries[size_t(curIdx)].c_str()
+                                              : current.c_str())) {
+                for (size_t i = 0; i < sceneries.size(); ++i) {
+                    const bool isCur = int(i) == curIdx;
+                    if (ImGui::Selectable(sceneries[i].c_str(), isCur))
+                        s_pick = int(i);
+                    if (isCur)
+                        ImGui::SetItemDefaultFocus();
+                }
+                ImGui::EndCombo();
+            }
+            const bool changed = s_pick >= 0 && s_pick != curIdx;
+            ImGui::BeginDisabled(!changed || m_studio.active || m_hasStamp);
+            if (ImGui::Button("Switch##scenerySwitch", ImVec2(-1.0f, kUiRowH))) {
+                if (!switchScenery(sceneries[size_t(s_pick)]))
+                    s_pick = curIdx; // failed switch: the combo shows the truth
+            }
+            ImGui::EndDisabled();
+            if (m_studio.active)
+                hintLine("The studio cannot switch sceneries.");
+            else if (changed)
+                hintLine("Switch reloads the whole world (~15 s) and saves "
+                         "your live edits to the scenery you leave.");
+            else
+                hintLine("One reload per switch; live edits stay per-scenery.");
+        } else {
+            hintLine("No scenery folders found under scenery/ (each needs a "
+                     "world.json).");
+        }
+        groupEnd();
+    }
+
     if (groupHeader("world.layers", "LAYERS")) {
         ImGui::SetNextItemWidth(-1.0f);
         ImGui::InputTextWithHint("##layerFilter", "Filter .vxw files", m_layerFilter,

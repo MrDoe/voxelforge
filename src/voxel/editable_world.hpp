@@ -40,6 +40,11 @@ struct EditableWorld {
     void enableInManifest() const; // mark this layer enabled in world.json
     bool ensureManifest(); // adds layer entry to world.json if absent
 
+    // Re-home this layer at another scenery (the in-session switcher). Does
+    // NOT touch disk: the caller load()s the new file so the old scene's
+    // records can never be saved into the new one.
+    void setAssetDir(std::string dir) { m_assetDir = std::move(dir); }
+
     // record generation helpers (anchor is lattice coord of selected voxel = bottom-center)
     std::vector<VoxelRecord> makeBox(glm::ivec3 anchor, glm::ivec3 sizeVox, uint8_t mat) const;
     std::vector<VoxelRecord> makeBoxMeters(glm::ivec3 anchor, glm::vec3 sizeM, uint8_t mat) const;

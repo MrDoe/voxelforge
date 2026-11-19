@@ -171,6 +171,30 @@ int App::runStartupTestHooks()
         }
     }
 
+    // VF_TEST_SCENERY_SWITCH="name[,name…]": drives the World panel's Switch
+    // button without a mouse — the SWITCH itself must be headless-gateable
+    // (a feature only a mouse can reach cannot be gated), and a round-trip
+    // pixel A/B is the only proof that one scene's state cannot bleed into
+    // another's. Switches run in order; the LAST scenery is what --shot
+    // captures. One PASS/FAIL log line per hop.
+    if (const char* sw = getenv("VF_TEST_SCENERY_SWITCH"); sw && *sw)
+    {
+        const std::string list = sw;
+        size_t pos = 0;
+        while (pos < list.size())
+        {
+            const size_t comma = list.find(',', pos);
+            const std::string name = list.substr(
+                pos, comma == std::string::npos ? std::string::npos : comma - pos);
+            pos = comma == std::string::npos ? list.size() : comma + 1;
+            if (name.empty())
+                continue;
+            const bool ok = switchScenery(name);
+            spdlog::info("VF_TEST_SCENERY_SWITCH: '{}' -> {}", name,
+                         ok ? "PASS" : "FAIL");
+        }
+    }
+
     // VF_TEST_BOX="x0,y0,z0,x1,y1,z1": activate the bounding-box selection
     // BEFORE the edit hook below, so a headless shot can prove the scoping:
     // a stamp outside the box changes nothing, a stamp inside changes the
@@ -581,7 +605,12 @@ void App::applyStartupEnvOverrides(FrameInputs& fx)
     // except World is invisible to automated checks.
     if (const char* panel = getenv("VF_TEST_PANEL")) {
         static const char* kNames[] = { "edit", "world", "render", "textures",
-                                        "mesh", "ai" };
+                                        "mesh", "ai", "animate" };
+        // The loop below indexes kNames by Panel; an enum member without a
+        // name silently read past the array once Animate joined (kPanelCount
+        // grew to 7). The assert makes the next panel addition fix BOTH.
+        static_assert(sizeof(kNames) / sizeof(kNames[0]) == kPanelCount,
+                      "VF_TEST_PANEL names must cover every Panel");
         bool found = false;
         for (int i = 0; i < kPanelCount; ++i) {
             if (strcasecmp(panel, kNames[i]) == 0) {

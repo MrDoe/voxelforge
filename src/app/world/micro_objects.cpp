@@ -206,8 +206,15 @@ void App::loadMicroObjects()
                         skinPath = skinPath.substr(0, sdot);
                     skinPath += ".skin";
                     std::string meshPath = l.meshSource;
-                    if (meshPath.empty() || meshPath[0] != '/')
-                        meshPath = dir + "/" + meshPath;
+                    // Mesh SOURCES are library references (assets/models/…),
+                    // even though the manifest now lives in a scenery: try the
+                    // manifest dir first (a scenery may carry its own mesh),
+                    // then the shared library - same contract as the texture
+                    // table. Pre-scenery builds resolved against the manifest
+                    // dir only, which was assets/ then.
+                    if (!meshPath.empty() && meshPath[0] != '/')
+                        meshPath = vf::voxel::scenery::resolveShared(dir + "/",
+                                                                     meshPath);
                     vf::voxel::MicroMesh mesh;
                     std::string merr;
                     // The axis the FILE was authored in. Y-up is the engine's

@@ -223,7 +223,12 @@ one costs a whole turn, because the bad call is rejected before any work runs.
   else the shared dir. `--scenery NAME` selects for one launch without
   touching the pointer. The app's manifest/overlay/heightmap/AI-edits and every
   `.vxw` resolve against `root()`; only `textures/` and `models/` use
-  `VOXELFORGE_ASSET_DIR`. Phase 1 switches scenery by RESTART (`--scenery`).
+  `VOXELFORGE_ASSET_DIR` (a micro layer's `meshSource` follows the same shared
+  contract: scenery dir first, then `assets/models/`). The World panel's
+  SCENERY group switches in-session (flushes the leaving scene's edits, writes
+  the pointer, full rollback on failure; headless hook
+  `VF_TEST_SCENERY_SWITCH="a,b"`); `--scenery`/`VF_SCENERY` stay for
+  one-launch and script selection.
 
 ## Assets — tracked (one exception)
 - Each `scenery/<name>/` is **versioned** (textures via the shared `assets/`
