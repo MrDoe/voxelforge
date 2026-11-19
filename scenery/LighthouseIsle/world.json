@@ -301,19 +301,19 @@
  "textures": [
   {
    "mat": 0,
-   "file": "textures/grass_meadow_prepared.png",
+   "file": "textures/isle_grass_tropical.png",
    "scale": 2.6,
    "card": "grass"
   },
   {
    "mat": 1,
-   "file": "textures/grass_light_high_res.png",
+   "file": "textures/isle_grass_dune.png",
    "scale": 2.6,
    "card": "grass"
   },
   {
    "mat": 2,
-   "file": "textures/soil_ground037.png",
+   "file": "textures/isle_soil.png",
    "scale": 1.8
   },
   {
@@ -323,53 +323,58 @@
   },
   {
    "mat": 4,
-   "file": "textures/rock.jpeg",
+   "file": "textures/isle_rock_volcanic.png",
    "scale": 1.2
   },
   {
    "mat": 5,
-   "file": "textures/rock_grey.png",
+   "file": "textures/isle_rock_cliff.png",
    "scale": 1.2
   },
   {
    "mat": 6,
-   "file": "textures/wood_highres.png",
+   "file": "textures/isle_wood_teak.png",
    "scale": 1.0
   },
   {
    "mat": 7,
-   "file": "textures/wooden_planks_dark.jpeg",
+   "file": "textures/isle_shingle.png",
    "scale": 0.9
   },
   {
    "mat": 8,
-   "file": "textures/foliage_foliage006.png",
+   "file": "textures/isle_junglefloor.png",
    "scale": 0.5,
    "card": "jungle"
   },
   {
    "mat": 15,
-   "file": "textures/gravel.png",
+   "file": "textures/isle_gravel.png",
    "scale": 0.9
   },
   {
+   "mat": 16,
+   "file": "textures/isle_snow.png",
+   "scale": 1.0
+  },
+  {
    "mat": 17,
-   "file": "textures/bark_brown.png",
+   "file": "textures/isle_bark.png",
    "scale": 0.4
   },
   {
    "mat": 18,
-   "file": "textures/proc_moss.png",
+   "file": "textures/isle_moss.png",
    "scale": 0.4
   },
   {
    "mat": 19,
-   "file": "textures/thatch_straw_prepared.png",
+   "file": "textures/isle_thatch.png",
    "scale": 0.6
   },
   {
    "mat": 20,
-   "file": "textures/stone_plaster.png",
+   "file": "textures/isle_plaster.png",
    "scale": 1.0
   }
  ]
