@@ -1,0 +1,373 @@
+{
+ "version": 1,
+ "layers": [
+  {
+   "file": "ai_edits.vxw",
+   "role": "object",
+   "name": "ai_edits",
+   "pos": [
+    0.0,
+    0.0,
+    0.0
+   ],
+   "rot": 0.0,
+   "rotX": 0.0,
+   "rotZ": 0.0,
+   "enabled": false
+  },
+  {
+   "file": "landscape.vxw",
+   "role": "landscape",
+   "name": "landscape",
+   "pos": [
+    0.0,
+    0.0,
+    0.0
+   ],
+   "rot": 0.0,
+   "rotX": 0.0,
+   "rotZ": 0.0,
+   "enabled": true
+  },
+  {
+   "file": "isle_palms.vxw",
+   "role": "object",
+   "name": "isle_palms",
+   "pos": [
+    0.0,
+    0.0,
+    0.0
+   ],
+   "rot": 0.0,
+   "rotX": 0.0,
+   "rotZ": 0.0,
+   "enabled": true
+  },
+  {
+   "file": "isle_interiors.vxw",
+   "role": "object",
+   "name": "isle_interiors",
+   "pos": [
+    0.0,
+    0.0,
+    0.0
+   ],
+   "rot": 0.0,
+   "rotX": 0.0,
+   "rotZ": 0.0,
+   "enabled": true
+  },
+  {
+   "file": "isle_jungle.vxw",
+   "role": "object",
+   "name": "isle_jungle",
+   "pos": [
+    0.0,
+    0.0,
+    0.0
+   ],
+   "rot": 0.0,
+   "rotX": 0.0,
+   "rotZ": 0.0,
+   "enabled": true
+  },
+  {
+   "file": "isle_house.vxw",
+   "role": "object",
+   "name": "isle_house",
+   "pos": [
+    0.0,
+    0.0,
+    0.0
+   ],
+   "rot": 0.0,
+   "rotX": 0.0,
+   "rotZ": 0.0,
+   "enabled": true
+  },
+  {
+   "file": "isle_barn.vxw",
+   "role": "object",
+   "name": "isle_barn",
+   "pos": [
+    0.0,
+    0.0,
+    0.0
+   ],
+   "rot": 0.0,
+   "rotX": 0.0,
+   "rotZ": 0.0,
+   "enabled": true
+  },
+  {
+   "file": "isle_windmill.vxw",
+   "role": "object",
+   "name": "isle_windmill",
+   "pos": [
+    0.0,
+    0.0,
+    0.0
+   ],
+   "rot": 0.0,
+   "rotX": 0.0,
+   "rotZ": 0.0,
+   "enabled": true
+  },
+  {
+   "file": "isle_sailing.vxw",
+   "role": "object",
+   "name": "isle_sailing",
+   "pos": [
+    0.0,
+    0.0,
+    0.0
+   ],
+   "rot": 0.0,
+   "rotX": 0.0,
+   "rotZ": 0.0,
+   "enabled": true
+  },
+  {
+   "file": "isle_rowboat.vxw",
+   "role": "object",
+   "name": "isle_rowboat",
+   "pos": [
+    0.0,
+    0.0,
+    0.0
+   ],
+   "rot": 0.0,
+   "rotX": 0.0,
+   "rotZ": 0.0,
+   "enabled": true
+  },
+  {
+   "file": "isle_forest.vxw",
+   "role": "object",
+   "name": "isle_forest",
+   "pos": [
+    0.0,
+    0.0,
+    0.0
+   ],
+   "rot": 0.0,
+   "rotX": 0.0,
+   "rotZ": 0.0,
+   "enabled": true
+  },
+  {
+   "file": "isle_rocks.vxw",
+   "role": "object",
+   "name": "isle_rocks",
+   "pos": [
+    0.0,
+    0.0,
+    0.0
+   ],
+   "rot": 0.0,
+   "rotX": 0.0,
+   "rotZ": 0.0,
+   "enabled": true
+  },
+  {
+   "file": "isle_lighthouse.vxw",
+   "role": "object",
+   "name": "isle_lighthouse",
+   "pos": [
+    0.0,
+    0.0,
+    0.0
+   ],
+   "rot": 0.0,
+   "rotX": 0.0,
+   "rotZ": 0.0,
+   "enabled": true
+  },
+  {
+   "file": "isle_jetty.vxw",
+   "role": "object",
+   "name": "isle_jetty",
+   "pos": [
+    0.0,
+    0.0,
+    0.0
+   ],
+   "rot": 0.0,
+   "rotX": 0.0,
+   "rotZ": 0.0,
+   "enabled": true
+  },
+  {
+   "file": "isle_driftwood.vxw",
+   "role": "object",
+   "name": "isle_driftwood",
+   "pos": [
+    0.0,
+    0.0,
+    0.0
+   ],
+   "rot": 0.0,
+   "rotX": 0.0,
+   "rotZ": 0.0,
+   "enabled": true
+  }
+ ],
+ "lights": [
+  {
+   "pos": [
+    27.95,
+    15.8,
+    -16.45
+   ],
+   "color": [
+    1.0,
+    0.95,
+    0.85
+   ],
+   "radius": 12.0,
+   "intensity": 7.0
+  },
+  {
+   "pos": [
+    -1.6,
+    2.7,
+    -23.9
+   ],
+   "color": [
+    1.0,
+    0.7,
+    0.4
+   ],
+   "radius": 4.0,
+   "intensity": 1.6
+  },
+  {
+   "pos": [
+    -12.0,
+    2.72,
+    -3.1
+   ],
+   "color": [
+    1.0,
+    0.55,
+    0.25
+   ],
+   "radius": 5.0,
+   "intensity": 2.6
+  },
+  {
+   "pos": [
+    -13.6,
+    3.97,
+    -6.0
+   ],
+   "color": [
+    1.0,
+    0.75,
+    0.45
+   ],
+   "radius": 3.6,
+   "intensity": 1.4
+  },
+  {
+   "pos": [
+    -11.1,
+    3.4,
+    -4.9
+   ],
+   "color": [
+    1.0,
+    0.68,
+    0.38
+   ],
+   "radius": 3.6,
+   "intensity": 1.3
+  },
+  {
+   "pos": [
+    17.95,
+    3.2,
+    -2.0
+   ],
+   "color": [
+    1.0,
+    0.7,
+    0.4
+   ],
+   "radius": 3.2,
+   "intensity": 1.2
+  }
+ ],
+ "textures": [
+  {
+   "file": "textures/dark_green_grass_dense_natural_meadow_topdown_vie_1_seamless.png",
+   "mat": 0,
+   "scale": 2.6
+  },
+  {
+   "file": "textures/grass_light_high_res.png",
+   "mat": 1,
+   "scale": 2.6
+  },
+  {
+   "file": "textures/sand_highres.png",
+   "mat": 2,
+   "scale": 1.8
+  },
+  {
+   "file": "textures/sand_highres.png",
+   "mat": 3,
+   "scale": 0.9
+  },
+  {
+   "file": "textures/grey_gravel_pebbles_small_stones_ground_texture_1_seamless.png",
+   "mat": 4,
+   "scale": 1.2
+  },
+  {
+   "file": "textures/white_plaster_smooth_wall_surface_subtle_texture_1_seamless.png",
+   "mat": 5,
+   "scale": 1.2
+  },
+  {
+   "file": "textures/brown_tree_bark_rough_vertical_ridges_natural_1_seamless.png",
+   "mat": 6,
+   "scale": 1.0
+  },
+  {
+   "file": "textures/dark_wooden_planks_aged_oak_horizontal_grain_1_seamless.png",
+   "mat": 7,
+   "scale": 0.9
+  },
+  {
+   "file": "textures/green_foliage_leaves_dense_vegetation_plant_textur_1_seamless.png",
+   "mat": 8,
+   "scale": 1.65
+  },
+  {
+   "file": "textures/gravel.png",
+   "mat": 15,
+   "scale": 0.9
+  },
+  {
+   "file": "textures/bark_brown.png",
+   "mat": 17,
+   "scale": 0.4
+  },
+  {
+   "file": "textures/foilage.png",
+   "mat": 18,
+   "scale": 0.4
+  },
+  {
+   "file": "textures/thatch_straw_woven_dry_golden_brown_1_seamless.png",
+   "mat": 19,
+   "scale": 0.6
+  },
+  {
+   "file": "textures/stone_plaster.png",
+   "mat": 20,
+   "scale": 1.0
+  }
+ ]
+}
