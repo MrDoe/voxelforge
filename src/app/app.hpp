@@ -210,6 +210,12 @@ private:
     // release them. Called from drawPanelTextures when the file list changed.
     void refreshTextureThumbnails();
     void destroyTextureThumbnails();
+    // Foliage-card picker
+    void rescanCardFiles();
+    void setCardBinding(int mat, const std::string& card);
+    void applyCardBindings();
+    void refreshCardThumbnails();
+    void destroyCardThumbnails();
     // hot-swap watch: folder drop-ins + mtime of every bound image file
     void pollTextureFiles();
     void applyWorldReload();
@@ -763,6 +769,15 @@ private:
     };
     std::vector<TexThumb> m_texThumbs;
     bool m_texThumbsDirty = true;
+    // Foliage-card picker (world.json "foliageCards": mat -> card name, joined
+    // with assets/textures/cards/cards.json). Same shape as the texture picker.
+    std::vector<vf::voxel::worldfile::FoliageCardBinding> m_cardBindings;
+    // available cards: name -> png file (relative to assets/textures/cards/)
+    std::vector<std::pair<std::string, std::string>> m_cardFiles;
+    struct CardThumb { std::string file; vf::Image3D img {}; ImTextureID id = 0; };
+    std::vector<CardThumb> m_cardThumbs;
+    bool m_cardThumbsDirty = true;
+    bool m_cardApplyPending = false;
     // hot-swap: a GUI edit (write manifest + re-upload) and a bound file's
     // on-disk change (re-upload only) both land between frames, never inside
     // a recorded command buffer. m_texSig = resolved path -> mtime+size.

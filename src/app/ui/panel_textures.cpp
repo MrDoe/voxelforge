@@ -20,6 +20,7 @@ void App::drawPanelTextures()
 {
     sectionHeader("Drop files into assets/textures/  ·  changes save to world.json");
     refreshTextureThumbnails();
+    refreshCardThumbnails();
     bool textureChanged = false;
     // The loop runs over the WHOLE palette: material 21 is `fleece` (fur coat)
     // and 22 is `wet soil`. A material the panel cannot show is a material the
@@ -154,6 +155,82 @@ void App::drawPanelTextures()
             ImGui::TextColored(kWarn, "File is not in the scanned folder");
         groupEnd();
     }
+    // Foliage cards: bind a ground material to a card from assets/textures/cards/.
+    ImGui::Separator();
+    ImGui::Text("Foliage cards (grass/leaves on ground materials)");
+    bool cardChanged = false;
+    for (int material = 0; material < int(vf::voxel::kPaletteN); ++material) {
+        if (material >= 10 && material <= 15)
+            continue;
+        auto bit = std::find_if(
+            m_cardBindings.begin(), m_cardBindings.end(),
+            [&](const vf::voxel::worldfile::FoliageCardBinding& b) { return b.mat == material; });
+        const std::string currentCard = bit != m_cardBindings.end()
+            ? bit->card : std::string();
+        char id[32];
+        snprintf(id, sizeof(id), "cardmat.%d", material);
+        std::string badge = currentCard.empty() ? "(none)" : currentCard;
+        if (!groupHeader(id, kMatNames[material], false, badge.c_str())) {
+            continue;
+        }
+        const float tileSize = 44.0f;
+        const float avail = ImGui::GetContentRegionAvail().x;
+        int cols = std::max(1, int(avail / (tileSize + 6.0f)));
+        int tileIdx = 0;
+        auto afterTile = [&]() {
+            ++tileIdx;
+            if (tileIdx % cols != 0)
+                ImGui::SameLine(0.0f, 6.0f);
+        };
+        auto tile = [&](const char* tid, ImTextureID tex, const char* tooltip,
+                        bool selected, const std::function<void()>& onClick) {
+            ImVec2 pos = ImGui::GetCursorScreenPos();
+            if (ImGui::InvisibleButton(tid, ImVec2(tileSize, tileSize)))
+                onClick();
+            ImDrawList* dl = ImGui::GetWindowDrawList();
+            if (tex) {
+                dl->AddImage(tex, pos, ImVec2(pos.x + tileSize, pos.y + tileSize));
+            } else {
+                dl->AddRectFilled(pos, ImVec2(pos.x + tileSize, pos.y + tileSize),
+                                  IM_COL32(40, 44, 52, 255));
+                dl->AddText(ImVec2(pos.x + 6, pos.y + tileSize * 0.5f - 6),
+                            IM_COL32(180, 180, 180, 255), "none");
+            }
+            ImU32 border = selected ? IM_COL32(50, 200, 230, 255)
+                                    : IM_COL32(70, 80, 95, 255);
+            dl->AddRect(pos, ImVec2(pos.x + tileSize, pos.y + tileSize), border,
+                        0.0f, 0, selected ? 2.0f : 1.0f);
+            if (ImGui::IsItemHovered())
+                ImGui::SetTooltip("%s", tooltip);
+            afterTile();
+        };
+        // none tile
+        {
+            char pid[32];
+            snprintf(pid, sizeof(pid), "cardnone.%d", material);
+            tile(pid, 0, "(none)", currentCard.empty(), [&]() {
+                setCardBinding(material, std::string());
+                cardChanged = true;
+            });
+        }
+        for (size_t ci = 0; ci < m_cardFiles.size(); ++ci) {
+            const std::string& cname = m_cardFiles[ci].first;
+            const std::string& cfile = m_cardFiles[ci].second;
+            ImTextureID tid = 0;
+            for (const auto& t : m_cardThumbs)
+                if (t.file == cfile) { tid = t.id; break; }
+            char fid[64];
+            snprintf(fid, sizeof(fid), "card.%d.%zu", material, ci);
+            tile(fid, tid, cname.c_str(), cname == currentCard, [&]() {
+                setCardBinding(material, cname);
+                cardChanged = true;
+            });
+        }
+        ImGui::NewLine();
+        groupEnd();
+    }
+    if (cardChanged)
+        m_cardApplyPending = true;
     if (textureChanged)
         m_texApplyPending = true;
     ImGui::Separator();

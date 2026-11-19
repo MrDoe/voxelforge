@@ -203,6 +203,93 @@ void App::refreshTextureThumbnails()
     m_texThumbsDirty = false;
 }
 
+// ---- Foliage-card picker ----------------------------------------------------
+void App::rescanCardFiles()
+{
+    m_cardFiles.clear();
+    const std::string cardsJson = std::string(VOXELFORGE_ASSET_DIR) + "/textures/cards/cards.json";
+    vf::voxel::worldfile::loadCardLibrary(cardsJson, m_cardFiles);
+    // load current bindings
+    m_cardBindings.clear();
+    vf::voxel::worldfile::loadFoliageCardBindings(m_manifestPath, m_cardBindings);
+    m_cardThumbsDirty = true;
+}
+
+void App::setCardBinding(int mat, const std::string& card)
+{
+    auto it = std::find_if(m_cardBindings.begin(), m_cardBindings.end(),
+                           [&](const vf::voxel::worldfile::FoliageCardBinding& b) { return b.mat == mat; });
+    if (card.empty()) {
+        if (it != m_cardBindings.end()) m_cardBindings.erase(it);
+    } else if (it != m_cardBindings.end()) {
+        it->card = card;
+    } else {
+        m_cardBindings.push_back({ mat, card });
+    }
+}
+
+void App::applyCardBindings()
+{
+    if (!vf::voxel::worldfile::writeFoliageCardManifest(m_manifestPath, m_cardBindings))
+        spdlog::warn("card picker: could not write '{}'", m_manifestPath);
+    reloadTexAtlas(); // rebuilds grass cards
+}
+
+void App::refreshCardThumbnails()
+{
+    if (!m_cardThumbsDirty) return;
+    destroyCardThumbnails();
+    const int thumb = 64;
+    const std::string cardsDir = std::string(VOXELFORGE_ASSET_DIR) + "/textures/cards";
+    for (const auto& cf : m_cardFiles) {
+        const std::string& name = cf.first;
+        const std::string& file = cf.second;
+        std::string path = cardsDir + "/" + file;
+        std::vector<uint8_t> raw;
+        int w = 0, h = 0;
+        bool ok = vf::voxel::loadPngRGBA8(path, raw, w, h);
+        CardThumb t;
+        t.file = file;
+        if (ok && w > 0 && h > 0) {
+            std::vector<uint8_t> px(size_t(thumb) * thumb * 4);
+            for (int y = 0; y < thumb; ++y)
+                for (int x = 0; x < thumb; ++x) {
+                    int sx = x * w / thumb;
+                    int sy = y * h / thumb;
+                    if (sx >= w) sx = w - 1;
+                    if (sy >= h) sy = h - 1;
+                    for (int k = 0; k < 4; ++k)
+                        px[size_t((y * thumb + x) * 4 + k)] =
+                            raw[size_t((sy * w + sx) * 4 + k)];
+                }
+            t.img = vf::makeImage2D(m_ctx, uint32_t(thumb), uint32_t(thumb),
+                                     VK_FORMAT_R8G8B8A8_UNORM,
+                                     VK_IMAGE_USAGE_TRANSFER_DST_BIT |
+                                         VK_IMAGE_USAGE_SAMPLED_BIT);
+            if (t.img.img)
+                vf::uploadToImage3D(m_ctx, t.img, px.data(), px.size());
+            if (t.img.view)
+                t.id = (ImTextureID)ImGui_ImplVulkan_AddTexture(
+                    m_uiSampler, t.img.view,
+                    VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+        }
+        m_cardThumbs.push_back(std::move(t));
+    }
+    m_cardThumbsDirty = false;
+}
+
+void App::destroyCardThumbnails()
+{
+    if (!m_ctx.device()) return;
+    vkDeviceWaitIdle(m_ctx.device());
+    for (auto& t : m_cardThumbs) {
+        if (t.id) ImGui_ImplVulkan_RemoveTexture((VkDescriptorSet)t.id);
+        t.id = 0;
+        vf::destroyImage3D(m_ctx, t.img);
+    }
+    m_cardThumbs.clear();
+}
+
 void App::destroyTextureThumbnails()
 {
     if (!m_ctx.device())

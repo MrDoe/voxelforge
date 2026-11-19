@@ -182,6 +182,16 @@ struct ResolvedFoliageCard {
 bool loadFoliageCardManifest(const std::string& manifestPath,
                              const std::string& cardsJsonPath,
                              std::vector<ResolvedFoliageCard>& out);
+// Raw binding loader for the editor: reads world.json "foliageCards" into
+// FoliageCardBinding entries (mat -> card name) without joining cards.json.
+bool loadFoliageCardBindings(const std::string& manifestPath,
+                            std::vector<FoliageCardBinding>& out);
+// Writes only the "foliageCards" key, preserving every other top-level key.
+bool writeFoliageCardManifest(const std::string& path,
+                              const std::vector<FoliageCardBinding>& bindings);
+// Shared card library loader: cards.json -> list of (name, png file).
+bool loadCardLibrary(const std::string& cardsJsonPath,
+                     std::vector<std::pair<std::string, std::string>>& out);
 
 // Point light sources from the same world.json manifest. A light is a
 // position, colour, radius (soft falloff to zero at radius) and intensity.

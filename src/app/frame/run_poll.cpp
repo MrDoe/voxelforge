@@ -69,6 +69,10 @@ void App::pollWorldAndTextures(float dt)
         m_texReloadPending = false;
         reloadTexAtlas();
     }
+    if (m_cardApplyPending) {
+        m_cardApplyPending = false;
+        applyCardBindings();
+    }
     m_texPollT += dt;
     if (m_texPollT >= 1.0f) {
         m_texPollT = 0.f;

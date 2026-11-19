@@ -712,6 +712,91 @@ bool loadFoliageCardManifest(const std::string& manifestPath,
     return !out.empty();
 }
 
+bool loadFoliageCardBindings(const std::string& manifestPath,
+                            std::vector<FoliageCardBinding>& out)
+{
+    out.clear();
+    std::string text;
+    {
+        std::FILE* f = std::fopen(manifestPath.c_str(), "rb");
+        if (!f) return false;
+        char buf[4096];
+        size_t n;
+        while ((n = std::fread(buf, 1, sizeof(buf), f)) > 0)
+            text.append(buf, n);
+        std::fclose(f);
+    }
+    Json j{ text };
+    if (!j.eat('{')) return false;
+    while (!j.peek('}') && j.i < text.size()) {
+        std::string key;
+        if (!j.str(key) || !j.eat(':')) return false;
+        if (key == "foliageCards" && j.eat('[')) {
+            while (!j.peek(']') && j.i < text.size()) {
+                FoliageCardBinding b;
+                if (!j.eat('{')) break;
+                while (!j.peek('}') && j.i < text.size()) {
+                    std::string k;
+                    if (!j.str(k) || !j.eat(':')) break;
+                    if (k == "mat") {
+                        float v = -1.f; j.num(v); b.mat = int(v);
+                    } else if (k == "card") {
+                        j.str(b.card);
+                    } else {
+                        j.skipValue();
+                    }
+                    if (!j.eat(',')) break;
+                }
+                j.eat('}');
+                if (b.mat >= 0) out.push_back(b);
+                if (!j.eat(',')) break;
+            }
+            j.eat(']');
+        } else {
+            j.skipValue();
+        }
+        if (!j.eat(',')) break;
+    }
+    return true;
+}
+
+bool loadCardLibrary(const std::string& cardsJsonPath,
+                     std::vector<std::pair<std::string, std::string>>& out)
+{
+    out.clear();
+    std::string text;
+    {
+        std::FILE* f = std::fopen(cardsJsonPath.c_str(), "rb");
+        if (!f) return false;
+        char buf[4096];
+        size_t n;
+        while ((n = std::fread(buf, 1, sizeof(buf), f)) > 0)
+            text.append(buf, n);
+        std::fclose(f);
+    }
+    // parse "files": { "name": "file.png", ... }
+    // reuse Json scanner
+    Json j{ text };
+    if (!j.eat('{')) return false;
+    while (!j.peek('}') && j.i < text.size()) {
+        std::string key;
+        if (!j.str(key) || !j.eat(':')) return false;
+        if (key == "files" && j.eat('{')) {
+            while (!j.peek('}') && j.i < text.size()) {
+                std::string name, file;
+                if (!j.str(name) || !j.eat(':') || !j.str(file)) break;
+                out.push_back({ name, file });
+                if (!j.eat(',')) break;
+            }
+            j.eat('}');
+        } else {
+            j.skipValue();
+        }
+        if (!j.eat(',')) break;
+    }
+    return !out.empty();
+}
+
 bool loadLightManifest(const std::string& path, std::vector<LightSource>& out)
 {
     out.clear();
@@ -1092,6 +1177,35 @@ bool writeTextureManifest(const std::string& path,
         std::fprintf(f, "  ]\n}\n");
     }
     return std::fclose(f) == 0;
+}
+
+bool writeFoliageCardManifest(const std::string& path,
+                              const std::vector<FoliageCardBinding>& bindings)
+{
+    std::vector<TopPair> pairs;
+    scanTopLevel(readFileText(path), pairs);
+
+    const std::string tmp = path + ".tmp";
+    std::FILE* f = std::fopen(tmp.c_str(), "wb");
+    if (!f) return false;
+    std::fprintf(f, "{");
+    bool first = true;
+    emitPreserved(f, pairs, "foliageCards", nullptr, first);
+    const char* sep = first ? "" : ",";
+    if (bindings.empty()) {
+        std::fprintf(f, "%s\n  \"foliageCards\": []\n}\n", sep);
+    } else {
+        std::fprintf(f, "%s\n  \"foliageCards\": [\n", sep);
+        for (size_t i = 0; i < bindings.size(); ++i) {
+            const FoliageCardBinding& b = bindings[i];
+            std::fprintf(f, "    { \"mat\": %d, \"card\": \"%s\" }%s\n",
+                         b.mat, b.card.c_str(),
+                         i + 1 < bindings.size() ? "," : "");
+        }
+        std::fprintf(f, "  ]\n}\n");
+    }
+    if (std::fclose(f) != 0) return false;
+    return std::rename(tmp.c_str(), path.c_str()) == 0;
 }
 
 bool writeManifest(const std::string& path, const std::vector<WorldLayer>& layers)

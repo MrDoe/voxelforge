@@ -476,6 +476,7 @@ bool App::initVulkan()
     // seed the GUI picker from the manifest + whatever is on disk
     vf::voxel::worldfile::loadTextureManifest(m_manifestPath, m_texBindings);
     rescanTextureFiles();
+    rescanCardFiles();
     // Explicit point lights (world.json "lights" + lights DERIVED from
     // emissive materials). MUST come after every pass init - setLights()
     // writes a descriptor of a set that does not exist until then, and a
@@ -672,6 +673,7 @@ void App::destroy()
     vf::destroyImage3D(m_ctx, m_taaHistory[1]);
     vf::destroyImage3D(m_ctx, m_taaResolved);
     destroyTextureThumbnails();
+    destroyCardThumbnails();
     m_texAtlas.destroy(); // atlas owns a sampler + a 2D-array image + a UBO
     m_swapchain.destroy();
     m_ctx.shutdown();
