@@ -48,17 +48,22 @@ void App::drawPanelWorld()
                 ImGui::EndCombo();
             }
             const bool changed = s_pick >= 0 && s_pick != curIdx;
-            ImGui::BeginDisabled(!changed || m_studio.active || m_hasStamp);
-            if (ImGui::Button("Switch##scenerySwitch", ImVec2(-1.0f, kUiRowH))) {
-                if (!switchScenery(sceneries[size_t(s_pick)]))
-                    s_pick = curIdx; // failed switch: the combo shows the truth
-            }
+            const bool switching = !m_pendingScenerySwitch.empty();
+            ImGui::BeginDisabled(!changed || switching || m_studio.active ||
+                                 m_hasStamp);
+            if (ImGui::Button("Switch##scenerySwitch", ImVec2(-1.0f, kUiRowH)))
+                m_pendingScenerySwitch = sceneries[size_t(s_pick)];
             ImGui::EndDisabled();
-            if (m_studio.active)
+            if (switching)
+                hintLine("Switch armed: the reload starts at the next frame "
+                         "boundary and blocks input until the new world is up.");
+            else if (m_studio.active)
                 hintLine("The studio cannot switch sceneries.");
             else if (changed)
-                hintLine("Switch reloads the whole world (~15 s) and saves "
-                         "your live edits to the scenery you leave.");
+                hintLine("Switch reloads the whole world (measured ~10 s, up "
+                         "to ~40 s on big scenes) and saves your live edits "
+                         "to the scenery you leave; the window will not "
+                         "paint during it - that is normal, do not kill it.");
             else
                 hintLine("One reload per switch; live edits stay per-scenery.");
         } else {

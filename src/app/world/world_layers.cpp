@@ -92,6 +92,10 @@ bool App::switchScenery(const std::string& name)
 {
     if (m_studio.active)
         return false; // the studio never owns world.json
+    // Forensic start line: flushed immediately, so a kill mid-switch still
+    // shows whether the switch began (info lines can die in stdout buffers).
+    spdlog::info("scenery: switch begin '{}'", name);
+    spdlog::default_logger()->flush();
     const std::string oldRoot = vf::voxel::scenery::root();
     if (!vf::voxel::scenery::setCurrent(name))
         return false;

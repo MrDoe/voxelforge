@@ -748,6 +748,13 @@ private:
     vf::voxel::LayeredWorld m_layers;
     float m_layerPollT = 0.f;
     bool m_pendingWorldReload = false;
+    // A GUI scenery switch armed by the World panel, consumed BETWEEN frames
+    // in pollWorldAndTextures. The switch may never run from the sidebar's
+    // draw pass: there the swapchain image is already acquired and the frame's
+    // command buffer is mid-recording, and switchScenery's applyWorldReload
+    // vkDeviceWaitIdles and destroys/recreates buffers the recording still
+    // references (spec-deadlock + submit-UB; live-froze a window 2026-11-19).
+    std::string m_pendingScenerySwitch;
     // Separate manifest watcher for micro-voxel objects: they are not part
     // of the world record set, so a manifest-only change (e.g. an MCP
     // set_layer_transform on a micro layer) never triggers applyWorldReload

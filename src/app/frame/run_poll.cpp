@@ -19,6 +19,18 @@ namespace app {
 // needs the atlas re-uploaded.
 void App::pollWorldAndTextures(float dt)
 {
+    // A GUI scenery switch lands HERE, between frames — never from the
+    // sidebar's draw pass, where the swapchain image is already acquired and
+    // the command buffer is mid-recording (applyWorldReload waits for idle
+    // and rebuilds buffers a recording still references; that deadlocked a
+    // live window on 2026-11-19). Consumed BEFORE this frame's poll so no
+    // reload is in flight against the switch's own full reload.
+    if (!m_pendingScenerySwitch.empty())
+    {
+        const std::string target = m_pendingScenerySwitch;
+        m_pendingScenerySwitch.clear();
+        switchScenery(target);
+    }
     // live world reload: MCP/chat edits and layer toggles land in the
     // layer files; poll for changes and swap the SVO in-place. Reloads are
     // camera-distance-priority and run off the render thread (see
