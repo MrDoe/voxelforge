@@ -57,6 +57,12 @@ light sources and lift the interior:*
 |---|---|
 | ![The thatched cottage from another angle](docs/images/barn2.png) | ![The tropical LighthouseIsle scenery](docs/images/isle_day.png) |
 
+**The barn view as raw voxels** — the same cottage rendered by the SVO
+pixel-reference backend (`--mode svo`), which exposes the per-voxel stair steps
+the surfel renderer smooths away:
+
+![The barn view rendered with the SVO voxel reference backend](tests/screenshots/barn_svo.png)
+
 ## Features
 
 - **Gaussian-surfel rendering (primary backend, `--mode splat`, default)**: the
