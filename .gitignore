@@ -29,6 +29,10 @@ scenery/*/micro/*.rig
 # asset swap a 275,912-line diff with an unreadable content change. Same rule
 # as the rig cache: regenerable, therefore not content.
 scenery/*/micro/*.skin
+# The normalized MESH side-car written by `vf_mesh2micro` is DERIVED from the
+# tracked source mesh in assets/models/ (scaled/rebased to --fit): regenerable
+# by re-running the tool, so it is a cache, not content.
+scenery/*/micro/*.stl
 
 # Convenience symlink into build/ output + local scratch screenshots.
 /voxelforge

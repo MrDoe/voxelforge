@@ -60,7 +60,13 @@ APP = sys.argv[1] if len(sys.argv) > 1 else os.path.join(ROOT, "build", "voxelfo
 MICRO_CAM = "12.15,0.35,13.60,12.15,-0.05,12.20"
 HOUSE_CAM = "2.5,1.3,6.0,6.8,1.0,12.2"
 W, H = 900, 600
-MANIFEST = os.path.join(ROOT, "assets", "world.json")
+# The authored manifest lives in the active scenery folder (assets/ is only
+# the shared texture/model library now). Pin the hermetic default and use the
+# same path the app resolves for every render in this gate.
+_SCENE = os.environ.setdefault("VF_SCENERY", "LakesideHamlet")
+MANIFEST = (os.path.join(_SCENE, "world.json")
+            if ("/" in _SCENE or "\\" in _SCENE)
+            else os.path.join(ROOT, "scenery", _SCENE, "world.json"))
 
 # The noise floor of a same-configuration pair. With the pose PINNED (see
 # FREEZE) a headless `--shot` is byte-reproducible, so this is a determinism

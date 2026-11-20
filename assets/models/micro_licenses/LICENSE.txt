@@ -1,0 +1,7 @@
+These OBJ/MTL files are Quaternius (CC0 1.0 Universal, public
+domain dedication): the Survival pack, https://quaternius.com
+(Drive folder linked from the pack page). Staged by
+tools/fetch_micro_meshes.py, renamed micro_*, mtllib lines rewritten; geometry
+otherwise unmodified. They are the meshSource of raster-owned micro-voxel
+layers authored with tools/mesh_to_micro.cpp. License:
+https://creativecommons.org/publicdomain/zero/1.0/

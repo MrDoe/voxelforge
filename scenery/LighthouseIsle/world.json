@@ -1,217 +1,29 @@
 {
   "version": 1,
   "layers": [
-  {
-   "file": "ai_edits.vxw",
-   "role": "object",
-   "name": "ai_edits",
-   "pos": [
-    0.0,
-    0.0,
-    0.0
-   ],
-   "rot": 0.0,
-   "rotX": 0.0,
-   "rotZ": 0.0,
-   "enabled": false
-  },
-  {
-   "file": "landscape.vxw",
-   "role": "landscape",
-   "name": "landscape",
-   "pos": [
-    0.0,
-    0.0,
-    0.0
-   ],
-   "rot": 0.0,
-   "rotX": 0.0,
-   "rotZ": 0.0,
-   "enabled": true
-  },
-  {
-   "file": "isle_palms.vxw",
-   "role": "object",
-   "name": "isle_palms",
-   "pos": [
-    0.0,
-    0.0,
-    0.0
-   ],
-   "rot": 0.0,
-   "rotX": 0.0,
-   "rotZ": 0.0,
-   "enabled": true
-  },
-  {
-   "file": "isle_interiors.vxw",
-   "role": "object",
-   "name": "isle_interiors",
-   "pos": [
-    0.0,
-    0.0,
-    0.0
-   ],
-   "rot": 0.0,
-   "rotX": 0.0,
-   "rotZ": 0.0,
-   "enabled": true
-  },
-  {
-   "file": "isle_jungle.vxw",
-   "role": "object",
-   "name": "isle_jungle",
-   "pos": [
-    0.0,
-    0.0,
-    0.0
-   ],
-   "rot": 0.0,
-   "rotX": 0.0,
-   "rotZ": 0.0,
-   "enabled": true
-  },
-  {
-   "file": "isle_house.vxw",
-   "role": "object",
-   "name": "isle_house",
-   "pos": [
-    0.0,
-    0.0,
-    0.0
-   ],
-   "rot": 0.0,
-   "rotX": 0.0,
-   "rotZ": 0.0,
-   "enabled": true
-  },
-  {
-   "file": "isle_barn.vxw",
-   "role": "object",
-   "name": "isle_barn",
-   "pos": [
-    0.0,
-    0.0,
-    0.0
-   ],
-   "rot": 0.0,
-   "rotX": 0.0,
-   "rotZ": 0.0,
-   "enabled": true
-  },
-  {
-   "file": "isle_windmill.vxw",
-   "role": "object",
-   "name": "isle_windmill",
-   "pos": [
-    0.0,
-    0.0,
-    0.0
-   ],
-   "rot": 0.0,
-   "rotX": 0.0,
-   "rotZ": 0.0,
-   "enabled": true
-  },
-  {
-   "file": "isle_sailing.vxw",
-   "role": "object",
-   "name": "isle_sailing",
-   "pos": [
-    0.0,
-    0.0,
-    0.0
-   ],
-   "rot": 0.0,
-   "rotX": 0.0,
-   "rotZ": 0.0,
-   "enabled": true
-  },
-  {
-   "file": "isle_rowboat.vxw",
-   "role": "object",
-   "name": "isle_rowboat",
-   "pos": [
-    0.0,
-    0.0,
-    0.0
-   ],
-   "rot": 0.0,
-   "rotX": 0.0,
-   "rotZ": 0.0,
-   "enabled": true
-  },
-  {
-   "file": "isle_forest.vxw",
-   "role": "object",
-   "name": "isle_forest",
-   "pos": [
-    0.0,
-    0.0,
-    0.0
-   ],
-   "rot": 0.0,
-   "rotX": 0.0,
-   "rotZ": 0.0,
-   "enabled": true
-  },
-  {
-   "file": "isle_rocks.vxw",
-   "role": "object",
-   "name": "isle_rocks",
-   "pos": [
-    0.0,
-    0.0,
-    0.0
-   ],
-   "rot": 0.0,
-   "rotX": 0.0,
-   "rotZ": 0.0,
-   "enabled": true
-  },
-  {
-   "file": "isle_lighthouse.vxw",
-   "role": "object",
-   "name": "isle_lighthouse",
-   "pos": [
-    0.0,
-    0.0,
-    0.0
-   ],
-   "rot": 0.0,
-   "rotX": 0.0,
-   "rotZ": 0.0,
-   "enabled": true
-  },
-  {
-   "file": "isle_jetty.vxw",
-   "role": "object",
-   "name": "isle_jetty",
-   "pos": [
-    0.0,
-    0.0,
-    0.0
-   ],
-   "rot": 0.0,
-   "rotX": 0.0,
-   "rotZ": 0.0,
-   "enabled": true
-  },
-  {
-   "file": "isle_driftwood.vxw",
-   "role": "object",
-   "name": "isle_driftwood",
-   "pos": [
-    0.0,
-    0.0,
-    0.0
-   ],
-   "rot": 0.0,
-   "rotX": 0.0,
-   "rotZ": 0.0,
-   "enabled": true
-  }
- ],
+    { "file": "ai_edits.vxw", "role": "object", "name": "ai_edits",  "pos": [0.00, 0.00, 0.00], "rot": 0.0, "rotX": 0.0,  "rotZ": 0.0, "enabled": false },
+    { "file": "landscape.vxw", "role": "landscape", "name": "landscape",  "pos": [0.00, 0.00, 0.00], "rot": 0.0, "rotX": 0.0,  "rotZ": 0.0, "enabled": true },
+    { "file": "isle_palms.vxw", "role": "object", "name": "isle_palms",  "pos": [0.00, 0.00, 0.00], "rot": 0.0, "rotX": 0.0,  "rotZ": 0.0, "enabled": true },
+    { "file": "isle_interiors.vxw", "role": "object", "name": "isle_interiors",  "pos": [0.00, 0.00, 0.00], "rot": 0.0, "rotX": 0.0,  "rotZ": 0.0, "enabled": true },
+    { "file": "isle_jungle.vxw", "role": "object", "name": "isle_jungle",  "pos": [0.00, 0.00, 0.00], "rot": 0.0, "rotX": 0.0,  "rotZ": 0.0, "enabled": true },
+    { "file": "isle_house.vxw", "role": "object", "name": "isle_house",  "pos": [0.00, 0.00, 0.00], "rot": 0.0, "rotX": 0.0,  "rotZ": 0.0, "enabled": true },
+    { "file": "isle_barn.vxw", "role": "object", "name": "isle_barn",  "pos": [0.00, 0.00, 0.00], "rot": 0.0, "rotX": 0.0,  "rotZ": 0.0, "enabled": true },
+    { "file": "isle_windmill.vxw", "role": "object", "name": "isle_windmill",  "pos": [0.00, 0.00, 0.00], "rot": 0.0, "rotX": 0.0,  "rotZ": 0.0, "enabled": true },
+    { "file": "isle_sailing.vxw", "role": "object", "name": "isle_sailing",  "pos": [0.00, 0.00, 0.00], "rot": 0.0, "rotX": 0.0,  "rotZ": 0.0, "enabled": true },
+    { "file": "isle_rowboat.vxw", "role": "object", "name": "isle_rowboat",  "pos": [0.00, 0.00, 0.00], "rot": 0.0, "rotX": 0.0,  "rotZ": 0.0, "enabled": true },
+    { "file": "isle_forest.vxw", "role": "object", "name": "isle_forest",  "pos": [0.00, 0.00, 0.00], "rot": 0.0, "rotX": 0.0,  "rotZ": 0.0, "enabled": true },
+    { "file": "isle_rocks.vxw", "role": "object", "name": "isle_rocks",  "pos": [0.00, 0.00, 0.00], "rot": 0.0, "rotX": 0.0,  "rotZ": 0.0, "enabled": true },
+    { "file": "isle_lighthouse.vxw", "role": "object", "name": "isle_lighthouse",  "pos": [0.00, 0.00, 0.00], "rot": 0.0, "rotX": 0.0,  "rotZ": 0.0, "enabled": true },
+    { "file": "isle_jetty.vxw", "role": "object", "name": "isle_jetty",  "pos": [0.00, 0.00, 0.00], "rot": 0.0, "rotX": 0.0,  "rotZ": 0.0, "enabled": true },
+    { "file": "isle_driftwood.vxw", "role": "object", "name": "isle_driftwood",  "pos": [0.00, 0.00, 0.00], "rot": 0.0, "rotX": 0.0,  "rotZ": 0.0, "enabled": true },
+    { "file": "micro/isle_torch.vxw", "role": "micro", "name": "isle_torch",  "pos": [28.00, 0.12, -16.00], "rot": 0.0, "rotX": 0.0,  "rotZ": 0.0, "enabled": true, "meshSource": "micro/isle_torch.stl", "meshUp": "y" },
+    { "file": "micro/isle_compass.vxw", "role": "micro", "name": "isle_compass",  "pos": [24.00, 0.31, -16.00], "rot": 0.0, "rotX": 0.0,  "rotZ": 0.0, "enabled": true, "meshSource": "micro/isle_compass.stl", "meshUp": "y" },
+    { "file": "micro/isle_radio.vxw", "role": "micro", "name": "isle_radio",  "pos": [-12.00, 1.84, -10.50], "rot": 0.0, "rotX": 0.0,  "rotZ": 0.0, "enabled": true, "meshSource": "micro/isle_radio.stl", "meshUp": "y" },
+    { "file": "micro/isle_backpack.vxw", "role": "micro", "name": "isle_backpack",  "pos": [-8.50, 2.29, -7.00], "rot": 0.0, "rotX": 0.0,  "rotZ": 0.0, "enabled": true, "meshSource": "micro/isle_backpack.stl", "meshUp": "y" },
+    { "file": "micro/isle_pot.vxw", "role": "micro", "name": "isle_pot",  "pos": [-2.80, 0.31, -23.00], "rot": 0.0, "rotX": 0.0,  "rotZ": 0.0, "enabled": true, "meshSource": "micro/isle_pot.stl", "meshUp": "y" },
+    { "file": "micro/isle_gascan.vxw", "role": "micro", "name": "isle_gascan",  "pos": [18.00, 1.62, -4.00], "rot": 0.0, "rotX": 0.0,  "rotZ": 0.0, "enabled": true, "meshSource": "micro/isle_gascan.stl", "meshUp": "y" },
+    { "file": "micro/isle_log.vxw", "role": "micro", "name": "isle_log",  "pos": [5.00, 3.31, 8.00], "rot": 0.0, "rotX": 0.0,  "rotZ": 0.0, "enabled": true, "meshSource": "micro/isle_log.stl", "meshUp": "y" }
+  ],
   "lights": [
   {
    "pos": [

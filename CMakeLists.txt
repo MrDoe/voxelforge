@@ -141,6 +141,13 @@ add_executable(vf_microvox tools/micro_voxel.cpp)
 target_include_directories(vf_microvox PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
 target_link_libraries(vf_microvox PRIVATE vf_core)
 
+# Author a MICRO-voxel layer from a real STL/OBJ mesh (the missing mesh input
+# path): voxelizes on the object's fine lattice and registers a role=micro
+# layer with meshSource/meshUp so the app draws it from the raster mesh.
+add_executable(vf_mesh2micro tools/mesh_to_micro.cpp)
+target_include_directories(vf_mesh2micro PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
+target_link_libraries(vf_mesh2micro PRIVATE vf_core)
+
 # Offline proof for the MESH-driven micro deformation (skin -> pose -> voxelize
 # -> delta). Explicit tool: never wired into the default build or the tests; run
 # it to measure the rest round-trip and the per-pose delta budget.

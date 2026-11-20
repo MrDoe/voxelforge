@@ -120,7 +120,15 @@ void main()
     // pc.misc.z carries the strength (0 = the original look, bit-exact).
     vec3 furCol = alb * light;
     const float sss = pc.misc.z;
-    if (sss > 0.0) {
+    // FUR ONLY. The fur pass also composites the RASTER GROUND FOLIAGE CARDS
+    // (grass) through these same accumulators, and those cover the whole frame
+    // in a foliated scenery. With no gate, backlit SSS lit every grass pixel -
+    // a house view with no animal in it changed ~66k px under VF_FUR_SSS. Only
+    // the fleece material grows fur cards (m_furMaterials defaults to 21), so
+    // matId == 21 is exactly the fur-covered set: gate the translucency to it.
+    // Grass cards carry their GROUND material id (0/1), so this never fires on
+    // them. matId is already flat/averaged per pixel from A.w above.
+    if (sss > 0.0 && matId == 21u) {
         const vec3 rdv = normalize(pAvg - pc.camPos.xyz);
         const float towardSun = max(dot(rdv, kSunDir), 0.0);
         const float thin = exp(-sumA);
