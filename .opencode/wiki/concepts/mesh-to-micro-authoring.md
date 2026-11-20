@@ -124,3 +124,26 @@ generator from `m_microMeshes[i].tris` for raster-owned layers; traced layers
 keep the field-cell roots. This removes the 1-cell root offset (bald patches)
 the field surface had relative to the mesh. Verified: fur_check all passed,
 107895 cards, coat strands 15.39 vs body 14.95 (readable), coat turns 22 px.
+
+## Field-free shading (E1, 2026-11-20)
+
+Raster-owned meshes can shade WITHOUT any field lookup, default-off behind
+`VF_MESH_FIELDFREE=1`. The vertex shader passes the REST face normal (from the
+triangle corners) and the packed per-vertex AO; the fragment uses them instead
+of `microNormal` (field gradient), `microAO` (field march) and `skyVisibilitySvo`
+(field march), and derives enclosure from AO. `shadeMicroLit` gained an `aoBaked`
+parameter (-1 = field path for traced callers). The enable flag rides
+`uSunParams.y`. Verified opt-in: alpaca renders lit with visible detail, 6366 px
+change vs field path, only 4 new near-black px. Kept DEFAULT-OFF because face
+normals produce hard facets (a look change needing its own measurement) and the
+field is still required for traced objects, cast shadows and fur AO anyway.
+
+## F (delete tracer bone machinery) — intentionally deferred
+
+The tracer's bone/claim machinery (`microUnbone`/`microBoneAt`/claim-rule/
+deep-hit retry in micro_shade.glsl) is only needed by `VF_MESH=0` (the diagnostic
+that draws the alpaca from its traced field). All SHIPPED actors are mesh-owned;
+the traced vase/urn have empty rigs so those calls are identity no-ops. Removing
+the machinery is pure dead-code cleanup with no user-visible benefit, and risks
+the surface continuity of the traced path. Deferred rather than ship risky
+shader surgery; revisit only if the traced path is removed entirely.

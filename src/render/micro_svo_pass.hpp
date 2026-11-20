@@ -102,7 +102,8 @@ public:
     void setLights(const vf::voxel::LightUBO& lights);
     // Per-frame sun-space shadow camera (world -> sun clip) + enable. Off keeps
     // the field-march verdict byte-identical.
-    void setSunShadow(const glm::mat4& viewProj, bool enabled);
+    void setSunShadow(const glm::mat4& viewProj, bool enabled,
+                      bool fieldFreeShading = false);
 
     // Record the overlay dispatch. Must run AFTER the main backend has written
     // its G-buffer for this frame: gpos is the depth reference the pass reads.

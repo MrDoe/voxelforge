@@ -579,8 +579,10 @@ void microAO(vec3 p, vec3 n, out float ao, out vec3 bent)
 //
 // It is shared verbatim by both paths, so a rasterised animal and a traced vase
 // cannot drift apart in how they are lit.
+// `aoBaked`: Workstream E1 - when >= 0, use this per-vertex baked AO and derive
+// enclosure from it (no field march). Traced callers pass -1 (field path).
 vec3 shadeMicroLit(int w, vec3 p, vec3 occlP, vec3 n, vec3 rd, vec3 alb, vec2 rr,
-                   uint mId)
+                   uint mId, float aoBaked)
 {
     const float vs = microVoxelSize();
     // The sun is occluded by BOTH worlds: the micro worlds (self-shadow and
@@ -601,10 +603,15 @@ vec3 shadeMicroLit(int w, vec3 p, vec3 occlP, vec3 n, vec3 rd, vec3 alb, vec2 rr
 
     float ao = 1.0;
     vec3 bent = n;
-    if ((gRenderFlags & 1) != 0)
+    if (aoBaked >= 0.0) {
+        // Workstream E1: field-free - use the per-vertex baked AO. bent = n.
+        ao = aoBaked;
+    } else if ((gRenderFlags & 1) != 0)
         microAO(occlP, n, ao, bent);
 
-    float enclosed = 1.0 - ((gRenderFlags & 256) != 0 ? skyVisibilitySvo(p, bent) : 1.0);
+    float enclosed = (aoBaked >= 0.0)
+        ? (1.0 - ao) // field-free enclosure proxy from AO
+        : 1.0 - ((gRenderFlags & 256) != 0 ? skyVisibilitySvo(p, bent) : 1.0);
     enclosed = max(enclosed, aoShEnclosure(ao, sh));
     float skyAmb = mix(1.0, 0.16, enclosed);
     float skyIbl = mix(1.0, 0.04, enclosed);
@@ -670,5 +677,5 @@ vec3 shadeMicro(vec3 p, vec3 rd, int w)
     const vec3 restN = microDirUnbone(w, microDirToBaked(w, n), rbone);
     alb = detailAlbedo(alb, rest, restN, mId);
     n = microDirFromBaked(w, microDirRebone(w, detailNormal(restN, rest, mId), rbone));
-    return shadeMicroLit(w, p, p, n, rd, alb, rr, mId);
+    return shadeMicroLit(w, p, p, n, rd, alb, rr, mId, -1.0);
 }

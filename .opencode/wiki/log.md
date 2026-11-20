@@ -7547,3 +7547,16 @@ shadeMicroLit uses PCF for mesh worlds, field march for traced. Sun ortho camera
 via glm::lookAt/ortho. Verified: map populated, PCF matches field verdict at
 grazing sun (0 px), deterministic (0 px two ON renders), fur_check pin added.
 Remaining: C (fur from mesh), E1 (field-free shading), F (delete tracer).
+
+## [2026-11-20] ingest | Workstreams C + E1 in feature/mesh-actor
+
+C: fur roots from the mesh surface (buildFurCards rootFn callback, area-weighted
+triangle samples; field still baked for material/AO/shadow). fur_check all passed,
+107895 cards, coat strands 15.39 vs body 14.95, turn 22 px.
+E1: field-free shading for raster meshes, default-off VF_MESH_FIELDFREE=1. Vertex
+passes REST face normal + packed AO; fragment skips microNormal/microAO/
+skyVisibilitySvo, derives enclosure from AO. shadeMicroLit aoBaked param (-1 =
+field path for traced). Verified opt-in: lit alpaca, 6366 px change, 4 new
+near-black. Kept default-off (face-normal facets = look change). F (delete tracer
+bone machinery) intentionally deferred: dead code for shipped scene, no benefit,
+risks traced-path continuity - see concept page.

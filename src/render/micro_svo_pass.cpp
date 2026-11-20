@@ -1093,13 +1093,16 @@ void MicroSvoPass::setLights(const vf::voxel::LightUBO& lights)
     }
 }
 
-void MicroSvoPass::setSunShadow(const glm::mat4& viewProj, bool enabled)
+void MicroSvoPass::setSunShadow(const glm::mat4& viewProj, bool enabled,
+                                bool fieldFreeShading)
 {
     if (!m_ctx || !m_sunUbo.mapped)
         return;
     struct SunShadow_t { glm::mat4 vp; glm::vec4 params; } sun0 {};
     sun0.vp = viewProj;
-    sun0.params = glm::vec4(enabled ? 1.f : 0.f);
+    // x = sun-shadow enable, y = field-free shading enable (E1).
+    sun0.params = glm::vec4(enabled ? 1.f : 0.f, fieldFreeShading ? 1.f : 0.f,
+                            0.f, 0.f);
     memcpy(m_sunUbo.mapped, &sun0, sizeof(sun0));
     vmaFlushAllocation(m_ctx->allocator(), m_sunUbo.alloc, 0, VK_WHOLE_SIZE);
     m_sunShadowOn = enabled && m_sunPipeline != VK_NULL_HANDLE;

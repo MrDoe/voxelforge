@@ -1253,6 +1253,9 @@ void App::updateMicroBehaviours(float dt)
     // shipped shots stay byte-identical. VF_MICRO_SUNSHADOW=1 enables 4-tap PCF.
     static const bool sunShadow = getenv("VF_MICRO_SUNSHADOW") &&
                                   atoi(getenv("VF_MICRO_SUNSHADOW")) != 0;
+    // Workstream E1: field-free shading for raster-owned meshes, default off.
+    static const bool fieldFree = getenv("VF_MESH_FIELDFREE") &&
+                                  atoi(getenv("VF_MESH_FIELDFREE")) != 0;
     auto nowMs = []() {
         return std::chrono::duration<double, std::milli>(
                    std::chrono::steady_clock::now().time_since_epoch())
@@ -1929,12 +1932,13 @@ void App::updateMicroBehaviours(float dt)
             const glm::mat4 view = glm::lookAt(eye, center, up);
             const glm::mat4 proj = glm::ortho(-radius, radius, -radius, radius,
                                               0.1f, dist + radius + 1.0f);
-            m_microSvoPass.setSunShadow(proj * view, true);
+            m_microSvoPass.setSunShadow(proj * view, true, fieldFree);
         } else {
-            m_microSvoPass.setSunShadow(glm::mat4(1.f), false);
+            m_microSvoPass.setSunShadow(glm::mat4(1.f), false, fieldFree);
         }
     } else {
-        m_microSvoPass.setSunShadow(glm::mat4(1.f), false);
+        // E1 field-free shading is independent of the sun shadow camera.
+        m_microSvoPass.setSunShadow(glm::mat4(1.f), false, fieldFree);
     }
 }
 
