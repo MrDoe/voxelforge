@@ -1,6 +1,8 @@
 # Voxelforge
 
-A real-time **dynamic voxel world** with two interchangeable render backends —
+**Describe a 3D world in chat and watch it appear — no recompiling, no source edits.**
+
+Voxelforge is a real-time **dynamic voxel world** with two interchangeable render backends —
 primary Gaussian-surfel rasterization and a chunked sparse-voxel octree (SVO)
 sphere tracer kept as the pixel reference — where a local AI can add, remove
 and shape voxel objects at runtime through chat or MCP tool calls, **without
@@ -11,9 +13,17 @@ tower, pier, boat and props, anything the AI builds — lives in plain `.vxw`
 voxel-record files. The renderer bakes those records into GPU octrees and surfels on the fly
 and hot-reloads them while running.
 
+![The Voxelforge editor: a photo-textured thatched cottage sculpted live in the running world](docs/images/barn1.png)
+
+*The editor in action — a detailed cottage, its own hearth glow, and the docked
+Edit / World / Render / Textures / Mesh / AI sidebar. Everything on screen
+comes from `.vxw` records; nothing is baked into the binary.*
+
+### Two backends, one world
+
 | Gaussian surfels (`--mode splat`, default) | SVO raymarcher (`--mode svo`, reference) |
 |---|---|
-| ![Gaussian-surfel rendering of the riverside cabin](docs/images/spo.png) | ![SVO voxel rendering of the same cabin](docs/images/voxel.png) |
+| ![LighthouseIsle rendered with Gaussian surfels](tests/screenshots/isle_wide.png) | ![The same view rendered with the SVO reference](tests/screenshots/isle_wide_svo.png) |
 
 *Same world, same camera — only the geometry backend differs; `F` toggles it
 live. See the full [renderer comparison](docs/rendering-comparison.md) for
@@ -23,9 +33,9 @@ side-by-side views, pixel-level zooms and measured timings.*
 
 The renderer is time-of-day aware: the sun's elevation/azimuth drive day, dusk
 and night, with a blue moon, authored + emissive-material-derived light
-sources (up to a 256-light budget, 8 shaded per pixel) and an irradiance
-volume for indirect bounce. Enclosed spaces (caves/rooms) keep their own
-darkness via sky-visibility occlusion. Drag the sun in the **Render** section
+sources (256-light UBO, 192 active by default, 4 nearest lights shaded per
+pixel) and an irradiance volume for indirect bounce. Enclosed spaces
+(caves/rooms) keep their own darkness via sky-visibility occlusion. Drag the sun in the **Render** section
 of the sidebar, or pass `--sun ELEV AZIM`.
 
 | Day | Night (moon + authored/derived lights) |
@@ -36,6 +46,16 @@ of the sidebar, or pass `--sun ELEV AZIM`.
 light sources and lift the interior:*
 
 ![Cabin at night, lit by emissive materials](docs/images/house_night.png)
+
+## Gallery
+
+| Night lighting, edited live | Sculpting after dark |
+|---|---|
+| ![An authored light washing a night scene, adjusted from the Render panel](docs/images/light1.png) | ![Sculpting a burning roof at dusk with the voxel brush](docs/images/light2.png) |
+
+| Rustic cottage, alternate view | LighthouseIsle |
+|---|---|
+| ![The thatched cottage from another angle](docs/images/barn2.png) | ![The tropical LighthouseIsle scenery](docs/images/isle_day.png) |
 
 ## Features
 
@@ -57,7 +77,7 @@ light sources and lift the interior:*
   per-column landscape records, objects from connected components flood-filled
   to solid volumes with a signed distance transform. No analytic scene code in
   the runtime or the shader.
-- **Physically-flavoured shading**: ACES tonemapping, PBR-style specular,
+- **Physically-flavoured shading**: AgX filmic tonemapping, PBR-style specular,
   soft shadows from the smooth terrain heightfield + a coarse object-only SDF
   volume (so AI-placed objects cast correct shadows), bent-normal AO,
   Preetham-style sky, altitude fog, animated water with refraction/foam and
@@ -73,7 +93,7 @@ light sources and lift the interior:*
   blue moon; authored lights plus lights derived from emissive materials
   (palette 9-15 and `"emissive"` texture bindings), an irradiance volume
   for indirect bounce, and enclosed-space sky occlusion so caves stay dark.
-  Up to a 256-light budget, 8 shaded per pixel.
+  256-light UBO (192 active by default), 4 nearest lights shaded per pixel (8 max).
 - **Micro-voxel objects**: high-detail assets (e.g. a 5 mm alpaca) get
   their own fine lattice + SVO overlay pass and composite over the world
   distance-wise; they cast/receive shadows via coarse representations.
@@ -102,7 +122,9 @@ light sources and lift the interior:*
 
 All libraries (spdlog, GLFW, glm, VMA, doctest, ImGui) are fetched automatically.
 
-## Build & first run
+## Quick start
+
+Four commands from a fresh clone to a running world:
 
 ```sh
 cmake -S . -B build -G Ninja
@@ -201,12 +223,15 @@ Edits are visible to a running instance within ~0.5 s — no repack, no rebuild.
 --selftest              headless acceptance check (sky probe + coverage)
 --smoke N               run N frames headless, report timings
 --shot out.ppm          render one frame and exit
---cam X Y Z TX TY TZ    camera placement
+--shotlist FILE         render many cameras in one load (PATH X Y Z TX TY TZ per line)
+--cam X Y Z TX TY TZ    camera placement (also accepts one comma-separated token)
 --sun ELEV AZIM         sun direction (degrees); elevation drives day/dusk/night
 --animtime S            deterministic water/grass animation clock
+--tonemap LOOK          AgX look: 0 default, 1 golden, 2 punchy (default 2)
 --probe X Y Z           print field distance/material at a point, exit
+--probe-surfel X Y Z    list the surfels making up a lattice cell
 --scenery NAME          select a scenery for this launch (no pointer write)
---mode splat|svo        render backend (default splat)
+--mode splat|svo|3dgs   render backend (default splat)
 --width/--height        offscreen resolution for headless modes
 --llm-url/--llm-model   chat backend override
 ```
