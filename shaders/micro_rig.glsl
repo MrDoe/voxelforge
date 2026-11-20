@@ -93,6 +93,13 @@ layout(std140, set = 0, binding = 7) readonly uniform WorldTable {
 layout(set = 0, binding = 8, rg32f) uniform readonly highp image2D uHeight;
 layout(set = 0, binding = 9, r8_snorm) uniform readonly highp image3D uObjVol;
 
+// Workstream B: the per-frame sun camera's world->sun-clip matrix. x of params
+// is the enable flag (0 = field-march path, byte-identical gates).
+layout(std140, set = 0, binding = 28) uniform SunShadow {
+    mat4 uSunViewProj;
+    vec4 uSunParams;
+} sun;
+
 layout(push_constant) uniform PC {
     vec4 camPos;
     vec4 camRight;

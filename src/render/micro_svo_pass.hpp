@@ -100,6 +100,9 @@ public:
     void setTexAtlas(VkImageView view, VkSampler sampler, VkBuffer tableUbo);
     void setIrrVolView(VkImageView view);
     void setLights(const vf::voxel::LightUBO& lights);
+    // Per-frame sun-space shadow camera (world -> sun clip) + enable. Off keeps
+    // the field-march verdict byte-identical.
+    void setSunShadow(const glm::mat4& viewProj, bool enabled);
 
     // Record the overlay dispatch. Must run AFTER the main backend has written
     // its G-buffer for this frame: gpos is the depth reference the pass reads.
@@ -126,6 +129,7 @@ private:
     void bindMicroBuffers();
     bool ensureMeshDepth(uint32_t slot, uint32_t w, uint32_t h);
     bool ensureMeshScene(uint32_t w, uint32_t h);
+    bool ensureSunDepth();
 
     const Context* m_ctx = nullptr;
     VkPipelineLayout m_layout = VK_NULL_HANDLE;
@@ -140,6 +144,21 @@ private:
     // EQUAL against it, which is what leaves exactly one surviving writer per
     // pixel (see the comment at its creation).
     VkPipeline m_meshDepthPipeline = VK_NULL_HANDLE;
+
+    // Workstream B: per-frame sun-space shadow map. The posed meshes are
+    // rasterized from the sun into m_sunDepthRT (a COLOR attachment), then
+    // COPIED into m_sunDepth (a STORAGE image bound at binding 29). Two images
+    // are required: writing an image as a colour attachment while it is also
+    // bound as a storage image in the same pass is a hazard that silently drops
+    // the writes - the cause of the first attempt's "clear value only" map.
+    VkPipeline m_sunPipeline = VK_NULL_HANDLE;
+    Image3D m_sunDepthRT {};      // R32F colour attachment (render target)
+    Image3D m_sunDepthAttach {};  // D32 depth for nearest-wins
+    Image3D m_sunDepth {};        // R32F storage (binding 29, shader-read)
+    VkExtent2D m_sunDepthExtent { 0, 0 };
+    static constexpr uint32_t kSunDepthRes = 1024;
+    Buffer m_sunUbo {};           // SunShadow UBO (viewProj + params), binding 28
+    bool m_sunShadowOn = false;
 
     // The micro worlds' own pools. These are NOT the world's SVO buffers.
     Ssbo m_grid, m_childBase, m_payload, m_handles, m_bricks, m_chunkInfo;

@@ -210,6 +210,8 @@ set(VF_SHADER_SRCS ${CMAKE_CURRENT_SOURCE_DIR}/shaders/svo_raymarch.comp
     ${CMAKE_CURRENT_SOURCE_DIR}/shaders/micro_overlay.comp
     ${CMAKE_CURRENT_SOURCE_DIR}/shaders/micro_mesh.vert
     ${CMAKE_CURRENT_SOURCE_DIR}/shaders/micro_mesh.frag
+    ${CMAKE_CURRENT_SOURCE_DIR}/shaders/micro_sun.vert
+    ${CMAKE_CURRENT_SOURCE_DIR}/shaders/micro_sun.frag
     ${CMAKE_CURRENT_SOURCE_DIR}/shaders/fur.vert
     ${CMAKE_CURRENT_SOURCE_DIR}/shaders/fur.frag
     ${CMAKE_CURRENT_SOURCE_DIR}/shaders/fur_composite.comp

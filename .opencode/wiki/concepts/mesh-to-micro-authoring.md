@@ -95,3 +95,21 @@ world with `behaviour.toWorld`. Traced worlds keep the field march. The AABB
 broad-phase uses the world ray inflated by one bone reach for mesh worlds.
 Verified with `VF_TEST_MICRO_PICK=1`: 3/3 selectable, and the alpaca hit distance
 moves with heading (6.42 → 6.39 → 6.28 m at 0/45/90 degrees).
+
+## Per-frame sun-space shadow (B, 2026-11-20)
+
+Raster-owned meshes get a per-frame sun-space shadow map, default-off
+(`VF_MICRO_SUNSHADOW=1` to enable; gates stay byte-identical). The posed meshes
+are rasterized from the sun into an orthographic R32F **render target**, then
+COPIED into a separate R32F **storage image** (binding 29) that the shading
+stages read with 4-tap PCF. Two images are essential: writing an image as a
+colour attachment while it is simultaneously bound as a storage image in the
+same pass is a hazard that silently drops the geometry writes — the exact cause
+of the first attempt's "clear value only" map (recorded in quirk bd3f44bc).
+`micro_shade.glsl:shadeMicroLit` uses `sunShadowPCF` for mesh worlds and keeps
+the field march for traced worlds; both retain the coarse world shadow. The sun
+ortho camera is rebuilt each frame from m_sunDir and the posed micro bounds via
+glm::lookAt/glm::ortho (hand-rolling the matrix produced a transpose that put
+every receiver at recv>=1). Verified: map populated (forced-marker test), PCF
+reproduces the field-march verdict at grazing sun (0 px parity), deterministic
+(0 px between two ON renders), gate green with a new fur_check pin.

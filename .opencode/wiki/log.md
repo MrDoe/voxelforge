@@ -7536,3 +7536,14 @@ plus a new WorldLayer.meshMat manifest key (parsed AND written). Verified by
 deleting isle_compass.vxw: loads raster-owned from the STL, 0 fallbacks.
 Workstream B (sun-space shadow) remains reverted (see quirk bd3f44bc); C (fur
 from mesh), E1 (field-free shading), F (delete tracer machinery) remain.
+
+## [2026-11-20] ingest | Workstream B: per-frame sun-space shadow map
+
+feature/mesh-actor: raster-owned micro meshes get a per-frame sun-space shadow
+map (default-off VF_MICRO_SUNSHADOW). Posed meshes rasterized from the sun into
+an R32F colour RT, copied to a separate storage image (binding 29) for 4-tap
+PCF. Two images fix the write/read hazard that broke the first attempt.
+shadeMicroLit uses PCF for mesh worlds, field march for traced. Sun ortho camera
+via glm::lookAt/ortho. Verified: map populated, PCF matches field verdict at
+grazing sun (0 px), deterministic (0 px two ON renders), fur_check pin added.
+Remaining: C (fur from mesh), E1 (field-free shading), F (delete tracer).

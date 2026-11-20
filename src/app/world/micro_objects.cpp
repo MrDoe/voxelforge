@@ -15,6 +15,9 @@
 #include "app/app.hpp"
 
 #include "voxel/micro_behaviour.hpp"
+#include <glm/glm.hpp>
+#include <glm/ext/matrix_clip_space.hpp>
+#include <glm/ext/matrix_transform.hpp>
 #include "voxel/micro_mesh.hpp"
 
 #include <algorithm>
@@ -1178,6 +1181,10 @@ void App::updateMicroBehaviours(float dt)
     static const bool noFurAnim = getenv("VF_FUR_NOANIM") != nullptr;
     static const bool furStat = getenv("VF_TEST_FUR_STAT") != nullptr;
     static const bool traceRig = getenv("VF_TRACE_RIG") != nullptr;
+    // Workstream B: per-frame sun-space shadow map, DEFAULT OFF so gates and
+    // shipped shots stay byte-identical. VF_MICRO_SUNSHADOW=1 enables 4-tap PCF.
+    static const bool sunShadow = getenv("VF_MICRO_SUNSHADOW") &&
+                                  atoi(getenv("VF_MICRO_SUNSHADOW")) != 0;
     auto nowMs = []() {
         return std::chrono::duration<double, std::milli>(
                    std::chrono::steady_clock::now().time_since_epoch())
@@ -1829,6 +1836,37 @@ void App::updateMicroBehaviours(float dt)
                              double(tip.x), double(tip.y), double(tip.z));
             }
         }
+    }
+
+    // ---- Workstream B: per-frame sun-space shadow camera -----------------
+    // An orthographic camera covering the union of the posed micro bounds,
+    // looking along -m_sunDir. glm's canonical lookAt/ortho avoid the transposed
+    // hand-rolled matrix that broke the first attempt. Disabled -> identity +
+    // enabled=0 so the field-march verdict is byte-identical.
+    if (sunShadow) {
+        glm::vec3 lo(1e30f), hi(-1e30f);
+        for (const auto& o : m_microOccluders) {
+            lo = glm::min(lo, o.aabbMin);
+            hi = glm::max(hi, o.aabbMax);
+        }
+        if (lo.x < hi.x) {
+            const glm::vec3 center = 0.5f * (lo + hi);
+            const float radius = 0.5f * glm::length(hi - lo) + 0.5f;
+            const glm::vec3 fwd = -glm::normalize(glm::vec3(m_sunDir));
+            glm::vec3 up(0.f, 1.f, 0.f);
+            if (std::fabs(glm::dot(fwd, up)) > 0.95f)
+                up = glm::vec3(0.f, 0.f, 1.f);
+            const float dist = radius * 2.0f + 1.0f;
+            const glm::vec3 eye = center - fwd * dist;
+            const glm::mat4 view = glm::lookAt(eye, center, up);
+            const glm::mat4 proj = glm::ortho(-radius, radius, -radius, radius,
+                                              0.1f, dist + radius + 1.0f);
+            m_microSvoPass.setSunShadow(proj * view, true);
+        } else {
+            m_microSvoPass.setSunShadow(glm::mat4(1.f), false);
+        }
+    } else {
+        m_microSvoPass.setSunShadow(glm::mat4(1.f), false);
     }
 }
 
