@@ -7523,3 +7523,16 @@ bar). Both failures were pre-existing at clean master HEAD, not mesh-actor
 regressions. Re-running `test-micro` to confirm.
   CONFIRMED: test-micro re-run 100% passed (micro_check 310s, fur_check 285s).
   Both failures resolved; no remaining gate failures in this worktree.
+
+## [2026-11-20] ingest | Workstreams D + E2 in feature/mesh-actor
+
+D: pick on the POSED mesh (App::pickMicroObjects): raster-owned micro worlds are
+ray-triangle intersected against the skin+behaviour-posed surface instead of the
+rest field; traced worlds keep the field march. VF_TEST_MICRO_PICK 3/3, hit
+distance tracks heading 0/45/90 (6.42/6.39/6.28 m).
+E2: runtime mesh-only layers - a role=micro entry with meshSource but no .vxw
+now synthesizes a transient field from the mesh at load (synthFieldFromMesh),
+plus a new WorldLayer.meshMat manifest key (parsed AND written). Verified by
+deleting isle_compass.vxw: loads raster-owned from the STL, 0 fallbacks.
+Workstream B (sun-space shadow) remains reverted (see quirk bd3f44bc); C (fur
+from mesh), E1 (field-free shading), F (delete tracer machinery) remain.

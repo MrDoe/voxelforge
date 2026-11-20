@@ -507,6 +507,11 @@ bool loadManifest(const std::string& path, std::vector<WorldLayer>& out)
                         j.str(layer.meshSource);
                     else if (k == "meshUp")
                         j.str(layer.meshUp);
+                    else if (k == "meshMat") {
+                        float mv = 0.f;
+                        if (j.num(mv))
+                            layer.meshMat = int(mv);
+                    }
                     else if (k == "pos") {
                         if (!j.eat('['))
                             return false;
@@ -1321,6 +1326,8 @@ bool writeManifest(const std::string& path, const std::vector<WorldLayer>& layer
             std::fprintf(f, ", \"meshSource\": \"%s\"", l.meshSource.c_str());
         if (!l.meshUp.empty())
             std::fprintf(f, ", \"meshUp\": \"%s\"", l.meshUp.c_str());
+        if (l.meshMat >= 0)
+            std::fprintf(f, ", \"meshMat\": %d", l.meshMat);
         std::fprintf(f, " }%s\n", i + 1 < layers.size() ? "," : "");
     }
     std::fprintf(f, "  ]");

@@ -14,6 +14,7 @@
 // layered_world.cpp).
 #include "app/app.hpp"
 
+#include "voxel/micro_behaviour.hpp"
 #include "voxel/micro_mesh.hpp"
 
 #include <algorithm>
@@ -30,6 +31,12 @@ namespace vf {
 namespace app {
 
 namespace {
+
+// Workstream E2 (defined below, forward-declared for loadMicroObjects):
+// synthesize a transient VXW field from a mesh for a mesh-only micro layer.
+bool synthFieldFromMesh(const std::string& meshPath, vf::voxel::UpAxis up,
+                        int matId, float voxel,
+                        vf::voxel::WorldFileData& out, std::string* err);
 
 // The rig's cache path: the layer's file with its extension replaced
 // ("micro/alpaca.vxw" -> "micro/alpaca.rig").
@@ -118,8 +125,31 @@ void App::loadMicroObjects()
         const std::string path = dir + "/" + l.file;
         vf::voxel::WorldFileData data;
         if (!vf::voxel::worldfile::read(path, data)) {
-            spdlog::error("micro: cannot read layer '{}'", l.file);
-            continue;
+            // Workstream E2: a mesh-only layer has meshSource but NO .vxw.
+            // Synthesize the transient field from the mesh rather than dropping
+            // the layer - this is the "use meshes directly" path.
+            if (!l.meshSource.empty()) {
+                std::string meshPath = l.meshSource;
+                if (!meshPath.empty() && meshPath[0] != '/')
+                    meshPath = vf::voxel::scenery::resolveShared(dir + "/", meshPath);
+                const int matId = l.meshMat >= 0 ? l.meshMat : 20;
+                const float vox = 0.005f;
+                std::string synErr;
+                if (synthFieldFromMesh(meshPath,
+                        (l.meshUp == "z" || l.meshUp == "Z")
+                            ? vf::voxel::UpAxis::Z : vf::voxel::UpAxis::Y,
+                        matId, vox, data, &synErr)) {
+                    spdlog::info("micro: '{}' mesh-only (synthesized {} field "
+                                 "cells from {} at mat {})", l.file,
+                                 data.voxels.size(), meshPath, matId);
+                } else {
+                    spdlog::error("micro: '{}': {}", l.file, synErr);
+                    continue;
+                }
+            } else {
+                spdlog::error("micro: cannot read layer '{}'", l.file);
+                continue;
+            }
         }
         // A micro layer MUST be finer than the world lattice. If it is not, it
         // is almost certainly a world object mis-tagged, and baking it here
@@ -620,6 +650,134 @@ void App::loadMicroObjects()
     }
 }
 
+namespace {
+// Workstream E2: build the transient VXW data a MESH-ONLY micro layer needs.
+// A layer with meshSource but no .vxw still needs a dense field for the SVO
+// shading/pick/shadow source, rig derivation and per-vertex appearance. We
+// voxelize the mesh on its own fine lattice with a uniform material and hand
+// back the records + meta that buildMicroField already consumes. The mesh
+// remains the raster ground truth; this field is never a second silhouette.
+bool synthFieldFromMesh(const std::string& meshPath, vf::voxel::UpAxis up,
+                        int matId, float voxel,
+                        vf::voxel::WorldFileData& out, std::string* err)
+{
+    std::vector<vf::voxel::MeshTri> tris;
+    if (!vf::voxel::readMeshFile(meshPath, tris, matId, *err))
+        return false;
+    if (tris.empty()) {
+        *err = "mesh has no triangles";
+        return false;
+    }
+    if (up == vf::voxel::UpAxis::Z)
+        for (auto& t : tris)
+            for (int k = 0; k < 3; ++k)
+                t.v[k] = vf::voxel::upAxisToY(t.v[k], up);
+
+    glm::vec3 lo(1e30f), hi(-1e30f);
+    for (const auto& t : tris)
+        for (int k = 0; k < 3; ++k)
+            for (int a = 0; a < 3; ++a) {
+                lo[a] = std::min(lo[a], t.v[k][a]);
+                hi[a] = std::max(hi[a], t.v[k][a]);
+            }
+    const int M = vf::voxel::kMicroMarginCells;
+    const glm::ivec3 dim(
+        int(std::ceil((hi.x - lo.x) / voxel)) + 2 * M,
+        int(std::ceil((hi.y - lo.y) / voxel)) + 2 * M,
+        int(std::ceil((hi.z - lo.z) / voxel)) + 2 * M);
+    const glm::vec3 origin = lo - glm::vec3(float(M) * voxel);
+
+    vf::voxel::MicroMeshGrid grid;
+    if (!vf::voxel::voxelizeMicroMesh(tris, dim, voxel, origin, grid, err))
+        return false;
+    // Seed a solid cell at every mesh vertex so open/multi-component meshes
+    // do not leave per-vertex appearance gaps (the vf_mesh2micro contract).
+    auto cellOf = [&](float p, int axis) {
+        return int(glm::floor((p - origin[axis]) / voxel));
+    };
+    for (const auto& t : tris)
+        for (int k = 0; k < 3; ++k) {
+            const int x = std::clamp(cellOf(t.v[k].x, 0), 0, dim.x - 1);
+            const int y = std::clamp(cellOf(t.v[k].y, 1), 0, dim.y - 1);
+            const int z = std::clamp(cellOf(t.v[k].z, 2), 0, dim.z - 1);
+            grid.solid[size_t(grid.idx(x, y, z))] = 1;
+        }
+
+    const glm::vec3& col = vf::voxel::kPalette[std::min<int>(
+        matId, int(vf::voxel::kPaletteN) - 1)];
+    const glm::vec2 rr = vf::voxel::kMaterialReflection[std::min<int>(
+        matId, int(vf::voxel::kPaletteN) - 1)];
+    out.voxels.clear();
+    for (int z = 0; z < dim.z; ++z)
+        for (int y = 0; y < dim.y; ++y)
+            for (int x = 0; x < dim.x; ++x) {
+                if (!grid.solid[size_t(grid.idx(x, y, z))])
+                    continue;
+                out.voxels.push_back(vf::voxel::makeVoxelRecord(
+                    x, y, z, uint8_t(matId), int(col.r * 255.f),
+                    int(col.g * 255.f), int(col.b * 255.f), int(rr.x), int(rr.y)));
+            }
+    out.meta.voxelSize = voxel;
+    out.meta.worldSize = float(std::max(dim.x, std::max(dim.y, dim.z))) * voxel;
+    out.meta.waterLevel = vf::voxel::WATER_LEVEL;
+    out.meta.gridN = uint32_t(std::max(dim.x, std::max(dim.y, dim.z)));
+    out.meta.brickN = 8;
+    return true;
+}
+
+// Workstream D: pose a rest vertex the way micro_mesh.vert does and return it
+// in WORLD space. The shader chain is microRebone (bone Rot*p + t, chained)
+// then microShadeFromBaked (behaviour offset/rotation about the pivot). The
+// bones uploaded to the behaviour are in the ANCHORED frame (rig shifted by
+// the layer offset at load), so the rest vertex must be shifted by
+// worldOffset first. Mesh with no rig / no behaviour poses to the rest shape.
+glm::vec3 posedVertexWorld(const glm::vec3& rest, glm::vec3 worldOffset,
+                           const vf::voxel::MicroBehaviour* b)
+{
+    const glm::vec3 anchored = rest + worldOffset;
+    glm::vec3 baked = anchored;
+    if (b && !b->boneRot.empty() && b->boneRot.size() == b->boneXform.size()) {
+        // Linear-blend skinning with the ONE kernel the shader uses. A mesh
+        // with no skeleton falls back to its rest position.
+        const vf::voxel::BoneInfluences inf = b->rig.boneInfluences(anchored);
+        if (inf.count > 0) {
+            baked = glm::vec3(0.f);
+            for (int k = 0; k < inf.count; ++k) {
+                const int bone = inf.bone[k];
+                if (bone < 0 || size_t(bone) >= b->boneRot.size())
+                    continue;
+                baked += (b->boneRot[size_t(bone)] * anchored +
+                          b->boneXform[size_t(bone)]) * inf.weight[k];
+            }
+        }
+    }
+    return b ? b->toWorld(baked) : baked;
+}
+
+// Möller-Trumbore ray/triangle. Returns the distance t (>0) or -1. Two-sided:
+// a thin card / inward-wound face must still be pickable.
+float rayTriangleT(glm::vec3 ro, glm::vec3 rd, glm::vec3 a, glm::vec3 b,
+                   glm::vec3 c)
+{
+    const glm::vec3 e1 = b - a, e2 = c - a;
+    const glm::vec3 p = glm::cross(rd, e2);
+    const float det = glm::dot(e1, p);
+    if (std::fabs(det) < 1e-9f)
+        return -1.f;
+    const float inv = 1.f / det;
+    const glm::vec3 tv = ro - a;
+    const float u = glm::dot(tv, p) * inv;
+    if (u < 0.f || u > 1.f)
+        return -1.f;
+    const glm::vec3 q = glm::cross(tv, e1);
+    const float v = glm::dot(rd, q) * inv;
+    if (v < 0.f || u + v > 1.f)
+        return -1.f;
+    const float t = glm::dot(e2, q) * inv;
+    return t > 1e-4f ? t : -1.f;
+}
+} // namespace
+
 App::MicroObjectPick
 App::pickMicroObjects(const std::vector<vf::voxel::MicroOccluder>& occ, glm::vec3 ro,
                       glm::vec3 rd) const
@@ -639,17 +797,70 @@ App::pickMicroObjects(const std::vector<vf::voxel::MicroOccluder>& occ, glm::vec
             lrd = m_microBehaviours[i].dirToLocal(rd);
         }
         // The AABB test first: a ray that misses the box never touches the
-        // field, so the cost is bounded by the objects near the pointer.
+        // geometry, so the cost is bounded by the objects near the pointer.
         // The box is the object's BAKED box, so the test is done on the
-        // transformed ray.
-        const glm::vec3 inv = glm::vec3(1.0f) / lrd;
-        const glm::vec3 t0 = (o.aabbMin - lro) * inv;
-        const glm::vec3 t1 = (o.aabbMax - lro) * inv;
+        // transformed ray. A POSED mesh can swing a limb outside that box, so
+        // inflate by one bone reach - conservative, still far smaller than
+        // testing every triangle unconditionally.
+        const bool isMeshWorld =
+            i < m_microMeshes.size() && m_microMeshes[i].active &&
+            !m_microMeshes[i].tris.empty();
+        // A POSED mesh can swing a limb outside its rest box, so inflate it
+        // by one bone reach. Test the WORLD ray against the world box (the
+        // posed vertices are built in world space below); traced worlds keep
+        // the behaviour-inverse ray and their exact rest box.
+        const float aabbPad = isMeshWorld ? 0.35f : 0.0f;
+        const glm::vec3 boxLo = o.aabbMin - aabbPad;
+        const glm::vec3 boxHi = o.aabbMax + aabbPad;
+        const glm::vec3 rayO = isMeshWorld ? ro : lro;
+        const glm::vec3 rayD = isMeshWorld ? rd : lrd;
+        const glm::vec3 inv = glm::vec3(1.0f) / rayD;
+        const glm::vec3 t0 = (boxLo - rayO) * inv;
+        const glm::vec3 t1 = (boxHi - rayO) * inv;
         const glm::vec3 tlo = glm::min(t0, t1), thi = glm::max(t0, t1);
         const float tEnter = glm::max(glm::max(tlo.x, tlo.y), tlo.z);
         const float tExit = glm::min(glm::min(thi.x, thi.y), thi.z);
         if (tExit <= glm::max(tEnter, 0.f))
             continue;
+
+        const vf::voxel::MicroBehaviour* behaviour =
+            (i < m_microBehaviours.size() && m_microBehaviours[i].active)
+                ? &m_microBehaviours[i]
+                : nullptr;
+        float meshT = -1.f;
+        glm::vec3 meshN(0.f);
+        if (isMeshWorld) {
+            // Workstream D: pick the POSED surface the GPU draws, not the
+            // rest field. Walk every triangle posed through the same skin +
+            // behaviour chain the vertex shader uses; the AABB already
+            // tested above bounds the cost. The ray is in world space here.
+            const auto& md = m_microMeshes[i];
+            for (const auto& tri : md.tris) {
+                const glm::vec3 a = posedVertexWorld(tri.v[0], o.worldOffset, behaviour);
+                const glm::vec3 b = posedVertexWorld(tri.v[1], o.worldOffset, behaviour);
+                const glm::vec3 c = posedVertexWorld(tri.v[2], o.worldOffset, behaviour);
+                const float t = rayTriangleT(ro, rd, a, b, c);
+                if (t > 0.f && (meshT < 0.f || t < meshT)) {
+                    meshT = t;
+                    meshN = glm::normalize(glm::cross(b - a, c - a));
+                    if (glm::dot(meshN, rd) > 0.f)
+                        meshN = -meshN; // face the camera
+                }
+            }
+        }
+
+        if (isMeshWorld) {
+            if (meshT < 0.f || (best.hit && meshT >= best.dist))
+                continue;
+            best.hit = true;
+            best.dist = meshT;
+            best.pos = ro + rd * meshT;
+            best.normal = meshN;
+            best.cell = glm::ivec3(0); // a mesh hit has no field cell
+            best.file = o.layerFile;
+            continue;
+        }
+
         const vf::voxel::MicroPick p =
             vf::voxel::pickMicroField(*o.field, o.worldOffset, lro, lrd);
         if (!p.hit)
@@ -660,12 +871,8 @@ App::pickMicroObjects(const std::vector<vf::voxel::MicroOccluder>& occ, glm::vec
         best.dist = p.dist;
         // The hit is in the object's own frame; a moving object is at its
         // ANIMATED place in the world.
-        best.pos = (i < m_microBehaviours.size() && m_microBehaviours[i].active)
-                       ? m_microBehaviours[i].toWorld(p.pos)
-                       : p.pos;
-        best.normal = (i < m_microBehaviours.size() && m_microBehaviours[i].active)
-                          ? m_microBehaviours[i].rot * p.normal
-                          : p.normal;
+        best.pos = behaviour ? behaviour->toWorld(p.pos) : p.pos;
+        best.normal = behaviour ? behaviour->rot * p.normal : p.normal;
         best.cell = p.cell;
         best.file = o.layerFile;
     }

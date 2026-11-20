@@ -131,6 +131,11 @@ struct WorldLayer {
     // mesh is the ground truth for deformation (voxelize the deformed mesh
     // each frame instead of animating rigid voxel cells). See
     // .opencode/wiki/concepts/micro-deformation-surface.md.
+    // Material id for a MESH-ONLY micro layer (no .vxw): the uniform material
+    // stamped onto the transient field synthesized from the mesh at load.
+    // -1 = unset (use the default plaster 20). Parsed AND written so an app
+    // run cannot erase it (the meshUp / behaviour trap).
+    int meshMat = -1;
     std::string meshSource;
     // UP AXIS of `meshSource`: "" / "y" = Y-up (the engine's object frame,
     // default), "z" = Z-up (a DCC export). The mesh loader converts a Z-up

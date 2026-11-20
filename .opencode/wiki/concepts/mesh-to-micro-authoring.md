@@ -1,6 +1,6 @@
 ---
-title: Mesh-to-micro authoring (vf_mesh2micro)
-tags: [micro, mesh, authoring, scenery, cc0, raster-owned, tool]
+title: Mesh-to-micro authoring (vf_mesh2micro) + runtime mesh-only layers + posed-mesh pick
+tags: [micro, mesh, authoring, scenery, cc0, raster-owned, tool, mesh-only, pick, posed]
 sourceRefs: [tools/mesh_to_micro.cpp, tools/fetch_micro_meshes.py, scenery/LighthouseIsle/world.json]
 lastReviewed: 2026-11-20
 ---
@@ -69,3 +69,29 @@ MTLs import cleanly (map_Kd-only packs would import monochrome).
 `raster-owned from .../micro/X.stl`. Any non-zero fallback count means the
 scale/side-car contract above broke. A close-up `--shot` at the layer's `pos`
 confirms the prop is visible and not flat grey.
+
+## Runtime mesh-only layers (E2, 2026-11-20)
+
+The tool above still writes a `.vxw`. The RUNTIME also accepts a layer that has
+`meshSource` but **no `.vxw`** — the true "use meshes directly" path. In
+`App::loadMicroObjects`, when `worldfile::read(path)` fails and `l.meshSource`
+is set, `synthFieldFromMesh()` voxelizes the mesh on a fine lattice (uniform
+`meshMat`, default 20) into a transient `WorldFileData`. Everything downstream
+is unchanged: that field feeds the SVO shading/rig/pick source, the mesh is
+still raster-owned from `meshSource`, and the field is never a second silhouette.
+`WorldLayer` gained `meshMat` (parsed AND written by worldfile, so an app run
+cannot erase it). Verified: removed `isle_compass.vxw`, the app logged
+`mesh-only (synthesized 1882 field cells … at mat 20)`, raster-owned from the
+STL with 0 appearance fallbacks, rendered correctly.
+
+## Pick on the posed mesh (D, 2026-11-20)
+
+`pickMicroObjects` used to ray-march the rest field even for raster-owned worlds,
+so a walking/rotated animal was picked where it was baked. Mesh worlds now ray-
+triangle intersect the POSED surface: each rest vertex is shifted by the layer
+offset, skinned with the same LBS kernel the vertex shader uses (`boneRot`/
+`boneXform` from the behaviour, which are in the anchored frame), then mapped to
+world with `behaviour.toWorld`. Traced worlds keep the field march. The AABB
+broad-phase uses the world ray inflated by one bone reach for mesh worlds.
+Verified with `VF_TEST_MICRO_PICK=1`: 3/3 selectable, and the alpaca hit distance
+moves with heading (6.42 → 6.39 → 6.28 m at 0/45/90 degrees).
