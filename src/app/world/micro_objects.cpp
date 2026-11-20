@@ -387,7 +387,12 @@ void App::loadMicroObjects()
         int nBones = 0;
         if (furEnabled && !world.chunkGrid.empty()) {
             const auto t0 = std::chrono::steady_clock::now();
-            furIndex = growFurCards(field, offset, microRigs.back(), nullptr);
+            // Workstream C: grow from the mesh surface when this layer is a
+            // raster-owned mesh; traced layers keep the field-cell roots.
+            const std::vector<vf::voxel::MeshTri>* furTris =
+                (!meshes.empty() && meshes.back().active && !meshes.back().tris.empty())
+                    ? &meshes.back().tris : nullptr;
+            furIndex = growFurCards(field, offset, microRigs.back(), nullptr, furTris);
             furMs = std::chrono::duration<double, std::milli>(
                         std::chrono::steady_clock::now() - t0)
                         .count();
@@ -941,7 +946,8 @@ bool App::layerPivotWorld(const std::string& file, glm::vec3& pivot) const
 // sidebar's sliders changed) share it.
 int App::growFurCards(const vf::voxel::MicroField& field, glm::vec3 worldOffset,
                       const vf::voxel::MicroRig& rig,
-                      std::function<int(glm::vec3)> boneFn)
+                      std::function<int(glm::vec3)> boneFn,
+                      const std::vector<vf::voxel::MeshTri>* meshTris)
 {
     if (!m_furEnabled)
         return -1;
@@ -957,7 +963,64 @@ int App::growFurCards(const vf::voxel::MicroField& field, glm::vec3 worldOffset,
     fp.materials = m_furMaterials;
     vf::voxel::FurObject fo;
     std::string ferr;
-    if (!vf::voxel::buildFurCards(field, fp, fo, &ferr, &rig, worldOffset, boneFn))
+    std::function<void(std::vector<vf::voxel::FurRoot>&)> rootFn;
+    if (meshTris && !meshTris->empty()) {
+        // Workstream C: grow roots from the MESH surface, area-weighted. A card
+        // per ~target spacing on each triangle; the field is still sampled for
+        // material / AO / shadow, so a mesh root that falls in a fur material's
+        // cell grows a coat exactly where the fleece is authored.
+        rootFn = [&](std::vector<vf::voxel::FurRoot>& roots) {
+            const float spacing = std::max(field.voxel, 0.006f);
+            for (const auto& t : *meshTris) {
+                const glm::vec3 e1 = t.v[1] - t.v[0], e2 = t.v[2] - t.v[0];
+                const float area = 0.5f * glm::length(glm::cross(e1, e2));
+                if (!(area > 0.f))
+                    continue;
+                const int count = std::max(1, int(area / (spacing * spacing)));
+                glm::vec3 n = glm::normalize(glm::cross(e1, e2));
+                for (int k = 0; k < count; ++k) {
+                    // Stratified barycentric sample with a low-discrepancy
+                    // sequence so the coat is even and reproducible.
+                    const float u = 0.5f * (1.f - std::sqrt(float(k + 0.5f) / count));
+                    const float vv = float(k + 0.5f) / count;
+                    const glm::vec3 p = t.v[0] + e1 * u + e2 * (u * vv + (1.f - u) * u);
+                    // Nearest solid cell within 2 voxels (the same search the
+                    // per-vertex appearance uses; nearestRestSolid is private).
+                    const glm::ivec3 c0 = glm::ivec3(glm::floor(
+                        (p - field.origin) / field.voxel));
+                    size_t ci = SIZE_MAX;
+                    for (int r = 0; r <= 2 && ci == SIZE_MAX; ++r)
+                        for (int dz = -r; dz <= r && ci == SIZE_MAX; ++dz)
+                            for (int dy = -r; dy <= r && ci == SIZE_MAX; ++dy)
+                                for (int dx = -r; dx <= r && ci == SIZE_MAX; ++dx) {
+                                    const glm::ivec3 q = c0 + glm::ivec3(dx, dy, dz);
+                                    if (!field.inside(q.x, q.y, q.z)) continue;
+                                    const size_t k = field.idx(q.x, q.y, q.z);
+                                    if (field.solid[k]) ci = k;
+                                }
+                    if (ci == SIZE_MAX)
+                        continue;
+                    const uint8_t mat = field.mat[ci];
+                    bool isFur = false;
+                    for (uint8_t fm : fp.materials) if (fm == mat) { isFur = true; break; }
+                    if (!isFur)
+                        continue;
+                    const glm::vec3 up = std::fabs(n.y) < 0.99f
+                        ? glm::vec3(0.f, 1.f, 0.f) : glm::vec3(1.f, 0.f, 0.f);
+                    vf::voxel::FurRoot r;
+                    r.p = p;
+                    r.n = n;
+                    r.t1 = glm::normalize(glm::cross(n, up));
+                    r.t2 = glm::cross(n, r.t1);
+                    r.col = glm::vec3(field.r[ci], field.g[ci], field.b[ci]) / 255.f;
+                    r.mat = mat;
+                    roots.push_back(r);
+                }
+            }
+        };
+    }
+    if (!vf::voxel::buildFurCards(field, fp, fo, &ferr, &rig, worldOffset, boneFn,
+                                  rootFn))
         return -1;
     fo.worldMin = field.origin + worldOffset;
     m_furObjects.push_back(std::move(fo));
@@ -998,11 +1061,16 @@ void App::rebuildFurCards()
             const int fi = m_furSourceField[i];
             if (fi < 0 || fi >= int(m_microFields.size()))
                 continue;
+            const std::vector<vf::voxel::MeshTri>* furTris =
+                (fi < int(m_microMeshes.size()) && m_microMeshes[size_t(fi)].active &&
+                 !m_microMeshes[size_t(fi)].tris.empty())
+                    ? &m_microMeshes[size_t(fi)].tris : nullptr;
             const int idx = growFurCards(m_microFields[size_t(fi)],
                                          m_microOccluders[size_t(fi)].worldOffset,
                                          (fi >= 0 && fi < int(m_microBehaviours.size()))
                                              ? m_microBehaviours[size_t(fi)].rig
-                                             : vf::voxel::MicroRig{});
+                                             : vf::voxel::MicroRig{},
+                                         nullptr, furTris);
             if (idx >= 0) {
                 m_furObjects[size_t(idx)].preview = prevOffset[size_t(fi)];
                 m_furObjects[size_t(idx)].previewActive = prevOffsetOn[size_t(fi)] != 0;

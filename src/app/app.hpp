@@ -512,7 +512,8 @@ private:
     // Returns the new object's fur index, or -1 when it grows no coat.
     int growFurCards(const vf::voxel::MicroField& field, glm::vec3 worldOffset,
                      const vf::voxel::MicroRig& rig,
-                     std::function<int(glm::vec3)> boneFn = nullptr);
+                     std::function<int(glm::vec3)> boneFn = nullptr,
+                     const std::vector<vf::voxel::MeshTri>* meshTris = nullptr);
     // Sun: m_sunDir is the single source of truth for where the sun is (it
     // rides the per-frame push constant), so every control that moves the sun
     // funnels through setSunAngles and nothing keeps parallel angle floats.

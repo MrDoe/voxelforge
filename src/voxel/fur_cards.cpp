@@ -113,7 +113,8 @@ float bakedSunShadow(const MicroField& f, glm::vec3 root, glm::vec3 n,
 
 bool buildFurCards(const MicroField& field, const FurParams& params, FurObject& out,
                    std::string* err, const MicroRig* rig, glm::vec3 worldOffset,
-                   std::function<int(glm::vec3)> boneFn)
+                   std::function<int(glm::vec3)> boneFn,
+                   std::function<void(std::vector<FurRoot>&)> rootFn)
 {
     (void)rig; (void)worldOffset;
     out = FurObject {};
@@ -142,17 +143,11 @@ bool buildFurCards(const MicroField& field, const FurParams& params, FurObject& 
     const float maxShadowDist = glm::length(glm::vec3(dim)) * vox;
 
     // ---- pass 1: the surface cells, their normals and their roots -------
-    struct Root {
-        glm::vec3 p;
-        glm::vec3 n;
-        glm::vec3 t1;
-        glm::vec3 t2;
-        glm::vec3 col;
-        uint8_t mat = 0;
-    };
-    std::vector<Root> roots;
-    roots.reserve(size_t(dim.x) * size_t(dim.y) / 8);
-
+    std::vector<FurRoot> roots;
+    if (rootFn) {
+        // Workstream C: roots come from the MESH surface (area-weighted).
+        rootFn(roots);
+    } else
     for (int z = 0; z < dim.z; ++z) {
         for (int y = 0; y < dim.y; ++y) {
             for (int x = 0; x < dim.x; ++x) {
@@ -186,7 +181,7 @@ bool buildFurCards(const MicroField& field, const FurParams& params, FurObject& 
                 const float step = glm::clamp(-d, 0.0f, 1.5f * vox);
                 const glm::vec3 up = std::fabs(n.y) < 0.99f ? glm::vec3(0.f, 1.f, 0.f)
                                                              : glm::vec3(1.f, 0.f, 0.f);
-                Root r;
+                FurRoot r;
                 r.p = c + n * step;
                 r.n = n;
                 r.t1 = safeNorm(glm::cross(n, up), glm::vec3(1.f, 0.f, 0.f));
@@ -206,7 +201,7 @@ bool buildFurCards(const MicroField& field, const FurParams& params, FurObject& 
     // ---- pass 2: the cards ------------------------------------------------
     const glm::vec3 down(0.f, -1.f, 0.f);
     for (size_t ri = 0; ri < roots.size(); ++ri) {
-        const Root& r = roots[ri];
+        const FurRoot& r = roots[ri];
         const int x = int(std::floor(r.p.x / vox));
         const int y = int(std::floor(r.p.y / vox));
         const int z = int(std::floor(r.p.z / vox));

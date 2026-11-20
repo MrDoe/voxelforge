@@ -157,9 +157,23 @@ struct FurParams {
 // assignment: it is called with the card root's WORLD position and returns the
 // bone index. This is how the coat binds to a different surface (e.g. the
 // mesh's skin) instead of the derived rig's nearest-segment rule.
+// One fur root: a point on the surface with its local frame and appearance.
+struct FurRoot {
+    glm::vec3 p { 0.f };
+    glm::vec3 n { 0.f, 1.f, 0.f };
+    glm::vec3 t1 { 1.f, 0.f, 0.f };
+    glm::vec3 t2 { 0.f, 0.f, 1.f };
+    glm::vec3 col { 1.f };
+    uint8_t mat = 0;
+};
+
 bool buildFurCards(const MicroField& field, const FurParams& params, FurObject& out,
                    std::string* err, const MicroRig* rig = nullptr,
                    glm::vec3 worldOffset = glm::vec3(0.0f),
-                   std::function<int(glm::vec3)> boneFn = nullptr);
+                   std::function<int(glm::vec3)> boneFn = nullptr,
+                   // Workstream C: when set, generate roots from the MESH surface
+                   // (area-weighted triangle samples) instead of field cells.
+                   // AO / sun-shadow are still baked from `field`.
+                   std::function<void(std::vector<FurRoot>&)> rootFn = nullptr);
 
 }  // namespace vf::voxel

@@ -113,3 +113,14 @@ glm::lookAt/glm::ortho (hand-rolling the matrix produced a transpose that put
 every receiver at recv>=1). Verified: map populated (forced-marker test), PCF
 reproduces the field-march verdict at grazing sun (0 px parity), deterministic
 (0 px between two ON renders), gate green with a new fur_check pin.
+
+## Fur roots from the mesh surface (C, 2026-11-20)
+
+`buildFurCards` gained an optional `rootFn` callback; when set, roots come from
+area-weighted samples on the MESH triangles instead of field surface cells.
+The field is still sampled for material/AO/sun-shadow, so a mesh root only
+grows a coat where the fleece material is authored. `growFurCards` supplies the
+generator from `m_microMeshes[i].tris` for raster-owned layers; traced layers
+keep the field-cell roots. This removes the 1-cell root offset (bald patches)
+the field surface had relative to the mesh. Verified: fur_check all passed,
+107895 cards, coat strands 15.39 vs body 14.95 (readable), coat turns 22 px.
