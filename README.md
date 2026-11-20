@@ -1,59 +1,39 @@
 # Voxelforge
 
-**Describe a 3D world in chat and watch it appear — no recompiling, no source edits.**
+A real-time voxel world you can fly around, sculpt by hand, or have a local
+AI build for you — without touching source code. Everything is data: terrain,
+objects, and anything the AI places live in `.vxw` files that hot-reload while
+the program runs.
 
-Voxelforge is a real-time 3D voxel world you can sculpt with a mouse or ask a
-local AI to build through chat. Every piece of geometry lives in plain `.vxw`
-files and hot-reloads while the app runs. Two render backends — Gaussian
-surfels and an SVO reference — can be switched live with `F`.
+Two renderers ship side by side. The default is a Gaussian-surfel rasterizer
+(smooth, fast, the one you'll actually look at); the other is a chunked SVO
+sphere tracer kept as the pixel reference. Press `F` to flip between them on
+the exact same world.
 
 ![The Voxelforge editor: a photo-textured thatched cottage sculpted live in the running world](docs/images/barn1.png)
 
-*The editor in action — a detailed cottage, its own hearth glow, and the docked
-sidebar. Everything on screen comes from `.vxw` records; nothing is baked into
-the binary.*
+*The editor in action. The docked sidebar on the left is the whole UI — Edit,
+World, Render, Textures, Mesh, AI. Pick a voxel with Ctrl+LMB, ask the chat
+for a crate, watch it appear.*
 
-## See it
+## Screenshots
 
 | Night lighting, edited live | Sculpting after dark |
 |---|---|
 | ![An authored light washing a night scene, adjusted from the Render panel](docs/images/light1.png) | ![Sculpting a burning roof at dusk with the voxel brush](docs/images/light2.png) |
 
-| Rustic cottage | The same cottage as raw voxels |
+| A cottage | The same cottage as raw voxels |
 |---|---|
 | ![The thatched cottage from another angle](docs/images/barn2.png) | ![The cottage rendered by the SVO voxel reference backend](tests/screenshots/barn_svo.png) |
 
-| LighthouseIsle scenery | Two render backends, one world |
+| LighthouseIsle scenery | Surfels vs. voxels |
 |---|---|
 | ![The tropical LighthouseIsle scenery](docs/images/isle_day.png) | ![LighthouseIsle rendered with Gaussian surfels vs. the SVO reference](tests/screenshots/isle_wide.png) |
 
-*Same world, same camera — only the geometry backend differs; `F` toggles it
-live. See the full [renderer comparison](docs/rendering-comparison.md) for
-side-by-side views, pixel-level zooms and measured timings.*
+*Same world, same camera in the last pair — only the geometry backend differs.
+See [renderer comparison](docs/rendering-comparison.md) for zooms and timings.*
 
-## Highlights
-
-- **Two render backends, one world** — Gaussian-surfel rasterization (default)
-  for smooth, fast interactive views, plus a chunked SVO sphere tracer kept as
-  the pixel reference. `F` switches between them.
-- **Live editing** — a voxel brush (Carve / Add / Delete / Paint / Smooth /
-  Rotate / Move) with undo and a persistent overlay. Stamps patch the running
-  world in milliseconds.
-- **AI builds geometry for you** — in-app chat or an MCP server. Ask for “a
-  3×3 wood crate” and it appears, no recompile.
-- **Lighting & night** — sun elevation drives day, dusk and night with a blue
-  moon; authored lights plus lights derived from emissive materials.
-- **Micro-voxel objects** — high-detail assets (e.g. a 5 mm alpaca) get their
-  own fine lattice and composite over the world; derived skeletons animate
-  grazers and a fur-card coat covers them.
-- **Photo textures** — per-material PNG/JPG bindings in a 512² atlas with a
-  GUI swapper.
-- **Multiple sceneries** — self-contained world folders; switch in-session or
-  from the command line.
-
-## Quick start
-
-Four commands from a fresh clone to a running world:
+## Building
 
 ```sh
 cmake -S . -B build -G Ninja
@@ -62,9 +42,9 @@ ninja -C build world    # bake assets — required once
 ./build/voxelforge
 ```
 
-Requires Linux with a Vulkan 1.3 GPU, CMake ≥ 3.24, Ninja, a C++20 compiler,
-`glslangValidator` and Python 3. All libraries are fetched automatically.
-The asset bake is an explicit step — see
+You need Linux with a Vulkan 1.3 GPU, CMake ≥ 3.24, Ninja, a C++20 compiler,
+`glslangValidator` and Python 3. Libraries are fetched by CMake, so there is
+nothing to install by hand. The asset bake is a separate step on purpose — see
 [Getting started](docs/getting-started.md) for requirements, build options and
 the one-shot `start.sh` launcher.
 
@@ -87,18 +67,18 @@ the one-shot `start.sh` launcher.
 | `Ctrl+1..6` | jump to a sidebar section |
 | window close button | quit (`Esc` is reserved and does not exit) |
 
-Edit modes (Carve / Add / Delete / Paint / Smooth / Rotate / Move) are chosen
-in the sidebar's Edit section — the letter keys are movement keys. Full control
-reference, including the bounding-box and rotate/move gizmos:
+Edit modes (Carve, Add, Delete, Paint, Smooth, Rotate, Move) are chosen in the
+sidebar's Edit section — the letter keys are movement keys, not shortcuts.
+Full control reference, including the rotate/move gizmos:
 [Getting started → Controls](docs/getting-started.md).
 
-## AI editing
+## Editing with AI
 
-The **AI** section of the sidebar talks to any Ollama / OpenAI-compatible
-server. Pick an anchor voxel with `Ctrl+LMB` and ask for *“a 3×3 wood crate”*,
-*“a small rock”*… Edits land as `.vxw` changes and show up within ~0.5 s.
-A stdio **MCP server** (`vf_mcp`) exposes the same operations to external
-agents.
+The **AI** section of the sidebar talks to any Ollama or OpenAI-compatible
+server. Pick an anchor voxel with `Ctrl+LMB` and ask for "a 3×3 wood crate" or
+"a small rock" — the tool calls land as `.vxw` changes and show up within
+about half a second. A stdio MCP server (`vf_mcp`) exposes the same operations
+to external agents.
 
 ```sh
 VF_LLM_URL=http://127.0.0.1:11434 VF_LLM_MODEL=qwen2.5 ./build/voxelforge
@@ -109,7 +89,7 @@ and the MCP protocol reference.
 
 ## Documentation
 
-Full developer documentation lives in **[`docs/`](docs/index.md)**:
+Full developer documentation lives in [`docs/`](docs/index.md):
 
 | doc | contents |
 |---|---|
