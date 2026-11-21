@@ -1,85 +1,123 @@
 #pragma once
-#include "ai/ollama_client.hpp"
+// The AI panel is now a thin client of a DEDICATED OpenCode session. The
+// Voxelforge agent (`.opencode/agents/voxelforge.md`) does all world editing
+// through the vf_mcp tools; there is no local tool dispatcher and no Ollama
+// client in this path. Undo works at whole-agent-turn granularity by
+// snapshotting the authored files before each prompt.
+#include "ai/opencode_client.hpp"
 #include "voxel/picking.hpp"
-#include "voxel/editable_world.hpp"
-#include "voxel/layered_world.hpp"
 #include <imgui.h>
+#include <chrono>
+#include <functional>
+#include <map>
+#include <mutex>
+#include <queue>
 #include <string>
 #include <vector>
-#include <mutex>
-#include <thread>
-#include <queue>
-#include <atomic>
-#include <functional>
 
 namespace vf::ai {
 
 struct ChatEntry {
-    std::string role; // user / assistant / system / tool
+    std::string role; // user / assistant / thinking / system
     std::string content;
-    bool isThinking = false;
+};
+
+struct ToolCard {
+    std::string id;
+    std::string name;
+    std::string args;
+    std::string result;
+    std::string status = "running";
+    int shotRetries = 0;
+    std::string shotPath;
+    ImTextureID shotImage = 0;
+    int shotW = 0, shotH = 0;
 };
 
 class ChatUi {
 public:
+    using ImageFn = std::function<ImTextureID(const std::string&, int*, int*)>;
+
     ChatUi();
     ~ChatUi();
-    void init(const std::string& baseUrl, const std::string& model);
+
+    struct Context {
+        std::string sceneryDir;
+        std::string sessionFile;              // .opencode/voxelforge_sessions.json
+        std::function<void()> reloadFn;       // request a world reload after undo
+        ImageFn imageFn;                      // PPM -> ImGui texture (App-owned cache)
+    };
+    void setContext(Context ctx) { m_ctx = std::move(ctx); }
+
+    bool init(std::string* err = nullptr);
     void shutdown();
 
-    // Drawn as a section of the editor sidebar (App::drawSidebar), inside an
-    // ImGui child region the sidebar owns. This renders only the body: the
-    // sidebar is the single window, so there is no Begin/End or positioning
-    // here. Still called every frame even when the section is not on screen,
-    // so an in-flight response keeps polling and the input state stays live.
-    // The callback that tells a high-detail animal what to do (the tool
-    // "set_behaviour"): it takes the layer's name and the command ("run",
-    // "graze", ...) and reports whether it found the animal.
-    using BehaviourFn = std::function<bool(const std::string&, const std::string&,
-                                          float)>;
-    void drawPanel(vf::voxel::EditableWorld& editable, vf::voxel::LayeredWorld& world,
-                   const vf::voxel::PickHit* hover, const vf::voxel::PickHit* selection,
-                   bool hasSelection, std::function<void()> rebuildFn,
-                   BehaviourFn behaviourFn = nullptr);
+    // Drawn as the body of the AI section of the one docked sidebar; the
+    // sidebar owns the window and the child region. Called every frame even
+    // when hidden so an in-flight turn keeps receiving events.
+    void drawPanel(const vf::voxel::PickHit* hover,
+                   const vf::voxel::PickHit* selection, bool hasSelection);
 
     bool isSending() const { return m_sending; }
     bool wantsCaptureKeyboard() const { return m_inputFocused; }
 
-    // direct tool execution; returns number of rejected/unknown calls
-    int executeToolCalls(const std::vector<ToolCall>& calls, glm::ivec3 anchor, bool hasAnchor,
-                         vf::voxel::EditableWorld& editable, vf::voxel::LayeredWorld& world,
-                         std::function<void()> rebuildFn,
-                         BehaviourFn behaviourFn = nullptr);
+    void undoLastTurn();
+    bool canUndo() const { return !m_undoStack.empty(); }
+    void clearHistory();
+    // Normalize a sessions/model JSON file before appending a key (public for
+    // the regression test: a trailing newline used to produce two objects).
+    // Decode JSON string escapes (notably "\n") in SSE text before it reaches
+    // the wrapped transcript. Public for the regression test.
+    static std::string unescapeJsonText(std::string text);
+    static std::string normalizeSessionJson(std::string text);
+    // Set one flat key in the sessions JSON text (append or replace, always
+    // keeping valid JSON). Public for regression tests.
+    static std::string setSessionKey(std::string text, const std::string& key,
+                                     const std::string& value);
+    // Append the app's current Ctrl+LMB pick to a prompt so the agent can
+    // actually see "here"/"this voxel" (public for the regression test).
+    static std::string promptWithSelection(const std::string& text,
+                                           const glm::ivec3& cell,
+                                           bool hasSelection);
 
 private:
-    void pushUser(const std::string& t);
-    void pushAssistant(const std::string& t, bool thinking=false);
-    void launchRequest(const std::string& userText, glm::ivec3 anchor, bool hasAnchor);
-    void spawnWorker();
-    void pollResults(vf::voxel::EditableWorld& editable, vf::voxel::LayeredWorld& world,
-                     std::function<void()> rebuildFn);
+    void onEvent(const OpenCodeEvent& e);   // SSE worker → queue only
+    void pollEvents();                      // UI thread → ImGui + history
+    void sendPrompt(const std::string& text);
+    void snapshotTurn(const std::string& label);
+    void pushEntry(const std::string& role, const std::string& text);
+    std::string statusText() const;
 
-    std::string buildSystemPrompt(bool hasSelection) const;
-
-    OllamaClient m_client;
+    Context m_ctx;
+    OpenCodeClient m_client;
     std::vector<ChatEntry> m_history;
-    std::vector<ChatMessage> m_llmHistory; // for API
-    char m_inputBuf[2048] = {0};
+    std::vector<ToolCard> m_cards;
+    std::map<std::string, std::string> m_toolNames; // call id -> tool name
+    std::vector<OpenCodeModel> m_models;
+    std::string m_modelId = "beam-free";       // project default
+    std::string m_modelProvider = "opencode-go";
+    bool m_modelFromEnv = false;
+    bool m_modelsLoaded = false;
+    bool m_mcpEnsured = false;
+    bool m_turnHasTools = false, m_turnHasText = false;
+    glm::ivec3 m_pendingSelection { 0 };
+    bool m_pendingHasSelection = false;
+    std::chrono::steady_clock::time_point m_lastActivity {}; // sending watchdog
+    bool m_showAllModels = false;
+    char m_inputBuf[4096] = {};
     bool m_inputFocused = false;
-    std::atomic<bool> m_sending{false};
-    std::string m_status; // small status line
-    bool m_showThinking = false;
+    bool m_sending = false;
+    bool m_autoScroll = true;
+    float m_fontScale = 0.f; // 0 = load from world.json "ui" on first draw
+    bool m_fontScaleDirty = false;
+    std::string m_status;
+    int m_turn = 0;
+    std::vector<std::string> m_undoStack; // snapshot directories, newest last
+    std::map<std::string, std::string> m_lastFileSig; // skip unchanged files in snapshots
 
-    // worker thread result queue
+    // SSE queue (worker produces, UI consumes).
     std::mutex m_mu;
-    std::queue<ChatResult> m_pending;
-    std::thread m_worker;
-    // anchor captured at send time
-    glm::ivec3 m_pendingAnchor{0};
-    bool m_pendingHasAnchor=false;
-    // unknown-tool self-correction
-    int m_unknownRetries = 0;
-    std::string m_lastUserText;
+    std::queue<OpenCodeEvent> m_events;
 };
 
 } // namespace vf::ai
