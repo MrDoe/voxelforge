@@ -20,20 +20,28 @@
 // Anchors are bottom-center lattice cells [0..1023]^3; alternatively pass
 // "ground":[x,z] to snap the anchor onto the terrain surface.
 #include "ai/tools.hpp"
+#include "ai/builders.hpp"
+#include "voxel/selector.hpp"
+#include "voxel/chunk_index.hpp"
 #include "voxel/common.hpp"
 #include "voxel/layered_world.hpp"
 #include "voxel/editable_world.hpp"
 #include "voxel/heightmap.hpp"
+#include "voxel/picking.hpp"
 #include "voxel/mesh_import.hpp"
 #include "voxel/mesh_voxel.hpp"
 #include "voxel/scenery.hpp"
 #include "voxel/worldfile.hpp"
 #include "voxel/micro_field.hpp"
 #include "voxel/micro_rig.hpp"
+#include "voxel/micro_clip.hpp"
 
 #include <spdlog/spdlog.h>
 #include <spdlog/sinks/ansicolor_sink.h>
 #include <memory>
+#include <algorithm>
+#include <chrono>
+#include <cmath>
 #include <cstdio>
 #include <cstring>
 #include <cstdlib>
@@ -42,6 +50,9 @@
 #include <string>
 #include <filesystem>
 #include <fstream>
+#include <unordered_map>
+#include <unordered_set>
+#include <deque>
 #include <unistd.h>
 #include <limits.h>
 
@@ -104,32 +115,50 @@ static std::string jsonGetString(const std::string& json, const char* key)
     return json.substr(q + 1, e - q - 1);
 }
 
-// raw id token (number or string) or "" when absent (notification)
+// raw TOP-LEVEL id token (number or string) or "" when absent (notification).
+// A plain find("\"id\"") matches a nested id inside params.arguments when a
+// client serializes `params` before `id` (OpenCode does), echoes the wrong
+// JSON-RPC id, and the client closes the connection on "unknown message ID".
 static std::string jsonGetId(const std::string& line)
 {
-    size_t p = line.find("\"id\"");
-    if (p == std::string::npos)
-        return "";
-    size_t c = line.find(':', p);
-    if (c == std::string::npos)
-        return "";
-    size_t s = c + 1;
-    while (s < line.size() && isspace((unsigned char)line[s]))
-        ++s;
-    size_t e = s;
-    if (s < line.size() && line[s] == '"') {
-        ++e;
-        while (e < line.size() && line[e] != '"')
-            ++e;
-        if (e < line.size())
-            ++e;
-    } else {
-        while (e < line.size() && (isdigit((unsigned char)line[e]) || line[e] == '-' ||
-                                   line[e] == '+' || line[e] == '.' ||
-                                   tolower(line[e]) == 'e'))
-            ++e;
+    int depth = 0;
+    bool inStr = false, esc = false;
+    for (size_t i = 0; i < line.size(); ++i) {
+        const char ch = line[i];
+        if (inStr) {
+            if (esc) esc = false;
+            else if (ch == '\\') esc = true;
+            else if (ch == '"') inStr = false;
+            continue;
+        }
+        if (ch == '"') {
+            const bool topId = depth == 1 && line.compare(i, 4, "\"id\"") == 0;
+            inStr = true;
+            if (!topId) continue;
+            size_t c = i + 4;
+            while (c < line.size() && isspace((unsigned char)line[c])) ++c;
+            if (c >= line.size() || line[c] != ':') continue;
+            ++c;
+            while (c < line.size() && isspace((unsigned char)line[c])) ++c;
+            size_t s = c, e = s;
+            if (s < line.size() && line[s] == '"') {
+                ++e;
+                while (e < line.size() && line[e] != '"') {
+                    if (line[e] == '\\' && e + 1 < line.size()) ++e;
+                    ++e;
+                }
+                if (e < line.size()) ++e;
+            } else {
+                while (e < line.size() && (isdigit((unsigned char)line[e]) ||
+                       line[e] == '-' || line[e] == '+' || line[e] == '.' ||
+                       tolower(line[e]) == 'e')) ++e;
+            }
+            return line.substr(s, e - s);
+        }
+        if (ch == '{' || ch == '[') ++depth;
+        else if (ch == '}' || ch == ']') --depth;
     }
-    return line.substr(s, e - s);
+    return "";
 }
 
 static bool jsonHasArray(const std::string& json, const char* key)
@@ -339,8 +368,33 @@ struct ToolResult {
 
 struct Server {
     voxel::EditableWorld editable{ voxel::scenery::root() };
+    std::string m_worldSig; // mtime+size of world.json + ai_edits.vxw
 
     void init() { editable.load(); }
+
+    // A long-lived vf_mcp process must not answer probe/ground from a world
+    // snapshot from before an agent turn or an UNDO. The signature changes
+    // whenever the app/agent rewrites authored files; reload both caches.
+    std::string worldSignature() const
+    {
+        std::ostringstream o;
+        for (const char* f : { "world.json", "ai_edits.vxw" }) {
+            const std::string p = voxel::scenery::root() + "/" + f;
+            std::error_code ec;
+            o << std::filesystem::last_write_time(p, ec).time_since_epoch().count()
+              << ":" << std::filesystem::file_size(p, ec) << ";";
+        }
+        return o.str();
+    }
+    void refreshIfChanged()
+    {
+        const std::string sig = worldSignature();
+        if (sig == m_worldSig)
+            return;
+        world().load(voxel::scenery::root() + "/world.json");
+        editable.load();
+        m_worldSig = sig;
+    }
 
     ToolResult listLayers()
     {
@@ -393,14 +447,12 @@ struct Server {
                  false };
     }
 
+    // Accessor only: refreshIfChanged() owns the single load. Loading here too
+    // made the first tool call of a fresh vf_mcp process build LayeredWorld
+    // twice (static init + explicit reload), ~7 s instead of ~5 s.
     voxel::LayeredWorld& world()
     {
         static voxel::LayeredWorld w;
-        static bool init = false;
-        if (!init) {
-            w.load(voxel::scenery::root() + "/world.json");
-            init = true;
-        }
         return w;
     }
 
@@ -431,6 +483,79 @@ struct Server {
                  H, x, z, int((x + 0.5f * voxel::WORLD) / voxel::VOXEL), cy,
                  int((z + 0.5f * voxel::WORLD) / voxel::VOXEL));
         return { buf, false };
+    }
+
+    // One-call surface map over an x/z rectangle. Each column reports the top
+    // solid world Y and material, sampled through the SAME field probe uses,
+    // so live store edits / the overlay are reflected. This replaces dozens
+    // of probe() round-trips when mapping terrain (a cone, a crater, a shore).
+    ToolResult surfaceScan(const std::string& args)
+    {
+        float x0 = -5.f, z0 = -5.f, x1 = 5.f, z1 = 5.f;
+        std::vector<float> box;
+        if (ai::jsonGetFloatArray(args, "box", box, 4) && box.size() == 4) {
+            x0 = box[0]; z0 = box[1]; x1 = box[2]; z1 = box[3];
+        } else {
+            std::vector<float> mn, mx;
+            if (ai::jsonGetFloatArray(args, "min", mn, 2) && mn.size() == 2 &&
+                ai::jsonGetFloatArray(args, "max", mx, 2) && mx.size() == 2) {
+                x0 = mn[0]; z0 = mn[1]; x1 = mx[0]; z1 = mx[1];
+            } else {
+                ai::jsonGetFloat(args, "x0", x0);
+                ai::jsonGetFloat(args, "z0", z0);
+                ai::jsonGetFloat(args, "x1", x1);
+                ai::jsonGetFloat(args, "z1", z1);
+            }
+        }
+        if (x0 > x1) std::swap(x0, x1);
+        if (z0 > z1) std::swap(z0, z1);
+        float step = 0.5f;
+        ai::jsonGetFloat(args, "step", step);
+        step = std::clamp(step, 0.1f, 5.f);
+        const int nx = int(std::floor((x1 - x0) / step)) + 1;
+        const int nz = int(std::floor((z1 - z0) / step)) + 1;
+        if (nx < 1 || nz < 1 || size_t(nx) * size_t(nz) > 2500)
+            return { "surface_scan grid too large (max 2500 columns); raise "
+                     "\"step\" or shrink the box", true };
+
+        char b[64];
+        std::ostringstream o;
+        o << "surface_scan x[" << x0 << ".." << x1 << "] z[" << z0 << ".." << z1
+          << "] step=" << step << "m grid=" << nx << "x" << nz << "\nx:";
+        for (int ix = 0; ix < nx; ++ix) {
+            snprintf(b, sizeof(b), "%7.1f", x0 + ix * step);
+            o << b;
+        }
+        o << "\n";
+        std::vector<int> hist(voxel::kPaletteN, 0);
+        float lo = 1e9f, hi = -1e9f;
+        for (int iz = 0; iz < nz; ++iz) {
+            snprintf(b, sizeof(b), "z=%5.1f:", z0 + iz * step);
+            o << b;
+            for (int ix = 0; ix < nx; ++ix) {
+                const float x = x0 + ix * step;
+                const float z = z0 + iz * step;
+                float top = -1e9f;
+                int mat = -1;
+                for (float y = 30.f; y >= -5.f; y -= 0.1f) {
+                    auto s = world().field().sampleWorld({ x, y, z });
+                    if (s.d < 0) { top = y; mat = int(s.mat); break; }
+                }
+                if (mat >= 0 && mat < voxel::kPaletteN) {
+                    hist[mat]++;
+                    lo = std::min(lo, top);
+                    hi = std::max(hi, top);
+                }
+                if (top < -1e8f) snprintf(b, sizeof(b), "      --");
+                else snprintf(b, sizeof(b), "%5.1f/%-2d", top, mat);
+                o << b;
+            }
+            o << "\n";
+        }
+        o << "surface height " << lo << ".." << hi << " m; materials:";
+        for (size_t i = 0; i < hist.size(); ++i)
+            if (hist[i]) o << " " << i << ":" << hist[i];
+        return { o.str(), false };
     }
 
     // bottom-center lattice anchor from "anchor":[x,y,z] (cells),
@@ -562,7 +687,7 @@ struct Server {
         std::vector<RawVox> cells;
         if (!parseRawVoxels(args, "cells", cells, 20000))
             return { "add_voxels needs cells:[{dx,dy,dz,mat?,r?,g?,b?,refl?,"
-                     "rough?},...]",
+                     "rough?,tex?},...]",
                      true };
         std::vector<voxel::VoxelRecord> recs;
         recs.reserve(cells.size());
@@ -574,6 +699,25 @@ struct Server {
                                                   c.g, c.b, c.refl, c.rough,
                                                   c.tex));
         }
+        // Optional \"name\"/\"layer\": write to a standalone named object layer
+        // instead of ai_edits. This makes every add addressable and removable
+        // (delete_voxels/undo_call work on named layers) - the old behaviour
+        // of dumping everything into ai_edits left no surgical way back.
+        std::string layerName = jsonGetString(args, "name");
+        if (layerName.empty()) layerName = jsonGetString(args, "layer");
+        if (!layerName.empty()) {
+            if (!editable.writeObjectLayer(layerName, recs))
+                return { "add_voxels: failed to write object layer \"" + layerName +
+                         "\" (illegal name or manifest error)", true };
+            char buf2[256];
+            snprintf(buf2, sizeof(buf2),
+                     "%zu voxels added to named object layer \"%s\" (.vxw "
+                     "registered + enabled); the running app hot-reloads "
+                     "within ~1 s",
+                     recs.size(), layerName.c_str());
+            return { buf2, false };
+        }
+
         size_t added = editable.append(recs);
         if (added == 0)
             return { "nothing added (cells empty or all out of bounds)", true };
@@ -637,7 +781,7 @@ struct Server {
             std::vector<RawVox> cells;
             if (!parseRawVoxels(args, "voxels", cells, 200000))
                 return { "write_object needs shapes:[...] or "
-                         "voxels:[{x,y,z,mat?,r?,g?,b?,refl?,rough?},...]",
+                         "voxels:[{x,y,z,mat?,r?,g?,b?,refl?,rough?,tex?},...]",
                          true };
             recs.reserve(cells.size());
             for (auto& c : cells) {
@@ -715,7 +859,8 @@ struct Server {
               << ",\"mat\":" << int(v.materialId) << ",\"r\":" << int(v.r)
               << ",\"g\":" << int(v.g) << ",\"b\":" << int(v.b)
               << ",\"refl\":" << int(v.reflectivity)
-              << ",\"rough\":" << int(v.roughness) << "}\n";
+              << ",\"rough\":" << int(v.roughness)
+              << ",\"tex\":" << int(v.reserved) << "}\n"; // per-cell atlas slot
         }
         if (d.voxels.size() > shown)
             o << "... (" << (d.voxels.size() - shown) << " more)\n";
@@ -735,6 +880,935 @@ struct Server {
         return { "deleted object layer \"" + name +
                      "\"; the running app hot-reloads within ~1 s",
                  false };
+    }
+
+    // Studio parity for micro animations: author a bone key in a .anim clip
+    // using the SAME quantisation/seeding rule as studioKeyAt and sampleTrackEuler.
+    ToolResult clipKey(const std::string& args)
+    {
+        std::string name = jsonGetString(args, "layer");
+        if (name.empty()) name = jsonGetString(args, "name");
+        if (name.empty()) return { "clip_key needs a \"layer\"", true };
+        int boneId = -1;
+        ai::jsonGetInt(args, "bone", boneId);
+        if (boneId < 0) return { "clip_key needs \"bone\" (id >= 0)", true };
+        float t = 0.f;
+        if (!ai::jsonGetFloat(args, "time", t) || t < 0.f)
+            return { "clip_key needs \"time\" >= 0", true };
+        std::vector<float> rot;
+        if (!ai::jsonGetFloatArray(args, "rot", rot, 3))
+            return { "clip_key needs \"rot\":[rx,ry,rz] in degrees", true };
+        std::vector<voxel::worldfile::WorldLayer> layers;
+        if (!voxel::worldfile::loadManifest(manifestPath(), layers))
+            return { "manifest unreadable", true };
+        voxel::worldfile::WorldLayer* layer = nullptr;
+        for (auto& l : layers)
+            if (l.name == name || l.file == name) { layer = &l; break; }
+        if (!layer || layer->role != "micro")
+            return { "clip_key needs a role:\"micro\" layer", true };
+        std::string rel = jsonGetString(args, "clip");
+        if (rel.empty()) {
+            const size_t slash = layer->file.find_last_of('/');
+            const std::string base = slash == std::string::npos
+                ? layer->file.substr(0, layer->file.find_last_of('.'))
+                : layer->file.substr(slash + 1, layer->file.find_last_of('.') - slash - 1);
+            rel = (slash == std::string::npos ? std::string("micro/")
+                                              : layer->file.substr(0, slash + 1)) +
+                  base + ".anim";
+        }
+        const std::string path = voxel::scenery::root() + "/" + rel;
+        voxel::MicroClip clip;
+        if (!voxel::readMicroClip(path, clip)) {
+            clip = voxel::MicroClip();
+            clip.name = "studio";
+            clip.description = "authored through vf_mcp clip_key";
+            clip.layer = layer->file;
+            clip.length = std::max(2.f, t + 0.5f);
+            clip.fps = 30.f;
+            clip.loop = true;
+            clip.clock = voxel::ClipClock::Time;
+            clip.speed = 0.20f;
+            clip.stride = 0.90f;
+            clip.blendIn = 0.20f;
+        }
+        clip.length = std::max(clip.length, t + 0.5f);
+        voxel::BoneTrack* track = nullptr;
+        for (auto& tr : clip.tracks)
+            if (tr.boneId == uint32_t(boneId)) { track = &tr; break; }
+        if (!track) {
+            clip.tracks.push_back({});
+            track = &clip.tracks.back();
+            track->boneId = uint32_t(boneId);
+        }
+        const float step = clip.fps > 1e-3f ? 1.f / clip.fps : 1.f / 30.f;
+        t = std::round(t / step) * step;
+        voxel::BoneKey* key = nullptr;
+        for (auto& k : track->keys)
+            if (std::abs(k.t - t) < 0.5f * step) { key = &k; break; }
+        if (!key) {
+            voxel::BoneKey k;
+            k.t = t;
+            k.rotDeg = voxel::sampleTrackEuler(track->keys, t); // seed from the blend
+            k.ease = voxel::ClipEase::Smooth;
+            track->keys.push_back(k);
+            std::sort(track->keys.begin(), track->keys.end(),
+                      [](const voxel::BoneKey& a, const voxel::BoneKey& b) { return a.t < b.t; });
+            for (auto& kk : track->keys)
+                if (std::abs(kk.t - t) < 0.5f * step) { key = &kk; break; }
+        }
+        key->rotDeg = glm::vec3(rot[0], rot[1], rot[2]);
+        std::string ease = jsonGetString(args, "ease");
+        if (ease == "step") key->ease = voxel::ClipEase::Step;
+        else if (ease == "linear") key->ease = voxel::ClipEase::Linear;
+        else key->ease = voxel::ClipEase::Smooth;
+        if (!voxel::writeMicroClip(path, clip))
+            return { "cannot write clip: " + path, true };
+        bool listed = false;
+        for (const auto& c : layer->clips) if (c == rel) listed = true;
+        if (!listed) {
+            layer->clips.push_back(rel);
+            if (!voxel::worldfile::writeManifest(manifestPath(), layers))
+                return { "clip written but manifest update failed", true };
+        }
+        reloadWorld();
+        return { "clip_key " + rel + ": bone " + std::to_string(boneId) +
+                 " t=" + std::to_string(t) + " rot=(" + std::to_string(rot[0]) + "," +
+                 std::to_string(rot[1]) + "," + std::to_string(rot[2]) + "), " +
+                 std::to_string(track->keys.size()) + " key(s); the app hot-reloads",
+                 false };
+    }
+
+    // Verification primitive: compare two headless --shot PPMs. The engine's
+    // own 1.25 % TAA noise floor is the interpretation threshold; callers pair
+    // this with render_shot before/after a write (and pin micro poses first).
+    ToolResult diffShots(const std::string& args)
+    {
+        const std::string a = jsonGetString(args, "a");
+        const std::string b = jsonGetString(args, "b");
+        if (a.empty() || b.empty())
+            return { "diff_shots needs \"a\" and \"b\" (.ppm paths)", true };
+        int threshold = 12;
+        ai::jsonGetInt(args, "threshold", threshold);
+        auto readPpm = [](const std::string& p, int& w, int& h,
+                          std::vector<uint8_t>& rgb) -> bool {
+            std::ifstream f(p, std::ios::binary);
+            if (!f) return false;
+            std::string magic;
+            f >> magic >> w >> h;
+            int maxv = 0;
+            f >> maxv;
+            if (magic != "P6" || maxv != 255 || w <= 0 || h <= 0) return false;
+            f.get(); // one whitespace after maxval
+            rgb.resize(size_t(w) * size_t(h) * 3);
+            return bool(f.read(reinterpret_cast<char*>(rgb.data()), rgb.size()));
+        };
+        int wa = 0, ha = 0, wb = 0, hb = 0;
+        std::vector<uint8_t> ca, cb;
+        if (!readPpm(a, wa, ha, ca)) return { "cannot read PPM: " + a, true };
+        if (!readPpm(b, wb, hb, cb)) return { "cannot read PPM: " + b, true };
+        if (wa != wb || ha != hb)
+            return { "shot dimensions differ", true };
+        size_t changed = 0;
+        double sum = 0.0;
+        for (size_t i = 0; i < ca.size(); i += 3) {
+            int d = std::max({ std::abs(int(ca[i]) - int(cb[i])),
+                               std::abs(int(ca[i + 1]) - int(cb[i + 1])),
+                               std::abs(int(ca[i + 2]) - int(cb[i + 2])) });
+            if (d > threshold) ++changed;
+            sum += std::abs((int(ca[i]) + int(ca[i + 1]) + int(ca[i + 2])) / 3.0 -
+                            (int(cb[i]) + int(cb[i + 1]) + int(cb[i + 2])) / 3.0);
+        }
+        const size_t px = size_t(wa) * size_t(ha);
+        std::ostringstream o;
+        o << "diff " << a << " vs " << b << ": " << wa << "x" << ha
+          << " px=" << px << " changed=" << changed
+          << " (" << (100.0 * double(changed) / double(px)) << " %)"
+          << " meanAbsLuma=" << (sum / double(px))
+          << " threshold=" << threshold
+          << " (engine TAA noise floor ~1.25 %)";
+        return { o.str(), false };
+    }
+
+    // ----- shared v2 helpers ------------------------------------------------
+    // A cell may be given as a lattice triple or as world metres. Normalising
+    // here kills the -51.2 m offset trap: everything downstream uses cells.
+    bool parseCellArg(const std::string& args, int cell[3], std::string& err) const
+    {
+        std::vector<int> c;
+        if (ai::jsonGetIntArray(args, "cell", c, 3) ||
+            ai::jsonGetIntArray(args, "at", c, 3) ||
+            ai::jsonGetIntArray(args, "anchor", c, 3)) {
+            for (int i = 0; i < 3; ++i) cell[i] = c[i];
+            return true;
+        }
+        float x = 0.f, y = 0.f, z = 0.f;
+        if (ai::jsonGetFloat(args, "x", x) && ai::jsonGetFloat(args, "y", y) &&
+            ai::jsonGetFloat(args, "z", z)) {
+            const glm::ivec3 v = voxel::worldToVoxel({ x, y, z });
+            for (int i = 0; i < 3; ++i) cell[i] = v[i];
+            return true;
+        }
+        err = "needs cell:[x,y,z] (lattice) or x/y/z (metres)";
+        return false;
+    }
+
+    // The FILTER is `from` only. `mat` is the TARGET colour in paint /
+    // recolor_layer — treating it as a filter selects zero cells and reads
+    // like a silent no-op (measured 2026-11-20).
+    int materialFilter(const std::string& args) const
+    {
+        int mat = -1;
+        ai::jsonGetInt(args, "from", mat);
+        return mat;
+    }
+
+    // Parse the shared selector grammar. `mat` applies to every spec unless a
+    // spec carries its own filter (none do yet, so this is simple).
+    bool parseSelector(const std::string& args, int matFilter,
+                       std::vector<voxel::selector::Spec>& specs,
+                       std::string& err) const
+    {
+        using Spec = voxel::selector::Spec;
+        std::vector<int> box, lo, hi, anc;
+        if (ai::jsonGetIntArray(args, "box", box, 6)) {
+            Spec s; s.kind = Spec::Kind::Box; s.mat = matFilter;
+            for (int i = 0; i < 6; ++i) s.box[i] = box[i];
+            specs.push_back(s);
+        } else if (ai::jsonGetIntArray(args, "min", lo, 3) &&
+                   ai::jsonGetIntArray(args, "max", hi, 3)) {
+            Spec s; s.kind = Spec::Kind::Box; s.mat = matFilter;
+            for (int i = 0; i < 3; ++i) { s.box[i] = lo[i]; s.box[i + 3] = hi[i]; }
+            specs.push_back(s);
+        }
+        const bool hasAnchor = ai::jsonGetIntArray(args, "anchor", anc, 3) ||
+                               ai::jsonGetIntArray(args, "cell", anc, 3);
+        float radius = -1.f;
+        ai::jsonGetFloat(args, "radius", radius);
+        int component = 0, conn = 6;
+        ai::jsonGetInt(args, "component", component);
+        ai::jsonGetInt(args, "connectivity", conn);
+        if (hasAnchor && radius > 0.f) {
+            Spec s; s.kind = Spec::Kind::Sphere; s.mat = matFilter;
+            for (int i = 0; i < 3; ++i) s.anchor[i] = anc[i];
+            s.radiusM = radius;
+            specs.push_back(s);
+        }
+        if (hasAnchor && component) {
+            Spec s; s.kind = Spec::Kind::Component; s.mat = matFilter;
+            for (int i = 0; i < 3; ++i) s.anchor[i] = anc[i];
+            s.connectivity = conn;
+            specs.push_back(s);
+        }
+        if (!hasAnchor && (radius > 0.f || component)) {
+            err = "anchor:[x,y,z] is required with radius or component";
+            return false;
+        }
+        if (specs.empty() && matFilter >= 0) {
+            Spec s; s.kind = Spec::Kind::Mat; s.mat = matFilter;
+            specs.push_back(s);
+        }
+        if (specs.empty()) {
+            err = "needs box:[x0,y0,z0,x1,y1,z1] (or min/max), anchor+radius, "
+                  "anchor+component, or mat";
+            return false;
+        }
+        return true;
+    }
+
+    // Read the persisted store overlay WITHOUT applying it. Only the chunk
+    // list and edit AABBs are needed to answer "is this cell store-edited?".
+    struct OverlayInfo {
+        bool present = false;
+        size_t bytes = 0;
+        std::vector<std::pair<int, std::array<int, 6>>> chunks;
+    };
+    OverlayInfo readOverlayInfo() const
+    {
+        OverlayInfo info;
+        std::string path = voxel::scenery::root() + "/runtime_edits.vxw";
+        if (const char* p = getenv("VF_OVERLAY_PATH"); p && *p) path = p;
+        std::error_code ec;
+        if (!std::filesystem::exists(path, ec))
+            return info;
+        info.present = true;
+        info.bytes = std::filesystem::file_size(path, ec);
+        voxel::WorldFileData d;
+        if (!voxel::worldfile::read(path, d))
+            return info;
+        for (const auto& s : d.sections) {
+            if (s.type != voxel::worldfile::kSectionStoreChunks)
+                continue;
+            const std::vector<uint8_t>& b = s.data;
+            size_t off = 0;
+            auto rd32 = [&](uint32_t& v) -> bool {
+                if (off + 4 > b.size()) return false;
+                std::memcpy(&v, b.data() + off, 4); off += 4; return true;
+            };
+            uint32_t schema = 0, count = 0;
+            if (!rd32(schema) || schema != 3 || !rd32(count))
+                break;
+            for (uint32_t k = 0; k < count; ++k) {
+                uint32_t ci = 0, nbox = 0, nbrick = 0;
+                if (!rd32(ci)) break;
+                off += 4;                       // state byte + 3 pad
+                std::array<int, 6> bounds{};
+                if (off + 24 > b.size()) break;
+                std::memcpy(bounds.data(), b.data() + off, 24); off += 24;
+                if (!rd32(nbox) || !rd32(nbrick)) break;
+                off += size_t(nbox) * 10;
+                off += size_t(nbrick) * (4 + 1024 * 4);
+                if (off > b.size()) break;
+                info.chunks.push_back({ int(ci), bounds });
+            }
+            break;
+        }
+        return info;
+    }
+
+    bool cellStoreEdited(const OverlayInfo& info, const int cell[3]) const
+    {
+        const int ci = voxel::chunkIndexOfCell(cell[0], cell[1], cell[2]);
+        for (const auto& kv : info.chunks) {
+            if (kv.first != ci)
+                continue;
+            const auto& b = kv.second;
+            return cell[0] >= b[0] && cell[0] <= b[3] && cell[1] >= b[1] &&
+                   cell[1] <= b[4] && cell[2] >= b[2] && cell[2] <= b[5];
+        }
+        return false;
+    }
+
+    // One call answering "what IS here, and which lane should edit it?".
+    ToolResult describeCell(const std::string& args)
+    {
+        int cell[3] = {};
+        std::string err;
+        if (!parseCellArg(args, cell, err))
+            return { err, true };
+        const auto wp = voxel::selector::cellCentreWorld(cell);
+        const auto smp = world().field().sampleWorld({ wp[0], wp[1], wp[2] });
+        const std::string owner =
+            smp.layer ? world().layerFile(smp.layer) : std::string();
+
+        std::ostringstream o;
+        o << "cell=[" << cell[0] << "," << cell[1] << "," << cell[2] << "] world=["
+          << wp[0] << "," << wp[1] << "," << wp[2] << "]m\n"
+          << "  material=" << int(smp.mat) << " ("
+          << (smp.mat < int(voxel::kPaletteN) ? kMatNames[smp.mat] : "?") << ")\n"
+          << "  object=" << (smp.obj ? "true" : "false")
+          << " layerId=" << int(smp.layer)
+          << " owner=" << (owner.empty() ? "(terrain / unowned)" : owner) << "\n"
+          << "  terrainHeight=" << world().field().terrainHeightAtWorld(wp[0], wp[2])
+          << "\n";
+
+        const OverlayInfo ov = readOverlayInfo();
+        const bool edited = cellStoreEdited(ov, cell);
+        o << "  overlay=" << (ov.present ? ("present (" + std::to_string(ov.chunks.size()) +
+                                             " edit chunks, " + std::to_string(ov.bytes) + " B)") : "none")
+          << " storeEdited=" << (edited ? "true" : "false") << "\n";
+
+        // Bounded material-masked flood over the merged field: component
+        // bounds + histogram, the census a selector edit would operate on.
+        std::unordered_set<uint32_t> seen;
+        std::deque<std::array<int, 3>> q;
+        q.push_back({ cell[0], cell[1], cell[2] });
+        seen.insert(voxel::selector::keyOf(cell[0], cell[1], cell[2]));
+        int lo[3] = { cell[0], cell[1], cell[2] };
+        int hi[3] = { cell[0], cell[1], cell[2] };
+        std::array<int, int(voxel::kPaletteN)> hist{};
+        static const int dir[6][3] = { {1,0,0},{-1,0,0},{0,1,0},{0,-1,0},{0,0,1},{0,0,-1} };
+        ++hist[std::min(int(smp.mat), int(voxel::kPaletteN) - 1)];
+        while (!q.empty() && seen.size() < 20000) {
+            const auto c = q.front(); q.pop_front();
+            for (int d = 0; d < 6; ++d) {
+                const int n[3] = { c[0] + dir[d][0], c[1] + dir[d][1], c[2] + dir[d][2] };
+                if (n[0] < 0 || n[1] < 0 || n[2] < 0 || n[0] > 1023 || n[1] > 1023 || n[2] > 1023)
+                    continue;
+                const uint32_t k = voxel::selector::keyOf(n[0], n[1], n[2]);
+                if (seen.count(k)) continue;
+                const auto pp = voxel::selector::cellCentreWorld(n);
+                const auto s2 = world().field().sampleWorld({ pp[0], pp[1], pp[2] });
+                if (s2.d > 0.f) continue;
+                seen.insert(k);
+                ++hist[std::min(int(s2.mat), int(voxel::kPaletteN) - 1)];
+                q.push_back({ n[0], n[1], n[2] });
+                for (int a = 0; a < 3; ++a) { lo[a] = std::min(lo[a], n[a]); hi[a] = std::max(hi[a], n[a]); }
+            }
+        }
+        o << "  component=" << seen.size() << " cells bounds[" << lo[0] << ".." << hi[0]
+          << "][" << lo[1] << ".." << hi[1] << "][" << lo[2] << ".." << hi[2] << "]\n"
+          << "  histogram:";
+        for (int m = 0; m < int(voxel::kPaletteN); ++m)
+            if (hist[m]) o << " " << m << "=" << hist[m];
+        o << "\n  lane=" << (edited ? "store (already edited live)" :
+                              (owner.empty() ? "store (terrain: stamp)" :
+                               "either: stamp=reversible, selector=baked/permanent")) << "\n";
+        return { o.str(), false };
+    }
+
+    // Region-scoped recolor using the shared selector. Keeps recolor_layer as
+    // the whole-layer sugar; this is the surgical, dry-run-able version.
+    ToolResult paintCells(const std::string& args)
+    {
+        std::string name = jsonGetString(args, "layer");
+        if (name.empty()) name = jsonGetString(args, "name");
+        if (name.empty()) return { "paint needs a \"layer\"", true };
+        int toMat = -1, filter = materialFilter(args);
+        ai::jsonGetInt(args, "mat", toMat) || ai::jsonGetInt(args, "material", toMat);
+        std::vector<voxel::selector::Spec> specs;
+        std::string err;
+        if (!parseSelector(args, filter, specs, err))
+            return { err, true };
+        int r = -1, g = -1, b = -1, refl = -1, rough = -1, tex = -1;
+        ai::jsonGetInt(args, "r", r); ai::jsonGetInt(args, "g", g);
+        ai::jsonGetInt(args, "b", b);
+        ai::jsonGetInt(args, "refl", refl); ai::jsonGetInt(args, "rough", rough);
+        ai::jsonGetInt(args, "tex", tex);
+        if (toMat < 0 && r < 0 && g < 0 && b < 0 && refl < 0 && rough < 0 && tex < 0)
+            return { "paint needs at least one of mat/r/g/b/refl/rough/tex", true };
+        if (toMat >= int(voxel::kPaletteN))
+            return { "mat must be 0.." + std::to_string(voxel::kPaletteN - 1), true };
+
+        std::string file = name;
+        bool protectedLayer = false;
+        std::vector<voxel::worldfile::WorldLayer> layers;
+        if (voxel::worldfile::loadManifest(manifestPath(), layers))
+            for (auto& l : layers)
+                if (l.name == name || l.file == name) {
+                    file = l.file;
+                    if (l.role == "landscape" || l.role == "packed") protectedLayer = true;
+                    break;
+                }
+        if (file.find(".vxw") == std::string::npos) file += ".vxw";
+        if (protectedLayer) return { "refusing to paint protected layer " + file, true };
+        if (file == "ai_edits.vxw")
+            return { "paint ai_edits via stamp(mat/...) in the store lane", true };
+        const std::string path = voxel::scenery::root() + "/" + file;
+        voxel::WorldFileData d;
+        if (!voxel::worldfile::read(path, d))
+            return { "cannot read layer file: " + file, true };
+        voxel::selector::Selection sel;
+        if (!voxel::selector::selectCells(d.voxels, specs, sel, err))
+            return { err, true };
+        std::array<int, int(voxel::kPaletteN)> before{}, after{};
+        for (const auto& v : d.voxels)
+            before[std::min(int(v.materialId), int(voxel::kPaletteN) - 1)]++;
+        int touched = 0;
+        for (auto& v : d.voxels) {
+            if (!sel.contains(v.x, v.y, v.z)) continue;
+            ++touched;
+            if (toMat >= 0) v.materialId = uint8_t(toMat);
+            if (r >= 0) v.r = uint8_t(std::clamp(r, 0, 255));
+            if (g >= 0) v.g = uint8_t(std::clamp(g, 0, 255));
+            if (b >= 0) v.b = uint8_t(std::clamp(b, 0, 255));
+            if (refl >= 0) v.reflectivity = uint8_t(std::clamp(refl, 0, 255));
+            if (rough >= 0) v.roughness = uint8_t(std::clamp(rough, 0, 255));
+            if (tex >= 0) v.reserved = uint8_t(std::clamp(tex, 0, 255));
+        }
+        after.fill(0);
+        for (const auto& v : d.voxels)
+            after[std::min(int(v.materialId), int(voxel::kPaletteN) - 1)]++;
+        std::ostringstream o;
+        for (size_t i = 0; i < specs.size(); ++i)
+            o << (i ? " + " : "") << specs[i].describe();
+        o << "\n  " << sel.summary() << " -> recoloured " << touched << " cells\n";
+        for (int m = 0; m < int(voxel::kPaletteN); ++m)
+            if (before[m] || after[m])
+                o << "  mat " << m << ": " << before[m] << " -> " << after[m] << "\n";
+        int dry = 0; ai::jsonGetInt(args, "dry_run", dry);
+        if (dry) return { o.str() + "dry run, nothing written", false };
+        const std::string tmp = path + ".tmp";
+        std::error_code ec;
+        if (!voxel::worldfile::write(tmp, d)) {
+            std::remove(tmp.c_str());
+            return { "failed to write " + tmp, true };
+        }
+        std::filesystem::rename(tmp, path, ec);
+        if (ec) { std::remove(tmp.c_str()); return { "failed to replace " + file, true }; }
+        reloadWorld();
+        return { o.str() + "the running app hot-reloads within ~1 s", false };
+    }
+
+    // Two-call transform flow. commit:false answers "where would it land?" by
+    // running the SAME worldfile::transformRecords the app uses at load, and
+    // reports the resulting AABB without writing anything. commit:true writes
+    // the manifest (the panel's Apply equivalent) and the app hot-reloads.
+    ToolResult transformLayer(const std::string& args)
+    {
+        std::string name = jsonGetString(args, "layer");
+        if (name.empty()) name = jsonGetString(args, "name");
+        if (name.empty()) return { "transform needs a \"layer\"", true };
+        std::vector<voxel::worldfile::WorldLayer> layers;
+        if (!voxel::worldfile::loadManifest(manifestPath(), layers))
+            return { "manifest unreadable", true };
+        voxel::worldfile::WorldLayer* target = nullptr;
+        for (auto& l : layers)
+            if (l.name == name || l.file == name) { target = &l; break; }
+        if (!target) return { "no such layer: " + name, true };
+        // Collect the requested delta. Both commits use the same convention as
+        // set_layer_transform: pos is a metres offset, angles are degrees.
+        std::vector<float> pos;
+        float yaw = target->rotDeg, pitch = target->rotX, roll = target->rotZ;
+        bool havePos = ai::jsonGetFloatArray(args, "pos", pos, 3);
+        ai::jsonGetFloat(args, "yaw", yaw) || ai::jsonGetFloat(args, "rot", yaw);
+        ai::jsonGetFloat(args, "pitch", pitch) || ai::jsonGetFloat(args, "rotX", pitch);
+        ai::jsonGetFloat(args, "roll", roll) || ai::jsonGetFloat(args, "rotZ", roll);
+        if (havePos && pos.size() != 3)
+            return { "pos must be [x,y,z] metres", true };
+        const glm::vec3 off = havePos ? glm::vec3(pos[0], pos[1], pos[2])
+                                      : glm::vec3(target->pos[0], target->pos[1], target->pos[2]);
+        int commit = 0;
+        ai::jsonGetInt(args, "commit", commit);
+        std::ostringstream o;
+        o << "layer " << name << " pos=[" << off.x << "," << off.y << "," << off.z
+          << "] yaw/pitch/roll=" << yaw << "/" << pitch << "/" << roll << "\n";
+        if (commit) {
+            const std::string resultMsg = setLayerTransform(args).text;
+            return { o.str() + "committed: " + resultMsg, false };
+        }
+        // Preview: apply the exact load-time placement to the layer's records.
+        const std::string file = target->file.find(".vxw") == std::string::npos
+            ? target->file + ".vxw" : target->file;
+        voxel::WorldFileData d;
+        if (!voxel::worldfile::read(voxel::scenery::root() + "/" + file, d))
+            return { "cannot read layer file for preview: " + file, true };
+        std::vector<voxel::VoxelRecord> out;
+        voxel::worldfile::transformRecords(d.voxels, d.meta, off, yaw, pitch, roll, out);
+        if (out.empty())
+            return { "transform preview produced no cells", true };
+        int lo[3] = { 1 << 30, 1 << 30, 1 << 30 };
+        int hi[3] = { -(1 << 30), -(1 << 30), -(1 << 30) };
+        for (const auto& v : out) {
+            lo[0] = std::min(lo[0], int(v.x)); lo[1] = std::min(lo[1], int(v.y));
+            lo[2] = std::min(lo[2], int(v.z));
+            hi[0] = std::max(hi[0], int(v.x)); hi[1] = std::max(hi[1], int(v.y));
+            hi[2] = std::max(hi[2], int(v.z));
+        }
+        const auto wp0 = voxel::selector::cellCentreWorld(lo);
+        const auto wp1 = voxel::selector::cellCentreWorld(hi);
+        o << "PREVIEW only (no manifest write): " << out.size() << " cells, "
+          << "bounds [" << lo[0] << ".." << hi[0] << "][" << lo[1] << ".." << hi[1]
+          << "][" << lo[2] << ".." << hi[2] << "] world ["
+          << wp0[0] << "," << wp0[1] << "," << wp0[2] << "] .. ["
+          << wp1[0] << "," << wp1[1] << "," << wp1[2] << "]\n"
+          << "call again with commit:true to write world.json";
+        return { o.str(), false };
+    }
+
+    // The per-layer Import button, exposed: translate a layer's records so its
+    // bottom-centre lands on the anchor and append only that copy to ai_edits.
+    // Layer files hold absolute lattice coords, so enabling a layer shows it
+    // where it was baked — import is the ONLY runtime placement path.
+    ToolResult placeCopy(const std::string& args)
+    {
+        std::string name = jsonGetString(args, "layer");
+        if (name.empty()) name = jsonGetString(args, "name");
+        if (name.empty()) return { "place_copy needs a \"layer\"", true };
+        std::string file = name;
+        std::vector<voxel::worldfile::WorldLayer> layers;
+        if (voxel::worldfile::loadManifest(manifestPath(), layers))
+            for (auto& l : layers)
+                if (l.name == name || l.file == name) { file = l.file; break; }
+        if (file.find(".vxw") == std::string::npos) file += ".vxw";
+        if (file == "ai_edits.vxw" || file == "landscape.vxw")
+            return { "place_copy refuses " + file + " (live/derived layer)", true };
+        glm::ivec3 anchor;
+        std::string err;
+        if (!resolveAnchor(args, anchor, err))
+            return { err, true };
+        const size_t added = editable.importLayer(
+            voxel::scenery::root() + "/" + file, anchor);
+        if (added == 0)
+            return { "place_copy: nothing added (missing layer, bad meta, or "
+                     "all cells out of bounds)", true };
+        reloadWorld();
+        return { "place_copy '" + file + "': " + std::to_string(added) +
+                 " cells appended to ai_edits at anchor [" + std::to_string(anchor.x) +
+                 "," + std::to_string(anchor.y) + "," + std::to_string(anchor.z) +
+                 "]; the app hot-reloads within ~1 s", false };
+    }
+
+    // ----- intent builders: intent -> cells, generated on the server ---------
+    ToolResult buildPath(const std::string& args)
+    {
+        std::vector<float> a, b;
+        if (!ai::jsonGetFloatArray(args, "from", a, 2) ||
+            !ai::jsonGetFloatArray(args, "to", b, 2))
+            return { "add_path needs from:[x,z] and to:[x,z] in metres", true };
+        float width = 0.4f, step = 0.2f;
+        ai::jsonGetFloat(args, "width", width);
+        ai::jsonGetFloat(args, "step", step);
+        int mat = 3;
+        ai::jsonGetInt(args, "mat", mat) || ai::jsonGetInt(args, "material", mat);
+        if (width <= 0.f || width > 12.f || step <= 0.f || step > 5.f ||
+            mat < 0 || mat >= int(voxel::kPaletteN))
+            return { "add_path: width 0..12, step 0..5, mat valid", true };
+        int allow = 0;
+        ai::jsonGetInt(args, "allow_keepout", allow);
+        const float mx = 0.5f * (a[0] + b[0]), mz = 0.5f * (a[1] + b[1]);
+        if (!allow && (ai::builders::inKeepOut(a[0], a[1]) ||
+                       ai::builders::inKeepOut(b[0], b[1]) ||
+                       ai::builders::inKeepOut(mx, mz)))
+            return { "add_path crosses the live_edit keep-out (world x -3..3, "
+                     "z -1..6); pass allow_keepout:true only if you know the "
+                     "carve-water test depends on that region", true };
+        const float dx = b[0] - a[0], dz = b[1] - a[1];
+        const float len = std::sqrt(dx * dx + dz * dz);
+        const float inv = len > 1e-5f ? 1.f / len : 0.f;
+        const float px = -dz * inv, pz = dx * inv; // lateral unit vector
+        const int lanes = std::max(1, int(std::ceil(width / voxel::VOXEL)));
+        const auto height = [this](float x, float z) {
+            return world().field().terrainHeightAtWorld(x, z);
+        };
+        std::vector<voxel::VoxelRecord> recs;
+        for (int lane = 0; lane < lanes; ++lane) {
+            const float off = (float(lane) - 0.5f * float(lanes - 1)) * voxel::VOXEL;
+            auto recsLane = ai::builders::path(
+                { a[0] + px * off, a[1] + pz * off },
+                { b[0] + px * off, b[1] + pz * off }, step, mat, height);
+            recs.insert(recs.end(), recsLane.begin(), recsLane.end());
+        }
+        if (recs.empty())
+            return { "add_path produced no cells", true };
+        std::string name = jsonGetString(args, "name");
+        if (name.empty()) name = "mcp_path_" +
+            std::to_string(std::chrono::steady_clock::now().time_since_epoch().count());
+        if (!editable.writeObjectLayer(name, recs))
+            return { "add_path: failed to write layer (illegal name?)", true };
+        return { "add_path '" + name + "': " + std::to_string(recs.size()) +
+                 " cells over " + std::to_string(int(std::ceil(len / step)) + 1) +
+                 " samples, ground sampled per cell; the app hot-reloads", false };
+    }
+
+    ToolResult buildTree(const std::string& args)
+    {
+        glm::ivec3 anchor;
+        std::string err;
+        if (!resolveAnchor(args, anchor, err))
+            return { err, true };
+        float height = 2.5f, canopy = 1.1f;
+        ai::jsonGetFloat(args, "height", height);
+        ai::jsonGetFloat(args, "canopy_r", canopy);
+        unsigned int seed = 1;
+        { int s = 1; ai::jsonGetInt(args, "seed", s); seed = unsigned(s); }
+        if (height < 0.3f || height > 12.f || canopy < 0.2f || canopy > 6.f)
+            return { "add_tree: height 0.3..12, canopy_r 0.2..6", true };
+        auto recs = ai::builders::tree(anchor, height, canopy, seed);
+        std::string name = jsonGetString(args, "name");
+        if (name.empty()) name = "mcp_tree_" + std::to_string(seed);
+        if (!editable.writeObjectLayer(name, recs))
+            return { "add_tree: failed to write layer", true };
+        return { "add_tree '" + name + "': " + std::to_string(recs.size()) +
+                 " cells (seed " + std::to_string(seed) + "); deterministic; "
+                 "the app hot-reloads", false };
+    }
+
+    // ----- intent queue: the only bridge into the App's live store lane ------
+    std::string intentsPath() const
+    {
+        return voxel::scenery::root() + "/mcp_intents.jsonl";
+    }
+    std::string resultsPath() const
+    {
+        return voxel::scenery::root() + "/mcp_results.jsonl";
+    }
+    std::string nextIntentId()
+    {
+        static unsigned long long counter = 0;
+        return "mcp" + std::to_string(
+            std::chrono::steady_clock::now().time_since_epoch().count()) +
+            "_" + std::to_string(++counter);
+    }
+    ToolResult postIntent(const char* tool, const std::string& args)
+    {
+        const std::string id = nextIntentId();
+        std::ofstream f(intentsPath(), std::ios::app);
+        if (!f) return { "cannot open intent queue: " + intentsPath(), true };
+        f << "{\"id\":" << jstr(id) << ",\"tool\":" << jstr(tool)
+          << ",\"args\":" << (args.empty() ? std::string("{}") : args) << "}\n";
+        f.flush();
+        return { std::string("queued ") + tool + " id=" + id +
+                 "; call stamp_result / commit_result for the engine report", false };
+    }
+    ToolResult readResult(const char* tool, const std::string& args)
+    {
+        std::string id = jsonGetString(args, "id");
+        std::ifstream f(resultsPath());
+        std::string line;
+        while (std::getline(f, line)) {
+            if (line.find("\"id\":\"" + id + "\"") == std::string::npos &&
+                line.find("\"id\": \"" + id + "\"") == std::string::npos)
+                continue;
+            return { line, false };
+        }
+        return { std::string(tool) + " " + id + ": pending or no result", true };
+    }
+
+    ToolResult stampTool(const std::string& args)
+    {
+        int cell[3] = {};
+        std::string err;
+        if (!parseCellArg(args, cell, err))
+            return { err, true };
+        std::string mode = jsonGetString(args, "mode");
+        if (mode.empty()) mode = jsonGetString(args, "brush");
+        static const char* kModes[] = { "carve", "add", "delete", "paint", "smooth" };
+        bool ok = false;
+        for (const char* m : kModes) if (mode == m) ok = true;
+        if (!ok)
+            return { "stamp needs mode: carve|add|delete|paint|smooth", true };
+        float diameter = 2.f, depth = 1.5f, strength = 0.65f;
+        ai::jsonGetFloat(args, "diameter", diameter);
+        ai::jsonGetFloat(args, "depth", depth);
+        ai::jsonGetFloat(args, "strength", strength);
+        int mat = -1; ai::jsonGetInt(args, "mat", mat);
+        if (diameter < 0.1f || diameter > 32.f || depth < 0.1f || depth > 12.f ||
+            strength < 0.f || strength > 1.f || mat >= int(voxel::kPaletteN))
+            return { "stamp: diameter 0.1..32, depth 0.1..12, strength 0..1, mat 0.."
+                     + std::to_string(voxel::kPaletteN - 1), true };
+        return postIntent("stamp", args);
+    }
+
+    ToolResult snapshotLayer(const std::string& args, bool restore)
+    {
+        std::string name = jsonGetString(args, "layer");
+        if (name.empty()) name = jsonGetString(args, "name");
+        if (name.empty()) return { "needs a \"layer\"", true };
+        std::vector<voxel::worldfile::WorldLayer> layers;
+        std::string file = name;
+        if (voxel::worldfile::loadManifest(manifestPath(), layers))
+            for (auto& l : layers)
+                if (l.name == name || l.file == name) { file = l.file; break; }
+        if (file.find(".vxw") == std::string::npos) file += ".vxw";
+        if (file == "ai_edits.vxw" || file == "landscape.vxw")
+            return { "snapshot/restore of " + file + " is refused (live/derived layer)", true };
+        const std::string path = voxel::scenery::root() + "/" + file;
+        std::error_code ec;
+        if (!restore) {
+            if (!std::filesystem::exists(path, ec)) return { "no such layer file: " + file, true };
+            const auto now = std::chrono::system_clock::now().time_since_epoch().count();
+            const std::string bak = path + ".snap-" + std::to_string(now) + ".bak";
+            std::filesystem::copy_file(path, bak,
+                std::filesystem::copy_options::overwrite_existing, ec);
+            if (ec) return { "snapshot copy failed: " + ec.message(), true };
+            return { "snapshot " + bak + " (" + std::to_string(std::filesystem::file_size(bak, ec)) +
+                     " B). Preserved outside /tmp.", false };
+        }
+        std::string src = jsonGetString(args, "file");
+        if (src.empty()) src = jsonGetString(args, "snapshot");
+        if (src.empty()) return { "restore_snapshot needs \"file\" (the .bak path)", true };
+        if (!std::filesystem::exists(src, ec)) return { "no such snapshot: " + src, true };
+        const std::string tmp = path + ".snaprestore.tmp";
+        std::filesystem::copy_file(src, tmp,
+            std::filesystem::copy_options::overwrite_existing, ec);
+        if (ec) return { "restore copy failed: " + ec.message(), true };
+        std::filesystem::rename(tmp, path, ec);
+        if (ec) { std::remove(tmp.c_str()); return { "restore rename failed: " + ec.message(), true }; }
+        reloadWorld();
+        return { "restored " + file + " from " + src + "; the app hot-reloads within ~1 s", false };
+    }
+
+    // Surgically remove CELLS from an existing layer, leaving the rest of the
+    // layer (and its manifest entry/placement) intact. This is the missing
+    // counterpart to delete_object (whole layer) and clear_edits (ai_edits
+    // only); it is how you take ONE tree out of a 150k-cell forest layer.
+    //
+    // Selectors (unioned if several are given):
+    //   box:[x0,y0,z0,x1,y1,z1]   inclusive lattice cells
+    //   min:[x,y,z], max:[x,y,z]  same, spelled as two corners
+    //   anchor:[x,y,z] + radius:<metres>       sphere around the cell centre
+    //   anchor:[x,y,z] + component:true        the whole connected component
+    //   connectivity:26            optional (default 6) for component mode
+    //   mat / from / material:<id> optional material filter
+    //   dry_run:true               report the selection without writing
+    ToolResult deleteVoxels(const std::string& args)
+    {
+        std::string name = jsonGetString(args, "layer");
+        if (name.empty()) name = jsonGetString(args, "name");
+        if (name.empty()) return { "delete_voxels needs a \"layer\"", true };
+
+        std::string file = name;
+        bool protectedLayer = false;
+        std::vector<voxel::worldfile::WorldLayer> layers;
+        if (voxel::worldfile::loadManifest(manifestPath(), layers))
+            for (auto& l : layers)
+                if (l.name == name || l.file == name) {
+                    file = l.file;
+                    if (l.role == "landscape" || l.role == "packed")
+                        protectedLayer = true;
+                    break;
+                }
+        if (file.find(".vxw") == std::string::npos) file += ".vxw";
+        if (protectedLayer)
+            return { "refusing to carve protected layer " + file +
+                     " (landscape/packed)", true };
+        if (file == "ai_edits.vxw")
+            return { "carve ai_edits with the in-app brush/Undo instead "
+                     "(the app owns that layer's live state)", true };
+
+        const std::string path = voxel::scenery::root() + "/" + file;
+        voxel::WorldFileData d;
+        if (!voxel::worldfile::read(path, d))
+            return { "cannot read layer file: " + file, true };
+        const size_t total = d.voxels.size();
+        if (total == 0)
+            return { file + ": layer is empty", true };
+
+        // The shared selector grammar is the single implementation of box /
+        // sphere / material-masked component used by EVERY cell verb.
+        int matFilter = materialFilter(args);
+        ai::jsonGetInt(args, "mat", matFilter) ||
+            ai::jsonGetInt(args, "material", matFilter);
+        int dryFlag = 0;
+        ai::jsonGetInt(args, "dry_run", dryFlag);
+        std::vector<int> box, anc;
+        const bool hasBox = ai::jsonGetIntArray(args, "box", box, 6);
+        const bool hasMinMax = ai::jsonGetIntArray(args, "min", box, 3) &&
+                               ai::jsonGetIntArray(args, "max", anc, 3);
+        const bool hasAnchor = ai::jsonGetIntArray(args, "anchor", anc, 3);
+        if (!hasBox && !hasMinMax && !hasAnchor)
+            return { "delete_voxels needs box:[x0,y0,z0,x1,y1,z1] (or min/max), "
+                     "or anchor + radius (metres) / component:true", true };
+        std::vector<voxel::selector::Spec> specs;
+        std::string selErr;
+        if (!parseSelector(args, matFilter, specs, selErr))
+            return { selErr, true };
+        voxel::selector::Selection sel;
+        if (!voxel::selector::selectCells(d.voxels, specs, sel, selErr))
+            return { selErr.empty() ? file + ": no cells matched the selection" : selErr, true };
+        const size_t removeCount = sel.size();
+        if (removeCount >= total)
+            return { "selection covers every cell of " + file +
+                     "; use delete_object to remove the whole layer", true };
+
+        std::vector<voxel::VoxelRecord> keep;
+        keep.reserve(total - removeCount);
+        for (const auto& v : d.voxels)
+            if (!sel.contains(v.x, v.y, v.z))
+                keep.push_back(v);
+        const int* mn = sel.lo;
+        const int* mx = sel.hi;
+        std::ostringstream o;
+        o << (dryFlag ? "would carve " : "carved ") << removeCount << " of "
+          << total << " cells from " << file << " (bounds ["
+          << mn[0] << ".." << mx[0] << "] [" << mn[1] << ".." << mx[1]
+          << "] [" << mn[2] << ".." << mx[2] << "]), " << keep.size()
+          << " remain";
+        if (dryFlag)
+            return { o.str() + "; dry run, nothing written", false };
+        d.voxels = std::move(keep);
+
+        // Same atomic temp+rename contract as writeManifest / OverlayWriter:
+        // never truncate a tracked .vxw in place (a crash would leave a
+        // corrupt layer and no way back).
+        const std::string tmp = path + ".tmp";
+        std::error_code ec;
+        if (!voxel::worldfile::write(tmp, d)) {
+            std::remove(tmp.c_str());
+            return { "failed to write " + tmp + "; original layer untouched", true };
+        }
+        std::filesystem::rename(tmp, path, ec);
+        if (ec) {
+            std::remove(tmp.c_str());
+            return { "failed to replace " + file + "; original layer untouched", true };
+        }
+        // This server caches a LayeredWorld; worldSignature() watches only
+        // world.json / ai_edits.vxw, so an object-layer carve needs an
+        // explicit reload before probe/ground answer from the new content.
+        reloadWorld();
+        o << "; the running app hot-reloads within ~1 s. Not undoable - "
+             "keep a backup of the .vxw before carving.";
+        return { o.str(), false };
+    }
+
+    // Cell-level carve of the ai_edits live layer. delete_voxels refuses
+    // ai_edits because the running app owns that file's live state; this tool
+    // is the explicit, snapshot-backed escape hatch for removing a bad add
+    // (e.g. a flat lava disk) surgically instead of clear_edits (nuke all).
+    // Requires confirm:true. Writes atomically via temp+rename and leaves a
+    // labelled .bak beside the file so undo_call/restore_snapshot can revert.
+    ToolResult deleteEdits(const std::string& args)
+    {
+        int confirmed = 0;
+        ai::jsonGetInt(args, "confirm", confirmed);
+        if (!confirmed)
+            return { "delete_edits requires confirm:true (it carves the live "
+                     "ai_edits layer); use dry_run:true first to see the "
+                     "selection", true };
+
+        const std::string path = voxel::scenery::root() + "/" +
+                                 voxel::EditableWorld::kFileName;
+        voxel::WorldFileData d;
+        if (!voxel::worldfile::read(path, d))
+            return { "cannot read ai_edits.vxw", true };
+        const size_t total = d.voxels.size();
+        if (total == 0)
+            return { "ai_edits.vxw is empty", true };
+
+        int matFilter = materialFilter(args);
+        ai::jsonGetInt(args, "mat", matFilter) ||
+            ai::jsonGetInt(args, "material", matFilter);
+        int dryFlag = 0;
+        ai::jsonGetInt(args, "dry_run", dryFlag);
+        std::vector<int> box, anc;
+        const bool hasBox = ai::jsonGetIntArray(args, "box", box, 6);
+        const bool hasMinMax = ai::jsonGetIntArray(args, "min", box, 3) &&
+                               ai::jsonGetIntArray(args, "max", anc, 3);
+        const bool hasAnchor = ai::jsonGetIntArray(args, "anchor", anc, 3);
+        if (!hasBox && !hasMinMax && !hasAnchor)
+            return { "delete_edits needs box:[x0,y0,z0,x1,y1,z1] (or min/max) "
+                     "or anchor + radius/component", true };
+        std::vector<voxel::selector::Spec> specs;
+        std::string selErr;
+        if (!parseSelector(args, matFilter, specs, selErr))
+            return { selErr, true };
+        voxel::selector::Selection sel;
+        if (!voxel::selector::selectCells(d.voxels, specs, sel, selErr))
+            return { selErr.empty() ? "ai_edits: no cells matched" : selErr, true };
+        const size_t removeCount = sel.size();
+        if (removeCount >= total)
+            return { "selection covers every cell of ai_edits; use "
+                     "clear_edits to drop the whole layer", true };
+
+        std::vector<voxel::VoxelRecord> keep;
+        keep.reserve(total - removeCount);
+        for (const auto& v : d.voxels)
+            if (!sel.contains(v.x, v.y, v.z)) keep.push_back(v);
+        const int* mn = sel.lo;
+        const int* mx = sel.hi;
+        std::ostringstream o;
+        o << (dryFlag ? "would carve " : "carved ") << removeCount << " of "
+          << total << " ai_edits cells (bounds [" << mn[0] << ".." << mx[0]
+          << "] [" << mn[1] << ".." << mx[1] << "] [" << mn[2] << ".." << mx[2]
+          << "]), " << keep.size() << " remain";
+        if (dryFlag)
+            return { o.str() + "; dry run, nothing written", false };
+
+        std::error_code ec;
+        const auto now = std::chrono::system_clock::now().time_since_epoch().count();
+        const std::string bak = path + ".snap-" + std::to_string(now) + ".bak";
+        std::filesystem::copy_file(path, bak,
+            std::filesystem::copy_options::overwrite_existing, ec);
+        if (ec) return { "snapshot copy failed: " + ec.message(), true };
+
+        d.voxels = std::move(keep);
+        const std::string tmp = path + ".tmp";
+        if (!voxel::worldfile::write(tmp, d)) {
+            std::remove(tmp.c_str());
+            return { "failed to write ai_edits tmp; original untouched", true };
+        }
+        std::filesystem::rename(tmp, path, ec);
+        if (ec) {
+            std::remove(tmp.c_str());
+            return { "failed to replace ai_edits; original untouched", true };
+        }
+        // The in-memory EditableWorld cache must be reloaded too, otherwise a
+        // later add_* would save the old records back and resurrect the cells.
+        editable.load();
+        reloadWorld();
+        o << "; backup " << bak << "; the app hot-reloads within ~1 s. "
+             "Revert with restore_snapshot(file:\"" << bak << "\").";
+        return { o.str(), false };
     }
 
     // Convert an STL/OBJ mesh file into a voxel object layer. Same pipeline as
@@ -1298,9 +2372,15 @@ struct Server {
         ai::jsonGetInt(args, "emissive", em);
         float es = 0.f;
         ai::jsonGetFloat(args, "emissiveScale", es);
+        std::string card = jsonGetString(args, "card");
         std::vector<voxel::worldfile::TextureBinding> bindings;
         voxel::worldfile::loadTextureManifest(manifestPath(), bindings);
-        // remove existing binding for this mat
+        // Carry the replaced binding's card over: editing one field (e.g.
+        // scale) must never silently drop its foliage card. Explicit
+        // "card": "" clears it.
+        std::string oldCard;
+        for (const auto& b : bindings)
+            if (b.mat == mat) oldCard = b.card;
         bindings.erase(std::remove_if(bindings.begin(), bindings.end(),
                                      [&](const voxel::worldfile::TextureBinding& b) {
                                          return b.mat == mat;
@@ -1313,6 +2393,7 @@ struct Server {
             b.scale = scale > 0.02f ? scale : 0.5f;
             b.emissive = em > 0;
             b.emissiveScale = es > 0.f ? es : 1.f;
+            b.card = args.find("\"card\"") != std::string::npos ? card : oldCard;
             bindings.push_back(b);
         }
         if (!voxel::worldfile::writeTextureManifest(manifestPath(), bindings))
@@ -1321,6 +2402,238 @@ struct Server {
                      (file.empty() ? " (palette fallback)" : " <- " + file) +
                      "; the running app hot-reloads within ~1 s",
                  false };
+    }
+
+    // ----- UI settings ("ui" manifest block: sidebar controls as data) ------
+    // The running app hot-applies from the manifest (~1 s); patch only the
+    // keys provided. See world/ui_settings.cpp in the app.
+    ToolResult getUi()
+    {
+        std::ostringstream o;
+        float e = 0.f, a = 0.f;
+        if (voxel::worldfile::loadSunManifest(manifestPath(), e, a))
+            o << "sun: elev " << e << " azim " << a << "\\n";
+        voxel::worldfile::UiSettings u;
+        if (voxel::worldfile::loadUiManifest(manifestPath(), u))
+            o << "ui: " << voxel::worldfile::uiSettingsToJson(u) << "\\n";
+        else
+            o << "ui: (none - controls are at startup/env defaults)\\n";
+        o << "keys: renderFlags backend taa volFog motionBlur dof linearFx "
+            "autoExposure exposure tonemapLook ssaoStrength ssaoRadius "
+            "ssaoBlur ssaoDebug splatRadius edgeBlend edgeShrink edgeFill "
+            "edgeBridgeSize cornerFill lightBudget lightK camSpeed camPos "
+            "camYaw camPitch furEnabled furPerCell furLength furWidth furCurl "
+            "furCycles furTilt furSss brushMode brushWidth brushDepth "
+            "brushMaterial smoothStrength falloffCurve smoothPreserveVolume "
+            "uiFontScale scenery\\nrenderFlags bits: 0 AO 1 Shadows 2 Flora 3 Water "
+            "5 SSR 6 SSAO 7 DetailNormals 8 Enclosure 9 TerrainInterp "
+            "10 AutoExpose 11 Transmission 13 PhotoCards";
+        return { o.str(), false };
+    }
+
+    ToolResult setUi(const std::string& args)
+    {
+        voxel::worldfile::UiSettings p;
+        std::ostringstream applied;
+        auto num = [&](const char* key, float& dst) {
+            float v;
+            if (ai::jsonGetFloat(args, key, v)) {
+                dst = v;
+                applied << " " << key << "=" << v;
+            }
+        };
+        auto str = [&](const char* key, std::string& dst) {
+            std::string v = jsonGetString(args, key);
+            if (!v.empty()) { dst = v; applied << " " << key << "=" << v; }
+        };
+        num("renderFlags", p.renderFlags); str("backend", p.backend);
+        num("taa", p.taa); num("volFog", p.volFog);
+        num("motionBlur", p.motionBlur); num("dof", p.dof);
+        num("linearFx", p.linearFx); num("autoExposure", p.autoExposure);
+        num("exposure", p.exposure); num("tonemapLook", p.tonemapLook);
+        num("ssaoStrength", p.ssaoStrength); num("ssaoRadius", p.ssaoRadius);
+        num("ssaoBlur", p.ssaoBlur); num("ssaoDebug", p.ssaoDebug);
+        num("splatRadius", p.splatRadius); num("edgeBlend", p.edgeBlend);
+        num("edgeShrink", p.edgeShrink); num("edgeFill", p.edgeFill);
+        num("edgeBridgeSize", p.edgeBridgeSize); num("cornerFill", p.cornerFill);
+        num("lightBudget", p.lightBudget); num("lightK", p.lightK);
+        num("camSpeed", p.camSpeed);
+        std::vector<float> cam;
+        if (ai::jsonGetFloatArray(args, "camPos", cam, 3) && cam.size() == 3) {
+            p.camX = cam[0]; p.camY = cam[1]; p.camZ = cam[2];
+            applied << " camPos";
+        }
+        num("camX", p.camX); num("camY", p.camY); num("camZ", p.camZ);
+        num("camYaw", p.camYaw); num("camPitch", p.camPitch);
+        num("furEnabled", p.furEnabled); num("furPerCell", p.furPerCell);
+        num("furLength", p.furLength); num("furWidth", p.furWidth);
+        num("furCurl", p.furCurl); num("furCycles", p.furCycles);
+        num("furTilt", p.furTilt); num("furSss", p.furSss);
+        str("brushMode", p.brushMode); num("brushWidth", p.brushWidth);
+        num("brushDepth", p.brushDepth); num("brushMaterial", p.brushMaterial);
+        num("smoothStrength", p.smoothStrength);
+        str("falloffCurve", p.falloffCurve);
+        num("smoothPreserveVolume", p.smoothPreserveVolume);
+        num("uiFontScale", p.uiFontScale);
+        str("scenery", p.scenery);
+        if (applied.str().empty())
+            return { "set_ui: no known keys in arguments (see get_ui)", true };
+        if (!voxel::worldfile::mergeUiManifest(manifestPath(), p))
+            return { "failed to write the ui block", true };
+        return {"ui" + applied.str() +
+                    " written; the running app hot-applies within ~1 s", false};
+    }
+
+    ToolResult setSun(const std::string& args)
+    {
+        float elev, azim;
+        if (!ai::jsonGetFloat(args, "elev", elev) ||
+            !ai::jsonGetFloat(args, "azim", azim))
+            return { "set_sun needs elev and azim (degrees, toward the sun; "
+                     "day 34/238, night -30/96)", true };
+        if (!std::isfinite(elev) || !std::isfinite(azim))
+            return { "set_sun: elev/azim must be finite degrees", true };
+        if (!voxel::worldfile::writeSunManifest(manifestPath(), elev, azim))
+            return { "failed to write the sun block", true };
+        char buf[160];
+        std::snprintf(buf, sizeof(buf),
+                      "sun authored: elev %.2f azim %.2f; the running app "
+                      "hot-applies (and rebakes shadows) within ~1 s", elev, azim);
+        return { buf, false };
+    }
+
+    ToolResult listSceneries()
+    {
+        std::ostringstream o;
+        const std::string cur = voxel::scenery::root();
+        for (const auto& s : voxel::scenery::list())
+            o << s << (cur.size() >= s.size() &&
+                              cur.compare(cur.size() - s.size(), s.size(), s) == 0
+                          ? "  (active)" : "") << "\\n";
+        o << "active root: " << cur;
+        return { o.str(), false };
+    }
+
+    ToolResult setScenery(const std::string& args)
+    {
+        std::string name = jsonGetString(args, "scenery");
+        if (name.empty()) name = jsonGetString(args, "name");
+        if (name.empty())
+            return { "set_scenery needs \"scenery\" (folder name)", true };
+        bool known = false;
+        for (const auto& s : voxel::scenery::list())
+            if (s == name) known = true;
+        if (!known)
+            return { "no scenery folder '" + name + "' under scenery/", true };
+        voxel::worldfile::UiSettings p;
+        p.scenery = name;
+        if (!voxel::worldfile::mergeUiManifest(manifestPath(), p))
+            return { "failed to write the ui block", true };
+        return { "scenery switch to '" + name +
+                    "' authored; the app switches between frames at its ~1 s poll", false };
+    }
+
+    // Alter an existing layer's voxels in place: mat swap (whole layer or
+    // only cells matching `from`), colour/response, AND the per-cell atlas
+    // override `tex` (0 clears it, 1..255 selects a bound atlas slot).
+    ToolResult recolorLayer(const std::string& args)
+    {
+        std::string name = jsonGetString(args, "layer");
+        if (name.empty()) name = jsonGetString(args, "name");
+        if (name.empty()) name = jsonGetString(args, "file");
+        if (name.empty()) return { "recolor_layer needs a \"layer\"", true };
+        std::string file = name;
+        std::vector<voxel::worldfile::WorldLayer> layers;
+        if (voxel::worldfile::loadManifest(manifestPath(), layers))
+            for (auto& l : layers)
+                if (l.name == name || l.file == name) { file = l.file; break; }
+        if (file.find(".vxw") == std::string::npos) file += ".vxw";
+        if (file == "ai_edits.vxw")
+            return { "recolor ai_edits via the chat/brush tools instead "
+                     "(the app owns that layer's live state)", true };
+        int toMat = -1, fromMat = -1, r = -1, g = -1, b = -1;
+        int refl = -1, rough = -1, tex = -1;
+        ai::jsonGetInt(args, "mat", toMat) || ai::jsonGetInt(args, "material", toMat);
+        ai::jsonGetInt(args, "from", fromMat);
+        ai::jsonGetInt(args, "r", r);
+        ai::jsonGetInt(args, "g", g);
+        ai::jsonGetInt(args, "b", b);
+        ai::jsonGetInt(args, "refl", refl);
+        ai::jsonGetInt(args, "rough", rough);
+        ai::jsonGetInt(args, "tex", tex);
+        if (toMat < 0 && fromMat < 0 && r < 0 && g < 0 && b < 0 && refl < 0 &&
+            rough < 0 && tex < 0)
+            return { "recolor_layer needs at least one of mat/from/r/g/b/"
+                     "refl/rough/tex", true };
+        if (toMat >= int(voxel::kPaletteN))
+            return { "mat must be 0.." + std::to_string(voxel::kPaletteN - 1), true };
+        const std::string path = voxel::scenery::root() + "/" + file;
+        voxel::WorldFileData d;
+        if (!voxel::worldfile::read(path, d))
+            return { "cannot read layer file: " + file, true };
+        int touched = 0;
+        for (auto& v : d.voxels) {
+            if (fromMat >= 0 && int(v.materialId) != fromMat) continue;
+            if (toMat >= 0) v.materialId = uint8_t(toMat);
+            if (r >= 0) v.r = uint8_t(std::clamp(r, 0, 255));
+            if (g >= 0) v.g = uint8_t(std::clamp(g, 0, 255));
+            if (b >= 0) v.b = uint8_t(std::clamp(b, 0, 255));
+            if (refl >= 0) v.reflectivity = uint8_t(std::clamp(refl, 0, 255));
+            if (rough >= 0) v.roughness = uint8_t(std::clamp(rough, 0, 255));
+            // reserved byte is the per-cell atlas-slot override (Sample::tex
+            // -> surfel tan_aspect.w); 0 = material's own slot
+            if (tex >= 0) v.reserved = uint8_t(std::clamp(tex, 0, 255));
+            ++touched;
+        }
+        if (touched == 0)
+            return { file + ": no cells matched (from=" +
+                         std::to_string(fromMat) + ")", true };
+        if (!voxel::worldfile::write(path, d))
+            return { "failed to rewrite " + file, true };
+        std::ostringstream o;
+        o << "recoloured " << touched << " cells in " << file;
+        if (toMat >= 0) o << " -> material " << toMat;
+        if (r >= 0 || g >= 0 || b >= 0)
+            o << " rgb(" << r << "," << g << "," << b << ")";
+        if (tex >= 0) o << " tex=" << std::clamp(tex, 0, 255)
+                        << (tex == 0 ? " (cleared; material's own slot)" : "");
+        o << "; the running app hot-reloads within ~1 s";
+        return { o.str(), false };
+    }
+
+    // Change one authored light in place (add_light only appends).
+    ToolResult updateLight(const std::string& args)
+    {
+        int idx = -1;
+        ai::jsonGetInt(args, "index", idx);
+        if (idx < 0) ai::jsonGetInt(args, "id", idx);
+        std::vector<voxel::worldfile::LightSource> lights;
+        if (!voxel::worldfile::loadLightManifest(manifestPath(), lights))
+            return { "no lights / manifest unreadable", true };
+        if (idx < 0 || idx >= int(lights.size()))
+            return { "invalid light index (0.." +
+                         std::to_string(lights.size() - 1) + ")", true };
+        auto& l = lights[size_t(idx)];
+        std::vector<float> v3;
+        if (ai::jsonGetFloatArray(args, "pos", v3, 3) && v3.size() == 3)
+            l.pos = { v3[0], v3[1], v3[2] };
+        if ((ai::jsonGetFloatArray(args, "color", v3, 3) ||
+             ai::jsonGetFloatArray(args, "colour", v3, 3)) && v3.size() == 3)
+            l.color = { v3[0], v3[1], v3[2] };
+        float f;
+        if (ai::jsonGetFloat(args, "radius", f) && f > 0.f) l.radius = f;
+        if (ai::jsonGetFloat(args, "intensity", f) && f > 0.f) l.intensity = f;
+        std::string s = jsonGetString(args, "follow");
+        if (args.find("\"follow\"") != std::string::npos) l.follow = s;
+        if (!voxel::worldfile::writeLightManifest(manifestPath(), lights))
+            return { "failed to write lights", true };
+        std::ostringstream o;
+        o << "light " << idx << " updated: pos=[" << l.pos.x << "," << l.pos.y
+          << "," << l.pos.z << "] radius=" << l.radius
+          << " intensity=" << l.intensity;
+        if (!l.follow.empty()) o << " follow=" << l.follow;
+        o << "; the running app hot-reloads within ~1 s";
+        return { o.str(), false };
     }
 
     // ----- reload cached world ----------------------------------------------
@@ -1348,8 +2661,15 @@ struct Server {
         std::string out = jsonGetString(args, "out");
         if (out.empty())
             out = jsonGetString(args, "path");
-        if (out.empty())
-            out = "/tmp/opencode/mcp_shot.ppm";
+        if (out.empty()) {
+            // Agent screenshots live in the local (gitignored) gallery so
+            // the in-app AI panel can show them; unique per call to avoid
+            // clobbering a previous turn's evidence.
+            const auto now = std::chrono::system_clock::now().time_since_epoch().count();
+            out = "workspace/screenshots/shot_" + std::to_string(now) + ".ppm";
+            std::error_code dirEc;
+            std::filesystem::create_directories("workspace/screenshots", dirEc);
+        }
 
         std::ostringstream cmd;
         cmd << bin.string() << " --shot " << out;
@@ -1688,8 +3008,13 @@ std::string toolSchemas()
           "Add an arbitrary voxel shape from explicit cells relative to the "
           "anchor/ground. Each cell: {dx,dy,dz,mat?,r?,g?,b?,refl?,rough?,tex?} "
           "(omit r,g,b to use the material palette; tex = optional texture "
-          "atlas layer 1..255 overriding the material's slot).",
-          obj(anchorSchema + "," + cellSchema), false);
+          "atlas layer 1..255 overriding the material's slot). Optional "
+          "name/layer writes to a standalone named object layer instead of "
+          "ai_edits (addressable + removable).",
+          obj(anchorSchema + "," + cellSchema +
+                  ",\"name\":{\"type\":\"string\"},"
+                  "\"layer\":{\"type\":\"string\"}"),
+          false);
     std::string voxSchema =
         "\"voxels\":{\"type\":\"array\",\"items\":{\"type\":\"object\"}}";
     std::string shapeSchema =
@@ -1716,6 +3041,26 @@ std::string toolSchemas()
           "Remove a named object layer file + its manifest entry (never "
           "landscape/packed).",
           obj(jstr("name") + ":{\"type\":\"string\"}"), false);
+    entry("delete_voxels",
+          "Surgically delete CELLS from an existing layer (one tree, a region, "
+          "or a connected component) without deleting the layer file. Select "
+          "with box:[x0,y0,z0,x1,y1,z1] inclusive lattice cells (or min/max), "
+          "or anchor:[x,y,z] + radius:<metres> / component:true. Optional "
+          "mat/from/material filter and connectivity:26. dry_run:true reports "
+          "the selection without writing. Refuses landscape/packed/ai_edits "
+          "and a selection covering the whole layer; writes atomically but is "
+          "NOT undoable.",
+          obj(jstr("layer") + ":{\"type\":\"string\"},"
+              "\"box\":{\"type\":\"array\",\"items\":{\"type\":\"integer\"}},"
+              "\"min\":{\"type\":\"array\",\"items\":{\"type\":\"integer\"}},"
+              "\"max\":{\"type\":\"array\",\"items\":{\"type\":\"integer\"}},"
+              "\"anchor\":{\"type\":\"array\",\"items\":{\"type\":\"integer\"}},"
+              "\"radius\":{\"type\":\"number\"},"
+              "\"component\":{\"type\":\"boolean\"},"
+              "\"connectivity\":{\"type\":\"integer\"},"
+              "\"mat\":{\"type\":\"integer\"},\"from\":{\"type\":\"integer\"},"
+              "\"dry_run\":{\"type\":\"boolean\"}"),
+          false);
     entry("import_mesh",
           "Convert an STL or OBJ mesh file into a voxel object layer (solid "
           "fill on the 0.1m lattice; the app hot-reloads it). Args: "
@@ -1802,7 +3147,188 @@ std::string toolSchemas()
     entry("set_pose", "Set a static rigged pose on a micro layer: pose:[bone,rx,ry,rz,...] (degrees, flat)",
           obj(jstr("layer") + ":{\"type\":\"string\"}," + jstr("pose") +
               ":{\"type\":\"array\",\"items\":{\"type\":\"number\"}}"), false);
-    entry("fur_stats", "Dump fur card counts per micro object (from .opencode/fur_stats.json)", obj(""), true);
+    entry("fur_stats", "Dump fur card counts per micro object (from .opencode/fur_stats.json)", obj(""), false);
+    entry("get_ui", "Read persisted UI settings (world.json ui block + authored sun)", obj(""), false);
+    entry("set_ui",
+          "Patch sidebar UI settings: any of renderFlags, backend, taa, volFog, motionBlur, dof, "
+          "linearFx, autoExposure, exposure, tonemapLook, ssaoStrength, ssaoRadius, ssaoBlur, "
+          "ssaoDebug, splatRadius, edgeBlend, edgeShrink, edgeFill, edgeBridgeSize, cornerFill, "
+          "lightBudget, lightK, camSpeed, camPos, camYaw, camPitch, furEnabled, furPerCell, "
+          "furLength, furWidth, furCurl, furCycles, furTilt, furSss, brushMode, brushWidth, "
+          "brushDepth, brushMaterial, smoothStrength, falloffCurve, smoothPreserveVolume, scenery. "
+          "Only provided keys change; the app hot-applies within ~1 s.",
+          obj("\"renderFlags\":{\"type\":\"integer\"}," + jstr("backend") +
+              ":{\"type\":\"string\"},"
+              "\"taa\":{\"type\":\"integer\"},\"volFog\":{\"type\":\"integer\"},"
+              "\"motionBlur\":{\"type\":\"integer\"},\"dof\":{\"type\":\"integer\"},"
+              "\"linearFx\":{\"type\":\"integer\"},\"autoExposure\":{\"type\":\"integer\"},"
+              "\"exposure\":{\"type\":\"number\"},\"tonemapLook\":{\"type\":\"integer\"},"
+              "\"ssaoStrength\":{\"type\":\"number\"},\"ssaoRadius\":{\"type\":\"number\"},"
+              "\"ssaoBlur\":{\"type\":\"integer\"},\"ssaoDebug\":{\"type\":\"integer\"},"
+              "\"splatRadius\":{\"type\":\"number\"},\"edgeBlend\":{\"type\":\"number\"},"
+              "\"edgeShrink\":{\"type\":\"number\"},\"edgeFill\":{\"type\":\"integer\"},"
+              "\"edgeBridgeSize\":{\"type\":\"number\"},\"cornerFill\":{\"type\":\"integer\"},"
+              "\"lightBudget\":{\"type\":\"integer\"},\"lightK\":{\"type\":\"integer\"},"
+              "\"camSpeed\":{\"type\":\"number\"}," + jstr("camPos") +
+              ":{\"type\":\"array\",\"items\":{\"type\":\"number\"}},"
+              "\"camYaw\":{\"type\":\"number\"},\"camPitch\":{\"type\":\"number\"},"
+              "\"furEnabled\":{\"type\":\"integer\"},\"furPerCell\":{\"type\":\"integer\"},"
+              "\"furLength\":{\"type\":\"number\"},\"furWidth\":{\"type\":\"number\"},"
+              "\"furCurl\":{\"type\":\"number\"},\"furCycles\":{\"type\":\"number\"},"
+              "\"furTilt\":{\"type\":\"number\"},\"furSss\":{\"type\":\"number\"}," +
+              jstr("brushMode") + ":{\"type\":\"string\"},"
+              "\"brushWidth\":{\"type\":\"integer\"},\"brushDepth\":{\"type\":\"integer\"},"
+              "\"brushMaterial\":{\"type\":\"integer\"},\"smoothStrength\":{\"type\":\"number\"}," +
+              jstr("falloffCurve") + ":{\"type\":\"string\"},"
+              "\"smoothPreserveVolume\":{\"type\":\"integer\"},"
+              "\"uiFontScale\":{\"type\":\"number\"}," + jstr("scenery") +
+              ":{\"type\":\"string\"}"),
+          false);
+    entry("set_sun", "Author the scene sun: elev/azim degrees toward the sun (day 34/238, night -30/96)",
+          obj("\"elev\":{\"type\":\"number\"},\"azim\":{\"type\":\"number\"}"), false);
+    entry("list_sceneries", "List scenery folders and mark the active one", obj(""), false);
+    entry("set_scenery", "Switch the live app to another scenery",
+          obj(jstr("scenery") + ":{\"type\":\"string\"}"), false);
+    entry("recolor_layer",
+          "Alter an existing layer's cells: mat (optional from-filter), r/g/b/refl/rough, and "
+          "tex (per-cell atlas slot: 0 clears the override, 1..255 binds a slot). Rewrites the "
+          ".vxw; the app hot-reloads.",
+          obj(jstr("layer") + ":{\"type\":\"string\"}," + jstr("mat") +
+              ":{\"type\":\"integer\"},\"from\":{\"type\":\"integer\"},"
+              "\"r\":{\"type\":\"integer\"},\"g\":{\"type\":\"integer\"},"
+              "\"b\":{\"type\":\"integer\"},\"refl\":{\"type\":\"integer\"},"
+              "\"rough\":{\"type\":\"integer\"},\"tex\":{\"type\":\"integer\"}"), false);
+    entry("update_light",
+          "Change one authored light in place (index + any of pos, color, radius, intensity, follow)",
+          obj(jstr("index") + ":{\"type\":\"integer\"}," + jstr("pos") +
+              ":{\"type\":\"array\",\"items\":{\"type\":\"number\"}},"
+              "\"color\":{\"type\":\"array\",\"items\":{\"type\":\"number\"}},"
+              "\"radius\":{\"type\":\"number\"},\"intensity\":{\"type\":\"number\"}," +
+              jstr("follow") + ":{\"type\":\"string\"}"), false);
+    entry("describe",
+          "One-call entry point: owner layer / terrain, material, store-edited flag, "
+          "component bounds + histogram, and which edit lane to use. Accepts "
+          "cell:[x,y,z] or x/y/z in metres.",
+          obj(jstr("cell") + ":{\"type\":\"array\",\"items\":{\"type\":\"integer\"}},"
+              "\"x\":{\"type\":\"number\"},\"y\":{\"type\":\"number\"},"
+              "\"z\":{\"type\":\"number\"}"), false);
+    entry("paint",
+          "Region-scoped recolor using the shared selector (box / min+max / "
+          "anchor+radius / anchor+component, optional mat filter). dry_run prints "
+          "bounds + a before/after histogram. Never creates geometry.",
+          obj(jstr("layer") + ":{\"type\":\"string\"},"
+              "\"box\":{\"type\":\"array\",\"items\":{\"type\":\"integer\"}},"
+              "\"min\":{\"type\":\"array\",\"items\":{\"type\":\"integer\"}},"
+              "\"max\":{\"type\":\"array\",\"items\":{\"type\":\"integer\"}},"
+              "\"anchor\":{\"type\":\"array\",\"items\":{\"type\":\"integer\"}},"
+              "\"radius\":{\"type\":\"number\"},\"component\":{\"type\":\"boolean\"},"
+              "\"connectivity\":{\"type\":\"integer\"},\"mat\":{\"type\":\"integer\"},"
+              "\"r\":{\"type\":\"integer\"},\"g\":{\"type\":\"integer\"},"
+              "\"b\":{\"type\":\"integer\"},\"refl\":{\"type\":\"integer\"},"
+              "\"rough\":{\"type\":\"integer\"},\"tex\":{\"type\":\"integer\"},"
+              "\"dry_run\":{\"type\":\"boolean\"}"), false);
+    entry("stamp",
+          "Store-lane edit on terrain OR objects: mode carve|add|delete|paint|smooth "
+          "at a cell, with diameter/depth/mat/strength. Posts an intent that the "
+          "running app executes through the SAME code path as the GUI brush "
+          "(undo+surfels+height/water+overlay for free). Returns an id; use "
+          "stamp_result for the engine report.",
+          obj(jstr("mode") + ":{\"type\":\"string\"},"
+              "\"cell\":{\"type\":\"array\",\"items\":{\"type\":\"integer\"}},"
+              "\"x\":{\"type\":\"number\"},\"y\":{\"type\":\"number\"},"
+              "\"z\":{\"type\":\"number\"},\"diameter\":{\"type\":\"number\"},"
+              "\"depth\":{\"type\":\"number\"},\"mat\":{\"type\":\"integer\"},"
+              "\"strength\":{\"type\":\"number\"},\"box_scope\":{\"type\":\"array\","
+              "\"items\":{\"type\":\"integer\"}}"), false);
+    entry("stamp_result", "Fetch the engine's instrument report for a queued stamp id.",
+          obj(jstr("id") + ":{\"type\":\"string\"}"), false);
+    entry("snapshot",
+          "Back up a tracked .vxw layer to a labelled .bak INSIDE the scenery "
+          "(never /tmp). Every destructive baked write should be snapshot-backed.",
+          obj(jstr("layer") + ":{\"type\":\"string\"}"), false);
+    entry("restore_snapshot",
+          "Restore a layer from a labelled snapshot via temp+rename; reloads the world.",
+          obj(jstr("layer") + ":{\"type\":\"string\"},"
+              "\"file\":{\"type\":\"string\"}"), false);
+    entry("commit_overlay",
+          "Converge the lanes: promote live store additions/paints into ai_edits.vxw "
+          "(the authored live layer the baker preserves) and clear the runtime "
+          "overlay. Pure deletions are refused — use delete_voxels on the baked "
+          "layer instead. Returns an id; use stamp_result for the report.",
+          obj(""), false);
+    entry("add_path",
+          "Server-generated path: samples the heightfield PER CELL across the "
+          "width, so a cross-slope ridge lifts the right cells. from/to in "
+          "metres; refuses the live_edit keep-out unless allow_keepout:true.",
+          obj("\"from\":{\"type\":\"array\",\"items\":{\"type\":\"number\"}},"
+              "\"to\":{\"type\":\"array\",\"items\":{\"type\":\"number\"}},"
+              "\"width\":{\"type\":\"number\"},\"step\":{\"type\":\"number\"},"
+              "\"mat\":{\"type\":\"integer\"},\"name\":{\"type\":\"string\"},"
+              "\"allow_keepout\":{\"type\":\"boolean\"}"), false);
+    entry("add_tree",
+          "Deterministic seeded tree (trunk + clumped canopy) generated as a "
+          "standalone authored layer. Same seed -> byte-identical cells.",
+          obj(anchorSchema + ",\"height\":{\"type\":\"number\"},"
+              "\"canopy_r\":{\"type\":\"number\"},\"seed\":{\"type\":\"integer\"},"
+              "\"name\":{\"type\":\"string\"}"), false);
+    entry("place_copy",
+          "The per-layer Import button: translate a layer's records so its "
+          "bottom-centre lands on the anchor and append only that copy to "
+          "ai_edits (the runtime placement path).",
+          obj(jstr("layer") + ":{\"type\":\"string\"}," + anchorSchema), false);
+    entry("transform",
+          "Two-call transform: commit:false previews the exact transformRecords "
+          "placement and AABB without writing; commit:true writes world.json "
+          "(the panel's Apply). pos in metres, yaw/pitch/roll in degrees.",
+          obj(jstr("layer") + ":{\"type\":\"string\"},"
+              "\"pos\":{\"type\":\"array\",\"items\":{\"type\":\"number\"}},"
+              "\"yaw\":{\"type\":\"number\"},\"pitch\":{\"type\":\"number\"},"
+              "\"roll\":{\"type\":\"number\"},\"commit\":{\"type\":\"boolean\"}"), false);
+    entry("diff_shots",
+          "Pixel-diff two headless --shot PPMs: changed-pixel count above a "
+          "threshold (default 12) and mean absolute luma delta. The engine's "
+          "TAA noise floor is ~1.25 %.",
+          obj(jstr("a") + ":{\"type\":\"string\"}," + jstr("b") +
+              ":{\"type\":\"string\"},\"threshold\":{\"type\":\"integer\"}"), false);
+    entry("clip_key",
+          "Author a bone key in a micro .anim clip (the studio's Add bone key "
+          "+ ring drag, exposed). Time is quantised to fps; a new key is seeded "
+          "from the existing blend via sampleTrackEuler. Creates and registers "
+          "the clip if needed.",
+          obj(jstr("layer") + ":{\"type\":\"string\"},"
+              "\"bone\":{\"type\":\"integer\"},\"time\":{\"type\":\"number\"},"
+              "\"rot\":{\"type\":\"array\",\"items\":{\"type\":\"number\"}},"
+              "\"ease\":{\"type\":\"string\"},\"clip\":{\"type\":\"string\"}"), false);
+    entry("surface_scan",
+          "One-call surface map over an x/z rectangle: for each column the top "
+          "solid world Y and material, sampled through the live field (so "
+          "store edits/overlay are reflected). Replaces dozens of probe calls. "
+          "Args: box:[x0,z0,x1,z1] metres (or min/max, or x0/z0/x1/z1), "
+          "step:metres (default 0.5, grid capped at 2500 columns).",
+          obj("\"box\":{\"type\":\"array\",\"items\":{\"type\":\"number\"}},"
+              "\"min\":{\"type\":\"array\",\"items\":{\"type\":\"number\"}},"
+              "\"max\":{\"type\":\"array\",\"items\":{\"type\":\"number\"}},"
+              "\"x0\":{\"type\":\"number\"},\"z0\":{\"type\":\"number\"},"
+              "\"x1\":{\"type\":\"number\"},\"z1\":{\"type\":\"number\"},"
+              "\"step\":{\"type\":\"number\"}"), false);
+    entry("delete_edits",
+          "Snapshot-backed cell-level carve of the live ai_edits layer (the "
+          "surgical undo for a bad add). Requires confirm:true; call with "
+          "dry_run:true first. Same selector grammar as delete_voxels "
+          "(box/min+max/anchor+radius/component, optional mat filter). Leaves "
+          "a labelled .bak - revert with restore_snapshot(file:<bak>).",
+          obj("\"confirm\":{\"type\":\"boolean\"},"
+              "\"dry_run\":{\"type\":\"boolean\"},"
+              "\"box\":{\"type\":\"array\",\"items\":{\"type\":\"integer\"}},"
+              "\"min\":{\"type\":\"array\",\"items\":{\"type\":\"integer\"}},"
+              "\"max\":{\"type\":\"array\",\"items\":{\"type\":\"integer\"}},"
+              "\"anchor\":{\"type\":\"array\",\"items\":{\"type\":\"integer\"}},"
+              "\"radius\":{\"type\":\"number\"},"
+              "\"component\":{\"type\":\"boolean\"},"
+              "\"mat\":{\"type\":\"integer\"}"), false);
+    entry("help", "Dump the full vf_mcp tool catalogue with exact signatures. "
+                  "Use instead of searching for tool names.",
+          obj(""), true);
     t += "] } ";
     return t;
 }
@@ -1815,7 +3341,7 @@ ToolResult callTool(Server& srv, const std::string& name, std::string args)
                                       "ground",        "clear_edits",  "add_box",
                                       "add_cylinder",  "add_ellipsoid", "add_stamp",
                                       "add_voxels",    "write_object", "read_object",
-                                      "delete_object", "import_mesh",
+                                      "delete_object", "delete_voxels", "import_mesh",
                                       "get_layer", "set_layer_transform", "set_layer_behaviour",
                                       "list_materials", "list_textures", "list_models",
                                       "list_micro", "world_info", "layer_stats",
@@ -1823,7 +3349,15 @@ ToolResult callTool(Server& srv, const std::string& name, std::string args)
                                       "list_lights", "add_light", "remove_light",
                                       "set_texture", "inspect_layer", "probe_region",
                                       "reload_world", "render_shot", "inspect_rig",
-                                      "set_pose", "fur_stats" };
+                                      "set_pose", "fur_stats",
+                                      "get_ui", "set_ui", "set_sun",
+                                      "list_sceneries", "set_scenery",
+                                      "recolor_layer", "update_light",
+                                      "describe", "paint", "stamp", "stamp_result",
+                                      "snapshot", "restore_snapshot", "commit_overlay",
+                                      "add_path", "add_tree", "place_copy", "transform",
+                                      "diff_shots", "clip_key",
+                                      "surface_scan", "delete_edits", "help" };
     std::string canonical = name;
     bool native = false;
     for (const char* n : kNative)
@@ -1841,6 +3375,17 @@ ToolResult callTool(Server& srv, const std::string& name, std::string args)
                         : n.name;
         args = n.argsJson; // normalized args may carry injected defaults
     }
+
+    // Read-only tools never touch the layered world: stamp_result reads the
+    // intent results file, commit_overlay posts an intent, diff_shots reads
+    // PPMs. Rebuilding VoxelField + LayeredWorld for them made a cold
+    // `stamp_result` take ~7 s and look like a frozen chat.
+    if (canonical != "stamp_result" && canonical != "commit_overlay" &&
+        canonical != "diff_shots") {
+        // The world is DATA on disk: re-adopt if the app or an undo changed it
+        // since the previous tool call (this server is a long-lived process).
+        srv.refreshIfChanged();
+    }
     if (canonical == "list_layers")
         return srv.listLayers();
     if (canonical == "enable_layer")
@@ -1849,6 +3394,13 @@ ToolResult callTool(Server& srv, const std::string& name, std::string args)
         return srv.probe(args);
     if (canonical == "ground")
         return srv.ground(args);
+    if (canonical == "surface_scan")
+        return srv.surfaceScan(args);
+    if (canonical == "help") {
+        // Dump the full tool catalogue with exact signatures - removes the
+        // discover-by-search overhead that cost several calls per session.
+        return { toolSchemas(), false };
+    }
     if (canonical == "clear_edits") {
         srv.editable.clear();
         return { "all AI edits cleared; the running app hot-reloads within ~1 s",
@@ -1862,6 +3414,10 @@ ToolResult callTool(Server& srv, const std::string& name, std::string args)
         return srv.readObject(args);
     if (canonical == "delete_object")
         return srv.deleteObject(args);
+    if (canonical == "delete_voxels")
+        return srv.deleteVoxels(args);
+    if (canonical == "delete_edits")
+        return srv.deleteEdits(args);
     if (canonical == "import_mesh")
         return srv.importMesh(args);
     if (canonical == "get_layer")
@@ -1910,6 +3466,46 @@ ToolResult callTool(Server& srv, const std::string& name, std::string args)
         return srv.setPose(args);
     if (canonical == "fur_stats")
         return srv.furStats(args);
+    if (canonical == "get_ui")
+        return srv.getUi();
+    if (canonical == "set_ui")
+        return srv.setUi(args);
+    if (canonical == "set_sun")
+        return srv.setSun(args);
+    if (canonical == "list_sceneries")
+        return srv.listSceneries();
+    if (canonical == "set_scenery")
+        return srv.setScenery(args);
+    if (canonical == "recolor_layer")
+        return srv.recolorLayer(args);
+    if (canonical == "update_light")
+        return srv.updateLight(args);
+    if (canonical == "describe")
+        return srv.describeCell(args);
+    if (canonical == "paint")
+        return srv.paintCells(args);
+    if (canonical == "stamp")
+        return srv.stampTool(args);
+    if (canonical == "stamp_result")
+        return srv.readResult("stamp", args);
+    if (canonical == "snapshot")
+        return srv.snapshotLayer(args, false);
+    if (canonical == "restore_snapshot")
+        return srv.snapshotLayer(args, true);
+    if (canonical == "commit_overlay")
+        return srv.postIntent("commit_overlay", args);
+    if (canonical == "add_path")
+        return srv.buildPath(args);
+    if (canonical == "add_tree")
+        return srv.buildTree(args);
+    if (canonical == "place_copy")
+        return srv.placeCopy(args);
+    if (canonical == "transform")
+        return srv.transformLayer(args);
+    if (canonical == "diff_shots")
+        return srv.diffShots(args);
+    if (canonical == "clip_key")
+        return srv.clipKey(args);
     if (canonical.rfind("add_", 0) == 0)
         return srv.addShape(canonical, args);
     return { "unknown tool: " + name, true };
