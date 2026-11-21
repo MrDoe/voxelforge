@@ -29,6 +29,9 @@ SHOTS = [
 
 W, H = 480, 270
 FAST = os.environ.get("VF_FAST_TESTS") == "1"
+# Hermetic world: render the shipped default scenery, never the user's
+# last-used one (the app otherwise follows scenery/last.json).
+os.environ.setdefault("VF_SCENERY", "LakesideHamlet")
 
 # --- canopy parity (the "slots in the tree" artifact) ----------------------
 # The splat backend must not paint the tree canopy BLACK where the SVO
@@ -357,10 +360,14 @@ def main():
         return 2
     binary = os.path.abspath(sys.argv[1])
     src_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-    manifest_path = os.path.join(
-        os.environ.get("VOXELFORGE_ASSET_DIR", os.path.join(src_root, "assets")),
-        "world.json",
-    )
+    # The authored manifest lives in the active scenery folder since the
+    # scenery migration (assets/ now holds only the shared texture/model
+    # library). VF_SCENERY is pinned to the default at import time above.
+    scene = os.environ["VF_SCENERY"]
+    if "/" in scene or "\\" in scene:
+        manifest_path = os.path.join(scene, "world.json")
+    else:
+        manifest_path = os.path.join(src_root, "scenery", scene, "world.json")
     manifest_before = None
     if os.path.exists(manifest_path):
         with open(manifest_path, "rb") as manifest_file:

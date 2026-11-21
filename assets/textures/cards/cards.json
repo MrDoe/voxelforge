@@ -1,18 +1,18 @@
 {
- "layerBase": 23,
+ "layerBase": 57,
  "size": 512,
  "cards": {
-  "grass": 23,
-  "jungle": 24,
-  "oak": 25,
-  "laurel": 26,
-  "nandina": 27
+  "grass": 57,
+  "jungle": 58,
+  "oak": 59,
+  "laurel": 60,
+  "nandina": 61
  },
  "files": {
-  "grass": "card_23_grass.png",
-  "jungle": "card_24_jungle.png",
-  "oak": "card_25_oak.png",
-  "laurel": "card_26_laurel.png",
-  "nandina": "card_27_nandina.png"
+  "grass": "card_57_grass.png",
+  "jungle": "card_58_jungle.png",
+  "oak": "card_59_oak.png",
+  "laurel": "card_60_laurel.png",
+  "nandina": "card_61_nandina.png"
  }
 }

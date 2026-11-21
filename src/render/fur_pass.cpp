@@ -1112,6 +1112,16 @@ void FurPass::record(VkCommandBuffer cmd, const RaymarchPush& push)
         // Ground foliage cards: same accumulators, same composite, grass
         // shaders. One draw over the whole world's card set.
         if (hasGrassCards) {
+            // The grass stages read pc.misc.z as the opacity slider; the
+            // shared push has tonemapLook there (post reads it, neither grass
+            // stage does). Re-push ONLY for this draw — the fur draw and the
+            // composite keep the original push / their own cp.misc.z = m_sss.
+            RaymarchPush gp = push;
+            gp.misc.z = m_foliageOpacity;
+            vkCmdPushConstants(cmd, m_layout,
+                               VkShaderStageFlags(VK_SHADER_STAGE_VERTEX_BIT |
+                                                  VK_SHADER_STAGE_FRAGMENT_BIT),
+                               0, sizeof(gp), &gp);
             vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, m_grassDrawPipe);
             vkCmdDraw(cmd, 4, uint32_t(m_grassCount), 0, 0);
         }

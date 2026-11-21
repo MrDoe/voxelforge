@@ -2,7 +2,7 @@
 title: Hard-edge surfel fit and crease bridges
 tags: [rendering, surfels, hard-edges, curvature, live-editing, performance]
 sourceRefs: [src/voxel/surfelize.hpp, src/voxel/surfelize.cpp, src/voxel/live_editor.hpp, src/voxel/live_editor.cpp, src/render/splat_pass.hpp, src/render/splat_pass.cpp, src/app/main.cpp, tests/test_surfelize.cpp, tests/test_store.cpp, docs/rendering.md, AGENTS.md]
-lastReviewed: 2026-10-08
+lastReviewed: 2026-11-20
 ---
 
 # Hard-edge surfel fit and crease bridges
@@ -95,9 +95,12 @@ along unmerged in LOD1/LOD2.
 
 ## Corner fill (coverage-gated)
 
-`SurfelParams::cornerFill` (default **ON**) adds small isotropic caps at
-tri-face corner vertices (three mutually orthogonal exposed faces;
-`edgeInfoFromMask` detects up to 8 corners per cell).
+`SurfelParams::cornerFill` (default **OFF** in `App::m_cornerFill`) adds small
+isotropic caps at tri-face corner vertices (three mutually orthogonal exposed
+faces; `edgeInfoFromMask` detects up to 8 corners per cell). Caps are emitted
+inside the same `edgeFill && edgeShrink > 0` block as bridges, so toggling
+*Fill corner splats* alone is a strict no-op — see
+[[concepts/splat-ui-settings-audit]].
 
 Caps are **coverage-gated, not angle-gated**: a cap fires only when the corner
 vertex projects **outside** the parent disk footprint — the parent is a flat
@@ -127,7 +130,9 @@ but modest silhouette effect.
 
 ## Controls
 
-- **Rendering → Sharp-edge fit**: baked strength, `0.00–0.80`, default `0.35`.
+- **Rendering → Sharp-edge fit**: baked strength, `0.00–0.80`, code default
+  `0.25` (`App::m_edgeShrink`; older docs quote 0.35 — there is no `ui` block
+  in the shipped scenery overriding it).
 - **Rendering → Interpolate crease splats**: bridge emission, default **off**.
 - **Rendering → Crease splat size**: `edgeBridgeSize`, `0.00–2.00`, default `1.00`.
 - **Rendering → Fill corner splats**: `cornerFill`, default **off**.

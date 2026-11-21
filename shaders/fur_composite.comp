@@ -49,6 +49,33 @@ const float kWaterLevel = -0.9;
 
 #include "common_base.glsl"
 
+// Sun visibility for the RASTER ground foliage cards. The world's own sun
+// shadow is baked per surfel on the CPU, and each FUR card carries that baked
+// verdict in its alpha*ndl term already; the GRASS cards had no shadow term at
+// all and so read fully sunlit even under a canopy or a roof. March the same
+// two coarse fields the splat water path uses (the 2048^2 heightfield and the
+// 256^3 object volume) ONCE PER PIXEL at the cards' average position - not per
+// card, where a pixel sees a dozen cards and would pay a dozen marches. The
+// verdict is binary, like the SVO and splat sun verdicts: a grey penumbra
+// wash on the smoothed heightfield would dim the whole meadow uniformly.
+float foliageCardSunVis(vec3 ro, vec3 rd)
+{
+    float t = 0.08;
+    for (int i = 0; i < 16; ++i) {
+        const vec3 sp = ro + rd * t;
+        const float sHf = sp.y - heightAt(sp.xz);
+        if (sHf < -0.04)
+            return 0.22;
+        const float sObj = objDist(sp);
+        if (sObj < 1.2474 && sObj < -0.05)
+            return 0.22;
+        t += clamp(max(min(sHf, sObj), pc.b.y * 0.35) * 0.85, 0.05, 1.2);
+        if (t > 20.0)
+            break;
+    }
+    return 1.0;
+}
+
 void main()
 {
     const ivec2 pix = ivec2(gl_GlobalInvocationID.xy) +
@@ -86,10 +113,24 @@ void main()
     // material is untextured, so the bit-7-off frame is unchanged.
     nAvg = detailNormal(nAvg, pRest, matId);
 
+    // Sun occlusion for the GROUND FOLIAGE CARDS only. A.y holds the sum of
+    // every card's alpha*ndl, but a FUR card folds its CPU-baked sun shadow
+    // into that term while a GRASS card stores it raw; oE.w isolates the
+    // grass part (fur leaves it at 0). Swapping just that part for the
+    // shadowed version makes grass under a roof/canopy darken with the rest
+    // of the world, while the fleece keeps its higher-quality baked verdict
+    // and the bit-13-off frame stays byte-exact. Gated by both the master
+    // Shadows bit (1) and the card-shadow bit (14) so the global toggle and
+    // VF_CARD_SHADOW both do what they say.
+    float sunVis = 1.0;
+    const float grassSun = E.w;
+    if (grassSun > 0.0 && (gRenderFlags & (2 | (1 << 14))) == (2 | (1 << 14)))
+        sunVis = foliageCardSunVis(pAvg + nAvg * 0.06, kSunDir);
+
     // The lighting, evaluated ONCE per pixel: the sun term is the average of
-    // the cards' own, and the sky ambient is a function of the average
-    // normal.
-    vec3 light = sunCol() * (A.y / sumA);
+    // the cards' own (with the grass part shadowed above), and the sky
+    // ambient is a function of the average normal.
+    vec3 light = sunCol() * ((A.y - grassSun + grassSun * sunVis) / sumA);
     light += skyIrradiance(nAvg) * (0.28 + 0.30 * aoAvg);
 
     // The albedo: the alpha-weighted average of the CARDS' own colours, so
@@ -120,15 +161,7 @@ void main()
     // pc.misc.z carries the strength (0 = the original look, bit-exact).
     vec3 furCol = alb * light;
     const float sss = pc.misc.z;
-    // FUR ONLY. The fur pass also composites the RASTER GROUND FOLIAGE CARDS
-    // (grass) through these same accumulators, and those cover the whole frame
-    // in a foliated scenery. With no gate, backlit SSS lit every grass pixel -
-    // a house view with no animal in it changed ~66k px under VF_FUR_SSS. Only
-    // the fleece material grows fur cards (m_furMaterials defaults to 21), so
-    // matId == 21 is exactly the fur-covered set: gate the translucency to it.
-    // Grass cards carry their GROUND material id (0/1), so this never fires on
-    // them. matId is already flat/averaged per pixel from A.w above.
-    if (sss > 0.0 && matId == 21u) {
+    if (sss > 0.0) {
         const vec3 rdv = normalize(pAvg - pc.camPos.xyz);
         const float towardSun = max(dot(rdv, kSunDir), 0.0);
         const float thin = exp(-sumA);

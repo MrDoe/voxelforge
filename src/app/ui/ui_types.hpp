@@ -123,12 +123,46 @@ const ImVec4 kSurfaceKeycap(0.110f, 0.137f, 0.173f, 1.0f);
 // kPalette names (src/voxel/common.hpp) for the material combo.
 // Keep this array's length in step with vf::voxel::kPaletteN (common.hpp):
 // a material missing here is a material unreachable from every combo. 23 = 0..22.
-inline constexpr const char* kMatNames[23] = {
+inline constexpr const char* kMatNames[57] = {
     "0 grass dark", "1 grass light", "2 soil", "3 sand", "4 rock",
     "5 light rock", "6 wood", "7 roof", "8 foliage", "9 lava", "10 ember",
     "11 glow cyan", "12 glow green", "13 glow purple", "14 glow blue",
     "15 white-hot", "16 snow", "17 bark", "18 moss", "19 thatch", "20 plaster",
     "21 fleece", "22 wet soil",
+    "23 slot",
+    "24 slot",
+    "25 slot",
+    "26 slot",
+    "27 slot",
+    "28 slot",
+    "29 slot",
+    "30 slot",
+    "31 slot",
+    "32 slot",
+    "33 slot",
+    "34 slot",
+    "35 slot",
+    "36 slot",
+    "37 slot",
+    "38 slot",
+    "39 slot",
+    "40 slot",
+    "41 slot",
+    "42 slot",
+    "43 slot",
+    "44 slot",
+    "45 slot",
+    "46 slot",
+    "47 slot",
+    "48 slot",
+    "49 slot",
+    "50 slot",
+    "51 slot",
+    "52 slot",
+    "53 slot",
+    "54 slot",
+    "55 slot",
+    "56 slot",
 };
 
 } // namespace app

@@ -31,7 +31,17 @@ struct alignas(16) GrassCard {
 // foliage-card binding. `layerForCard(x, z, mat)` returns the atlas layer or
 // -1, resolving the material + per-cell texture override against the atlas.
 // Returns an empty vector when no material is bound (the pass stays inert).
-std::vector<GrassCard> buildGrassCards(const std::function<int(float, float, int)>& layerForCard,
-                                       float spacing = 0.15f, int perCell = 3);
+// `region` (xlo, zlo, xhi, zhi in world metres) restricts generation to the
+// painted rectangle for an incremental rebuild. Placement is a hash of the
+// candidate index, so a region's cards are bit-identical to the full bake's.
+// The callback is the ONLY source of the answer "does grass grow here": it
+// returns the atlas layer (-1 = no) and writes the WORLD Y of the live top
+// surface into outHeight. Nothing about placement comes from the baked
+// heightmap — grass is a runtime property of the bound texture, like glow.
+using GrassCardLayerFn = std::function<int(float x, float z, int mat,
+                                           float& outHeight, int& outMaterial)>;
+std::vector<GrassCard> buildGrassCards(const GrassCardLayerFn& layerForCard,
+                                       float spacing = 0.15f, int perCell = 3,
+                                       const glm::vec4* region = nullptr);
 
 } // namespace vf::voxel

@@ -33,7 +33,7 @@ namespace vf {
 class TexAtlas {
 public:
     static constexpr uint32_t kTexSize = 512;   // texels per atlas layer side
-    static constexpr uint32_t kLayers = 28;     // 23 palette materials (0..22) + 5 foliage cards (23..27)
+    static constexpr uint32_t kLayers = 62;     // 57 palette materials (0..56) + 5 foliage cards (57..61)
     static constexpr uint32_t kCardBase = 23;   // first foliage-card layer (see assets/textures/cards/cards.json)
     static constexpr float kDefaultScale = 0.5f; // metres per tile
 

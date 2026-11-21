@@ -258,7 +258,7 @@ void main()
             q = pw;
         } else {
             const uint mId = uint(vMat.x + 0.5);
-            const vec3 alb = kPalette[clamp(mId, 0u, 16u)];
+            const vec3 alb = kPalette[clamp(mId, 0u, 56u)];
             const vec2 rr = vec2(vMat.y, vMat.z) / 255.0;
             const float shB = ((gRenderFlags & 2) != 0 && dot(n, kSunDir) > 0.02)
                                   ? surfelBakedShadow(s.bent_sh.w)

@@ -42,6 +42,7 @@
 #include <algorithm>
 #include <chrono>
 #include <cmath>
+#include <cctype>
 #include <cstdio>
 #include <cstring>
 #include <cstdlib>
@@ -1548,7 +1549,13 @@ struct Server {
     {
         int cell[3] = {};
         std::string err;
-        if (!parseCellArg(args, cell, err))
+        // A screen click is resolved by the App through pickAtWindowPos; no
+        // cell is needed on this side, but one is still accepted (and remains
+        // the deterministic form used by the gate).
+        std::vector<float> scr;
+        if (!ai::jsonGetFloatArray(args, "screen", scr, 2) &&
+            !ai::jsonGetFloatArray(args, "pixel", scr, 2) &&
+            !parseCellArg(args, cell, err))
             return { err, true };
         std::string mode = jsonGetString(args, "mode");
         if (mode.empty()) mode = jsonGetString(args, "brush");
@@ -1567,6 +1574,91 @@ struct Server {
             return { "stamp: diameter 0.1..32, depth 0.1..12, strength 0..1, mat 0.."
                      + std::to_string(voxel::kPaletteN - 1), true };
         return postIntent("stamp", args);
+    }
+
+    // View/edit intents. Validation lives here (so an agent gets an instant
+    // argument error); the actual pick, edit and commit live in the App, which
+    // owns the camera, the ChunkStore and the undo stack. "screen" is a click
+    // in the VIEW at logical window pixels - pickAtWindowPos runs the same
+    // screen->ray + store/micro competition the mouse uses.
+    ToolResult viewTool(const std::string& tool, const std::string& args)
+    {
+        auto boolArg = [&](const char* key, bool fallback) {
+            const std::string pat = std::string("\"") + key + "\"";
+            size_t p = args.find(pat);
+            if (p == std::string::npos) return fallback;
+            p = args.find(':', p + pat.size());
+            if (p == std::string::npos) return fallback;
+            ++p;
+            while (p < args.size() && std::isspace(static_cast<unsigned char>(args[p]))) ++p;
+            if (args.compare(p, 4, "true") == 0) return true;
+            if (args.compare(p, 5, "false") == 0) return false;
+            return fallback;
+        };
+
+        if (tool == "undo" || tool == "clear")
+            return postIntent(tool.c_str(), "{}");
+        if (tool == "box") {
+            std::vector<int> box;
+            const bool clear = boolArg("clear", false);
+            if (!clear && !ai::jsonGetIntArray(args, "box", box, 6))
+                return { "view_box needs box:[x0,y0,z0,x1,y1,z1] or clear:true", true };
+            return postIntent("box", args);
+        }
+
+        std::vector<float> scr;
+        const bool hasScreen = ai::jsonGetFloatArray(args, "screen", scr, 2) ||
+                               ai::jsonGetFloatArray(args, "pixel", scr, 2);
+        int cell[3] = {};
+        std::string err;
+        const bool hasCell = parseCellArg(args, cell, err);
+        if (!hasScreen && !hasCell)
+            return { tool + " needs screen:[x,y] (a click in the view), "
+                            "cell:[x,y,z], or x/y/z in metres", true };
+        if (hasScreen && (std::abs(scr[0]) > 100000.f || std::abs(scr[1]) > 100000.f))
+            return { "screen coordinates are logical window pixels; got "
+                     + std::to_string(scr[0]) + "," + std::to_string(scr[1]), true };
+
+        if (tool == "click") {
+            std::string mode = jsonGetString(args, "mode");
+            if (mode.empty()) mode = jsonGetString(args, "brush");
+            static const char* kModes[] = { "carve", "add", "delete", "paint",
+                                            "smooth", "rotate", "move", "select" };
+            bool ok = false;
+            for (const char* m : kModes) if (mode == m) ok = true;
+            if (!ok)
+                return { "view_click needs mode: carve|add|delete|paint|smooth|"
+                         "rotate|move|select", true };
+            float diameter = 2.f, depth = 1.5f, strength = 0.65f;
+            ai::jsonGetFloat(args, "diameter", diameter);
+            ai::jsonGetFloat(args, "depth", depth);
+            ai::jsonGetFloat(args, "strength", strength);
+            int mat = -1;
+            ai::jsonGetInt(args, "mat", mat);
+            if (diameter < 0.1f || diameter > 32.f || depth < 0.1f || depth > 12.f ||
+                strength < 0.f || strength > 1.f || mat >= int(voxel::kPaletteN))
+                return { "view_click: diameter 0.1..32, depth 0.1..12, "
+                         "strength 0..1, mat 0.." +
+                         std::to_string(voxel::kPaletteN - 1), true };
+            if (mode == "rotate") {
+                float y = 0.f, p = 0.f, r = 0.f;
+                ai::jsonGetFloat(args, "yaw", y) || ai::jsonGetFloat(args, "rot", y);
+                ai::jsonGetFloat(args, "pitch", p) || ai::jsonGetFloat(args, "rotX", p);
+                ai::jsonGetFloat(args, "roll", r) || ai::jsonGetFloat(args, "rotZ", r);
+                if (std::abs(y) > 3600.f || std::abs(p) > 3600.f ||
+                    std::abs(r) > 3600.f)
+                    return { "view_click rotate: yaw/pitch/roll within +-3600 deg", true };
+            }
+            if (mode == "move") {
+                float dx = 0.f, dy = 0.f, dz = 0.f;
+                ai::jsonGetFloat(args, "dx", dx);
+                ai::jsonGetFloat(args, "dy", dy);
+                ai::jsonGetFloat(args, "dz", dz);
+                if (std::abs(dx) > 100.f || std::abs(dy) > 100.f || std::abs(dz) > 100.f)
+                    return { "view_click move: dx/dy/dz within +-100 m", true };
+            }
+        }
+        return postIntent(tool.c_str(), args);
     }
 
     ToolResult snapshotLayer(const std::string& args, bool restore)
@@ -2645,6 +2737,71 @@ struct Server {
         return { "world reloaded from " + manifestPath(), false };
     }
 
+    // ----- LIVE screen capture ----------------------------------------------
+    // Grab the running app's actual X window (HUD, sidebar and all) via
+    // ImageMagick `import`. Unlike render_shot (a fresh headless process that
+    // reads the baked files), this shows what the USER currently sees - the
+    // only way to verify a hot-reload actually landed in the live view.
+    ToolResult captureScreen(const std::string& args)
+    {
+        std::string out = jsonGetString(args, "out");
+        if (out.empty()) out = jsonGetString(args, "path");
+        if (out.empty()) {
+            const auto now = std::chrono::system_clock::now().time_since_epoch().count();
+            out = "workspace/screenshots/live_" + std::to_string(now) + ".png";
+            std::error_code dirEc;
+            std::filesystem::create_directories("workspace/screenshots", dirEc);
+        }
+        // Find the main Voxelforge window. wmctrl prints "0xID  desktop  host  TITLE";
+        // match a title that ends in "Voxelforge" but exclude the "AI panel" window,
+        // terminals whose cwd/path merely contains the word, and browsers.
+        std::string winId;
+        {
+            FILE* p = popen("wmctrl -l 2>/dev/null", "r");
+            if (p) {
+                char line[512];
+                while (fgets(line, sizeof(line), p)) {
+                    std::string s(line);
+                    while (!s.empty() && (s.back() == '\n' || s.back() == '\r')) s.pop_back();
+                    if (s.find("Voxelforge") == std::string::npos) continue;
+                    if (s.find("AI panel") != std::string::npos ||
+                        s.find("christoph") != std::string::npos ||
+                        s.find("Firefox") != std::string::npos ||
+                        s.find("Code") != std::string::npos) continue;
+                    // title is the last whitespace-separated token run; require
+                    // the line to end with "Voxelforge" so the terminal (ends in
+                    // "voxelforge" path) and other titled windows are excluded.
+                    if (s.size() < 10 || s.compare(s.size() - 10, 10, "Voxelforge") != 0)
+                        continue;
+                    size_t sp = s.find(' ');
+                    if (sp == std::string::npos) continue;
+                    winId = s.substr(0, sp);
+                    break;
+                }
+                pclose(p);
+            }
+        }
+        if (winId.empty())
+            return { "capture_screen: no live Voxelforge window found (is the app "
+                     "running on DISPLAY? wmctrl -l saw none titled 'Voxelforge')", true };
+
+        std::ostringstream cmd;
+        cmd << "import -window " << winId << " \"" << out << "\" 2>/tmp/opencode/mcp_capture.err";
+        int rc = std::system(cmd.str().c_str());
+        std::error_code ec;
+        auto sz = std::filesystem::file_size(out, ec);
+        if (rc != 0 || ec || sz == 0) {
+            std::ifstream ef("/tmp/opencode/mcp_capture.err");
+            std::string err((std::istreambuf_iterator<char>(ef)),
+                            std::istreambuf_iterator<char>());
+            return { "capture_screen failed for window " + winId + ": " +
+                     err.substr(0, 300), true };
+        }
+        return { "captured LIVE app window " + winId + " -> " + out + " (" +
+                 std::to_string(sz) + " bytes) - this is the user's actual view "
+                 "(HUD + sidebar included)", false };
+    }
+
     // ----- headless render shot ---------------------------------------------
     ToolResult renderShot(const std::string& args)
     {
@@ -3242,6 +3399,56 @@ std::string toolSchemas()
               "\"items\":{\"type\":\"integer\"}}"), false);
     entry("stamp_result", "Fetch the engine's instrument report for a queued stamp id.",
           obj(jstr("id") + ":{\"type\":\"string\"}"), false);
+    // ---- view / edit tools: a click into the live view -------------------
+    std::string viewTarget = jstr("screen") +
+        ":{\"type\":\"array\",\"items\":{\"type\":\"number\"}},"
+        "\"cell\":{\"type\":\"array\",\"items\":{\"type\":\"integer\"}},"
+        "\"x\":{\"type\":\"number\"},\"y\":{\"type\":\"number\"},"
+        "\"z\":{\"type\":\"number\"}";
+    entry("view_pick",
+          "Click into the live VIEW at logical window pixels screen:[x,y] (or "
+          "a cell/world point) and report what the app's real pick path hits: "
+          "cell, world position, material, owning layer and distance. Use a "
+          "screenshot from capture_screen/render_shot to choose the pixel. "
+          "Returns an id; use edit_result for the report.",
+          obj(viewTarget), false);
+    entry("view_click",
+          "Click into the live VIEW at screen:[x,y] (or cell/xyz) and use an "
+          "edit tool directly, through the same paths the GUI brush and Apply "
+          "buttons use. mode: carve|add|delete|paint|smooth (cell brushes: "
+          "diameter/depth/strength/mat/box_scope), rotate (yaw/pitch/roll "
+          "degrees) or move (dx/dy/dz metres) on the object under the click, "
+          "select (activate that object), with commit:false to stage a "
+          "preview instead of writing the manifest. Returns an id; use "
+          "edit_result for the instrument report.",
+          obj(viewTarget + "," + jstr("mode") + ":{\"type\":\"string\"},"
+              "\"layer\":{\"type\":\"string\"},\"diameter\":{\"type\":\"number\"},"
+              "\"depth\":{\"type\":\"number\"},\"strength\":{\"type\":\"number\"},"
+              "\"mat\":{\"type\":\"integer\"},\"yaw\":{\"type\":\"number\"},"
+              "\"pitch\":{\"type\":\"number\"},\"roll\":{\"type\":\"number\"},"
+              "\"dx\":{\"type\":\"number\"},\"dy\":{\"type\":\"number\"},"
+              "\"dz\":{\"type\":\"number\"},\"commit\":{\"type\":\"boolean\"},"
+              "\"box_scope\":{\"type\":\"array\",\"items\":{\"type\":\"integer\"}}"),
+          false);
+    entry("view_undo",
+          "Undo the last live-edit stroke in the running app (the same stack "
+          "as the sidebar's Undo / Ctrl+Z). Returns an id; use edit_result.",
+          obj(""), false);
+    entry("view_clear",
+          "Clear ALL live edits in the running app, including its overlay file "
+          "(the same irreversible action as 'Clear live edits'). Returns an id; "
+          "use edit_result.",
+          obj(""), false);
+    entry("view_box",
+          "Set or clear the selection box that scopes every cell brush in the "
+          "running app. box:[x0,y0,z0,x1,y1,z1] inclusive lattice cells, or "
+          "clear:true. Returns an id; use edit_result.",
+          obj("\"box\":{\"type\":\"array\",\"items\":{\"type\":\"integer\"}},"
+              "\"clear\":{\"type\":\"boolean\"}"), false);
+    entry("edit_result",
+          "Fetch the running app's instrument report for any view_* intent id "
+          "(also accepts stamp ids).",
+          obj(jstr("id") + ":{\"type\":\"string\"}"), false);
     entry("snapshot",
           "Back up a tracked .vxw layer to a labelled .bak INSIDE the scenery "
           "(never /tmp). Every destructive baked write should be snapshot-backed.",
@@ -3328,7 +3535,15 @@ std::string toolSchemas()
               "\"mat\":{\"type\":\"integer\"}"), false);
     entry("help", "Dump the full vf_mcp tool catalogue with exact signatures. "
                   "Use instead of searching for tool names.",
-          obj(""), true);
+          obj(""), false);
+    entry("capture_screen",
+          "Capture the LIVE running Voxelforge app window from X11 (HUD + "
+          "sidebar included) to a PNG. Unlike render_shot (fresh headless "
+          "process reading baked files), this shows the user's ACTUAL current "
+          "view - use it to verify a hot-reload really landed. Returns the PNG "
+          "path; read it with an image viewer. Args: out/path (default "
+          "workspace/screenshots/live_<time>.png).",
+          obj("\"out\":{\"type\":\"string\"},\"path\":{\"type\":\"string\"}"), true);
     t += "] } ";
     return t;
 }
@@ -3357,7 +3572,10 @@ ToolResult callTool(Server& srv, const std::string& name, std::string args)
                                       "snapshot", "restore_snapshot", "commit_overlay",
                                       "add_path", "add_tree", "place_copy", "transform",
                                       "diff_shots", "clip_key",
-                                      "surface_scan", "delete_edits", "help" };
+                                      "surface_scan", "delete_edits", "help",
+                                      "capture_screen",
+                                      "view_pick", "view_click", "view_undo",
+                                      "view_clear", "view_box", "edit_result" };
     std::string canonical = name;
     bool native = false;
     for (const char* n : kNative)
@@ -3381,7 +3599,10 @@ ToolResult callTool(Server& srv, const std::string& name, std::string args)
     // PPMs. Rebuilding VoxelField + LayeredWorld for them made a cold
     // `stamp_result` take ~7 s and look like a frozen chat.
     if (canonical != "stamp_result" && canonical != "commit_overlay" &&
-        canonical != "diff_shots") {
+        canonical != "diff_shots" && canonical != "view_pick" &&
+        canonical != "view_click" && canonical != "view_undo" &&
+        canonical != "view_clear" && canonical != "view_box" &&
+        canonical != "edit_result") {
         // The world is DATA on disk: re-adopt if the app or an undo changed it
         // since the previous tool call (this server is a long-lived process).
         srv.refreshIfChanged();
@@ -3460,6 +3681,8 @@ ToolResult callTool(Server& srv, const std::string& name, std::string args)
         return srv.reloadWorldTool(args);
     if (canonical == "render_shot")
         return srv.renderShot(args);
+    if (canonical == "capture_screen")
+        return srv.captureScreen(args);
     if (canonical == "inspect_rig")
         return srv.inspectRig(args);
     if (canonical == "set_pose")
@@ -3488,6 +3711,18 @@ ToolResult callTool(Server& srv, const std::string& name, std::string args)
         return srv.stampTool(args);
     if (canonical == "stamp_result")
         return srv.readResult("stamp", args);
+    if (canonical == "edit_result")
+        return srv.readResult("edit", args);
+    if (canonical == "view_pick")
+        return srv.viewTool("pick", args);
+    if (canonical == "view_click")
+        return srv.viewTool("click", args);
+    if (canonical == "view_undo")
+        return srv.viewTool("undo", args);
+    if (canonical == "view_clear")
+        return srv.viewTool("clear", args);
+    if (canonical == "view_box")
+        return srv.viewTool("box", args);
     if (canonical == "snapshot")
         return srv.snapshotLayer(args, false);
     if (canonical == "restore_snapshot")

@@ -8,6 +8,7 @@
 // "unknown tool".
 //
 // Header-only on purpose: unit-testable without linking ImGui/Ollama.
+#include <cctype>
 #include <string>
 #include <vector>
 #include <cstdlib>
@@ -30,8 +31,9 @@ struct NormalizedCall {
 
 inline const char* kValidTools =
     "create_box, create_cylinder, create_ellipsoid, create_stamp, create_voxels, "
-    "write_object, read_object, delete_object, import_mesh, list_world, probe, "
-    "set_behaviour";
+    "write_object, read_object, delete_object, delete_voxels, import_mesh, "
+    "list_world, probe, describe, paint, snapshot, restore_snapshot, commit_overlay, "
+    "add_path, add_tree, place_copy, transform, diff_shots, clip_key, set_behaviour";
 
 // lowercase alnum key with verb prefixes and trailing instance counters stripped:
 // "Add_Rock_2" -> "rock", "create-box" -> "box", "LIST_WORLD" -> "listworld"
@@ -83,11 +85,30 @@ inline std::string canonicalToolName(const std::string& key)
     if (has("behaviour") || has("behavior") || has("run") || has("graze") ||
         has("walk") || has("animate") || has("command"))
         return "set_behaviour";
+    if (has("transform") || has("reposition"))
+        return "transform";
+    // the per-layer Import BUTTON (place a copy at the anchor), not mesh import
+    if (has("copy"))
+        return "place_copy";
     // object-layer file ops (read/modify/write/delete standalone .vxw layers)
     if (has("import") || has("stl") || has("objfile") || has("convert"))
         return "import_mesh";
+    if (has("describe") || has("what is") || has("identify"))
+        return "describe";
+    if (has("restore") && (has("snapshot") || has("backup")))
+        return "restore_snapshot";
+    if (has("snapshot") || has("backup"))
+        return "snapshot";
+    if (has("paint") || has("recolor") || has("recolour"))
+        return "paint";
     if (has("read") || has("inspect") || has("getobject") || has("dump"))
         return "read_object";
+    // "delete voxels/cells" is a SURGICAL carve, not a whole-layer delete.
+    // Without this rule every invented delete-*voxels name was normalised to
+    // delete_object, silently wiping the entire layer (e.g. all 44 trees).
+    if ((has("delete") || has("remove") || has("erase")) &&
+        (has("voxel") || has("cell") || has("region") || has("area")))
+        return "delete_voxels";
     if (has("delete") || has("remove") || has("erase"))
         return "delete_object";
     if (has("layer") || has("saveobject") || has("writelayer") ||
@@ -97,6 +118,12 @@ inline std::string canonicalToolName(const std::string& key)
     if (has("voxel") || has("sculpt") || has("freeform") || has("custom") ||
         has("object"))
         return "create_voxels";
+    // Builders come AFTER the deletion rules so "remove tree" still deletes
+    // cells rather than planting a new one.
+    if (has("path") || has("trail") || has("road"))
+        return "add_path";
+    if (has("tree") || has("bush"))
+        return "add_tree";
     // box family last: "crate"/"chest"/"block" also contain no earlier keywords
     if (has("box") || has("crate") || has("cube") || has("block") || has("chest") ||
         has("brick"))
@@ -373,6 +400,28 @@ inline bool jsonGetFloatArray(const std::string& json, const char* key,
         }
     }
     return out.size() == expected;
+}
+
+// Find an image path in a tool result like "rendered <path> (N bytes)".
+// No quotes around the path, so scan back from the extension to whitespace.
+inline std::string extractImagePath(const std::string& text)
+{
+    for (size_t i = 0; i + 4 < text.size(); ++i) {
+        if (text.compare(i, 4, ".ppm") != 0 && text.compare(i, 4, ".png") != 0)
+            continue;
+        const size_t e = i + 4;
+        size_t b = i;
+        while (b > 0) {
+            const char c = text[b - 1];
+            if (std::isspace(static_cast<unsigned char>(c)) || c == '"' ||
+                c == '\'' || c == '[' || c == '(' || c == ':')
+                break;
+            --b;
+        }
+        const std::string p = text.substr(b, e - b);
+        if (p.find('/') != std::string::npos) return p;
+    }
+    return {};
 }
 
 } // namespace vf::ai

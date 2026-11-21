@@ -145,3 +145,7 @@ before the shared library), wet-shoreline soil (render bit 12), backlit
 foliage transmission (bit 11), the emissive lighthouse lantern auto-deriving a
 point light ([[concepts/enclosed-space-lighting]]), auto-exposure and
 linear-HDR FX. Hero flags: `VF_RENDER_FLAGS=2559 VF_AUTOEXPOSE=1 VF_LINEAR_FX=1`.
+
+Removing one of the ~44 trees from the dense `isle_forest` /
+`isle_jungle` layers is a per-cell carve, not a whole-layer delete; see
+[[concepts/surgical-voxel-deletion]].

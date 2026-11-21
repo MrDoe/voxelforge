@@ -87,8 +87,10 @@ int App::recordInteractiveFrame(FrameSync& fr, const FrameInputs& fx)
     push.b = glm::vec4(m_pushB.x, m_pushB.y, m_pushB.z, float(m_frameIdx % 1024));
     push.sunDir = m_sunDir;
     push.misc = glm::vec4(float(m_renderFlags), m_animTime, float(m_tonemapLook), m_exposure);
-    // buried camera (inside solid): render shells two-sided this frame
-    updateBuriedProbe();
+    // buried camera (inside solid): render shells two-sided this frame.
+    // The interactive camera is ejected from deep inside the heightfield here;
+    // headless --cam placement stays untouched (tests rely on exact cams).
+    updateBuriedProbe(!headlessRun);
 
     // splat raster or ray-march -> HDR + G-buffer --------------------
     // The STUDIO is its own path: no world backend, no water, no

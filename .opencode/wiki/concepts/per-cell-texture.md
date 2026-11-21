@@ -1,8 +1,8 @@
 ---
 title: Per-cell texture overrides (phase 2)
 tags: [textures, surfels, svo, chunk-store, voxel-field, mcp]
-sourceRefs: [src/voxel/worldfile.cpp, src/voxel/voxel_field.cpp, src/voxel/layered_world.cpp, src/voxel/chunk_store.cpp, src/voxel/surfelize.cpp, shaders/common_base.glsl, shaders/splat.vert, shaders/splat.frag, src/ai/mcp_server.cpp]
-lastReviewed: 2026-09-19
+sourceRefs: [src/voxel/worldfile.cpp, src/voxel/voxel_field.cpp, src/voxel/layered_world.cpp, src/voxel/chunk_store.cpp, src/voxel/surfelize.cpp, shaders/common_base.glsl, shaders/splat.vert, shaders/splat.frag, shaders/common_svo.glsl, src/ai/mcp_server.cpp]
+lastReviewed: 2026-11-20
 ---
 
 # Per-cell texture overrides (phase 2)
@@ -45,6 +45,26 @@ field — the 16-byte record's 14th byte, which was unused before.
    `slot = gTexOv > 0.5 ? floor(gTexOv + 0.5) : uTex.matTex[mId].x`.
    `tex` is stored as a **raw integer** (not /255) precisely so the `> 0.5`
    test works.
+
+## The SVO gap (fixed 2026-11-20)
+
+Steps 1–5 are backend-neutral; step 6 was **splat-only**. The SVO shader
+(`shaders/common_svo.glsl`) never wrote `gTexOv`, so the per-cell byte sat in
+word1 of the brick but was ignored: a cell with `tex: N` rendered with its
+material's atlas slot (or palette) in `--mode svo`, silently. The splat path
+worked (the `texture_check.py` phase-2 gate is splat-only), which is why this
+went unnoticed.
+
+Fix: `brickTexByte(p)` in `common_svo.glsl` walks the same SVO octree as
+`brickMatByte` and returns `uBricks[vi] & 0xFF` (word1 byte 0). `shadeTerrain`
+sets `gTexOv = float(brickTexByte(p))` before `detailAlbedo`, so both the
+albedo and the emissive lookup (via `texSlotFor`) follow the override.
+`shadeFloor` (water reflection bed) resets `gTexOv = 0` — terrain has no
+override and must use its material slot. Measured: with a `tex: 3` checker
+block bound to atlas layer 3, SVO now shows a 0.46 % frame diff against the
+same block without the override (splat: 0.63 %), vs ~0 % before the fix.
+**Never read this as "texture paint works everywhere" until both backends
+are gated** — the regression would be easy to reintroduce.
 
 ## The overlay-schema bump
 

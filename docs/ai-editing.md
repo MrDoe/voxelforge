@@ -1,17 +1,83 @@
-# AI editing: chat backend, tools, MCP server
+# AI editing: in-app OpenCode panel + MCP server
+
+> For agents: `.opencode/skills/vf-mcp/SKILL.md` is the operational skill for
+> driving the MCP server (tool map, scene data model, authoring recipes,
+> texture/anchor rules, verification and gotchas). Load it before world edits.
 
 Two entry points mutate the world:
 
-1. the **in-app chat window** (`src/app/chat_ui.cpp`) talking to an
-   Ollama / OpenAI-compatible server;
-2. the **`vf_mcp` stdio MCP server** (`src/ai/mcp_server.cpp`) for external
-   agent hosts.
+1. the **in-app AI panel** (`src/app/chat_ui.cpp`) — a thin client of a
+   *dedicated* OpenCode session (one per scenery) whose `voxelforge` agent
+   (`.opencode/agents/voxelforge.md`) calls the same `vf_mcp` tools as any
+   external agent. There is no local tool dispatcher and no direct Ollama
+   client in this path;
+2. the **`vf_mcp` stdio MCP server** (`src/ai/mcp_server.cpp`) itself, for
+   external agent hosts.
 
-Both funnel through `vf::ai::normalizeToolCall()` and write records into
-`assets/ai_edits.vxw` via `EditableWorld`. A running voxelforge picks changes
-up within ~0.5 s (disk poll) or instantly (chat triggers a reload directly).
+Both write authored DATA under `scenery/<name>/` (`ai_edits.vxw`, layer `.vxw`,
+`world.json`); the running app hot-reloads within ~1 s. The in-app panel adds
+whole-turn Undo (snapshot/restore of authored files), renders agent screenshots
+from `workspace/screenshots/`, and persists UI-wide text size through the
+`uiFontScale` UI setting.
 
-## Chat backend configuration
+## In-app panel / OpenCode backend
+
+- `src/ai/opencode_client.{hpp,cpp}` — HTTP Basic auth from the local service
+  registration file (`~/.local/state/opencode/service.json`), `VF_OPENCODE_URL`
+  override, `POST /api/session` with `location.directory`, `POST .../prompt`,
+  `/interrupt`, permission auto-reply (`once`, no approval UI by decision),
+  `/api/event` SSE on a worker thread, and `/api/session/{id}/environment` for
+  per-turn scene context.
+- Session IDs are cached per scenery in `.opencode/voxelforge_sessions.json`.
+- The agent is limited by permissions to `voxelforge_*` MCP tools plus reads;
+  `set_scenery`/`set_ui` are denied this milestone. Shell, file edits and git
+  commands are denied (a previous session lost tree-wide work to `git stash`).
+- Screenshots: `vf_mcp render_shot` now defaults to
+  `workspace/screenshots/shot_<time>.ppm` (gitignored); the panel decodes PPM
+  into a cached Vulkan texture and shows it on the tool card.
+- Undo: before each prompt the panel snapshots `world.json`, `ai_edits.vxw`
+  and every layer `.vxw` into `/tmp/opencode/ai_undo/<pid>/<turn>/`; Undo
+  restores them and requests a world reload. `vf_mcp` re-adopts its cached
+  world when file mtimes change, so `probe`/`ground` follow the restore.
+- Text size: the panel's **Text** slider writes `uiFontScale` into the `ui`
+  manifest block; `App::rebuildUiFont()` rebuilds the ImGui atlas/style
+  between frames (0.8–2.5); default is now **2.0** for high-res displays.
+  At 2×, font pixels double but widget padding scales only 1.5×; the sidebar
+  rail/footer/pane width scale fully (524 px rail+footer+pane at 960×540,
+  logged once as `sidebar layout: ...`); AI-panel explicit heights scale too.
+- Model: the panel has a **Model** dropdown. Default is **Beam Free**
+  (`opencode-go/beam-free`); free models are listed by default, **All** shows
+  the full catalog. The choice is persisted per scenery in
+  `.opencode/voxelforge_sessions.json` and applied with
+  `POST /api/session/{id}/model`; `VF_OPENCODE_MODEL=provider/id` pins it for
+  scripted runs (overrides the persisted choice). Reasoning deltas are hidden
+  from the chat view. Chat replies use OpenCode's low-verbosity style: one
+  compact `ok/ERR/... tool(args)` line per tool call (click to expand details),
+  with the model's direct text answer shown normally (multi-line messages are
+  split and wrapped correctly). The current Ctrl+LMB pick is injected into each
+  prompt as a `[UI context: selected voxel cell [...], world position [...]]`
+  line, so "here"/"this"/"selected" resolves to the bottom-center anchor. A
+  2-minute silence watchdog re-enables Send if a turn never reports idle. The
+  agent prompt requires a plain-language answer for every turn — tools are
+  optional and chat-only questions get no tool calls. Enter sends a message;
+  Shift+Enter adds a newline.
+- Optimizations: SSE events are filtered by session ID on the worker thread;
+  undone snapshots skip unchanged files; agent screenshots are downsampled to
+  360 px before GPU upload (24-card / 32-texture cache bound); tool names come
+  from `session.tool.input.started`; MCP connection is ensured at session
+  setup (the mcp-lazy plugin starts disconnected).
+
+Known limitation: the MCP tool process inherits the OpenCode service's
+environment, so a one-launch `VF_SCENERY`/`--scenery` override on the app does
+NOT reach it — the agent inspects the pointer (`scenery/last.json`) scenery.
+Normal pointer-based launches are aligned; keep this in mind when testing with
+scratch copies outside the repo.
+
+## Legacy direct LLM client (not used by the in-app panel)
+
+The following describes `OllamaClient` and the six-tool bridge that USED to
+drive the chat. They are kept for compatibility/tests; the in-app panel now
+uses OpenCode + vf_mcp (see above). New work should not extend this path.
 
 Precedence: env var > CLI flag > default.
 
@@ -52,6 +118,10 @@ arguments. Normalization rescues them:
   stamp/mosaic/pixel → `create_stamp`; listworld/layers/list → `list_world`;
   box/crate/cube/block/chest/brick → `create_box`; exact `probe`.
   Structural nouns win over rock-family keywords ("stone_pillar" is a pillar).
+- Deletion is split by target: `delete`/`remove`/`erase` + `voxel`/`cell`/
+  `region`/`area` → `delete_voxels` (a surgical carve); plain
+  `delete`/`remove`/`erase` → `delete_object` (whole layer). Without the
+  first rule an invented "remove voxels" silently wiped the entire layer.
 - `injectToolDefaults()` — missing args get conservative defaults:
   box `[4,4,4]`, cylinder r0.35 h0.9, ellipsoid `[0.5,0.5,0.5]`
   (`[0.6,0.45,0.6]` flat boulder when the name says rock). Material inferred
@@ -66,7 +136,7 @@ create_stamp, list_world, probe`.
 
 ## EditableWorld API (`src/voxel/editable_world.{hpp,cpp}`)
 
-Persistent layer = `assets/ai_edits.vxw` + its manifest entry. All anchors are
+Persistent layer = `scenery/<active>/ai_edits.vxw` + its manifest entry. All anchors are
 **bottom-center lattice cells**: the selected voxel's center is where the new
 object's bottom-center sits.
 
@@ -140,6 +210,7 @@ ai_edits), and writes edits through its own `EditableWorld` instance.
 | `duplicate_layer` | `source`, `name` | copy a .vxw layer to a new name (registered, disabled) |
 | `rename_layer` | `layer`, `new_name` | rename a layer (file + manifest entry) |
 | `delete_layer` | `layer` (name/file) | delete a non-protected layer |
+| `delete_voxels` | `layer`, `box:[x0,y0,z0,x1,y1,z1]` (or `min`/`max`), or `anchor` + `radius` (m) / `component:true`; `connectivity?`, `mat?`/`from?`, `dry_run?` | surgically remove CELLS from one layer (e.g. a single tree in `isle_forest`); refuses landscape/packed/ai_edits and a whole-layer selection; atomic temp+rename, **not undoable** |
 | `list_micro` | – | list micro-voxel object layers with placement |
 | `list_materials` | – | palette materials: id, name, rgb, reflectivity, roughness, emissive |
 | `list_textures` | – | texture files + current material bindings |
@@ -150,10 +221,108 @@ ai_edits), and writes edits through its own `EditableWorld` instance.
 | `list_lights` | – | authored point lights in world.json |
 | `add_light` | `pos`, `color?`, `radius?`, `intensity?`, `follow?` | add a point light |
 | `remove_light` | `index` | remove a point light by index |
-| `set_texture` | `mat`, `file?`, `scale?`, `emissive?`, `emissiveScale?` | bind a texture to a material (empty file = palette) |
+| `update_light` | `index`, `pos?`, `color?`, `radius?`, `intensity?`, `follow?` | edit one authored light in place |
+| `set_texture` | `mat`, `file?`, `scale?`, `emissive?`, `emissiveScale?`, `card?` | bind a texture to a material (empty file = palette; card preserved unless given) |
+| `recolor_layer` | `layer`, `mat?`, `from?`, `r?`, `g?`, `b?`, `refl?`, `rough?`, `tex?` | edit existing cells: material/colour/response and per-cell atlas slot (`tex`: 0 clears, 1..255 binds a slot) |
+| `get_ui` | – | read the persisted "ui" block + authored sun |
+| `set_ui` | any of ~40 named keys (see below) | patch sidebar-rendered settings; only given keys change |
+| `set_sun` | `elev`, `azim` (degrees, toward the sun) | author the scene sun; the app rebakes shadows |
+| `list_sceneries` | – | list scenery folders and mark the active one |
+| `set_scenery` | `scenery` | switch the live app to another scenery (World panel path) |
 | `render_shot` | `out?`, `cam?` (6 nums), `width?`, `height?`, `mode?`, `animtime?`, `sun?` | headless render to a PPM image path |
 | `inspect_rig` | `layer` | derive + report the skeleton (bones, roles, parents, segments) of a micro layer |
 | `set_pose` | `layer`, `pose` (flat: bone,rx,ry,rz,...) | set a static rigged pose on a micro layer |
+| `view_pick` | `screen:[x,y]` (logical window pixels) or `cell`/`x,y,z` | click into the running VIEW; report cell, world position, material, owning layer, distance |
+| `view_click` | target as above + `mode:carve\|add\|delete\|paint\|smooth\|rotate\|move\|select`; brush args `diameter`/`depth`/`strength`/`mat`/`box_scope`, transform args `yaw`/`pitch`/`roll` or `dx`/`dy`/`dz`, `layer?`, `commit?` | use an edit tool directly through the App's real paths; returns an id for `edit_result` |
+| `view_undo` | – | undo the last live-edit stroke in the running app |
+| `view_clear` | – | clear ALL live edits and the overlay (irreversible) |
+| `view_box` | `box:[x0,y0,z0,x1,y1,z1]` or `clear:true` | set/clear the selection box that scopes every cell brush |
+| `edit_result` | `id` | engine instrument report for any queued view_* / stamp intent |
+
+#### Clicking into the view
+
+The `view_*` tools are intents: `vf_mcp` validates the arguments and appends a
+line to `scenery/<name>/mcp_intents.jsonl`; the running app consumes it between
+frames. A `screen:[x,y]` target goes through `App::pickAtWindowPos` — the same
+screen→ray conversion, store march and micro-vs-world competition the mouse
+uses — so a pixel chosen from `render_shot`/`capture_screen` resolves to the
+same cell a Ctrl+LMB click would. Cell/xyz targets stay available for
+camera-independent edits. The app then drives `applyEditLive` (all five cell
+brushes), the selection box, `undoEdit`, `clearLiveEdits`, and the same
+`commitRotation`/`commitMove` the sidebar's Apply buttons call; undo, surfel/SVO
+patching, height/water and overlay persistence come for free. `commit:false`
+stages a rotate/move preview without writing `world.json`. Results land in
+`mcp_results.jsonl` and are read with `edit_result {id}` — if no app is running
+the result stays "pending". See `.opencode/wiki/concepts/mcp-intent-bridge.md`.
+Gate: `tests/mcp_view_check.py` (CTest `mcp_view_check`, label `mcp`).
+
+#### Carving one object out of a baked layer
+
+`delete_voxels` is the per-cell counterpart to `delete_object`. Preview first,
+then carve:
+
+```sh
+echo '{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"delete_voxels","arguments":{"layer":"isle_forest","anchor":[444,559,481],"component":true,"dry_run":true}}}' | ./build/vf_mcp
+```
+
+`component:true` flood-fills the 6-connected component containing the picked
+cell, so one tree goes while the rest of the forest stays. Use `box` (inclusive
+lattice cells) or `anchor` + `radius` (metres) when a canopy overlaps a
+neighbour, and `mat`/`from` to restrict by material; `connectivity:26` is
+available for diagonally-connected foliage. The `.vxw` is rewritten
+atomically via temp+rename, but there is **no Undo** — back up the layer
+first. The in-app Delete brush remains the reversible alternative (it writes
+to `runtime_edits.vxw`).
+
+### UI settings block (`"ui"` in world.json)
+
+vf_mcp is a separate process: it cannot poke the running app's members. The
+control surface rides the channel the app already polls — `world.json` — as
+DATA: a top-level `"ui"` object whose keys mirror the Render and Edit panels
+(`src/app/world/ui_settings.cpp`). The app re-reads it on the ~0.5 s manifest
+poll and applies a field only when the file value differs from the live
+member, so a GUI drag is never snapped back by an unrelated manifest edit,
+and a manifest with no `"ui"` block behaves as before. At startup the block
+lands before `VF_*` env overrides, so explicit scripted A/B flags still win.
+
+Keys (all optional; `set_ui` merges): `renderFlags` (bitmask: 0 AO,
+1 Shadows, 2 Flora, 3 Water, 5 SSR, 6 SSAO, 7 DetailNormals, 8 Enclosure,
+9 TerrainInterp, 10 AutoExpose, 11 Transmission, 13 PhotoCards), `backend`
+(`"splats"|"svo"`), `taa`, `volFog`, `motionBlur`, `dof`, `linearFx`,
+`autoExposure` (0/1), `exposure` (0.1–4), `tonemapLook` (0–2),
+`ssaoStrength`, `ssaoRadius`, `ssaoBlur`, `ssaoDebug`, `splatRadius` (0.5–2),
+`edgeBlend`, `edgeShrink`, `edgeFill`, `edgeBridgeSize`, `cornerFill`,
+`lightBudget`, `lightK`, `camSpeed`, `camPos` [x,y,z] / `camX/Y/Z`,
+`camYaw`, `camPitch` (deg), `furEnabled`, `furPerCell`, `furLength` (m),
+`furWidth` (m), `furCurl`, `furCycles`, `furTilt` (deg), `furSss`,
+`brushMode` (`carve|add|delete|paint|smooth|rotate|move`), `brushWidth`
+(voxels), `brushDepth` (voxels), `brushMaterial` (palette id),
+`smoothStrength`, `falloffCurve`, `smoothPreserveVolume`, `scenery` (folder
+name — routes through the same between-frames switcher as the GUI).
+
+The sun is its own block (`set_sun`): the live follower applies it only when
+the FILE value changed since the app last saw it — the session-only Day/Night
+(P) rule holds. Writers use the temp+rename + read-back discipline of
+`writeLightManifest` and preserve every foreign top-level key.
+
+### Drawing textures onto cells
+
+Three levels, all data-only and hot-reloaded:
+
+1. `set_texture {mat, file, scale, ...}` binds an image to a whole material.
+2. New cells: `add_voxels` / `write_object` accept `tex` on each cell — an
+   atlas-slot override (the record's `reserved` byte → `Sample::tex` →
+   surfel `tan_aspect.w`); the cell keeps its own material's response.
+3. **Existing cells**: `recolor_layer {layer, tex:N}` sets that override on
+   matched cells (`from` filters by material); `tex:0` clears it back to the
+   material's own slot. `read_object` now prints `tex` on every cell line,
+   so read → modify → write round-trips the override without losing it.
+
+Slots 9–15 are the emissive band (only safe for non-glowing art if no enabled
+cell uses those ids as its material); the override inherits the cell
+material's m/tile scale. Splats are derived from voxels: a `tex` change flows
+into their surfels automatically on reload — there is no direct per-splat
+texture paint.
 
 Conventions:
 

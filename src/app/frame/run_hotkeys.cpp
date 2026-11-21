@@ -172,45 +172,9 @@ void App::handleHotkeys(bool textCaptures, bool headlessRun)
             m_splatPass.setRadiusScale(m_splatPass.radiusScale() * 1.12f);
             spdlog::info("splat radius -> {:.2f}", m_splatPass.radiusScale());
         }
-        // ---- edit brush modes ------------------------------------------------
-        // The mode keys are ALSO camera keys (A/D/S = strafe/back) and they
-        // keep flying - movement is never yielded to the brush, because flying
-        // is how you aim the brush. The two uses do not conflict: a mode is
-        // picked on the EDGE (one action per press, matching the rest of this
-        // function) while flying is level-triggered, so holding A strafes
-        // continuously and selects Add once.
-        //
-        // The mode keys act ONLY while the brush is armed. Tab is the single
-        // View/Edit switch, both directions: a stray A/D/S/C/M while flying
-        // must never drag the user into Edit mode, and no non-Tab key may
-        // leave it either. This REVERSED the earlier design where the mode
-        // keys armed the brush themselves and C disarmed on a second press -
-        // do not restore either.
-        //
-        // Rotate stays unbound: R would collide with nothing today but it needs
-        // a selected layer first, and a hotkey that silently no-ops is worse
-        // than no hotkey. It is one click in the Edit section.
-        //
-        // All five edges are read unconditionally, even in View mode: edge()
-        // is a stateful latch, so short-circuiting a key while disarmed would
-        // leave its latch stale and it would phantom-fire on the frame the
-        // brush arms.
-        const bool cEdge = edge(GLFW_KEY_C, hw);
-        const bool aEdge = edge(GLFW_KEY_A, hw);
-        const bool dEdge = edge(GLFW_KEY_D, hw);
-        const bool sEdge = edge(GLFW_KEY_S, hw);
-        const bool mEdge = edge(GLFW_KEY_M, hw);
-        if (m_editActive) {
-            struct ModeKey { bool pressed; EditBrush mode; };
-            const ModeKey kModeKeys[] = {
-                { cEdge, EditBrush::Carve }, { aEdge, EditBrush::Add },
-                { dEdge, EditBrush::Delete }, { sEdge, EditBrush::Smooth },
-                { mEdge, EditBrush::Move }
-            };
-            for (const ModeKey& mk : kModeKeys)
-                if (mk.pressed)
-                    chooseEditMode(mk.mode);
-        }
+        // Edit brush modes are selected in the sidebar only (no hotkeys):
+        // the C/A/D/S/M keys are movement keys (A/D/S strafe/fly) and binding
+        // them to mode switching interfered with flying.
         // X: drop the bounding-box selection so the whole world is editable
         // again (an absent box is the classic, unscoped brush). The edge is
         // read unconditionally - these latches are stateful, and skipping a
@@ -226,11 +190,11 @@ void App::handleHotkeys(bool textCaptures, bool headlessRun)
         // character in the chat's multiline InputText, which is why the
         // suppression has to be whole-function rather than per-chord.
         {
-            // Tab is the ONLY View/Edit switch, both directions. The mode
-            // keys do not arm the brush and C does not disarm (see above):
-            // one key owns the mode, so a press can never switch it by
-            // accident. Arming reveals the brush controls so the switch into
-            // Edit mode is never a two-step hunt through the rail.
+            // Tab is the ONLY View/Edit switch, both directions. Edit modes
+            // are selected in the sidebar only (no mode hotkeys), so a press
+            // can never switch the mode by accident. Arming reveals the brush
+            // controls so the switch into Edit mode is never a two-step hunt
+            // through the rail.
             if (edge(GLFW_KEY_TAB, hw)) {
                 m_editActive = !m_editActive;
                 if (m_editActive)
@@ -346,7 +310,7 @@ void App::handleHotkeys(bool textCaptures, bool headlessRun)
         }
         if (edge(GLFW_KEY_0, hw)) {
             // Reset to the default look, which includes photo foliage cards.
-            m_renderFlags = 31 | (1 << 13);
+            m_renderFlags = 31 | (1 << 13) | (1 << 14);
             spdlog::info("render flags reset -> default");
         }
         // photorealism feature toggles

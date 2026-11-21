@@ -154,6 +154,10 @@ int App::run(const Args& args)
     } else if (const char* strength = getenv("VF_EDIT_STRENGTH")) {
         m_smoothStrength = std::clamp(finiteEnv(strength, m_smoothStrength), 0.0f, 1.0f);
     }
+    // Material used by an Add/Paint stamp. Lets a headless paint prove that
+    // foliage grows where a foliage-bearing texture is painted.
+    if (const char* e = getenv("VF_EDIT_MAT"))
+        m_editMat = uint8_t(std::clamp(atoi(e), 0, 255));
     // VF_EDIT_FALLOFF_CURVE=constant|sphere|root|smooth|linear|sharp
     if (const char* curve = getenv("VF_EDIT_FALLOFF_CURVE")) {
         using C = vf::voxel::EditableWorld::FalloffCurve;
@@ -189,6 +193,8 @@ int App::run(const Args& args)
         m_furTilt = std::clamp(finiteEnv(e, m_furTilt), 0.0f, 89.0f);
     if (const char* e = getenv("VF_FUR_SSS"))
         m_furSss = std::clamp(finiteEnv(e, m_furSss), 0.0f, 4.0f);
+    if (const char* e = getenv("VF_FOLIAGE_OPACITY"))
+        m_foliageOpacity = std::clamp(finiteEnv(e, m_foliageOpacity), 0.0f, 1.0f);
     if (args.probeSet)
         return runProbe() ? 1 : 0;
 
@@ -218,6 +224,10 @@ int App::run(const Args& args)
     // The per-frame state has to exist before the env overrides run, because
     // VF_HUD_SHOT fills a field of it.
     FrameInputs fx;
+    // The authored "ui" block lands FIRST, before camera setup and env
+    // overrides, so an explicit --cam / VF_RENDER_FLAGS for THIS run still
+    // wins over persisted intent (same precedence the sun block follows).
+    applyUiSettingsFromManifest(false);
     setupCameraAndShots();
     // Seed the previous-frame camera before the first frame renders: the
     // unseeded value is a camera at the world origin, which makes the first
@@ -225,6 +235,9 @@ int App::run(const Args& args)
     // as full-frame motion on a still scene.
     advancePrevCam();
     applyStartupEnvOverrides(fx);
+    // Seed the seen-snapshots from the ACTUAL post-env state: a live apply
+    // then only follows a real file change, never re-wins over an env flag.
+    resetUiSettingsState();
 
     auto last = std::chrono::steady_clock::now();
     while (!m_window.shouldClose()) {

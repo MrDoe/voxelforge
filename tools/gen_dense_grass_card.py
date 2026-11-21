@@ -9,7 +9,7 @@ copies of those blades into one 512x512 RGBA card, so each tuft is a dense
 clump of dozens of photographic blades with natural green/straw variation.
 
 Only the CC0 source is read; the output is written into the active scenery's
-shared card library (assets/textures/cards/card_23_grass.png). Re-running the
+shared card library (assets/textures/cards/card_57_grass.png). Re-running the
 packer (pack_foliage_cards.py) will overwrite it, so run THIS afterwards.
 
 Usage: gen_dense_grass_card.py [--src maps-dir] [--out card.png] [--count N]
@@ -127,7 +127,7 @@ def main():
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--src", default="/home/christoph/code/plantcards-texel/maps")
     ap.add_argument("--out", default=os.path.join(
-        REPO, "assets", "textures", "cards", "card_23_grass.png"))
+        REPO, "assets", "textures", "cards", "card_57_grass.png"))
     ap.add_argument("--size", type=int, default=512)
     ap.add_argument("--count", type=int, default=26)
     ap.add_argument("--seed", type=int, default=1337)

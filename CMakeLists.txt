@@ -103,7 +103,8 @@ add_library(vf_core STATIC src/core/camera.cpp
                           src/voxel/heightmap.cpp src/voxel/worldfile.cpp
                           src/voxel/scenery.cpp
                           src/voxel/picking.cpp src/voxel/editable_world.cpp
-                          src/ai/ollama_client.cpp)
+                          src/ai/ollama_client.cpp
+                          src/ai/opencode_client.cpp)
 target_include_directories(vf_core PUBLIC src PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/external)
 target_compile_definitions(vf_core PUBLIC
     VOXELFORGE_ASSET_DIR="${CMAKE_CURRENT_SOURCE_DIR}/assets")
@@ -140,13 +141,6 @@ target_link_libraries(vf_mesh2vox PRIVATE vf_core)
 add_executable(vf_microvox tools/micro_voxel.cpp)
 target_include_directories(vf_microvox PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
 target_link_libraries(vf_microvox PRIVATE vf_core)
-
-# Author a MICRO-voxel layer from a real STL/OBJ mesh (the missing mesh input
-# path): voxelizes on the object's fine lattice and registers a role=micro
-# layer with meshSource/meshUp so the app draws it from the raster mesh.
-add_executable(vf_mesh2micro tools/mesh_to_micro.cpp)
-target_include_directories(vf_mesh2micro PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
-target_link_libraries(vf_mesh2micro PRIVATE vf_core)
 
 # Offline proof for the MESH-driven micro deformation (skin -> pose -> voxelize
 # -> delta). Explicit tool: never wired into the default build or the tests; run
@@ -210,8 +204,6 @@ set(VF_SHADER_SRCS ${CMAKE_CURRENT_SOURCE_DIR}/shaders/svo_raymarch.comp
     ${CMAKE_CURRENT_SOURCE_DIR}/shaders/micro_overlay.comp
     ${CMAKE_CURRENT_SOURCE_DIR}/shaders/micro_mesh.vert
     ${CMAKE_CURRENT_SOURCE_DIR}/shaders/micro_mesh.frag
-    ${CMAKE_CURRENT_SOURCE_DIR}/shaders/micro_sun.vert
-    ${CMAKE_CURRENT_SOURCE_DIR}/shaders/micro_sun.frag
     ${CMAKE_CURRENT_SOURCE_DIR}/shaders/fur.vert
     ${CMAKE_CURRENT_SOURCE_DIR}/shaders/fur.frag
     ${CMAKE_CURRENT_SOURCE_DIR}/shaders/fur_composite.comp
@@ -256,8 +248,10 @@ add_executable(voxelforge
     src/app/world/store_overlay.cpp
     src/app/world/surfel_stream.cpp
     src/app/world/micro_objects.cpp
+    src/app/world/ui_settings.cpp
     src/app/textures/texture_bindings.cpp
     src/app/edit/live_edit.cpp
+    src/app/edit/mcp_intents.cpp
     src/app/edit/box_select.cpp
     src/app/edit/transform.cpp
     src/app/mesh/mesh_import.cpp
@@ -303,14 +297,17 @@ add_executable(vf_tests tests/main.cpp tests/test_camera.cpp
                         tests/test_surfelize.cpp tests/test_store.cpp
                         tests/test_app_gizmo.cpp tests/test_app_cli_ui.cpp
                         tests/test_box_select.cpp tests/test_micro.cpp
-                        tests/test_collision.cpp
+                        tests/test_collision.cpp tests/test_selector.cpp
+                        tests/test_mcp_tools.cpp tests/test_mcp_builders.cpp
                         # The app's pure leaf logic, compiled in directly: before
                         # the src/app split these lived in the same translation
                         # unit as main() and could not be reached from a test.
                         src/app/cli/args.cpp
                         src/app/ui/gizmo_math.cpp
                         src/app/ui/ui_primitives.cpp
-                        src/ai/ollama_client.cpp)
+                        src/app/chat_ui.cpp
+                        src/ai/ollama_client.cpp
+                        tests/test_app_opencode.cpp)
 target_link_libraries(vf_tests PRIVATE vf_core vf_doctest imgui_core)
 target_compile_definitions(vf_tests PRIVATE DOCTEST_CONFIG_NO_MULTITHREADING)
 find_package(Python3 COMPONENTS Interpreter REQUIRED)
@@ -336,6 +333,22 @@ add_test(NAME unit_worldfile_tests
 add_test(NAME unit_app_tests
     COMMAND ${Python3_EXECUTABLE} ${GROUP_GATE} unit,app
             $<TARGET_FILE:vf_tests> --source-file=*test_app_*)
+
+# vf_mcp v2 functional gates: scratch scenery, hermetic /tmp overlays. They
+# invoke the tools over stdio and the app headlessly, so they need vf_mcp AND
+# voxelforge built. Enable with VOXELFORGE_TEST_GROUPS=mcp.
+add_test(NAME mcp_v2_check
+    COMMAND ${Python3_EXECUTABLE} ${GROUP_GATE} mcp
+            ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/tests/mcp_v2_check.py)
+set_tests_properties(mcp_v2_check PROPERTIES LABELS "mcp" SKIP_RETURN_CODE 77)
+add_test(NAME mcp_selector_check
+    COMMAND ${Python3_EXECUTABLE} ${GROUP_GATE} mcp
+            ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/tests/mcp_v2_selector_check.py)
+set_tests_properties(mcp_selector_check PROPERTIES LABELS "mcp" SKIP_RETURN_CODE 77)
+add_test(NAME mcp_view_check
+    COMMAND ${Python3_EXECUTABLE} ${GROUP_GATE} mcp
+            ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/tests/mcp_view_check.py)
+set_tests_properties(mcp_view_check PROPERTIES LABELS "mcp" SKIP_RETURN_CODE 77)
 
 # ---- material textures ----------------------------------------------------------
 # The shipped photo set comes from tools/fetch_textures.py (ambientCG, CC0,
@@ -563,6 +576,7 @@ vf_add_test_group(app vf_tests)
 vf_add_test_group(surfel vf_tests voxelforge)
 vf_add_test_group(store vf_tests voxelforge)
 vf_add_test_group(world vf_tests)
+vf_add_test_group(mcp vf_mcp voxelforge)
 vf_add_test_group(live-edit vf_tests voxelforge)
 # Brush preview only (no unit binary needed - it is all rendered frames).
 vf_add_test_group(preview voxelforge)

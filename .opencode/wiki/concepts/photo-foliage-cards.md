@@ -119,6 +119,68 @@ is the limited source art — the CC0 atlas has only five distinct blades,
 composited into each card — and the voxel ground under the gaps. Sourcing a
 photographic multi-blade cutout is the next real lever, not more post tuning.
 
+## Light, opacity and live editing (2026-11-20)
+
+**Light/shadow.** Cards already had `ndl` against the sun and a sky/AO term,
+but no sun occlusion. A per-pixel 16-step march over `uHeight` + `uObjVol`
+runs in `fur_composite.comp` and is applied only to the grass part of the sun
+term. Fur and grass share the accumulator set, so `grass.frag:oE.w` tags the
+grass card's raw `alpha*ndl` (fur leaves it 0) and the composite subtracts
+that part from `A.y` before re-adding it shadowed. Bit 14 (ON by default,
+`VF_CARD_SHADOW=0` for a clean A/B) gates it alongside bits 2 and 13.
+
+**Opacity.** The Render panel's **Foliage opacity** slider (0..1, default 1,
+`VF_FOLIAGE_OPACITY` headless) scales `alpha` in `grass.frag`, so every
+accumulation term and the final `1-exp(-sumA)` coverage fade together; the fur
+coat is untouched. The card's `Has foliage` checkbox in the Textures panel is
+the binding itself: checked = a card is bound to that material.
+
+**One modal for both pickers.** The Textures panel no longer expands an inline
+wall of thumbnails per material. Both the photo-texture and foliage-card
+galleries are one `Texture picker` modal opened by a per-material **Choose…**
+button, with a name filter and a `(palette)` / `(none)` option. The modal calls
+the same `setTextureBinding` / `setCardBinding` paths the old tiles did, so
+the existing GUI apply tests still cover persistence and re-upload.
+
+**Always dynamic, like emissive.** Neither the presence nor the root height
+of a card comes from the baked heightmap. `buildGrassCards` only proposes
+hash-stable x/z sites; `App::grassCardLayerAt()` reads the LIVE `ChunkStore`
+column: the first solid TERRAIN cell below a bounded hint supplies the
+material, per-cell texture override and root Y, and the atlas binding decides
+the card layer. The height texture is just a search hint. Paint a grass
+material and the region rebuild grows blades; paint it away and they vanish.
+A low band (~0.8 m) of OBJECT cells just above the terrain rejects enclosed
+ground — this is what removed the blades that poked through the LighthouseIsle
+barn's `footing` floor. A tree canopy metres higher is deliberately ignored,
+so grass under trees stays. Verified: a camera on the barn floor is
+byte-identical with cards on vs off; grass through the doorway still shows.
+
+**Incremental rebuild.** `buildGrassCards` places candidates with a hash of
+the candidate index (not a sequential RNG), so a card's position is independent
+of its neighbours. `App` caches the uploaded cards; a paint stroke accumulates
+its xz AABB and `rebuildGrassCardsRegion()` erases/rebuilds only the cached
+cards rooted in that rectangle, then re-uploads. `grassCardLayerAt()` reads the
+LIVE height texture (`m_heightCpu`, patched by `patchHeightTexture`) and store
+tags, never the baked field — otherwise painted grass would never grow cards.
+Measured on the hamlet: full rebuild 305,679 cards / 756 ms; one brush region
+221 removed + 221 added in 12.3 ms (~60× faster).
+
+The LighthouseIsle binding was also corrected globally: its two grass ground
+materials carried jungle/nandina cards; mat 0 now uses `grass` (mat 1 keeps
+`nandina`, whose colour matched its coastal ground better) and mat 8 uses
+`jungle`.
+
+## Gate interaction with `test-textures`
+
+`tests/texture_check.py` had two stale assumptions after the scenery move:
+it looked for `assets/world.json`, and its `VF_TEXTURES=0` arm also lost the
+foliage cards (their atlas slots are zeroed with the atlas), producing ~1%
+of frame difference that the gate attributed to the atlas. It now renders
+against a **sandbox copy** of the shipped scenery and pins `VF_RENDER_FLAGS=511`
+(bit 13 clear) for every arm, so cards are absent throughout and the atlas A/B
+is isolated. `test-textures` passes 2/2. `visual_check.py`'s manifest path was
+moved to `scenery/<VF_SCENERY>/world.json` for the same reason.
+
 ## Gate
 
 `tests/photo_cards_check.py <binary>` (stdlib only) renders house/hero/water

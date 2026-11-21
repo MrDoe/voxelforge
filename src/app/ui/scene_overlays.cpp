@@ -273,11 +273,6 @@ ImFont* font = io.FontDefault ? io.FontDefault
         entries = {
             { "W/A/S/D", "fly", false },
             { "Q/E", "down/up", false },
-            { "C", "Carve", m_editBrush == EditBrush::Carve },
-            { "A", "Add", m_editBrush == EditBrush::Add },
-            { "D", "Delete", m_editBrush == EditBrush::Delete },
-            { "S", "Smooth", m_editBrush == EditBrush::Smooth },
-            { "M", "Move", m_editBrush == EditBrush::Move },
             { "+/-", "size", false },
             { "Shift+LMB", "box", false },
             { "X", "clear box", false },
@@ -311,7 +306,7 @@ ImFont* font = io.FontDefault ? io.FontDefault
     const float sidebarW =
         m_sidebarCollapsed
             ? std::min(kRailW, io.DisplaySize.x)
-            : sidebarWidthFor(m_sidebarWidth, io.DisplaySize.x);
+            : sidebarWidthFor(m_sidebarWidth, io.DisplaySize.x, m_uiFontScale);
     const float availLeft = sidebarW;
     const float availW = io.DisplaySize.x - availLeft;
     const float platePad = 6.0f;

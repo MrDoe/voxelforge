@@ -56,7 +56,7 @@ void App::chooseEditMode(EditBrush mode)
 
 void App::drawPanelEdit()
 {
-    sectionHeader("Tab: View/Edit  |  A/D/S/C/M pick a mode  |  +/- size");
+    sectionHeader("Tab: View/Edit  |  +/- size");
 
     if (m_rotationPreviewPending || m_rotationStaged || m_moveStaged) {
         // A staged transform is a PENDING WRITE to world.json. It gets its own

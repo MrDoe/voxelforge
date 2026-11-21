@@ -402,14 +402,11 @@ one costs a whole turn, because the bad call is rejected before any work runs.
   (`SurfelParams::terrainAnalytic`, default ON, `VF_TERRAIN_ANALYTIC=0` to
   restore), IS on: see `.opencode/wiki/concepts/terrain-surfel-interpolation.md`
   for the measurement that says the splat SIZE is not the lever here.
-  **Edit brush hotkeys** (state-dependent, and the reason the key list is not
-  one flat table): `Tab` is the ONLY View/Edit switch (the plain arm/disarm
-  toggle, both directions); `C` = Carve, `A` = Add, `D` = Delete, `S` =
-  Smooth, `M` = Move, and those pick a mode only while the brush is armed — in
-  View mode they never switch the mode (A/D/S still fly, `C`/`M` do nothing),
-  so a stray press while looking around cannot drag you into Edit. The mode
-  keys' edge latches are still read every frame while disarmed, so arming can
-  never make a stale latch phantom-fire.
+  **Edit brush hotkeys**: `Tab` is the ONLY View/Edit switch (the plain
+  arm/disarm toggle, both directions). Edit modes (Carve/Add/Delete/Paint/
+  Smooth/Rotate/Move) are selected in the sidebar only — the C/A/D/S/M keys
+  are movement keys (A/D/S strafe/fly) and are no longer bound to mode
+  switching, so they never interfere with flying. Rotate has no hotkey either.
   `+`/`-` change the width by one voxel and `Shift`+`+`/`-` the depth (Smooth
   strength) — those already existed and act only while armed; disarmed, `+`/`-`
   are exposure. **Bind these by keycap, not by position**: GLFW reports physical
@@ -963,7 +960,13 @@ one costs a whole turn, because the bad call is rejected before any work runs.
   slices, both recording paths, selftest, profiler). `main.cpp` is the entry
   point only. CMakeLists lists every `.cpp` explicitly — a new file that is not
   listed there does not build.
-- `src/app/chat_ui.cpp`, `src/ai/*` — chat UI, LLM client/tool parsing, MCP
+- `src/app/chat_ui.cpp`, `src/ai/*` — the in-app AI panel is now a thin client
+  of a dedicated per-scenery OpenCode session (`opencode_client.*`, agent
+  `.opencode/agents/voxelforge.md`); it has no local tool dispatcher. The
+  panel supports whole-turn undo, agent screenshots in `workspace/screenshots/`
+  and a persisted `uiFontScale` (default 2.0; ImGui atlas rebuild between
+  frames, sidebar rail/footer/pane widths and AI panel heights scale with it).
+  For driving the MCP server, use the `vf-mcp` skill (`.opencode/skills/vf-mcp/SKILL.md`). MCP
   server (`vf_mcp`: authoring — add_box/cylinder/ellipsoid/stamp, add_voxels,
   write_object, read_object, delete_object, import_mesh, clear_edits; inspection
   — list_layers, get_layer, inspect_layer, layer_stats, list_micro, list_materials,
@@ -971,7 +974,11 @@ one costs a whole turn, because the bad call is rejected before any work runs.
   inspect_rig;
   placement — set_layer_transform, set_layer_behaviour, set_pose, enable_layer,
   duplicate_layer, rename_layer, delete_layer; textures/lights — set_texture,
-  add_light, remove_light; control — reload_world, render_shot). See the
+  add_light, remove_light, update_light; alter — recolor_layer (material/rgb/
+  refl/rough **and per-cell tex atlas-slot override**); UI/render settings —
+  get_ui, set_ui, set_sun, list_sceneries, set_scenery (world.json "ui" block
+  hot-applied within ~1 s, field-diffed so a GUI drag is never snapped back);
+  control — reload_world, render_shot, fur_stats). See the
   voxel-object skill for how to author arbitrary objects via these tools (the
   `.vxw` file is produced by `write_object`/`add_voxels`, never hand-written
   binary).

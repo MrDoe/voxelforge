@@ -58,6 +58,13 @@ void App::pollWorldAndTextures(float dt)
             loadMicroObjects();
             m_taaFirstFrame = true;
         }
+        // A manifest edit may carry UI settings (vf_mcp set_ui/set_sun/
+        // set_scenery). Apply between frames; field-level guards keep a GUI
+        // drag untouched (see world/ui_settings.cpp).
+        if (manifestChanged) {
+            applyUiSettingsFromManifest(true);
+            applyManifestSun();
+        }
         m_microManifestMtime = mt;
         m_microManifestSize = sz;
         m_microManifestSeeded = true;
@@ -68,6 +75,11 @@ void App::pollWorldAndTextures(float dt)
         m_pendingWorldReload = false;
         m_layers.requestReload(m_camera.pos, true);
     }
+    // vf_mcp live-lane intents run AFTER any reload so a stamp always edits
+    // the freshly adopted store, never a stale one. They go through
+    // applyEditLive — the GUI brush's own implementation.
+    if (m_layers.loaded())
+        consumeMcpIntents();
 
     // texture hot-swap: a picker edit (write world.json + re-upload) or an
     // on-disk change of a bound image (re-upload only) lands here, between

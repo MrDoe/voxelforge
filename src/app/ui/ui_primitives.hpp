@@ -19,9 +19,9 @@
 namespace vf {
 namespace app {
 
-float clampSidebarWidth(float width, float displayWidth);
+float clampSidebarWidth(float width, float displayWidth, float uiScale = 1.0f);
 
-float sidebarWidthFor(float requestedWidth, float displayWidth);
+float sidebarWidthFor(float requestedWidth, float displayWidth, float uiScale = 1.0f);
 
 bool overSidebarResizeGrip(const ImGuiIO& io, float sidebarWidth,
                            float displayHeight);

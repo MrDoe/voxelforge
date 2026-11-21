@@ -257,6 +257,24 @@ void App::drawPanelRender()
         if (ImGui::IsItemHovered())
             ImGui::SetTooltip("Photographic grass/leaf cards from the shared "
                               "texture library. Needs textures enabled.");
+        // Sun occlusion of those cards: they used to read fully sunlit under
+        // a roof or canopy. Needs the Photo foliage cards and Shadows bits.
+        flagToggle("Foliage card shadows", 1 << 14);
+        if (ImGui::IsItemHovered())
+            ImGui::SetTooltip("Let sun shadow fall on the raster grass/leaf "
+                              "cards, the way it falls on the ground they "
+                              "stand on. Needs cards and Shadows enabled.");
+        // Opacity of the photographic ground cover. Applied in grass.frag, so
+        // every accumulation term and the final coverage fade together; no
+        // card rebuild, and the fur coat is untouched.
+        controlRow("Foliage opacity", [&] {
+            ImGui::SetNextItemWidth(-1.0f);
+            if (ImGui::SliderFloat("##foliageOpacity", &m_foliageOpacity,
+                                   0.0f, 1.0f, "%.2f"))
+                m_furPass.setFoliageOpacity(m_foliageOpacity);
+        });
+        hintLine("Transparency of the photographic grass/leaf cards. "
+                 "1 = the authored look, 0 = none.");
         // Fog / motion blur / DoF are separate opt-in members, not render-flag
         // bits (bit 4 is the unused outline flag and stays unexposed).
         ImGui::Checkbox("Volumetric fog (J)", &m_volFogEnabled);
@@ -300,6 +318,10 @@ void App::drawPanelRender()
                                   "turning this off moves ~1.2%% of pixels by >12 at "
                                   "the house view (a coverage/complexity trade, not "
                                   "a free off switch). Rebuilds.");
+            // The size slider used to sit there fully active while both fill
+            // mechanisms were off, so it changed nothing at all. Disabled is
+            // honest: there is no derived splat to size until one is enabled.
+            ImGui::BeginDisabled(!((m_edgeFill || m_cornerFill) && m_edgeShrink > 0.0f));
             controlRow("Crease splat size", [&] {
                 ImGui::SetNextItemWidth(-1.0f);
                 ImGui::SliderFloat("##edgeSize", &m_edgeBridgeSize, 0.0f, 2.0f,
@@ -308,15 +330,21 @@ void App::drawPanelRender()
             if (ImGui::IsItemDeactivatedAfterEdit())
                 requestWorldReload();
             if (ImGui::IsItemHovered())
-                ImGui::SetTooltip("Size of edge/corner fill splats. Rebuilds.");
+                ImGui::SetTooltip("Size of the enabled edge bridges / corner caps. "
+                                  "Disabled while both fills are off. Rebuilds.");
+            ImGui::EndDisabled();
+            ImGui::BeginDisabled(m_edgeShrink <= 0.0f);
             if (ImGui::Checkbox("Fill corner splats", &m_cornerFill))
                 requestWorldReload();
             if (ImGui::IsItemHovered())
                 ImGui::SetTooltip("Cap corner vertices the parent disk does not "
                                   "reach (thin shells, concave corners); covered "
-                                  "convex corners are skipped. Off by default - "
-                                  "measured no visible change on the hamlet "
-                                  "(stays inside the rerun noise floor). Rebuilds.");
+                                  "convex corners are skipped. Independent of "
+                                  "crease interpolation, but needs Sharp-edge fit "
+                                  "> 0. Off by default - measured no visible change "
+                                  "on the hamlet (inside the rerun noise floor). "
+                                  "Rebuilds.");
+            ImGui::EndDisabled();
         } else {
             hintLine("Splat tuning applies to the Gaussian backend; the SVO "
                      "reference draws the same world differently.");

@@ -11,25 +11,31 @@
 namespace vf {
 namespace app {
 
-float clampSidebarWidth(float width, float displayWidth)
+float clampSidebarWidth(float width, float displayWidth, float uiScale)
 {
     if (displayWidth <= 0.0f)
         return width;
     // Keep the rail plus a usable content pane on desktop-sized windows. On a
     // tiny window, fitting the display wins so the docked edge never leaves a
     // scene-coloured strip at the top or bottom.
-    const float minW = std::min(displayWidth, kRailW + kPaneMin);
+    const float minW = std::min(displayWidth, (kRailW + kPaneMin) * uiScale);
     const float maxW = std::max(minW, displayWidth - kSidebarGripW);
     return std::clamp(width, minW, maxW);
 }
 
-float sidebarWidthFor(float requestedWidth, float displayWidth)
+float sidebarWidthFor(float requestedWidth, float displayWidth, float uiScale)
 {
     if (requestedWidth > 0.0f)
-        return clampSidebarWidth(requestedWidth, displayWidth);
-    const float paneW = std::max(
-        kPaneMin, std::min(kPaneW, displayWidth * 0.30f));
-    return clampSidebarWidth(kRailW + paneW, displayWidth);
+        return clampSidebarWidth(requestedWidth, displayWidth, uiScale);
+    // Scale the pane with the text size: at 2x the 300 px default cannot hold
+    // a legible panel, while the fraction keeps small windows usable.
+    // 1x stays the original 46 + ~288 = 334 px at 960 wide; 2x grows
+    // proportionally but caps the pane at 45% of the display so the scene
+    // remains usable. The rail is already included in railW scaling here.
+    const float paneW = std::max(kPaneMin * uiScale,
+                                 std::min(kPaneW * uiScale,
+                                          displayWidth * std::min(0.45f, 0.30f * uiScale)));
+    return clampSidebarWidth(kRailW * uiScale + paneW, displayWidth, uiScale);
 }
 
 bool overSidebarResizeGrip(const ImGuiIO& io, float sidebarWidth,

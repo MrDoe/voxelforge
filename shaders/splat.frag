@@ -340,7 +340,7 @@ void main()
         } else if (dbg > 5.5) {
             // albedo as-is
             uint mDbg = uint(vMat.x + 0.5);
-            col = kPalette[clamp(mDbg, 0u, 16u)];
+            col = kPalette[clamp(mDbg, 0u, 56u)];
             alpha = 1.0;
         } else if (dbg > 4.5) {
             // vTex: per-surfel texture override as a heat ramp
@@ -390,7 +390,7 @@ void main()
         q = pw;
     } else {
         uint mId = uint(vMat.x + 0.5);
-        vec3 alb = kPalette[clamp(mId, 0u, 16u)];
+        vec3 alb = kPalette[clamp(mId, 0u, 56u)];
         vec2 rr = vec2(vMat.y, vMat.z) / 255.0;
         // TERRAIN NORMAL (render flag bit 9): shade a terrain fragment with
         // the CONTINUOUS heightfield normal instead of the surfel's own.

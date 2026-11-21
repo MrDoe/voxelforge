@@ -32,13 +32,13 @@ HERO_CAM = ["1.0", "2.0", "1.5", "5.3", "1.0", "11.3"]
 W, H = 480, 270
 FAST = os.environ.get("VF_FAST_TESTS") == "1"
 
-# This test rewrites the SHIPPED assets/world.json "textures" table in place
-# (VOXELFORGE_ASSET_DIR is a compile-time define, so there is no way to point
-# the app at a sandbox copy). A hard kill between a test write and the restore
-# used to leave the shipped manifest holding a deleted /tmp checker path -
-# the whole scene then rendered untextured. Guard it with a persistent backup:
-# restore on any exit path (finally / atexit / SIGINT / SIGTERM), and heal a
-# leftover backup at startup, so the next run recovers even after SIGKILL.
+# This test rewrites the "textures" table of a SANDBOX COPY of the shipped
+# scenery's world.json. Since the scenery migration the manifest lives in
+# scenery/<name>/, and VF_SCENERY accepts a direct path, so every render is
+# pointed at the copy: a hard kill can no longer leave a deleted /tmp checker
+# path in the shipped scene. The backup guard below is kept as a second line
+# of defence for the sandbox manifest (and for older callers that still pass
+# a real path).
 _manifest_bak = None
 _manifest_path = None
 
@@ -118,7 +118,11 @@ def region_stats(a, x0, x1, y0, y1, w=W):
 
 def render(binary, tmp, tag, extra_env=None, cam=None):
     out = os.path.join(tmp, f"{tag}.ppm")
-    env = dict(os.environ, VF_NO_OVERLAY="1")
+    # This gate is about the MATERIAL ATLAS only. Pin the procedural escape
+    # hatch (bit 13 clear) so the photographic foliage cards are absent from
+    # every arm: VF_TEXTURES=0 zeroes their atlas slots too, and the resulting
+    # ~1% card coverage difference was being misreported as an atlas failure.
+    env = dict(os.environ, VF_NO_OVERLAY="1", VF_RENDER_FLAGS="511")
     if extra_env:
         env.update(extra_env)
     cmd = [binary, "--width", str(W), "--height", str(H),
@@ -132,16 +136,29 @@ def render(binary, tmp, tag, extra_env=None, cam=None):
 
 def main():
     binary = sys.argv[1] if len(sys.argv) > 1 else "build/voxelforge"
-    # resolve the asset dir: the compiled-in VOXELFORGE_ASSET_DIR is absolute,
-    # but ctest runs from build/ so a bare "assets" relative path misses.
-    # tests/ is one level under the source root that owns assets/.
+    # The world manifest lives in scenery/<name>/ since the scenery migration.
+    # Pin the hermetic default (the same choice visual_check makes) and render
+    # against a sandbox COPY: the test mutates only that copy's world.json.
     src_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-    world_json = os.path.join(os.environ.get("VOXELFORGE_ASSET_DIR",
-                                             os.path.join(src_root, "assets")),
-                              "world.json")
+    scene_name = "LakesideHamlet"
+    source_scene = os.path.join(src_root, "scenery", scene_name)
+    if not os.path.isfile(os.path.join(source_scene, "world.json")):
+        print(f"FAIL: missing shipped scenery {source_scene}")
+        return 1
     failures = []
 
     with tempfile.TemporaryDirectory() as tmp:
+        sandbox_scene = os.path.join(tmp, "scenery_sandbox")
+        os.makedirs(sandbox_scene, exist_ok=True)
+        for entry in os.listdir(source_scene):
+            src = os.path.join(source_scene, entry)
+            dst = os.path.join(sandbox_scene, entry)
+            if entry == "world.json":
+                shutil.copyfile(src, dst)
+            elif not os.path.exists(dst):
+                os.symlink(src, dst)
+        os.environ["VF_SCENERY"] = sandbox_scene
+        world_json = os.path.join(sandbox_scene, "world.json")
         # a texture that is unmistakably not the palette: bright magenta grid
         # so any application shows as a large, structured colour change
         from PIL import Image, ImageDraw

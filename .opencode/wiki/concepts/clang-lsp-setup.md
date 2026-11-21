@@ -186,3 +186,10 @@ server's flags. To force a recompile, `touch` a source file instead.
 - **Parsing clean is not a behavioural gate.** Zero diagnostics is a syntactic
   and type-consistency result only; it cannot catch a wrong loop order or a
   changed render. Do not read it as "the refactor is semantically clean".
+
+## Related
+- The same project file also owns a `plugins/` discovery root:
+  [[concepts/opencode-plugin-relative-import]] explains how a shim under
+  `.opencode/plugins/` resolves its imports relative to its own directory, why
+  a copied shim with `../../node_modules` broke, and how to tell a failing
+  per-Location plugin from a healthy global one.

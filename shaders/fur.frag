@@ -143,7 +143,7 @@ void main()
     // record's colour (the same rule the world follows); an untextured one
     // keeps the record's colour. Sampled PER FRAGMENT, at the rest position,
     // so the fleece keeps its centimetre-scale variation.
-    vec3 alb = kPalette[clamp(mId, 0u, 21u)];
+    vec3 alb = kPalette[clamp(mId, 0u, 56u)];
     const vec3 tex = sampleTex(restPos, restN, mId);
     alb = tex.r >= 0.0 ? tex : vTint;
     // Clump-to-clump tone. Uniform albedo makes the coat a flat wash of the

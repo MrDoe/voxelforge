@@ -114,7 +114,7 @@ Each phase lands independently and leaves `AGENTS.md`/wiki/quirks updated; nothi
 
 ## Cross-references
 
-- [[wiki/entities/mcp-server]] — current tool surface.
+- [[entities/vf-mcp-v2]] — current tool surface.
 - [[wiki/concepts/brush-preview-visibility]] — the noise-floor measurement this plan's `verify` relies on.
 - [[wiki/concepts/live-edit-surfel-parity]] — the shared-code invariant Phase 3 must preserve.
 - [[wiki/concepts/geometry-format-policy]] — editor-path vs baked-path rules for objects and transforms.

@@ -7498,65 +7498,129 @@ Final check_texture over ALL 14 bound files: ALL PASS. Schema note: the
 foliageCards key migrated to per-row "card" fields on textures entries
 (cards stay = row-field carry in any table rebuild).
 
-## [2026-11-20] ingest | mesh-to-micro authoring + CC0 props in LighthouseIsle
+## [2026-11-20] ingest | MCP UI settings + per-cell texture painting (restored)
+New page [[concepts/ui-settings-manifest]]: vf_mcp's UI settings ride a flat
+world.json "ui" object through the app's ~0.5 s manifest poll; three guards
+(member-diff, last-seen sun block, between-frames scenery switch) keep it from
+fighting the GUI. Writer uses writeOwnedTopKey (temp+rename, fail-closed scan,
+read-back + dangling-comma shape guard); the ui loader locates the block with
+quote-aware scanTopLevel because Json::skipValue is not string-aware.
+Tool surface: get_ui/set_ui/set_sun/set_scenery/list_sceneries/recolor_layer/
+update_light; recolor_layer now also sets the per-cell `tex` atlas override
+(0 clears) and read_object prints `tex` so read-modify-write round-trips it.
+Note: this work was wiped by an external `git reset -- moving to HEAD` and
+restored from the session record the same day after tree-wide notification.
 
-Work in the `feature/mesh-actor` worktree (`/home/christoph/code/voxelforge-mesh-actor`).
-New concept page [[concepts/mesh-to-micro-authoring]]. Added `tools/mesh_to_micro.cpp`
-(`vf_mesh2micro`), `tools/fetch_micro_meshes.py`, and 7 raster-owned micro layers
-(torch/lamp, compass, radio, backpack, pot, gas can, log) in LighthouseIsle from
-CC0 Quaternius Survival props. Two gotchas found and fixed: (1) the mesh side-car
-must carry the `--fit` scale or ~100% appearance fallbacks — tool now writes a
-normalized STL beside the .vxw and sets meshSource to `micro/<name>.stl`; (2) open
-multi-component meshes leave parity-fill holes — seed a solid cell at every mesh
-vertex. Verified all 7 load raster-owned with 0 fallbacks via --selftest.
+## [2026-11-20] ingest | Splat UI settings audit: what actually changes the picture
+New page [[concepts/splat-ui-settings-audit]]: A/B of every Render → SURFELS
+control against a byte-identical same-binary baseline (headless noise floor 0
+px, not the live 1.25 %). Radius 0.5/2.0 moves 43.7/49.6 % of hero pixels and
+all real surfels scale (splat.vert/cull/tile); sky (3.2 % changed), micro/fur
+(12.3 % of coat pixels) and the SVO backend (0 px) do not. Strict no-ops in
+the shipped hamlet: Fill corner splats (0 px, fill on or off), Crease splat
+size without Interpolate crease splats (bridges/caps gated on `edgeFill &&
+edgeShrink>0`), and the edge window by itself (silhouette bleed 1.00x). Fixed
+the stale cornerFill/default-0.35 notes in [[concepts/edge-aware-surfel-radius]]
+(code default: cornerFill off, edgeShrink 0.25). Sheets:
+tests/screenshots/splat_ui_audit_{core,edges}.png,
+splat_radius_change_mask.png, splat_ui_render_panel.png.
 
-## [2026-11-20] fix | two gate failures (fur SSS glow leak + micro shadow calibration)
+## [2026-11-20] fix | Splat no-op controls: cap gating and UI honesty
+Follow-up to the splat UI audit. Landed: corner caps are no longer emitted
+inside the crease-bridge gate in buildSurfels / appendCandidateEdgeBridges,
+so "Fill corner splats" works with crease interpolation off (both need
+edgeShrink > 0); bake and live-store paths stay in parity, and a new
+test_surfelize case pins caps firing with edgeFill=false. The SURFELS panel
+now disables "Crease splat size" when neither fill is active and documents the
+corner toggle's real dependency. unit_surfel_tests passes in test-surfel.
+Re-tested and REVERTED a tunable stencil coverage threshold: references
+0/1/2/4/8 all produced byte-identical frames (0 px), so a count of all
+overlapping disks still cannot identify a silhouette disk. Rendered A/B of
+the cap fix was blocked by an unrelated chat-client segfault in
+ChatUi::init -> OpenCodeClient::connect -> parseUrl; see the audit page.
+Verification addendum: an isolated worktree at HEAD with only the surfelizer
+edit rebuilt and rendered successfully (the main-tree binary was crashing in
+an unrelated ChatUi::init -> OpenCodeClient::connect -> parseUrl change).
+default vs VF_CORNER_FILL=1 remains 0 px on the hamlet: the coverage guard
+correctly suppresses caps on covered convex corners, so the decoupling fixes
+control semantics and bake/live parity without changing the shipped look.
+Default path byte-identical (no regression). A tunable stencil count probe was
+NOT kept: references 0..8 all rendered 0 px.
 
-In the `feature/mesh-actor` worktree. (1) `shaders/fur_composite.comp`: gate backlit
-SSS to `matId == 21u` — the composite shares accumulators with raster GRASS cards,
-which were glowing across the whole house view under VF_FUR_SSS (66244 px); fleece
-is the only fur material (21), grass carries ground mat 0/1. Verified 0 px changed
-on the house view. (2) `tests/micro_check.py`: the "vase shadows the urn" check
-counted 3-5 luma AA-fringe pixels of the binary micro shadow, diluting the mean to
-6.34; raised the darkened cutoff to 5 luma -> 56 px at mean 8.62 (clears the 8.0
-bar). Both failures were pre-existing at clean master HEAD, not mesh-actor
-regressions. Re-running `test-micro` to confirm.
-  CONFIRMED: test-micro re-run 100% passed (micro_check 310s, fur_check 285s).
-  Both failures resolved; no remaining gate failures in this worktree.
+## [2026-11-20] ingest | In-app AI panel moves to OpenCode
+New architecture: ChatUi is now an OpenCode API client (`src/ai/opencode_client.*`) driving a dedicated per-scenery session with the `voxelforge` agent; no local tool dispatcher or Ollama client. Tool cards, agent screenshots in `workspace/screenshots/`, permission auto-reply, and whole-turn undo (snapshot authored files + mtime-aware vf_mcp reload). UI text size (`uiFontScale` in the ui block) rebuilds the ImGui atlas between frames. Verified: 44-tool schema valid, 8/8 new client helper assertions + 90/90 worldfile assertions, full build, headless smoke and xvfb AI-panel capture. Live agent prompt could not be exercised: the configured OpenRouter account has 102 tokens credit (session outcome=failed); mock/helper gates cover the client.
 
-## [2026-11-20] ingest | Workstreams D + E2 in feature/mesh-actor
+## [2026-11-20] ingest | Beam Free default, model dropdown, AI panel optimizations
+The in-app AI panel now defaults to `opencode-go/beam-free` (verified live: session outcome succeeded, tool calls land), with a Model dropdown listing free models by default (`All` for the full 423), per-scenery persistence, and `VF_OPENCODE_MODEL=provider/id` for scripted runs. Reasoning output is hidden. Default UI text scale raised to 1.2. Performance/correctness passes: SSE filtering moved to the worker and server-side via repeated `types` params; undo snapshots copy only changed files; agent screenshots downsample to 360 px with 24-card/32-texture bounds; tool names come from `session.tool.input.started`; mcp-lazy server is connected automatically at session setup; session/model JSON writer consolidated and regression-tested; screenshot path parser extracted and tested; mock OpenCode service integration test added. Gates: full vf_tests 209/209, test-app/test-world green, mock client 12/12, xvfb panel captures. `test-smoke` 4/8 red (visual ownership, live-edit threshold, SSAO, fog) with uncommitted peer shader/render diffs present — not from these UI/AI changes.
 
-D: pick on the POSED mesh (App::pickMicroObjects): raster-owned micro worlds are
-ray-triangle intersected against the skin+behaviour-posed surface instead of the
-rest field; traced worlds keep the field march. VF_TEST_MICRO_PICK 3/3, hit
-distance tracks heading 0/45/90 (6.42/6.39/6.28 m).
-E2: runtime mesh-only layers - a role=micro entry with meshSource but no .vxw
-now synthesizes a transient field from the mesh at load (synthFieldFromMesh),
-plus a new WorldLayer.meshMat manifest key (parsed AND written). Verified by
-deleting isle_compass.vxw: loads raster-owned from the STL, 0 fallbacks.
-Workstream B (sun-space shadow) remains reverted (see quirk bd3f44bc); C (fur
-from mesh), E1 (field-free shading), F (delete tracer machinery) remain.
+Soak verification: app with AI panel stayed alive through two live Beam Free turns (65 s startup + 2×25 s, no errors). Live agent tool call confirmed (`voxelforge_list_layers` input/result in SSE); MCP server had to be connected explicitly (mcp-lazy starts disconnected). Agent permissions verified via /api/agent: 32 steps, wildcard vf_mcp allow followed by explicit denies for set_scenery/set_ui. test-smoke 4/8 red remains attributable to uncommitted peer shader/render diffs (visual ownership, live-edit threshold, SSAO, fog); UI/AI diffs touch no rendering code.
 
-## [2026-11-20] ingest | Workstream B: per-frame sun-space shadow map
+Final hardening pass: SSE fd ownership moved to the worker (stop() only shuts down, preventing a double-close of a reused fd); SSE reconnect flips the client online if the service starts after app launch; model status shown in the chat header; `VF_OPENCODE_MODEL=provider/id` scripted override; mcp-connect handshake cached per run; agent step budget 16→32 with explicit lattice→metre conversion and a bounded exploration rule; permissions re-verified with explicit denies after the wildcard allow. Mock OpenCode service test (tests/mock_opencode.py + opt-in VF_OPENCODE_URL) covers auth, MCP connect, model list, session create/prompt/model, and SSE events.
 
-feature/mesh-actor: raster-owned micro meshes get a per-frame sun-space shadow
-map (default-off VF_MICRO_SUNSHADOW). Posed meshes rasterized from the sun into
-an R32F colour RT, copied to a separate storage image (binding 29) for 4-tap
-PCF. Two images fix the write/read hazard that broke the first attempt.
-shadeMicroLit uses PCF for mesh worlds, field march for traced. Sun ortho camera
-via glm::lookAt/ortho. Verified: map populated, PCF matches field verdict at
-grazing sun (0 px), deterministic (0 px two ON renders), fur_check pin added.
-Remaining: C (fur from mesh), E1 (field-free shading), F (delete tracer).
+Bug fixed: a persisted `uiFontScale` was ignored at startup because `applyUiSettingsFromManifest(false)` skipped the font rebuild while `initImGui()` had already built the atlas at 1.2. The rebuild now runs before the heavy-only gate; xvfb capture at uiFontScale=2.0 logs `font rebuilt at scale 1.20` then `2.00`, with the AI panel controls still legible. Default remains 1.2.
 
-## [2026-11-20] ingest | Workstreams C + E1 in feature/mesh-actor
+Final state check: with uiFontScale=1.2 persisted, startup logs exactly one `font rebuilt at 1.20`; with 2.0 it logs 1.20 then 2.00 (atlas rebuilt with persisted value). Beam Free session verified (`opencode-go/beam-free`, agent `voxelforge`) and a live read-only MCP tool call succeeded through the agent. CPU gates green after all hardening (full vf_tests 209/209, test-app, test-world, mock client 12/12).
 
-C: fur roots from the mesh surface (buildFurCards rootFn callback, area-weighted
-triangle samples; field still baked for material/AO/shadow). fur_check all passed,
-107895 cards, coat strands 15.39 vs body 14.95, turn 22 px.
-E1: field-free shading for raster meshes, default-off VF_MESH_FIELDFREE=1. Vertex
-passes REST face normal + packed AO; fragment skips microNormal/microAO/
-skyVisibilitySvo, derives enclosure from AO. shadeMicroLit aoBaked param (-1 =
-field path for traced). Verified opt-in: lit alpaca, 6366 px change, 4 new
-near-black. Kept default-off (face-normal facets = look change). F (delete tracer
-bone machinery) intentionally deferred: dead code for shipped scene, no benefit,
-risks traced-path continuity - see concept page.
+Gate summary at handoff: `ninja -C build` clean; full `vf_tests` 209/209 (38.2M assertions), `test-unit` 8/8 CTest entries, `test-app` 1/1, `test-world` 2/2, mock-service integration 12/12, 44-tool MCP schema valid. `test-smoke` 4/8 red and `test-effects`/`test-fog` red with uncommitted peer shader/render diffs (visual ownership, live-edit threshold, SSAO, fog); no AI/UI diff touches rendering code. Local sessions JSON cleared.
+
+Last hardening: the model catalog retries when the first fetch returned empty (service still starting), so the dropdown is not permanently empty after an early panel open. Final local state cleaned (sessions JSON removed); smoke + GUI capture at default scale still clean.
+
+## [2026-11-20] ingest | vf-mcp skill for driving the MCP server
+New agent skill `.opencode/skills/vf-mcp/SKILL.md` (auto-discovered by OpenCode): full 44-tool map, scenery/lattice/record data model, inspect→bind→author→place→verify workflow, stony-path / re-texture / micro-object recipes, emissive-band and scenery-env gotchas, and screenshot verification. All 44 tool names validated against the live `tools/list`; linked from docs/ai-editing.md and AGENTS.md.
+
+vf-mcp skill updated with the user's authoritative usage notes: origin-centred coordinate conversion (cell/10 − 51.2, inverse floor((m+51.2)/0.1)), ≤8 inspection calls, bottom-center/absolute-lattice anchor rules, material==texture-binding and per-cell tex, light budget, micro-object limits, layer placement, exact Undo scope, and the fresh-shell default-scenery write hazard. Agent prompt's coordinate rule corrected to match.
+
+Validation of the vf-mcp skill/notes in a disposable scenery copy: inspect + geometry + texture + light tool sequences all landed correctly (see quirk for exact numbers); manifest keys preserved; shipped scenery untouched. Three real agent prompts with the corrected coordinate rule produced 24.9 m for cell 761, the right path-tool sequence, and a direct greeting answer — zero tool calls for chat-only prompts. One measurement trap: multiple SSE listeners duplicated the captured text; a single persistent listener showed clean answers.
+
+AI panel fixes: the selected Ctrl+LMB voxel is now injected into every prompt as UI context (agent quoted cell [512,508,512] / world [0.05,-1.45,0.05] correctly); multi-line chat answers are split and wrapped (ImGui TextWrapped stops at newline); a 2-minute silence watchdog re-enables Send after a turn that never sends session.idle. Agent prompt + vf-mcp skill document the UI-context line. Full vf_tests and mock integration green.
+
+Default UI font scale raised from 1.2 to 2.0 and layout adapted: ImGui font pixels double while widget padding scales only 1.5x, the sidebar rail/footer/pane widths scale fully (524 px at 960x540, 92 px rail, 104 px footer — logged once at startup), hotkey bar already follows font size, and AI-panel explicit heights (tool cards, composer, buttons, history) scale by m_uiFontScale. Fixed a double-scaling bug in sidebarWidthFor that made the sidebar nearly full-screen. xvfb capture at 2.0 shows all AI controls and composer unclipped.
+
+## [2026-11-20] extend | surgical voxel deletion in vf_mcp
+Verified the in-app assistant's claim that the MCP had no per-cell delete: true for the tool set, false for the codebase (ChunkStore::apply Clear, `tools/isle_opendoor.cpp`, deterministic `tools/isle_nature.py` generator). Added `delete_voxels` to vf_mcp: box / min-max / anchor+radius / connected-component selectors, optional material filter and dry-run, protected-layer and whole-layer guards, atomic temp+rename rewrite, explicit `reloadWorld()` because the server's signature watches only world.json and ai_edits.vxw. Fixed `canonicalToolName()` so invented "delete/remove voxels" aliases map to the surgical tool instead of `delete_object` (which used to wipe all 44 trees). Wired into `kNative`, tool schema, docs/ai-editing.md, and a doctest. Integration-tested in a scratch scenery (54 → 27 cells, other component untouched, all safety guards fire); tools/list parses with 45 tools; focused doctest 5/5. Filed as [[concepts/surgical-voxel-deletion]].
+
+## [2026-11-20] fix | terrain "slits" are an embedded camera, not splat coverage
+Filed [[concepts/buried-camera-terrain-slits]]. The user's low-angle slit view
+(position 1.3,2.1,10.4, LighthouseIsle) had terrain 2.93 m at the camera's own
+xz: the camera was 0.83 m inside the hill and the eye ray never exited the
+solid, so the world-wide water plane showed through where no terrain surfel
+exists. Measured radius 1.0→2.0, LOD/aniso/cull/analytic A/Bs, riser face disks
+and buried-camera disk growth: all left the water-diff mask ~100 % water; only
+lifting the camera removed the bright pixels (26,778 → 8). Landed an
+interactive-only terrain ejection in `App::updateBuriedProbe` (terrain column
+top + 0.35 m when >0.30 m embedded, `VF_NO_CAMERA_EJECT` escape), deliberately
+NOT in the headless path — applying it there broke live_edit_check's exact
+cameras. test-surfel back to its 2 pre-existing failures (ownership-blue,
+edit-too-small 0.36 %); no new gates red.
+
+## [2026-11-20] update | remaining "holes" measured; camera eject margin trimmed
+Follow-up to the buried-camera fix. Reduced the interactive eject margin from
+0.35 m to 0.12 m: the larger lift exposed the 10 cm heightfield and read as
+stairs, while measurements showed even 0.05 m above the top seals the slit
+(y = top + 0.12 m renders 0 bright pixels at the repro camera). A second class
+of bright patches at a mountain view (`-4,12.3,14 → 0,11.8,4`) was measured:
+the eye rays fly over a 6 m cliff into a real valley, so water past the stepped
+silhouette is legitimate, not a coverage hole. Radius sweep 0.7/0.85/1.1/1.3
+all increased water px over the default 1.0; bit 9 darkens the ground badly;
+wider heightfield taps were a no-op after a forced rebuild. No shading default
+changed. Details added to [[concepts/buried-camera-terrain-slits]].
+
+## [2026-11-21] ingest | vf_mcp v2: two lanes, one selector grammar, one code path
+Implemented the intent bridge (`scenery/<name>/mcp_intents.jsonl` → `App::consumeMcpIntents()` → `App::applyEditLive`) so MCP stamps share the GUI brush's undo/surfel/height/water/overlay path; added `describe`, region `paint`, `snapshot`/`restore_snapshot`, `commit_overlay`, and deterministic `add_path`/`add_tree` builders; refactored cell selection into `src/voxel/selector.hpp` with a material-masked component flood fill. Gates: 3 unit files + `tests/mcp_v2_check.py` + `tests/mcp_v2_selector_check.py`, all against throwaway sceneries with `VF_OVERLAY_PATH`; registered as CTest group `mcp`. Measured green: 58 tools parse in tools/list, 27,310 unit assertions, both functional gates, and the full `test-unit` group (8/8). Two measured traps recorded: `mat` is the paint TARGET, `from` the filter; and an object compiled while its source is still being edited goes stale (instrument fields were absent from the binary). The `test-store` group's `fast_live_edit_check` is red in this dirty shared tree (0.36 % pixel diff vs a 5 % floor, though the stamp log shows 1,765 cells applied); disabling the new intent hook reproduced the identical failure, so the bridge is not the cause. Pages: [[entities/vf-mcp-v2]], [[concepts/mcp-intent-bridge]].
+
+## [2026-11-21] ingest | vf_mcp v2 authoring plan — catalog stub
+The page was committed (a3481f2) but had no entry in the content catalog or log; added both. [[concepts/mcp-v2-plan]] is the proposed design behind v2: the model expresses intent and the server computes lattice cells, with one engine code path, one selector grammar, and every destructive write dry-run-able, snapshot-backed and verifiable. Same-day shipping note: `jsonGetId()` now reads only the TOP-LEVEL JSON-RPC id — a tool argument named `id` was matched by the old first-occurrence scan, echoed as the message id, and made the Code Mode bridge close the connection (the `stamp_result`/chat freeze); and a cold `stamp_result` no longer builds LayeredWorld twice (~7–8 s → 0.00 s) because `world()` is accessor-only and read-only tools skip `refreshIfChanged()`. Gates: `test-mcp` 2/2, `test-app` 1/1.
+
+## [2026-11-21] fix | OpenCode RAG shim: a relative import into a missing local install
+Traced `ref=err_b7a04439` from `~/.local/share/opencode/log/opencode.log:126037`: the tracked `.opencode/plugins/opencode-rag/index.js` imported `../../node_modules/opencode-rag-plugin/dist/plugin-entry.js`, which from that shim's directory resolves to `<project>/.opencode/node_modules/opencode-rag-plugin` — never installed (`.opencode/package.json` declares only `@opencode-ai/plugin`; the lockfile still lists a stale 1.21.0). The global copy at `~/.config/opencode/plugins/opencode-rag/` uses four `..` segments to reach `~/.opencode/node_modules/opencode-rag-plugin` v2.13.8 and loads successfully in the same runs; semantic retrieval kept working, so this was duplicate-config noise, not a RAG outage. Fixed by `git rm` of the two tracked shim files (deletion left staged, not committed); the global copy is now the single provider. Filed [[concepts/opencode-plugin-relative-import]].
+
+`wiki_lint` after the change: new page cataloged (Uncataloged 0) and cross-linked from [[concepts/clang-lsp-setup]], no dangling links from it. The 91 stale pages, 16 orphans and 1 dangling `[[concepts/water-flooding]]` link reported are pre-existing backlog, not introduced here.
+
+## [2026-11-21] ingest | vf_mcp can click into the view and use every edit tool
+Extended the intent bridge from stamps to the whole live-edit surface. New MCP tools `view_pick`, `view_click` (carve/add/delete/paint/smooth/rotate/move/select), `view_undo`, `view_clear`, `view_box`, `edit_result`; `App::consumeMcpIntents` now resolves `screen:[x,y]` through the real `pickAtWindowPos` path and dispatches to `applyEditLive`, the box selection, undo/clear and the sidebar's own `commitRotation`/`commitMove`. `stamp` also accepts a screen target. Validated in `viewTool` before queueing; read-only tools skip the costly world re-adopt. Two fixed traps: transform args matched by layer name but the commit functions require the manifest file (normalised to `it->file`), and the queued id ends with a semicolon so a `\S+` regex captured it. Gate `tests/mcp_view_check.py` (CTest `mcp_view_check`, label `mcp`) proves pick/select/screen-carve agree on one cell, checks rotate/move manifest persistence and hermeticity; full `test-mcp` 3/3 green (267 s). Docs: skill tool map, `docs/ai-editing.md`; pages [[concepts/mcp-intent-bridge]], [[entities/vf-mcp-v2]].
+
+## [2026-11-22] ingest | describe_image vision configuration — Hy4 flash Free swap and its expired-key blocker
+Reconfigured `.opencode/opencode-rag.json` `imageDescription` to `provider: opencode-go`, `model: hy4-flash-free`, Zen Go base URL, empty `apiKey` (resolved from OpenCode's auth store), and `onDemand.model` only so the base URL/key are inherited. JSON validates and the CLI reports the new provider/model, but a real describe call fails HTTP 401 `api_key_expired`: the stored `opencode-go` key is expired (no-key request reads `OpenCode Go requires an API key`). Verified OpenRouter `tencent/hy4-flash` is image-capable and captioned a test shot sensibly, but it was not substituted for the requested id. Recorded that the plugin tool captures config at load (footer names the loaded model; CLI reads fresh) and that stale `onDemand.baseUrl`/`apiKey` overrides silently defeat a provider swap. Filed [[concepts/image-description-vision-config]] and cataloged it.
+
+## [2026-11-22] update | Hy4 Flash Free key resolved; in-session tool still cached
+Key refresh sequence measured at the CLI (fresh config read): 401 `api_key_expired` → 403 `permission_error: This API key can't call models` → success, with a sensible caption from `opencode-go/hy4-flash-free`. `GET /models` returned 200 even during the 403 stage, so it is not a scope test. The in-session `describe_image` tool still reported `openai/qwen3-vl-8b`: its config is captured at plugin load and OpenCode V2's shared background service survives TUI restarts, so `opencode service restart` is required for the swap to reach the tool. Updated [[concepts/image-description-vision-config]].

@@ -1540,23 +1540,32 @@ SurfelSet buildSurfels(const VoxelField& field, const SurfelParams& params) {
     // no fragment-shader work. Keep them per chunk for the LOD/object path and
     // the later [base | edge | micro] interleave.
     std::vector<std::vector<Surfel>> edgeByChunk(kChunks);
-    if (params.edgeFill && params.edgeShrink > 0.0f) {
+    // Bridges and caps fix DIFFERENT holes and must be independently
+    // switchable. A bridge fills the crease the hard-edge shrink opened; a
+    // cap fills a CORNER the parent disk does not reach (thin footprints as
+    // well as shrunk ones). Both need edgeShrink > 0 to have a hole to fill,
+    // but caps must not depend on edgeFill: coupling them made the GUI's
+    // "Fill corner splats" a strict no-op whenever crease fill was off.
+    const bool doBridges = params.edgeFill && params.edgeShrink > 0.0f;
+    const bool doCaps = params.cornerFill && params.edgeShrink > 0.0f;
+    if (doBridges || doCaps) {
         for (int i = 0; i < n; ++i) {
             const int source = order[i];
             // Face-expanded thin cells have several parent entries with the
             // same key. Their explicit footprints are not tightened, and one
-            // bridge set per lattice cell is sufficient.
+            // bridge/cap set per lattice cell is sufficient.
             if (i > 0 && keys[source] == keys[order[i - 1]])
                 continue;
-            if (!isObj[source] || edgeInfos[source].pairCount <= 0)
+            if (!isObj[source])
                 continue;
+            const EdgeInfo& ei = edgeInfos[source];
             // A bridge exists to fill the hole the hard-edge SHRINK opened.
             // A parent that was never tightened - a thin footprint keeps its
             // explicit radii, smooth curvature and foliage keep the full disk
             // - already covers its crease, so bridging it too only adds a
             // redundant 45-degree-normal disk. That was the "diamond chain"
-            // on thin beams. Corner caps keep their own coverage gate below.
-            if (!tightened[source])
+            // on thin beams. Caps keep their own coverage gate below.
+            if (!doCaps && (!doBridges || ei.pairCount <= 0 || !tightened[source]))
                 continue;
             const int mat = int(surfels[i].mat_ao.x + 0.5f);
             if (mat == 8 || (mat >= 9 && mat <= 15))
@@ -1568,10 +1577,11 @@ SurfelSet buildSurfels(const VoxelField& field, const SurfelParams& params) {
                                        -51.2f + (z + 0.5f) * voxel);
             std::vector<Surfel>& out = edgeByChunk[chunkOf[i]];
             const size_t before = out.size();
-            appendEdgeBridges(cellCentre, surfels[i], edgeInfos[source],
-                              baseR, params.edgeBridgeSize, out);
-            if (params.cornerFill)
-                appendCornerCaps(cellCentre, surfels[i], edgeInfos[source],
+            if (doBridges && ei.pairCount > 0 && tightened[source])
+                appendEdgeBridges(cellCentre, surfels[i], ei,
+                                  baseR, params.edgeBridgeSize, out);
+            if (doCaps && ei.cornerCount > 0)
+                appendCornerCaps(cellCentre, surfels[i], ei,
                                  baseR, params.edgeBridgeSize, out);
             if (out.size() != before) {
                 ++set.edgeParentCount;
@@ -2520,7 +2530,12 @@ void appendCandidateEdgeBridges(const std::vector<SurfelCand>& cands,
                                 std::vector<uint64_t>& edgeKeys,
                                 std::vector<Surfel>& edges)
 {
-    if (!params.edgeFill || params.edgeShrink <= 0.0f)
+    // Same independent gates as the full bake (see buildSurfels): caps must
+    // not be gated on edgeFill, or a live patch with "Fill corner splats" on
+    // and crease fill off would disagree with the freshly baked run.
+    const bool doBridges = params.edgeFill && params.edgeShrink > 0.0f;
+    const bool doCaps = params.cornerFill && params.edgeShrink > 0.0f;
+    if (!doBridges && !doCaps)
         return;
     for (size_t i = 0; i < cands.size(); ++i) {
         const SurfelCand& cd = cands[i];
@@ -2533,11 +2548,11 @@ void appendCandidateEdgeBridges(const std::vector<SurfelCand>& cands,
         // Bridges only where the hard-edge shrink actually opened a crease.
         // A thin footprint (thinTall > 0) keeps its explicit radii and covers
         // its own crease, so bridging it too is the "diamond chain" on thin
-        // beams. Corner caps keep their own coverage gate.
-        if (cd.edge.pairCount > 0 && cd.thinTall <= 0.0f)
+        // beams. Caps keep their own coverage gate and may fire on thin shells.
+        if (doBridges && cd.edge.pairCount > 0 && cd.thinTall <= 0.0f)
             appendEdgeBridges(cd.pos, base[i], cd.edge, params.baseRadius,
                               params.edgeBridgeSize, edges);
-        if (params.cornerFill)
+        if (doCaps && cd.edge.cornerCount > 0)
             appendCornerCaps(cd.pos, base[i], cd.edge, params.baseRadius,
                              params.edgeBridgeSize, edges);
         for (size_t j = before; j < edges.size(); ++j)

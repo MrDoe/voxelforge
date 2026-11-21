@@ -35,7 +35,7 @@ DEFAULT_CARDS = [
     ("nandina",    "T_Nandina_basecolor_Jpeg.webp",               "T_Nandina_Opacity_Jpeg.webp"),
 ]
 
-LAYER_BASE = 23  # materials occupy 0..22
+LAYER_BASE = 57  # materials occupy 0..56
 
 
 def pack(src_dir, out_dir, size, cards):

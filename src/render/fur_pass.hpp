@@ -96,6 +96,10 @@ public:
     // Lambert-and-sky look, bit-exact). Real fleece transmits light when the
     // sun is behind it; the body path has foliage SSS but the coat did not.
     void setSss(float s) { m_sss = s; }
+    // Opacity of the raster GROUND FOLIAGE cards (0 = invisible, 1 = the
+    // authored card alpha). A grass-draw uniform: no card rebuild, and the
+    // fur coat is untouched.
+    void setFoliageOpacity(float v) { m_foliageOpacity = v; }
 
     // Record the dispatch. Must run AFTER the micro overlay has written the
     // G-buffer for this frame: the G-buffer is the depth reference this pass
@@ -151,6 +155,7 @@ private:
     VkSampler m_blackSampler = VK_NULL_HANDLE;
     VkSampler m_irrSampler = VK_NULL_HANDLE;
     float m_sss = 0.0f; // backlit translucency strength; 0 keeps the old look
+    float m_foliageOpacity = 1.0f; // ground foliage-card alpha; 1 = authored look
 
     VkImageView m_heightView = VK_NULL_HANDLE;
     VkImageView m_objVolView = VK_NULL_HANDLE;

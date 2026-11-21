@@ -183,6 +183,8 @@ one of:
 
 ## Cross-refs
 
+[[concepts/buried-camera-terrain-slits]] (when the "slits" are not a coverage
+problem at all: a camera below the heightfield, where no underside is drawn),
 [[concepts/detail-pipeline]] (the surfel layout and the LOD rings),
 [[concepts/splat-base-seal]] (why the nearest fragment's colour seals a
 pixel), [[concepts/splat-edge-fade-measurement]] (the measurement discipline

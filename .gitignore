@@ -19,6 +19,10 @@ opencode-rag.json
 # scenery. The pointer file is user state too (which scenery was last used).
 scenery/last.json
 scenery/*/runtime_edits.vxw
+# vf_mcp v2 live-lane intent queue + engine reports (session state, not content).
+scenery/*/mcp_intents.jsonl
+scenery/*/mcp_results.jsonl
+scenery/*/*.bak
 # The SKELETON caches are DERIVED from a micro layer's own voxels (the app
 # writes them next to the layer the first time it loads one). They are a cache,
 # not content: the cache carries the layer's signature, so an edited layer
@@ -29,13 +33,15 @@ scenery/*/micro/*.rig
 # asset swap a 275,912-line diff with an unreadable content change. Same rule
 # as the rig cache: regenerable, therefore not content.
 scenery/*/micro/*.skin
-# The normalized MESH side-car written by `vf_mesh2micro` is DERIVED from the
-# tracked source mesh in assets/models/ (scaled/rebased to --fit): regenerable
-# by re-running the tool, so it is a cache, not content.
-scenery/*/micro/*.stl
 
 # Convenience symlink into build/ output + local scratch screenshots.
 /voxelforge
 .opencode/scratch/
 .opencode/sidebar-*.png
 scenery/*/bin/
+
+# Local screenshots produced by the in-app AI agent's render_shot calls.
+/workspace/screenshots/*
+!/workspace/screenshots/.gitkeep
+# Dedicated in-app OpenCode session IDs are local state.
+.opencode/voxelforge_sessions.json

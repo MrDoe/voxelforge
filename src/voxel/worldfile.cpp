@@ -507,11 +507,6 @@ bool loadManifest(const std::string& path, std::vector<WorldLayer>& out)
                         j.str(layer.meshSource);
                     else if (k == "meshUp")
                         j.str(layer.meshUp);
-                    else if (k == "meshMat") {
-                        float mv = 0.f;
-                        if (j.num(mv))
-                            layer.meshMat = int(mv);
-                    }
                     else if (k == "pos") {
                         if (!j.eat('['))
                             return false;
@@ -1326,8 +1321,6 @@ bool writeManifest(const std::string& path, const std::vector<WorldLayer>& layer
             std::fprintf(f, ", \"meshSource\": \"%s\"", l.meshSource.c_str());
         if (!l.meshUp.empty())
             std::fprintf(f, ", \"meshUp\": \"%s\"", l.meshUp.c_str());
-        if (l.meshMat >= 0)
-            std::fprintf(f, ", \"meshMat\": %d", l.meshMat);
         std::fprintf(f, " }%s\n", i + 1 < layers.size() ? "," : "");
     }
     std::fprintf(f, "  ]");
@@ -1522,6 +1515,323 @@ bool writeLightManifest(const std::string& path,
         return false;
     }
     return true;
+}
+
+// ---- atomic single-key rewrite (owned by vf_mcp's UI settings) --------------
+// The writeLightManifest discipline (fail-closed scan, temp+rename, read-back
+// proving preserved keys + the owned value byte-exact), factored for the
+// "sun"/"ui" keys. The dangling-comma shape guard exists because the byte-
+// equality self-check happily persisted a leading-comma bug once: `{ , "x":1 }`
+// round-trips byte-identically but is not JSON.
+static bool writeOwnedTopKey(const std::string& path, const char* ownedKey,
+                             const std::string& valueJson)
+{
+    if (valueJson.find("{ ,") != std::string::npos ||
+        valueJson.find("{,") != std::string::npos ||
+        valueJson.find(", }") != std::string::npos ||
+        valueJson.find(",}") != std::string::npos ||
+        valueJson.find(",,") != std::string::npos) {
+        spdlog::warn("world.json: refusing to write a malformed {} block", ownedKey);
+        return false;
+    }
+    const std::string prev = readFileText(path);
+    std::vector<TopPair> pairs;
+    if (!scanTopLevel(prev, pairs)) {
+        spdlog::warn("world.json: malformed top level, refusing to rewrite {}", ownedKey);
+        return false;
+    }
+    const std::string tmp = path + ".tmp";
+    std::FILE* f = std::fopen(tmp.c_str(), "wb");
+    if (!f)
+        return false;
+    std::fprintf(f, "{");
+    bool first = true;
+    emitPreserved(f, pairs, ownedKey, nullptr, first);
+    std::fprintf(f, "%s\n  \"%s\":%s\n}\n", first ? "" : ",", ownedKey,
+                 valueJson.c_str());
+    auto fail = [&](const char* why) {
+        spdlog::warn("world.json: {} rewrite rejected by self-check ({}) - manifest left untouched",
+                     ownedKey, why);
+        std::fclose(f);
+        std::remove(tmp.c_str());
+        return false;
+    };
+    if (std::fclose(f) != 0) {
+        std::remove(tmp.c_str());
+        return false;
+    }
+    std::vector<TopPair> got;
+    if (!scanTopLevel(readFileText(tmp), got))
+        return fail("tmp does not re-parse");
+    size_t preserved = 0;
+    for (const TopPair& p : pairs)
+        if (p.key != ownedKey)
+            ++preserved;
+    if (got.size() != preserved + 1)
+        return fail("top-level key count changed");
+    for (size_t i = 0; i < got.size(); ++i)
+        for (size_t j = i + 1; j < got.size(); ++j)
+            if (got[i].key == got[j].key)
+                return fail("duplicate top-level key after rewrite");
+    for (const TopPair& want : pairs) {
+        if (want.key == ownedKey)
+            continue;
+        const TopPair* found = nullptr;
+        for (const TopPair& g : got)
+            if (g.key == want.key) { found = &g; break; }
+        if (!found)
+            return fail("a preserved key vanished");
+        if (found->value != want.value)
+            return fail("a preserved value was altered");
+    }
+    const TopPair* mine = nullptr;
+    for (const TopPair& g : got)
+        if (g.key == ownedKey) mine = &g;
+    if (!mine)
+        return fail("the owned key is absent from the rewrite");
+    if (mine->value != valueJson)
+        return fail("the emitted value does not match");
+    std::error_code ec;
+    std::filesystem::rename(tmp, path, ec);
+    if (ec) {
+        std::remove(tmp.c_str());
+        return false;
+    }
+    return true;
+}
+
+bool writeSunManifest(const std::string& path, float elev, float azim)
+{
+    char buf[96];
+    std::snprintf(buf, sizeof(buf), "{ \"elev\": %.4f, \"azim\": %.4f }", elev, azim);
+    return writeOwnedTopKey(path, "sun", buf);
+}
+
+// ---- UI settings ("ui" top-level object) -------------------------------------
+namespace {
+inline bool uiHas(float v) { return v != UiSettings::kUiAbsent && std::isfinite(v); }
+inline void uiNum(std::string& o, const char* key, float v)
+{
+    if (!uiHas(v)) return;
+    char buf[64];
+    if (v == std::floor(v) && std::fabs(v) < 1e15f)
+        std::snprintf(buf, sizeof(buf), "%.0f", v);
+    else
+        std::snprintf(buf, sizeof(buf), "%.6g", v);
+    o += o.empty() ? "" : ", ";
+    o += "\"" + std::string(key) + "\": " + buf;
+}
+inline void uiStr(std::string& o, const char* key, const std::string& v)
+{
+    if (v.empty()) return;
+    o += o.empty() ? "" : ", ";
+    o += "\"" + std::string(key) + "\": \"";
+    for (char c : v) {
+        if (c == '"' || c == '\\') o.push_back('\\');
+        o.push_back(c);
+    }
+    o += "\"";
+}
+} // namespace
+
+std::string uiSettingsToJson(const UiSettings& u)
+{
+    // Body FIRST: seeding the accumulator with "{ " made the first field get
+    // a leading comma (`{ , "x":1 }`) - a real bug the byte-equality guard
+    // could not see. Wrap only after all fields are emitted.
+    std::string b;
+    uiNum(b, "renderFlags", u.renderFlags);
+    uiStr(b, "backend", u.backend);
+    uiNum(b, "taa", u.taa);
+    uiNum(b, "volFog", u.volFog);
+    uiNum(b, "motionBlur", u.motionBlur);
+    uiNum(b, "dof", u.dof);
+    uiNum(b, "linearFx", u.linearFx);
+    uiNum(b, "autoExposure", u.autoExposure);
+    uiNum(b, "exposure", u.exposure);
+    uiNum(b, "tonemapLook", u.tonemapLook);
+    uiNum(b, "ssaoStrength", u.ssaoStrength);
+    uiNum(b, "ssaoRadius", u.ssaoRadius);
+    uiNum(b, "ssaoBlur", u.ssaoBlur);
+    uiNum(b, "ssaoDebug", u.ssaoDebug);
+    uiNum(b, "splatRadius", u.splatRadius);
+    uiNum(b, "edgeBlend", u.edgeBlend);
+    uiNum(b, "edgeShrink", u.edgeShrink);
+    uiNum(b, "edgeFill", u.edgeFill);
+    uiNum(b, "edgeBridgeSize", u.edgeBridgeSize);
+    uiNum(b, "cornerFill", u.cornerFill);
+    uiNum(b, "lightBudget", u.lightBudget);
+    uiNum(b, "lightK", u.lightK);
+    uiNum(b, "camSpeed", u.camSpeed);
+    uiNum(b, "camX", u.camX);
+    uiNum(b, "camY", u.camY);
+    uiNum(b, "camZ", u.camZ);
+    uiNum(b, "camYaw", u.camYaw);
+    uiNum(b, "camPitch", u.camPitch);
+    uiNum(b, "furEnabled", u.furEnabled);
+    uiNum(b, "furPerCell", u.furPerCell);
+    uiNum(b, "furLength", u.furLength);
+    uiNum(b, "furWidth", u.furWidth);
+    uiNum(b, "furCurl", u.furCurl);
+    uiNum(b, "furCycles", u.furCycles);
+    uiNum(b, "furTilt", u.furTilt);
+    uiNum(b, "furSss", u.furSss);
+    uiStr(b, "brushMode", u.brushMode);
+    uiNum(b, "brushWidth", u.brushWidth);
+    uiNum(b, "brushDepth", u.brushDepth);
+    uiNum(b, "brushMaterial", u.brushMaterial);
+    uiNum(b, "smoothStrength", u.smoothStrength);
+    uiStr(b, "falloffCurve", u.falloffCurve);
+    uiNum(b, "smoothPreserveVolume", u.smoothPreserveVolume);
+    uiNum(b, "uiFontScale", u.uiFontScale);
+    uiStr(b, "scenery", u.scenery);
+    return b.empty() ? "{}" : "{ " + b + " }";
+}
+
+bool loadUiManifest(const std::string& path, UiSettings& out)
+{
+    out = UiSettings();
+    // Locate via scanTopLevel (quote-aware), NOT a Json top-level walk:
+    // Json::skipValue's depth skip ignores strings, so a `}` inside a string
+    // value of an earlier key desynchronises it and later keys disappear.
+    const std::string text = readFileText(path);
+    std::vector<TopPair> pairs;
+    if (!scanTopLevel(text, pairs))
+        return false;
+    const std::string* raw = nullptr;
+    for (const TopPair& p : pairs)
+        if (p.key == "ui") { raw = &p.value; break; }
+    if (!raw)
+        return false;
+
+    Json j{ *raw };
+    if (!j.eat('{'))
+        return false;
+    auto skipVal = [&]() {
+        j.skipWs();
+        if (j.i >= raw->size()) return;
+        const char c = (*raw)[j.i];
+        if (c == '{' || c == '[') {
+            const char open = c, close = c == '[' ? ']' : '}';
+            int depth = 0;
+            bool inStr = false, esc = false;
+            for (; j.i < raw->size(); ++j.i) {
+                const char d = (*raw)[j.i];
+                if (inStr) {
+                    if (esc) esc = false;
+                    else if (d == '\\') esc = true;
+                    else if (d == '"') inStr = false;
+                    continue;
+                }
+                if (d == '"') inStr = true;
+                else if (d == open) ++depth;
+                else if (d == close && --depth == 0) { ++j.i; return; }
+            }
+            return;
+        }
+        std::string sinkS;
+        float sinkN = 0.f;
+        bool sinkB = false;
+        if (c == '"' || c == 't' || c == 'f') {
+            if (!j.str(sinkS) && !j.boolean(sinkB)) j.num(sinkN);
+            return;
+        }
+        j.num(sinkN);
+    };
+    while (!j.peek('}') && j.i < raw->size()) {
+        std::string k;
+        if (!j.str(k) || !j.eat(':'))
+            return false;
+        float v = UiSettings::kUiAbsent;
+        bool b = false;
+        std::string s;
+        bool consumed = false;
+        auto field = [&](const char* name, float& dst) -> bool {
+            if (k != name) return false;
+            consumed = true;
+            if (j.num(v)) dst = v;
+            else if (j.boolean(b)) dst = b ? 1.f : 0.f;
+            else skipVal();
+            return true;
+        };
+        if (field("renderFlags", out.renderFlags) ||
+            field("taa", out.taa) || field("volFog", out.volFog) ||
+            field("motionBlur", out.motionBlur) || field("dof", out.dof) ||
+            field("linearFx", out.linearFx) || field("autoExposure", out.autoExposure) ||
+            field("exposure", out.exposure) || field("tonemapLook", out.tonemapLook) ||
+            field("ssaoStrength", out.ssaoStrength) || field("ssaoRadius", out.ssaoRadius) ||
+            field("ssaoBlur", out.ssaoBlur) || field("ssaoDebug", out.ssaoDebug) ||
+            field("splatRadius", out.splatRadius) || field("edgeBlend", out.edgeBlend) ||
+            field("edgeShrink", out.edgeShrink) || field("edgeFill", out.edgeFill) ||
+            field("edgeBridgeSize", out.edgeBridgeSize) || field("cornerFill", out.cornerFill) ||
+            field("lightBudget", out.lightBudget) || field("lightK", out.lightK) ||
+            field("camSpeed", out.camSpeed) || field("camX", out.camX) ||
+            field("camY", out.camY) || field("camZ", out.camZ) ||
+            field("camYaw", out.camYaw) || field("camPitch", out.camPitch) ||
+            field("furEnabled", out.furEnabled) || field("furPerCell", out.furPerCell) ||
+            field("furLength", out.furLength) || field("furWidth", out.furWidth) ||
+            field("furCurl", out.furCurl) || field("furCycles", out.furCycles) ||
+            field("furTilt", out.furTilt) || field("furSss", out.furSss) ||
+            field("brushWidth", out.brushWidth) || field("brushDepth", out.brushDepth) ||
+            field("brushMaterial", out.brushMaterial) ||
+            field("smoothStrength", out.smoothStrength) ||
+            field("smoothPreserveVolume", out.smoothPreserveVolume) ||
+            field("uiFontScale", out.uiFontScale)) {
+        } else if (k == "backend" && (consumed = true, j.str(s)))
+            out.backend = s;
+        else if (k == "brushMode" && (consumed = true, j.str(s)))
+            out.brushMode = s;
+        else if (k == "falloffCurve" && (consumed = true, j.str(s)))
+            out.falloffCurve = s;
+        else if (k == "scenery" && (consumed = true, j.str(s)))
+            out.scenery = s;
+        if (!consumed) skipVal();
+        if (!j.eat(',')) break;
+    }
+    return true;
+}
+
+bool writeUiManifest(const std::string& path, const UiSettings& ui)
+{
+    return writeOwnedTopKey(path, "ui", uiSettingsToJson(ui));
+}
+
+bool mergeUiManifest(const std::string& path, const UiSettings& patch)
+{
+    UiSettings cur;
+    loadUiManifest(path, cur);
+    auto num = [](float p, float& dst) {
+        if (p != UiSettings::kUiAbsent) dst = p;
+    };
+    auto str = [](const std::string& p, std::string& dst) {
+        if (!p.empty()) dst = p;
+    };
+    num(patch.renderFlags, cur.renderFlags); str(patch.backend, cur.backend);
+    num(patch.taa, cur.taa); num(patch.volFog, cur.volFog);
+    num(patch.motionBlur, cur.motionBlur); num(patch.dof, cur.dof);
+    num(patch.linearFx, cur.linearFx); num(patch.autoExposure, cur.autoExposure);
+    num(patch.exposure, cur.exposure); num(patch.tonemapLook, cur.tonemapLook);
+    num(patch.ssaoStrength, cur.ssaoStrength); num(patch.ssaoRadius, cur.ssaoRadius);
+    num(patch.ssaoBlur, cur.ssaoBlur); num(patch.ssaoDebug, cur.ssaoDebug);
+    num(patch.splatRadius, cur.splatRadius); num(patch.edgeBlend, cur.edgeBlend);
+    num(patch.edgeShrink, cur.edgeShrink); num(patch.edgeFill, cur.edgeFill);
+    num(patch.edgeBridgeSize, cur.edgeBridgeSize); num(patch.cornerFill, cur.cornerFill);
+    num(patch.lightBudget, cur.lightBudget); num(patch.lightK, cur.lightK);
+    num(patch.camSpeed, cur.camSpeed); num(patch.camX, cur.camX);
+    num(patch.camY, cur.camY); num(patch.camZ, cur.camZ);
+    num(patch.camYaw, cur.camYaw); num(patch.camPitch, cur.camPitch);
+    num(patch.furEnabled, cur.furEnabled); num(patch.furPerCell, cur.furPerCell);
+    num(patch.furLength, cur.furLength); num(patch.furWidth, cur.furWidth);
+    num(patch.furCurl, cur.furCurl); num(patch.furCycles, cur.furCycles);
+    num(patch.furTilt, cur.furTilt); num(patch.furSss, cur.furSss);
+    str(patch.brushMode, cur.brushMode); num(patch.brushWidth, cur.brushWidth);
+    num(patch.brushDepth, cur.brushDepth); num(patch.brushMaterial, cur.brushMaterial);
+    num(patch.smoothStrength, cur.smoothStrength);
+    str(patch.falloffCurve, cur.falloffCurve);
+    num(patch.smoothPreserveVolume, cur.smoothPreserveVolume);
+    num(patch.uiFontScale, cur.uiFontScale);
+    str(patch.scenery, cur.scenery);
+    return writeUiManifest(path, cur);
 }
 
 bool readLayered(const std::string& manifestPath, const WorldFileMeta& expected,

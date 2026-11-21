@@ -16,6 +16,10 @@ the exact same world.
 World, Render, Textures, Mesh, AI. Pick a voxel with Ctrl+LMB, ask the chat
 for a crate, watch it appear.*
 
+**The same view as raw voxels** (`--mode svo`):
+
+![The barn view rendered with the SVO voxel reference backend](tests/screenshots/barn_svo.png)
+
 ## Screenshots
 
 | Night lighting, edited live | Sculpting after dark |

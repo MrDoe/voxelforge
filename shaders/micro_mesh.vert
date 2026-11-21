@@ -53,9 +53,6 @@ layout(location = 1) out vec3 vWorld; // the posed world point (m)
 // is interpolated like any other vertex attribute.
 layout(location = 2) flat out uint vWord;
 layout(location = 3) out float vAo;
-// Workstream E1: the REST face normal, so the fragment can shade without the
-// field's gradient. Computed from the triangle's three corners (non-indexed).
-layout(location = 4) out vec3 vFaceN;
 
 // Linear depth, in metres. The depth attachment is this pass's own (the main
 // backend's depth is not touched): it exists only so the mesh occludes ITSELF,
@@ -70,18 +67,6 @@ void main()
     // so one pipeline and one buffer serve every object.
     const int w = int(pc.b.z + 0.5);
     const vec4 v = uMeshVerts[gl_VertexIndex];
-
-    // REST face normal from the triangle's three corners (object frame). The
-    // mesh is non-indexed, so corners are consecutive: base = idx - idx%3.
-    {
-        const int base = gl_VertexIndex - (gl_VertexIndex % 3);
-        const vec3 a = uMeshVerts[base].xyz;
-        const vec3 b = uMeshVerts[base + 1].xyz;
-        const vec3 c = uMeshVerts[base + 2].xyz;
-        const vec3 fn = cross(b - a, c - a);
-        const float fl = length(fn);
-        vFaceN = fl > 1e-12f ? fn / fl : vec3(0.f, 1.f, 0.f);
-    }
 
     // The packed lane. `w` is a float because the record is (rest.xyz, w), so
     // the bytes arrive as a BIT PATTERN; decoding it as a number would read a

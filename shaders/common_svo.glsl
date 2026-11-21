@@ -156,6 +156,47 @@ bool isObjectSurface(vec3 p)
     return ((brickMatByte(p) & 0x80u) != 0u) && map(p) < p.y - heightAt(p.xz) + 0.02;
 }
 
+uint brickTexByte(vec3 p)
+{
+    vec3 wmin = vec3(-pc.b.x * 0.5);
+    vec3 rel = p - wmin;
+    float chunkM = pc.b.x / pc.b.z;
+    ivec3 cc = ivec3(floor(rel / chunkM));
+    cc = clamp(cc, ivec3(0), ivec3(int(pc.b.z) - 1));
+    int ci = (cc.z * int(pc.b.z) + cc.y) * int(pc.b.z) + cc.x;
+    int root = uGrid[ci];
+    if (root == -1)
+        return 0u;
+    Bases bs = chunkBases(ci);
+    uint h = uint(root);
+    vec3 mn = wmin + vec3(cc) * chunkM;
+    vec3 sz = vec3(chunkM);
+    for (int guard = 0; guard < 12; ++guard) {
+        if ((h & 3u) == 1u) {
+            uint bi = h >> 2;
+            float cellSz = sz.x / float(BRICK_N);
+            vec3 g = clamp((p - mn) / cellSz - 0.5, vec3(0.0), vec3(BRICK_N - 1.001));
+            ivec3 i0 = ivec3(g);
+            uint vi = (bs.brick + bi) * BRICK_WORDS +
+                      (uint(i0.z) * BRICK_N * BRICK_N + uint(i0.y) * BRICK_N +
+                       uint(i0.x)) *
+                          2 + 1;
+            return uBricks[vi] & 0xFFu;
+        }
+        if ((h & 3u) != 0u)
+            break; // solid/empty terminal
+        uint ni = h >> 2;
+        vec3 halfS = sz * 0.5;
+        vec3 r2 = p - mn;
+        int oct = (r2.x >= halfS.x ? 1 : 0) | (r2.y >= halfS.y ? 2 : 0) |
+                  (r2.z >= halfS.z ? 4 : 0);
+        h = uHandles[bs.child + uChildBase[bs.node + ni] + oct];
+        mn += vec3(oct & 1, (oct >> 1) & 1, (oct >> 2) & 1) * halfS;
+        sz = halfS;
+    }
+    return 0u;
+}
+
 uint getMaterialId(vec3 p)
 {
     // objects: material baked into each brick cell by the CPU bake
@@ -550,6 +591,7 @@ void sdfAO(vec3 p, vec3 n, out float ao, out vec3 bent)
 // so the water's base look never changes when objects are added or removed.
 vec3 shadeFloor(vec3 q, vec3 r)
 {
+    gTexOv = 0.0; // terrain/water reflections never carry a per-cell override
     uint mId = heightMatNearest(q.xz);
     vec3 n = calcNormal(q);
     float sh = ((gRenderFlags & 2) != 0) ? softShadowTerrain(q + n * 0.3, kSunDir) : 1.0;
@@ -576,6 +618,7 @@ vec3 shadeFloor(vec3 q, vec3 r)
 }
 vec3 shadeTerrain(vec3 p, vec3 rd, vec3 alb, vec2 rr, vec3 ro)
 {
+    gTexOv = float(brickTexByte(p)); // per-cell texture override (0 = material slot)
     uint mId = getMaterialId(p);
     vec3 n = calcNormal(p);
     alb = detailAlbedo(alb, p, n, mId);

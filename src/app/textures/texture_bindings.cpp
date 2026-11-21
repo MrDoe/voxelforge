@@ -6,6 +6,7 @@
 #include "app/app.hpp"
 #include "voxel/grass_cards.hpp"
 
+#include <algorithm>
 #include <chrono>
 #include <filesystem>
 
@@ -75,44 +76,116 @@ bool App::reloadTexAtlas()
     return true;
 }
 
+// Read the LIVE height/material texture and store, not the baked field:
+// patchHeightTexture() keeps m_heightCpu in step with every paint stamp, so a
+// rebuild after painting grows cards on newly-painted grass and drops them
+// where the grass was painted away. The old baked-field lookup made foliage
+// frozen at the authored ground materials no matter what the brush did.
+int App::grassCardLayerAt(float x, float z, int /*hintMat*/,
+                          float& outHeight, int& outMaterial)
+{
+    // Grass is a property of the bound TEXTURE, evaluated against the LIVE
+    // surface — exactly like emissive — never a baked grass layer. The height
+    // texture is used only as a bounded starting hint for the column scan;
+    // the answer comes from the first solid cell seen from above.
+    const int latN = m_layers.loaded() ? m_layers.store().latN() : 0;
+    if (latN <= 0 || m_heightCpu.size() != size_t(latN) * latN)
+        return -1;
+    const float half = 0.5f * vf::voxel::WORLD;
+    const glm::vec2 tc = glm::clamp(glm::vec2(x, z) / vf::voxel::WORLD + 0.5f,
+                                    glm::vec2(0.0f), glm::vec2(1.0f)) *
+                         glm::vec2(latN - 1);
+    const glm::ivec2 c = glm::clamp(glm::ivec2(tc), glm::ivec2(0),
+                                    glm::ivec2(latN - 1));
+    const float hint = m_heightCpu[size_t(c.y) * latN + c.x].x;
+    if (hint <= -1e29f)
+        return -1;
+    const int lx = glm::clamp(int(glm::floor((x + half) / vf::voxel::VOXEL)),
+                              0, latN - 1);
+    const int lz = glm::clamp(int(glm::floor((z + half) / vf::voxel::VOXEL)),
+                              0, latN - 1);
+    const auto& store = m_layers.store();
+    const int top = std::clamp(int(glm::floor((hint + half) / vf::voxel::VOXEL)) - 1,
+                               0, latN - 1);
+    // The live TERRAIN cell is the source of the material and the root height:
+    // paint it grass and grass grows, paint it away and it disappears.
+    for (int y = top; y >= 0; --y) {
+        const auto cell = store.cellAt(lx, y, lz);
+        if (!cell.solid || cell.obj)
+            continue;
+        outMaterial = cell.mat;
+        outHeight = -half + float(y + 1) * vf::voxel::VOXEL;
+        const int layer = m_texAtlas.cardLayerForSampled(outMaterial, cell.tags);
+        if (layer < 0)
+            return -1;
+        // A building's FLOOR (the LighthouseIsle barn's `footing`) or a low
+        // wall sits just above this terrain cell. Blades rooted on the grass
+        // texture below poke through it, which is the "grass inside the barn"
+        // bug. Reject only GROUND-LEVEL objects — a tree canopy metres above
+        // is not enclosed ground and must not wipe out the meadow under it.
+        const int ceiling = std::min(latN - 1, top + 8); // ~0.8 m
+        for (int oy = top + 1; oy <= ceiling; ++oy) {
+            const auto above = store.cellAt(lx, oy, lz);
+            if (above.solid && above.obj)
+                return -1;
+        }
+        return layer;
+    }
+    return -1;
+}
+
 bool App::rebuildGrassCards()
 {
     if ((m_renderFlags & (1 << 13)) == 0) {
+        m_grassCardsCache.clear();
         m_furPass.setGrassCards({});
         return true;
     }
-    std::vector<voxel::GrassCard> cards = voxel::buildGrassCards(
-        [this](float x, float z, int mat) {
-            int tex = 0;
-            if (m_layers.loaded()) {
-                // terrain height at this point (CPU mirror of the height tex)
-                float H = -1e9f;
-                {
-                    const auto& hf = m_layers.field().heightTexture();
-                    const int sz = m_layers.field().latN();
-                    if (sz > 0 && !hf.empty()) {
-                        glm::vec2 tc = glm::clamp(glm::vec2(x, z) / vf::voxel::WORLD + 0.5f,
-                                                 glm::vec2(0.0f), glm::vec2(1.0f)) *
-                                       glm::vec2(sz - 1);
-                        glm::ivec2 i0(glm::floor(tc)), i1(glm::min(i0 + 1, sz - 1));
-                        glm::vec2 f = tc - glm::vec2(i0);
-                        H = glm::mix(glm::mix(hf[size_t(i0.y)*sz + i0.x].r,
-                                              hf[size_t(i0.y)*sz + i1.x].r, f.x),
-                                     glm::mix(hf[size_t(i1.y)*sz + i0.x].r,
-                                              hf[size_t(i1.y)*sz + i1.x].r, f.x), f.y);
-                    }
-                }
-                if (H > -1e8f) {
-                    auto s = m_layers.field().sampleWorld(glm::vec3(x, H, z));
-                    if (s.mat != 0 || s.tex != 0) {
-                        mat = s.mat;
-                        tex = s.tex;
-                    }
-                }
-            }
-            return m_texAtlas.cardLayerForSampled(mat, tex);
+    const auto t0 = std::chrono::steady_clock::now();
+    m_grassCardsCache = voxel::buildGrassCards(
+        [this](float x, float z, int mat, float& h, int& m) {
+            return grassCardLayerAt(x, z, mat, h, m);
         });
-    return m_furPass.setGrassCards(cards);
+    const float ms = float(std::chrono::duration<double, std::milli>(
+        std::chrono::steady_clock::now() - t0).count());
+    spdlog::info("foliage cards: full rebuild {} cards ({:.1f} ms) from live ground",
+                 m_grassCardsCache.size(), ms);
+    return m_furPass.setGrassCards(m_grassCardsCache);
+}
+
+bool App::rebuildGrassCardsRegion(float x0, float z0, float x1, float z1)
+{
+    if ((m_renderFlags & (1 << 13)) == 0)
+        return rebuildGrassCards();
+    if (x1 < x0 || z1 < z0)
+        return true;
+    const auto t0 = std::chrono::steady_clock::now();
+    // Drop only the cached cards rooted in the painted rectangle. Placement
+    // is a hash of the candidate index, so the newly generated subset is
+    // exactly what a full rebuild would have produced there — the rest of the
+    // ~300k cards are left untouched.
+    const size_t before = m_grassCardsCache.size();
+    m_grassCardsCache.erase(
+        std::remove_if(m_grassCardsCache.begin(), m_grassCardsCache.end(),
+                       [x0, z0, x1, z1](const voxel::GrassCard& c) {
+                           return c.rootLayer.x >= x0 && c.rootLayer.x <= x1 &&
+                                  c.rootLayer.z >= z0 && c.rootLayer.z <= z1;
+                       }),
+        m_grassCardsCache.end());
+    const size_t removed = before - m_grassCardsCache.size();
+    const glm::vec4 region(x0, z0, x1, z1);
+    std::vector<voxel::GrassCard> added = voxel::buildGrassCards(
+        [this](float x, float z, int mat, float& h, int& m) {
+            return grassCardLayerAt(x, z, mat, h, m);
+        },
+        0.15f, 3, &region);
+    m_grassCardsCache.insert(m_grassCardsCache.end(), added.begin(), added.end());
+    const float ms = float(std::chrono::duration<double, std::milli>(
+        std::chrono::steady_clock::now() - t0).count());
+    spdlog::info("foliage cards: region ({:.1f},{:.1f})-({:.1f},{:.1f}) "
+                 "{} removed, {} added, {} total ({:.2f} ms)",
+                 x0, z0, x1, z1, removed, added.size(), m_grassCardsCache.size(), ms);
+    return m_furPass.setGrassCards(m_grassCardsCache);
 }
 
 void App::rescanTextureFiles()

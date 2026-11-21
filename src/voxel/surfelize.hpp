@@ -80,7 +80,10 @@ struct SurfelParams {
     // Scales the small derived surfels that fill creases and corners.
     float edgeBridgeSize = 1.0f;
     // Fill corners the parent disk does not reach with small caps. DEFAULT OFF
-    // (matches App::m_cornerFill).
+    // (matches App::m_cornerFill). Needs edgeShrink > 0, but is INDEPENDENT of
+    // edgeFill: caps repair corners (also on thin shells), bridges repair
+    // creases on tightened parents. Coupling the two used to make the GUI's
+    // corner toggle a strict no-op whenever crease fill was off.
     // A COVERAGE guard skips any corner vertex that projects inside the
     // parent's in-plane footprint (flat Gaussian at centre + n*0.5*VOXEL,
     // radius = max parent radius). A normal 0.14 m parent covers the

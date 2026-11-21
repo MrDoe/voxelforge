@@ -1327,3 +1327,101 @@ TEST_CASE("writeLightManifest clamps to the UBO capacity")
 
     fs::remove_all(dir);
 }
+
+TEST_CASE("worldfile ui manifest: write, merge, preserve and parse booleans")
+{
+    namespace fs = std::filesystem;
+    const fs::path dir = fs::temp_directory_path() / "vf_ui_manifest_test";
+    fs::remove_all(dir);
+    fs::create_directories(dir);
+    const fs::path p = dir / "world.json";
+
+    // A manifest with a sun block and a foreign key containing nested braces
+    // and a `}` INSIDE A STRING: the ui/sun writers must preserve both.
+    {
+        std::ofstream out(p);
+        out << "{ \"layers\": [], \"sun\": { \"elev\": 12.5, \"azim\": 200.0 }, "
+               "\"foreign\": { \"keep\": [1, 2, {\"a\": \"b}\"} ] } }";
+    }
+    {
+        worldfile::UiSettings u;
+        CHECK_FALSE(worldfile::loadUiManifest(p.string(), u));
+    }
+
+    // sparse write + read-back; untouched fields stay absent
+    {
+        worldfile::UiSettings w;
+        w.renderFlags = 509.f;
+        w.exposure = 2.345f;
+        w.brushMode = "smooth";
+        w.edgeFill = 1.f;
+        REQUIRE(worldfile::writeUiManifest(p.string(), w));
+        worldfile::UiSettings u;
+        REQUIRE(worldfile::loadUiManifest(p.string(), u));
+        CHECK(u.renderFlags == doctest::Approx(509.f));
+        CHECK(u.exposure == doctest::Approx(2.345f).epsilon(1e-5));
+        CHECK(u.brushMode == "smooth");
+        CHECK(u.edgeFill == doctest::Approx(1.f));
+        CHECK(u.splatRadius == worldfile::UiSettings::kUiAbsent);
+        CHECK(u.backend.empty());
+    }
+    {
+        float e = 0.f, a = 0.f;
+        REQUIRE(worldfile::loadSunManifest(p.string(), e, a));
+        CHECK(e == doctest::Approx(12.5f));
+        CHECK(a == doctest::Approx(200.0f));
+        const std::string text = [] (const std::string& path) {
+            std::ifstream in(path);
+            return std::string((std::istreambuf_iterator<char>(in)),
+                               std::istreambuf_iterator<char>());
+        }(p.string());
+        CHECK(text.find("\"b}\"") != std::string::npos); // nested brace kept
+    }
+    // merge touches one key, keeps the rest
+    {
+        worldfile::UiSettings patch;
+        patch.splatRadius = 1.25f;
+        patch.uiFontScale = 1.5f;
+        REQUIRE(worldfile::mergeUiManifest(p.string(), patch));
+        worldfile::UiSettings u;
+        REQUIRE(worldfile::loadUiManifest(p.string(), u));
+        CHECK(u.renderFlags == doctest::Approx(509.f));
+        CHECK(u.brushMode == "smooth");
+        CHECK(u.splatRadius == doctest::Approx(1.25f));
+        CHECK(u.uiFontScale == doctest::Approx(1.5f));
+    }
+    // hand-authored booleans (scope the ofstream BEFORE reading - an open
+    // ofstream has not flushed and the loader would see an empty file)
+    {
+        { std::ofstream out(p);
+          out << "{ \"layers\": [], \"ui\": { \"edgeFill\": true, \"taa\": false, "
+                 "\"furCurl\": 0.25 } }"; }
+        worldfile::UiSettings u;
+        REQUIRE(worldfile::loadUiManifest(p.string(), u));
+        CHECK(u.edgeFill == doctest::Approx(1.f));
+        CHECK(u.taa == doctest::Approx(0.f));
+        CHECK(u.furCurl == doctest::Approx(0.25f));
+        CHECK(u.splatRadius == worldfile::UiSettings::kUiAbsent);
+    }
+    // sun writer preserves the ui block
+    {
+        REQUIRE(worldfile::writeSunManifest(p.string(), -30.f, 96.f));
+        float e = 0.f, a = 0.f;
+        REQUIRE(worldfile::loadSunManifest(p.string(), e, a));
+        CHECK(e == doctest::Approx(-30.f));
+        CHECK(a == doctest::Approx(96.f));
+        worldfile::UiSettings u;
+        REQUIRE(worldfile::loadUiManifest(p.string(), u));
+        CHECK(u.furCurl == doctest::Approx(0.25f));
+    }
+    // empty block
+    {
+        worldfile::UiSettings w;
+        REQUIRE(worldfile::writeUiManifest(p.string(), w));
+        worldfile::UiSettings u;
+        REQUIRE(worldfile::loadUiManifest(p.string(), u));
+        CHECK(u.renderFlags == worldfile::UiSettings::kUiAbsent);
+        CHECK(u.brushMode.empty());
+    }
+    fs::remove_all(dir);
+}

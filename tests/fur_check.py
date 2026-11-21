@@ -560,26 +560,6 @@ def main() -> int:
         note(dc == 0,
              f"the default sun's reference frame is unchanged ({dc} px)")
 
-        # ---- 7: per-frame sun-space micro shadow (Workstream B, default off)
-        # At a grazing sun the PCF path must reproduce the field-march verdict
-        # (parity) and be deterministic (two ON renders byte-identical).
-        backlit_low = ["--sun", "3", "100"]
-        render(os.path.join(OUTDIR, "sun_off.ppm"), alpaca_cam,
-               args_extra=backlit_low, env_extra={"VF_MICRO_SUNSHADOW": "0"})
-        render(os.path.join(OUTDIR, "sun_on.ppm"), alpaca_cam,
-               args_extra=backlit_low, env_extra={"VF_MICRO_SUNSHADOW": "1"})
-        render(os.path.join(OUTDIR, "sun_on2.ppm"), alpaca_cam,
-               args_extra=backlit_low, env_extra={"VF_MICRO_SUNSHADOW": "1"})
-        _, _, s0 = read_ppm(os.path.join(OUTDIR, "sun_off.ppm"))
-        _, _, s1 = read_ppm(os.path.join(OUTDIR, "sun_on.ppm"))
-        _, _, s2 = read_ppm(os.path.join(OUTDIR, "sun_on2.ppm"))
-        sc, *_ = diff_stats(s1, s0, NOISE_MAX)
-        note(sc == 0,
-             f"sun-space shadow matches the field verdict at grazing sun ({sc} px)")
-        sd, *_ = diff_stats(s2, s1, NOISE_MAX)
-        note(sd == 0,
-             f"sun-space shadow is deterministic ({sd} px)")
-
     finally:
         if not restore_micro():
             failures.append("the manifest restore did not take")

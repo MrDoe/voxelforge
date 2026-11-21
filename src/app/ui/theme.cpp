@@ -83,6 +83,11 @@ void App::initImGui()
     colors[ImGuiCol_TextSelectedBg] = ImVec4(0.122f, 0.294f, 0.353f, 0.65f);
     colors[ImGuiCol_NavHighlight] = ImVec4(0.204f, 0.804f, 0.925f, 0.65f);
     colors[ImGuiCol_PlotLines] = ImVec4(0.204f, 0.804f, 0.925f, 1.00f);
+    // Capture the authored style once, before any text-size scaling, so a
+    // scale change can reset instead of compounding (ScaleAllSizes is not
+    // idempotent). The UI-settings manifest key uiFontScale drives the scale.
+    m_uiBaseStyle = style;
+
     ImGui_ImplGlfw_InitForVulkan(m_window.handle(), true);
 
     ImGui_ImplVulkan_InitInfo vi {};
@@ -104,6 +109,9 @@ void App::initImGui()
     };
     ImGui_ImplVulkan_Init(&vi);
     ImGui_ImplVulkan_CreateFontsTexture();
+    rebuildUiFont(); // apply the startup uiFontScale (usually 1.0)
+
+
 
     // linear sampler for UI textures (e.g. the live scene-preview thumbnail)
     VkSamplerCreateInfo sci { VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO };
@@ -117,9 +125,33 @@ void App::initImGui()
 
     // AI chat
     if (!m_chatInitialized) {
-        m_chatUi.init(args.llmUrl, args.llmModel);
+        std::string aiErr;
+        if (!m_chatUi.init(&aiErr))
+            spdlog::warn("AI panel: OpenCode service unavailable ({})", aiErr);
         m_chatInitialized = true;
     }
+}
+
+void App::rebuildUiFont()
+{
+    if (!ImGui::GetCurrentContext() || !m_ctx.device())
+        return;
+    ImGui_ImplVulkan_DestroyFontsTexture();
+    ImGuiIO& io = ImGui::GetIO();
+    io.Fonts->Clear();
+    ImFontConfig cfg;
+    cfg.SizePixels = 13.0f * m_uiFontScale; // ImGui default pixel size
+    io.Fonts->AddFontDefault(&cfg);
+    // Font doubles at scale 2.0, but doubling every padding/row as well
+    // wastes the pane; scale widget metrics only half as much. The sidebar
+    // rail/footer/pane width scales fully (see sidebar.cpp).
+    const float styleScale = 1.0f + (m_uiFontScale - 1.0f) * 0.5f;
+    // Reset first: ScaleAllSizes compounds if applied repeatedly.
+    ImGui::GetStyle() = m_uiBaseStyle;
+    if (styleScale != 1.0f)
+        ImGui::GetStyle().ScaleAllSizes(styleScale);
+    ImGui_ImplVulkan_CreateFontsTexture();
+    spdlog::info("ui: ImGui font rebuilt at scale {:.2f}", m_uiFontScale);
 }
 
 } // namespace app

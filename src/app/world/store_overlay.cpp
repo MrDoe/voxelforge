@@ -95,6 +95,9 @@ void App::loadStoreOverlay()
         if (pool)
             m_svoPass.patchChunk(uint32_t(ci), *pool);
     }
+    // The restored overlay carries painted materials: regrow foliage from the
+    // same live height texture the strokes patched.
+    rebuildGrassCards();
     spdlog::info("live overlay: restored {} chunks ({} run surfels) from {}", chunks.size(),
                  n, path);
 }

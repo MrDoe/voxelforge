@@ -231,6 +231,11 @@ void App::applyEditLive()
     }
 
     m_strokeRiseCells = std::max(m_strokeRiseCells, riseCells);
+    // A paint dab can add or remove a foliage-bearing ground material. Mark
+    // the cards dirty; finishStroke() rebuilds them from the live height
+    // texture once the drag ends (one rebuild per stroke, not per dab).
+    if (m_editBrush == EditBrush::Paint)
+        m_foliagePaintDirty = true;
     commitStoreEdits(edits, riseCells, "", refreshMargin);
     if (!m_dragging)
         finishStroke(); // a lone stamp (incl. the headless VF_TEST_EDIT) is a stroke
@@ -294,13 +299,19 @@ void App::commitStoreEdits(std::vector<vf::voxel::StoreEdit>& edits, int riseCel
     // is already there (one fixed level, world-wide), and the foam /
     // absorption / reflected bed all read this texture, so a stale patch would
     // make the new water shade differently from the river.
-    {
-        int hx0 = edits[0].x, hx1 = hx0, hz0 = edits[0].z, hz1 = hz0;
-        for (const vf::voxel::StoreEdit& e : edits) {
-            hx0 = std::min(hx0, e.x); hx1 = std::max(hx1, e.x);
-            hz0 = std::min(hz0, e.z); hz1 = std::max(hz1, e.z);
-        }
-        patchHeightTexture(hx0 - 3, hz0 - 3, hx1 + 3, hz1 + 3, riseCells);
+    int hx0 = edits[0].x, hx1 = hx0, hz0 = edits[0].z, hz1 = hz0;
+    for (const vf::voxel::StoreEdit& e : edits) {
+        hx0 = std::min(hx0, e.x); hx1 = std::max(hx1, e.x);
+        hz0 = std::min(hz0, e.z); hz1 = std::max(hz1, e.z);
+    }
+    patchHeightTexture(hx0 - 3, hz0 - 3, hx1 + 3, hz1 + 3, riseCells);
+    // Grow the painted region by one brush cell of margin so blades whose
+    // ROOT sits just outside the edited columns still get re-evaluated.
+    if (m_editBrush == EditBrush::Paint) {
+        m_foliageRegion.x = std::min(m_foliageRegion.x, float(hx0 - 1) * vf::voxel::VOXEL - vf::voxel::WORLD * 0.5f);
+        m_foliageRegion.y = std::min(m_foliageRegion.y, float(hz0 - 1) * vf::voxel::VOXEL - vf::voxel::WORLD * 0.5f);
+        m_foliageRegion.z = std::max(m_foliageRegion.z, float(hx1 + 2) * vf::voxel::VOXEL - vf::voxel::WORLD * 0.5f);
+        m_foliageRegion.w = std::max(m_foliageRegion.w, float(hz1 + 2) * vf::voxel::VOXEL - vf::voxel::WORLD * 0.5f);
     }
     m_taaFirstFrame = true; // no history across a geometry change
     const auto t2 = std::chrono::steady_clock::now();    auto ms = [](auto a, auto b) {
@@ -308,6 +319,8 @@ void App::commitStoreEdits(std::vector<vf::voxel::StoreEdit>& edits, int riseCel
     };
     m_lastEditMs = float(ms(t0, t2));
     m_lastEditSurfels = nRunSurfels;
+    m_lastEditCells = edits.size();
+    m_lastEditChunks = changed.size();
     if (!m_dragging || getenv("VF_TRACE"))
         spdlog::info("live edit{}: {} cells, {} chunks, {} run surfels "
                      "({} parents + {} edges), pick {}, "
@@ -472,6 +485,15 @@ void App::finishStroke()
     m_lastStampWroteCell = glm::ivec3(-1, -1, -1);
     m_undoOverflow = false;
     refreshLiveLights();
+    // One foliage rebuild per paint stroke: the live height texture now has
+    // the painted materials, so cards grow on the new grass and vanish where
+    // it was painted away. Done at stroke end to keep a drag cheap.
+    if (m_foliagePaintDirty) {
+        m_foliagePaintDirty = false;
+        rebuildGrassCardsRegion(m_foliageRegion.x, m_foliageRegion.y,
+                                m_foliageRegion.z, m_foliageRegion.w);
+        m_foliageRegion = glm::vec4(1e30f, 1e30f, -1e30f, -1e30f);
+    }
 }
 
 void App::undoEdit()
@@ -499,6 +521,8 @@ void App::undoEdit()
     // until the next reload, exactly like a painted stroke).
     m_overlayWriter.queue(m_layers.store(), overlayPath());
     refreshLiveLights();
+    // Undo restores the pre-stroke materials, so the card set follows it.
+    rebuildGrassCards();
 }
 
 void App::clearLiveEdits()
@@ -565,6 +589,8 @@ void App::clearLiveEdits()
     for (const auto& b : bounds)
         patchHeightTexture(b.first.x - 3, b.first.z - 3, b.second.x + 3,
                            b.second.z + 3, fresh.latN());
+    // The store is back to the baked materials: drop any paint-grown cards.
+    rebuildGrassCards();
     m_undo.clear();
     m_undoPending.clear();
     m_strokeRiseCells = 2;

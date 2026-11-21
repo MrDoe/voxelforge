@@ -40,7 +40,13 @@ void main()
     // Clamp UVs: the atlas sampler is REPEAT, so edge texels would wrap.
     const vec2 uv = clamp(vUV, vec2(0.0), vec2(1.0));
     const vec4 tex = textureLod(uTexAtlas, vec3(uv, vCard.x), 0.0);
-    const float alpha = tex.a * vCard.y * vEnergy;
+    // pc.misc.z is tonemapLook in the shared push, which neither grass stage
+    // reads; FurPass re-pushes just the grass draw with the opacity slider
+    // there. Scaling here (rather than in the composite) makes every
+    // accumulation term — and so the final 1-exp(-sumA) coverage — fade
+    // together, and keeps the sun-shadow tagging in oE.w consistent.
+    const float opacity = clamp(pc.misc.z, 0.0f, 1.0f);
+    const float alpha = tex.a * vCard.y * vEnergy * opacity;
     if (alpha < 0.01)
         discard;
 
@@ -69,5 +75,11 @@ void main()
     oB = vec4(alpha * vWorld, 0.0);
     oC = vec4(alpha * n, 0.0);
     oD = vec4(alpha * alb, 0.0);
-    oE = vec4(alpha * vWorld, 0.0);
+    // xyz is the world position (the composite's rest-position stand-in for
+    // cards, which have no skeleton). w carries THIS card's raw sun term
+    // (alpha * ndl) so the composite can apply sun occlusion to grass cards
+    // only: fur cards leave w = 0 and keep their CPU-baked sun shadow. That
+    // is why the two card kinds can share one accumulator set and one
+    // composite without the grass shadow double-darkening the fleece.
+    oE = vec4(alpha * vWorld, alpha * ndl);
 }

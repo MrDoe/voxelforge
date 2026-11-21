@@ -60,8 +60,6 @@ layout(location = 1) in vec3 vWorld; // the posed world point (m)
 // the lighting uses is still the shader's own microAO march, and switching to
 // the per-vertex value is a separate measurement, not a free win.
 layout(location = 2) flat in uint vWord;
-layout(location = 3) in float vAo;   // per-vertex baked AO (byte 2)
-layout(location = 4) in vec3 vFaceN; // per-vertex REST face normal (E1)
 
 void main()
 {
@@ -94,12 +92,9 @@ void main()
     if (sceneHasGeometry && t >= sceneT - 0.5 * vs)
         discard;
 
-    // Workstream E1: field-free mode uses the mesh's REST face normal (and
-    // baked AO) so the raster path never samples the field. Default off keeps
-    // the field-gradient normal byte-identical. uSunParams.y is the hatch.
-    const bool fieldFree = sun.uSunParams.y > 0.5;
-    const vec3 restN = fieldFree ? normalize(vFaceN)
-                                 : microNormal(vRest, 1.0 * vs);
+    // The REST-POSE normal, from the field's own gradient - the normal the
+    // traced path uses, so the coat and the body under it agree at the seam.
+    const vec3 restN = microNormal(vRest, 1.0 * vs);
 
     // THE APPEARANCE. The packed per-vertex material is PRIMARY when it is
     // present (`assignMicroMeshAppearance` resolves it against the rest field
@@ -157,8 +152,7 @@ void main()
     }
     const vec3 n = microDirFromBaked(w, bakedN);
 
-    const vec3 col = shadeMicroLit(w, p, vRest, n, rd, alb, rr, mId,
-                                   fieldFree ? clamp(vAo, 0.0, 1.0) : -1.0);
+    const vec3 col = shadeMicroLit(w, p, vRest, n, rd, alb, rr, mId);
     if (any(isnan(col)) || any(isinf(col))) {
         // DIAGNOSTIC: paint yellow for NaN/Inf (proves the speckle source).
         imageStore(uOutHdr, pix, vec4(1.0, 1.0, 0.0, 1.0));

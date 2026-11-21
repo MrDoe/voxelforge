@@ -17,10 +17,6 @@ layout(set = 0, binding = 12, rgba16f) uniform highp image2D uOutHdr;
 layout(set = 0, binding = 13, rgba16f) uniform highp image2D uOutGPos;
 layout(set = 0, binding = 14, rgba16f) uniform highp image2D uOutGNorm;
 
-// Workstream B: the per-frame R32F sun-space depth, copied from the render
-// target after the sun pass. Read-only in the shading stages.
-layout(set = 0, binding = 29, r32f) uniform readonly highp image2D uSunDepth;
-
 #define VOXELFORGE_MICRO_BACKEND 1
 #include "common_base.glsl"
 #include "common_irradiance.glsl"
@@ -130,32 +126,6 @@ float microVoxelSize()
     for (int w = 0; w < wt.uWorldInfo.x && w < MAX_MICRO_WORLDS; ++w)
         v = min(v, wt.uWorlds[w].geo.x);
     return v > 1e29 ? 0.005 : v;
-}
-
-// Workstream B: 4-tap PCF in sun space. 1 = lit, 0 = shadowed, matching the
-// binary softShadow verdict. The sun depth is the nearest posed-mesh depth
-// from the sun; a receiver behind it is shadowed. Disabled -> lit (gates exact).
-float sunShadowPCF(vec3 worldPos, vec3 n)
-{
-    if (sun.uSunParams.x < 0.5)
-        return 1.0;
-    const vec4 sc = sun.uSunViewProj * vec4(worldPos + n * (2.0 * microVoxelSize()), 1.0);
-    const vec2 uv = sc.xy / max(sc.w, 1e-6) * 0.5 + 0.5;
-    const float recv = clamp(sc.z / max(sc.w, 1e-6) * 0.5 + 0.5, 0.0, 1.0);
-    if (uv.x < 0.0 || uv.x > 1.0 || uv.y < 0.0 || uv.y > 1.0 || recv >= 1.0)
-        return 1.0; // outside the sun map: no occluder
-    const ivec2 sz = imageSize(uSunDepth);
-    const vec2 texel = 1.0 / vec2(sz);
-    const float bias = 0.0016;
-    float vis = 0.0;
-    for (int j = 0; j < 2; ++j)
-        for (int i = 0; i < 2; ++i) {
-            const vec2 o = (vec2(float(i), float(j)) - 0.5) * texel;
-            const float d = imageLoad(uSunDepth,
-                clamp(ivec2((uv + o) * vec2(sz)), ivec2(0), sz - 1)).r;
-            vis += (recv - bias <= d) ? 1.0 : 0.0;
-        }
-    return vis * 0.25;
 }
 
 // Union of every micro world. Because each world contributes a DISTANCE, the
@@ -579,10 +549,8 @@ void microAO(vec3 p, vec3 n, out float ao, out vec3 bent)
 //
 // It is shared verbatim by both paths, so a rasterised animal and a traced vase
 // cannot drift apart in how they are lit.
-// `aoBaked`: Workstream E1 - when >= 0, use this per-vertex baked AO and derive
-// enclosure from it (no field march). Traced callers pass -1 (field path).
 vec3 shadeMicroLit(int w, vec3 p, vec3 occlP, vec3 n, vec3 rd, vec3 alb, vec2 rr,
-                   uint mId, float aoBaked)
+                   uint mId)
 {
     const float vs = microVoxelSize();
     // The sun is occluded by BOTH worlds: the micro worlds (self-shadow and
@@ -591,27 +559,16 @@ vec3 shadeMicroLit(int w, vec3 p, vec3 occlP, vec3 n, vec3 rd, vec3 alb, vec2 rr
     // backend gives a water fragment, so a vase standing in the house's shadow
     // reads exactly as dark as the ground it stands on.
     float sh = 1.0;
-    if ((gRenderFlags & 2) != 0) {
-        // Workstream B: raster-owned meshes use the per-frame sun-space PCF map
-        // (the posed mesh IS in it); traced worlds keep the field march. Both
-        // keep the coarse WORLD shadow, which the micro map does not contain.
-        const float microSh = microWorldIsMesh(w)
-                                  ? sunShadowPCF(p, n)
-                                  : softShadow(occlP + n * (1.0 * vs), kSunDir);
-        sh = microSh * worldShadow(p + n * (1.0 * vs), kSunDir);
-    }
+    if ((gRenderFlags & 2) != 0)
+        sh = softShadow(occlP + n * (1.0 * vs), kSunDir) *
+             worldShadow(p + n * (1.0 * vs), kSunDir);
 
     float ao = 1.0;
     vec3 bent = n;
-    if (aoBaked >= 0.0) {
-        // Workstream E1: field-free - use the per-vertex baked AO. bent = n.
-        ao = aoBaked;
-    } else if ((gRenderFlags & 1) != 0)
+    if ((gRenderFlags & 1) != 0)
         microAO(occlP, n, ao, bent);
 
-    float enclosed = (aoBaked >= 0.0)
-        ? (1.0 - ao) // field-free enclosure proxy from AO
-        : 1.0 - ((gRenderFlags & 256) != 0 ? skyVisibilitySvo(p, bent) : 1.0);
+    float enclosed = 1.0 - ((gRenderFlags & 256) != 0 ? skyVisibilitySvo(p, bent) : 1.0);
     enclosed = max(enclosed, aoShEnclosure(ao, sh));
     float skyAmb = mix(1.0, 0.16, enclosed);
     float skyIbl = mix(1.0, 0.04, enclosed);
@@ -677,5 +634,5 @@ vec3 shadeMicro(vec3 p, vec3 rd, int w)
     const vec3 restN = microDirUnbone(w, microDirToBaked(w, n), rbone);
     alb = detailAlbedo(alb, rest, restN, mId);
     n = microDirFromBaked(w, microDirRebone(w, detailNormal(restN, rest, mId), rbone));
-    return shadeMicroLit(w, p, p, n, rd, alb, rr, mId, -1.0);
+    return shadeMicroLit(w, p, p, n, rd, alb, rr, mId);
 }

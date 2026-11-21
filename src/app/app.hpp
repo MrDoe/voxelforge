@@ -30,6 +30,7 @@
 #include "rhi/context.hpp"
 #include "rhi/resources.hpp"
 #include "rhi/swapchain.hpp"
+#include "voxel/grass_cards.hpp"
 #include "render/dof_pass.hpp"
 #include "render/exposure_pass.hpp"
 #include "render/oit_composite_pass.hpp"
@@ -134,8 +135,20 @@ private:
     void drawPanelWorld();
     void drawPanelRender();
     void drawPanelTextures();
+    // Shared modal gallery for material textures and foliage cards. The
+    // per-material rows only show a "Choose…" button; the modal owns the
+    // thumbnail grid, a name filter and the selection callback.
+    void drawTexturePickerModal(bool& textureChanged, bool& cardChanged);
     void drawPanelMesh();
     void drawPanelAI();
+    // Decode a screenshot (PPM from vf_mcp render_shot, or PNG) into a cached
+    // Vulkan image + ImGui descriptor for the AI tool cards. Returned texture
+    // lives as long as the App; pass width/height for aspect-ratio layout.
+    ImTextureID aiScreenshotTexture(const std::string& path, int* w, int* h);
+    // Rebuild the ImGui font atlas + style at m_uiFontScale (0.8..2.0) for
+    // high-resolution displays; called from initImGui and from the manifest
+    // UI-settings applier BETWEEN frames (never while a command buffer records).
+    void rebuildUiFont();
     void drawPanelAnimate();
     void drawSidebarFooter();
     void drawSceneOverlays();
@@ -191,6 +204,14 @@ private:
     // Rebuild + upload the raster ground-foliage cards from the atlas's
     // material bindings. Called after every atlas load/world reload.
     bool rebuildGrassCards();
+    // Incremental variant: regenerate ONLY the cards rooted inside the given
+    // world-xz rectangle, merge them into the cached set and re-upload. Used
+    // at paint-stroke end so editing does not pay the ~0.8 s full rebuild.
+    bool rebuildGrassCardsRegion(float x0, float z0, float x1, float z1);
+    // Shared lookup for both rebuild paths: the effectively-sampled atlas
+    // card layer at a ground point, from the LIVE height texture/store.
+    int grassCardLayerAt(float x, float z, int hintMat,
+                         float& outHeight, int& outMaterial);
     void persistWorldLayers();
     void rescanWorldLayers();
     // In-session scenery switch: re-home the live world at another
@@ -501,6 +522,19 @@ private:
     // sun is front/back-side to the reference cameras, so reference shots are
     // unchanged. VF_FUR_SSS=0 restores the original bit-exact look.
     float m_furSss = 0.8f;
+    // Opacity of the photographic ground-foliage cards (grass/leaves), 0..1.
+    // 1 is the authored look and keeps every gate bit-exact; the Render panel
+    // slider and VF_FOLIAGE_OPACITY drive it. A grass-draw uniform, so it
+    // needs no card rebuild and never touches the fur coat.
+    float m_foliageOpacity = 1.0f;
+    // A Paint stroke changed ground materials: rebuild the photographic
+    // foliage cards at stroke end so growth follows the brush.
+    bool m_foliagePaintDirty = false;
+    // Union of the painted xz rectangle(s) in one stroke; only this region is
+    // regenerated (hash-stable placement makes the subset exact).
+    glm::vec4 m_foliageRegion = glm::vec4(1e30f, 1e30f, -1e30f, -1e30f);
+    // The last uploaded card set. Kept so a stroke can splice just its region.
+    std::vector<vf::voxel::GrassCard> m_grassCardsCache;
     // The materials that grow a coat. 21 is `fleece`.
     std::vector<uint8_t> m_furMaterials { 21 };
     // Grow the cards with the current parameters and upload them. The cards
@@ -512,8 +546,7 @@ private:
     // Returns the new object's fur index, or -1 when it grows no coat.
     int growFurCards(const vf::voxel::MicroField& field, glm::vec3 worldOffset,
                      const vf::voxel::MicroRig& rig,
-                     std::function<int(glm::vec3)> boneFn = nullptr,
-                     const std::vector<vf::voxel::MeshTri>* meshTris = nullptr);
+                     std::function<int(glm::vec3)> boneFn = nullptr);
     // Sun: m_sunDir is the single source of truth for where the sun is (it
     // rides the per-frame push constant), so every control that moves the sun
     // funnels through setSunAngles and nothing keeps parallel angle floats.
@@ -529,6 +562,20 @@ private:
     // never feeds a write. Session-only, no world.json write; an untouched
     // startup stays at 34/238.
     void setSunTime(float hours);
+    // ---- "ui" manifest block: the out-of-process (MCP) control surface -----
+    // Applies the world.json "ui" object (Render/Edit settings as data); see
+    // world/ui_settings.cpp. A field lands only when its parsed value differs
+    // from the live member, so this never fights a GUI drag. `heavy` gates
+    // rebuilds/uploads that are only safe between frames (live).
+    void applyUiSettingsFromManifest(bool heavy);
+    // Follow the manifest "sun" block only when the FILE value changed from
+    // what we last saw - a session-only P toggle is never snapped back.
+    void applyManifestSun();
+    // Forget the seen-snapshots after startup/scenery switch.
+    void resetUiSettingsState();
+    void seedUiSunFromDir();
+    vf::voxel::worldfile::UiSettings m_seenUi;
+    float m_seenSunElev = -1e30f, m_seenSunAzim = -1e30f; // unseeded
     // Log every splat belonging to one lattice cell: stable id, segment, radii,
     // and whether its disk connects to any neighbour (the floating-splat
     // verdict). Pure - builds a throwaway 3x3x3 range, touches no live state.
@@ -606,10 +653,42 @@ private:
     
 
     // Per-frame CPU probe: camera embedded in solid => two-sided shells.
-    void updateBuriedProbe()
+    // Also the one place an embedded camera is lifted out of the HEIGHTFIELD.
+    // The splat path has no underside for terrain top disks, so a camera below
+    // the surface sees the world-wide water plane through a bright slit (no
+    // splat radius or normal change can seal a surface that was never drawn).
+    void updateBuriedProbe(bool ejectEmbedded = false)
     {
-        m_splatPass.setBuried(m_layers.loaded() &&
-                              m_layers.field().sampleWorld(m_camera.pos).d < 0.0f);
+        if (!m_layers.loaded()) {
+            m_splatPass.setBuried(false);
+            return;
+        }
+        const auto& field = m_layers.field();
+        if (ejectEmbedded && m_collisionEnabled &&
+            std::getenv("VF_NO_CAMERA_EJECT") == nullptr) {
+            const int n = field.latN();
+            const auto& tops = field.colTops();
+            const int cx = int(std::floor(
+                (m_camera.pos.x + 0.5f * vf::voxel::WORLD) / vf::voxel::VOXEL));
+            const int cz = int(std::floor(
+                (m_camera.pos.z + 0.5f * vf::voxel::WORLD) / vf::voxel::VOXEL));
+            if (cx >= 0 && cx < n && cz >= 0 && cz < n) {
+                const int16_t top = tops[size_t(cz) * size_t(n) + size_t(cx)];
+                if (top >= 0) {
+                    const float topY = (float(top) + 1.0f) * vf::voxel::VOXEL
+                                       - 0.5f * vf::voxel::WORLD;
+                    // A small margin keeps the low-angle (flat-looking) view;
+                    // measured 0.05 m above the top already seals the slit.
+                    const float standY = topY + 0.12f;
+                    // Only a DEEP embed is corrected: a camera a few cm under
+                    // a rough surface is left alone, and interiors of objects
+                    // (no colTop) are never touched.
+                    if (m_camera.pos.y < standY - 0.30f)
+                        m_camera.pos.y = standY;
+                }
+            }
+        }
+        m_splatPass.setBuried(field.sampleWorld(m_camera.pos).d < 0.0f);
     }
     // In-place photorealism chain on m_offscreen (post-tonemap LDR):
     // SSR/SSAO/volumetric-fog/motion-blur/DoF per the G/H/J/K/L toggles.
@@ -786,6 +865,14 @@ private:
     std::vector<CardThumb> m_cardThumbs;
     bool m_cardThumbsDirty = true;
     bool m_cardApplyPending = false;
+    // One modal picker serves BOTH gallery pickers (material photo textures
+    // and foliage cards). Per-material rows now show a single "Choose…"
+    // button instead of an inline wall of thumbnails.
+    enum class TexturePickerKind : uint8_t { Texture, Card };
+    bool m_texPickerOpen = false;
+    TexturePickerKind m_texPickerKind = TexturePickerKind::Texture;
+    int m_texPickerMaterial = 0;
+    char m_texPickerFilter[128] = {};
     // hot-swap: a GUI edit (write manifest + re-upload) and a bound file's
     // on-disk change (re-upload only) both land between frames, never inside
     // a recorded command buffer. m_texSig = resolved path -> mtime+size.
@@ -851,7 +938,9 @@ private:
     // Photo foliage cards (bit 13) ON by default: photographic CC0 grass/leaf
     // cards replace procedural blades at silhouettes. VF_RENDER_FLAGS still
     // overrides wholesale (e.g. 511 = pre-card look) for A/B gates.
-    int m_renderFlags = 511 | (1 << 13);
+    // Bit 14 = sun occlusion of the raster ground-foliage cards, ON by
+    // default. Needs bits 2 (Shadows) and 13 (photo foliage cards).
+    int m_renderFlags = 511 | (1 << 13) | (1 << 14);
     float m_exposure = 1.15f;
     // SSAO tuning (VF_SSAO_*): world-scale two-band AO, opt-in via H / bit 6.
     float m_ssaoStrength = 0.6f;
@@ -911,6 +1000,10 @@ private:
                                      std::string(vf::voxel::EditableWorld::kRaiseLayerName),
                                      std::string("raise") };
     vf::ai::ChatUi m_chatUi;
+    struct AiShot { std::string path; vf::Image3D img {}; ImTextureID id = 0; int w = 0, h = 0; };
+    std::vector<AiShot> m_aiShots; // screenshot thumbnails for the AI panel
+    float m_uiFontScale = 2.0f;     // ImGui text/style scale from world.json "ui"
+    ImGuiStyle m_uiBaseStyle {};    // captured once before any scaling
     vf::voxel::PickHit m_hoverHit;
     vf::voxel::PickHit m_selectedHit;
     bool m_hasSelection = false;
@@ -1085,6 +1178,12 @@ private:
     // assets/runtime_edits.vxw on mouse release.
     float m_lastEditMs = 0.0f;
     size_t m_lastEditSurfels = 0;
+    // Cells actually sent to the store by the last stamp (the instrument the
+    // MCP stamp report returns before making any pixel claim).
+    size_t m_lastEditCells = 0;
+    // Chunk count of the last stamp, kept separately from m_lastChangedChunks
+    // (which the light refresh consumes and clears at stroke end).
+    size_t m_lastEditChunks = 0;
     vf::voxel::LiveEditor m_liveEditor;
     vf::voxel::OverlayWriter m_overlayWriter;
     // Undo: the state each touched cell held before the current stroke (keyed
@@ -1201,6 +1300,10 @@ private:
     glm::vec3 storeNormalAt(const glm::ivec3& v);
 public:
     void requestWorldReload() { m_pendingWorldReload = true; }
+    // Execute queued vf_mcp intents between frames. Stamp intents run through
+    // applyEditLive() — the SAME path the GUI brush uses — so undo, surfel /
+    // SVO patches, height-texture and water follow without a second truth.
+    void consumeMcpIntents();
     };
 
 } // namespace app

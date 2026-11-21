@@ -551,6 +551,18 @@ TEST_CASE("surfelize: corner caps fill only where the parent disk misses")
     CAPTURE(loneCaps.edgeBridgeCount);
     CHECK(loneCaps.edgeBridgeCount > loneNo.edgeBridgeCount); // caps fired
 
+    // The cap toggle must work on its own. It used to be nested inside the
+    // crease-bridge block, so with edgeFill off it emitted nothing at all and
+    // "Fill corner splats" was a strict no-op.
+    p.edgeFill = false;
+    p.cornerFill = false;
+    const SurfelSet capsOnlyNo = buildSurfels(lone, p);
+    p.cornerFill = true;
+    const SurfelSet capsOnly = buildSurfels(lone, p);
+    CHECK(capsOnlyNo.edgeBridgeCount == 0);
+    CHECK(capsOnly.edgeBridgeCount > capsOnlyNo.edgeBridgeCount);
+    p.edgeFill = true;
+
     // Convex block: every corner is parent-covered, so cornerFill is a no-op.
     const VoxelField cube = cubeField(9);
     p.cornerFill = false;

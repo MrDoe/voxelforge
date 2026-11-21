@@ -466,7 +466,7 @@ bool MicroSvoPass::init(const Context& ctx)
     const VkShaderStageFlags gfx = VkShaderStageFlags(
         VK_SHADER_STAGE_COMPUTE_BIT | VK_SHADER_STAGE_VERTEX_BIT |
         VK_SHADER_STAGE_FRAGMENT_BIT);
-    VkDescriptorSetLayoutBinding b[24] = {};
+    VkDescriptorSetLayoutBinding b[20] = {};
     int n = 0;
     // 1-6: the micro worlds' own six pools (separate from the world's SVO set).
     for (uint32_t i = 1; i < 7; ++i)
@@ -498,9 +498,6 @@ bool MicroSvoPass::init(const Context& ctx)
     b[n++] = { 25, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, 1, gfx, nullptr };
     // coarse irradiance volume (same binding as the other sets)
     b[n++] = { 26, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1, gfx, nullptr };
-    // Workstream B: sun camera UBO (28) + sun depth storage image (29).
-    b[n++] = { 28, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, 1, gfx, nullptr };
-    b[n++] = { 29, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 1, gfx, nullptr };
     // 41: the PRE-MESH gpos snapshot, read-only. The raster mesh fragment uses
     // it as its world-depth reference; it must not read the live gpos, which
     // the same draw writes (a read/write hazard made the world/micro verdict
@@ -715,60 +712,14 @@ bool MicroSvoPass::init(const Context& ctx)
                              int(mr), int(dr));
             return false;
         }
-
-        // ---- SUN-SPACE DEPTH pipeline (Workstream B) --------------------
-        // Renders posed meshes from the sun into an R32F colour attachment
-        // (separate from the storage-bound copy) with a D32 attachment for
-        // nearest-wins. The fragment writes a COLOUR, so the depth test
-        // suppresses far fragments - deterministic, no imageStore race.
-        VkShaderModule sunVS = VK_NULL_HANDLE, sunFS = VK_NULL_HANDLE;
-        if (!makeModule("micro_sun.vert.spv", &sunVS) ||
-            !makeModule("micro_sun.frag.spv", &sunFS)) {
-            spdlog::critical("micro: sun shadow shader module load failed");
-            return false;
-        }
-        VkPipelineShaderStageCreateInfo ss[2] = {};
-        ss[0] = { VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO };
-        ss[0].stage = VK_SHADER_STAGE_VERTEX_BIT; ss[0].module = sunVS; ss[0].pName = "main";
-        ss[1] = { VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO };
-        ss[1].stage = VK_SHADER_STAGE_FRAGMENT_BIT; ss[1].module = sunFS; ss[1].pName = "main";
-        VkFormat sunColorFormats[] = { VK_FORMAT_R32_SFLOAT };
-        VkPipelineRenderingCreateInfo sunPRC {
-            VK_STRUCTURE_TYPE_PIPELINE_RENDERING_CREATE_INFO };
-        sunPRC.colorAttachmentCount = 1;
-        sunPRC.pColorAttachmentFormats = sunColorFormats;
-        sunPRC.depthAttachmentFormat = kMicroMeshDepthFormat;
-        VkPipelineDepthStencilStateCreateInfo sunDS = ds;
-        sunDS.depthWriteEnable = VK_TRUE;
-        sunDS.depthCompareOp = VK_COMPARE_OP_LESS;
-        VkGraphicsPipelineCreateInfo spi {
-            VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO };
-        spi.pNext = &sunPRC;
-        spi.stageCount = 2; spi.pStages = ss;
-        spi.pVertexInputState = &vi;
-        spi.pInputAssemblyState = &ia;
-        spi.pViewportState = &vp;
-        spi.pRasterizationState = &rs; // shares cull mode with the mesh pass
-        spi.pMultisampleState = &ms;
-        spi.pDepthStencilState = &sunDS;
-        spi.pDynamicState = &dy;
-        spi.layout = m_layout;
-        const VkResult sr = vkCreateGraphicsPipelines(
-            dev, VK_NULL_HANDLE, 1, &spi, nullptr, &m_sunPipeline);
-        vkDestroyShaderModule(dev, sunVS, nullptr);
-        vkDestroyShaderModule(dev, sunFS, nullptr);
-        if (sr != VK_SUCCESS) {
-            spdlog::critical("micro: sun depth pipeline failed ({})", int(sr));
-            return false;
-        }
     }
 
     // Pool sizes cover every binding above: STORAGE_IMAGE 8/9/12/13/14 (5),
     // STORAGE_BUFFER 1-6 + 10 + 11 (8), UNIFORM_BUFFER 7/23/25 (3),
     // COMBINED_IMAGE_SAMPLER 22/26 (2).
-    VkDescriptorPoolSize sizes[4] = { { VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 6 },
+    VkDescriptorPoolSize sizes[4] = { { VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 5 },
                                        { VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 8 },
-                                       { VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, 4 },
+                                       { VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, 3 },
                                        { VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 2 } };
     VkDescriptorPoolCreateInfo pi { VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO };
     pi.maxSets = 1;
@@ -812,46 +763,6 @@ bool MicroSvoPass::init(const Context& ctx)
                                  0, 1, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, nullptr,
                                  &meshInfo, nullptr };
     vkUpdateDescriptorSets(dev, 1, &wmesh, 0, nullptr);
-
-    // Workstream B: bindings 28 (sun UBO) and 29 (sun depth) must be WRITTEN at
-    // init even with the feature off, or the whole set is invalid on this
-    // driver. Placeholder 1x1 R32F + identity viewProj with enabled=0.
-    {
-        struct SunShadow_t { glm::mat4 vp; glm::vec4 params; } sun0 {};
-        sun0.vp = glm::mat4(1.f);
-        sun0.params = glm::vec4(0.f);
-        m_sunUbo = makeBuffer(ctx, sizeof(sun0), VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT,
-                              VMA_MEMORY_USAGE_AUTO_PREFER_HOST, true);
-        if (!m_sunUbo.buf || !m_sunUbo.mapped)
-            return false;
-        memcpy(m_sunUbo.mapped, &sun0, sizeof(sun0));
-        VkDescriptorBufferInfo bi { m_sunUbo.buf, 0, sizeof(sun0) };
-        VkWriteDescriptorSet w28 { VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, nullptr,
-                                   m_set, 28, 0, 1, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,
-                                   nullptr, &bi, nullptr };
-        vkUpdateDescriptorSets(dev, 1, &w28, 0, nullptr);
-
-        m_sunDepth = makeImage2D(*m_ctx, 1, 1, VK_FORMAT_R32_SFLOAT,
-                                 VK_IMAGE_USAGE_STORAGE_BIT |
-                                     VK_IMAGE_USAGE_TRANSFER_DST_BIT);
-        if (!m_sunDepth.img)
-            return false;
-        m_sunDepthExtent = { 1, 1 };
-        m_ctx->immediateSubmit([&](VkCommandBuffer cmd) {
-            vf::transitionImage(cmd, m_sunDepth.img, VK_IMAGE_ASPECT_COLOR_BIT,
-                                VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_GENERAL,
-                                VK_PIPELINE_STAGE_2_NONE, VK_ACCESS_2_NONE,
-                                VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT,
-                                VK_ACCESS_2_SHADER_STORAGE_READ_BIT |
-                                    VK_ACCESS_2_TRANSFER_WRITE_BIT);
-        });
-        VkDescriptorImageInfo di { VK_NULL_HANDLE, m_sunDepth.view,
-                                   VK_IMAGE_LAYOUT_GENERAL };
-        VkWriteDescriptorSet w29 { VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, nullptr,
-                                   m_set, 29, 0, 1, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE,
-                                   &di, nullptr, nullptr };
-        vkUpdateDescriptorSets(dev, 1, &w29, 0, nullptr);
-    }
     return true;
 }
 
@@ -925,64 +836,6 @@ bool MicroSvoPass::ensureMeshDepth(uint32_t slot, uint32_t w, uint32_t h)
     else
         spdlog::info("micro: mesh depth slot {} created {}x{}", slot, w, h);
     return ok;
-}
-
-bool MicroSvoPass::ensureSunDepth()
-{
-    if (!m_ctx)
-        return false;
-    const uint32_t R = kSunDepthRes;
-    if (m_sunDepthRT.img && m_sunDepthAttach.img && m_sunDepth.img &&
-        m_sunDepthExtent.width == R)
-        return true;
-    if (m_sunDepthRT.img) destroyImage3D(*m_ctx, m_sunDepthRT);
-    if (m_sunDepthAttach.img) destroyImage3D(*m_ctx, m_sunDepthAttach);
-    if (m_sunDepth.img) destroyImage3D(*m_ctx, m_sunDepth);
-    // Render target: colour attachment + copy SOURCE (never bound as storage).
-    m_sunDepthRT = makeImage2D(*m_ctx, R, R, VK_FORMAT_R32_SFLOAT,
-                               VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT |
-                                   VK_IMAGE_USAGE_TRANSFER_SRC_BIT);
-    m_sunDepthAttach = makeImage2D(*m_ctx, R, R, kMicroMeshDepthFormat,
-                                   VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT,
-                                   VK_IMAGE_ASPECT_DEPTH_BIT);
-    // Storage copy: bound at 29, never a colour attachment.
-    m_sunDepth = makeImage2D(*m_ctx, R, R, VK_FORMAT_R32_SFLOAT,
-                             VK_IMAGE_USAGE_STORAGE_BIT |
-                                 VK_IMAGE_USAGE_TRANSFER_DST_BIT);
-    if (!m_sunDepthRT.img || !m_sunDepthAttach.img || !m_sunDepth.img) {
-        spdlog::critical("micro: sun depth targets {}x{} failed", R, R);
-        return false;
-    }
-    m_sunDepthExtent = { R, R };
-    m_ctx->immediateSubmit([&](VkCommandBuffer cmd) {
-        vf::transitionImage(cmd, m_sunDepthRT.img, VK_IMAGE_ASPECT_COLOR_BIT,
-                            VK_IMAGE_LAYOUT_UNDEFINED,
-                            VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
-                            VK_PIPELINE_STAGE_2_NONE, VK_ACCESS_2_NONE,
-                            VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT,
-                            VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT);
-        vf::transitionImage(cmd, m_sunDepthAttach.img, VK_IMAGE_ASPECT_DEPTH_BIT,
-                            VK_IMAGE_LAYOUT_UNDEFINED,
-                            VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL,
-                            VK_PIPELINE_STAGE_2_NONE, VK_ACCESS_2_NONE,
-                            VK_PIPELINE_STAGE_2_EARLY_FRAGMENT_TESTS_BIT |
-                                VK_PIPELINE_STAGE_2_LATE_FRAGMENT_TESTS_BIT,
-                            VK_ACCESS_2_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT);
-        vf::transitionImage(cmd, m_sunDepth.img, VK_IMAGE_ASPECT_COLOR_BIT,
-                            VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_GENERAL,
-                            VK_PIPELINE_STAGE_2_NONE, VK_ACCESS_2_NONE,
-                            VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT,
-                            VK_ACCESS_2_SHADER_STORAGE_READ_BIT |
-                                VK_ACCESS_2_TRANSFER_WRITE_BIT);
-    });
-    // Rebind the shading read (29) to the real storage copy.
-    VkDescriptorImageInfo di { VK_NULL_HANDLE, m_sunDepth.view,
-                               VK_IMAGE_LAYOUT_GENERAL };
-    VkWriteDescriptorSet w29 { VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, nullptr,
-                               m_set, 29, 0, 1, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE,
-                               &di, nullptr, nullptr };
-    vkUpdateDescriptorSets(m_ctx->device(), 1, &w29, 0, nullptr);
-    return true;
 }
 
 bool MicroSvoPass::ensureMeshScene(uint32_t w, uint32_t h)
@@ -1091,21 +944,6 @@ void MicroSvoPass::setLights(const vf::voxel::LightUBO& lights)
                                  nullptr };
         vkUpdateDescriptorSets(m_ctx->device(), 1, &w, 0, nullptr);
     }
-}
-
-void MicroSvoPass::setSunShadow(const glm::mat4& viewProj, bool enabled,
-                                bool fieldFreeShading)
-{
-    if (!m_ctx || !m_sunUbo.mapped)
-        return;
-    struct SunShadow_t { glm::mat4 vp; glm::vec4 params; } sun0 {};
-    sun0.vp = viewProj;
-    // x = sun-shadow enable, y = field-free shading enable (E1).
-    sun0.params = glm::vec4(enabled ? 1.f : 0.f, fieldFreeShading ? 1.f : 0.f,
-                            0.f, 0.f);
-    memcpy(m_sunUbo.mapped, &sun0, sizeof(sun0));
-    vmaFlushAllocation(m_ctx->allocator(), m_sunUbo.alloc, 0, VK_WHOLE_SIZE);
-    m_sunShadowOn = enabled && m_sunPipeline != VK_NULL_HANDLE;
 }
 
 void MicroSvoPass::record(VkCommandBuffer cmd, const RaymarchPush& push,
@@ -1369,114 +1207,6 @@ void MicroSvoPass::record(VkCommandBuffer cmd, const RaymarchPush& push,
         // its own in-flight slot, which the frame loop's fence already proves
         // idle. See kMeshSlots in the header.
 
-        // ---- SUN-SPACE DEPTH pass + copy (Workstream B, default OFF) ------
-        // Render the posed meshes from the sun into m_sunDepthRT (a pure colour
-        // attachment), then COPY it into m_sunDepth (storage binding 29). The
-        // two images are essential: writing a colour attachment that is also
-        // bound as a storage image in the same pass is a hazard that drops the
-        // writes - the cause of the first attempt's clear-value-only map.
-        if (m_sunShadowOn && ensureSunDepth() &&
-            m_sunDepthExtent.width == kSunDepthRes) {
-            VkRenderingAttachmentInfo sunColor {};
-            sunColor.sType = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO;
-            sunColor.imageView = m_sunDepthRT.view;
-            sunColor.imageLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
-            sunColor.loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;
-            sunColor.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
-            sunColor.clearValue.color = { 2.0f, 0.f, 0.f, 0.f }; // far = lit
-            VkRenderingAttachmentInfo sunDepthAtt {};
-            sunDepthAtt.sType = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO;
-            sunDepthAtt.imageView = m_sunDepthAttach.view;
-            sunDepthAtt.imageLayout = VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL;
-            sunDepthAtt.loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;
-            sunDepthAtt.storeOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
-            sunDepthAtt.clearValue.depthStencil = { 1.0f, 0 };
-            VkRenderingInfo sunRI { VK_STRUCTURE_TYPE_RENDERING_INFO };
-            const VkRect2D sunRect { { 0, 0 }, { kSunDepthRes, kSunDepthRes } };
-            sunRI.renderArea = sunRect;
-            sunRI.layerCount = 1;
-            sunRI.colorAttachmentCount = 1;
-            sunRI.pColorAttachments = &sunColor;
-            sunRI.pDepthAttachment = &sunDepthAtt;
-            vkCmdBeginRendering(cmd, &sunRI);
-            const VkViewport sunVP { 0.f, 0.f, float(kSunDepthRes), float(kSunDepthRes), 0.f, 1.f };
-            vkCmdSetViewport(cmd, 0, 1, &sunVP);
-            vkCmdSetScissor(cmd, 0, 1, &sunRect);
-            vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, m_sunPipeline);
-            vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, m_layout,
-                                    0, 1, &m_set, 0, nullptr);
-            uint32_t sunBase = 0;
-            for (size_t i = 0; i < m_worldCount; ++i) {
-                const size_t nv = i < m_meshVerts.size() ? m_meshVerts[i].size() : 0;
-                if (nv == 0) continue;
-                RaymarchPush sp = push;
-                sp.b.z = float(i);
-                vkCmdPushConstants(cmd, m_layout,
-                    VkShaderStageFlags(VK_SHADER_STAGE_VERTEX_BIT |
-                                       VK_SHADER_STAGE_FRAGMENT_BIT),
-                    0, sizeof(sp), &sp);
-                vkCmdDraw(cmd, uint32_t(nv), 1, sunBase, 0);
-                sunBase += uint32_t(nv);
-            }
-            vkCmdEndRendering(cmd);
-
-            // RT: COLOR_ATTACHMENT_OPTIMAL -> TRANSFER_SRC_OPTIMAL.
-            VkImageMemoryBarrier2 rtb { VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER_2 };
-            rtb.srcStageMask = VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT;
-            rtb.srcAccessMask = VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT;
-            rtb.dstStageMask = VK_PIPELINE_STAGE_2_TRANSFER_BIT;
-            rtb.dstAccessMask = VK_ACCESS_2_TRANSFER_READ_BIT;
-            rtb.oldLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
-            rtb.newLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
-            rtb.image = m_sunDepthRT.img;
-            rtb.subresourceRange = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1 };
-            // STORAGE copy: GENERAL -> TRANSFER_DST_OPTIMAL.
-            VkImageMemoryBarrier2 dbb = rtb;
-            dbb.srcStageMask = VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT;
-            dbb.srcAccessMask = VK_ACCESS_2_SHADER_STORAGE_READ_BIT |
-                                VK_ACCESS_2_TRANSFER_WRITE_BIT;
-            dbb.dstStageMask = VK_PIPELINE_STAGE_2_TRANSFER_BIT;
-            dbb.dstAccessMask = VK_ACCESS_2_TRANSFER_WRITE_BIT;
-            dbb.oldLayout = VK_IMAGE_LAYOUT_GENERAL;
-            dbb.newLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
-            dbb.image = m_sunDepth.img;
-            VkImageMemoryBarrier2 bars[] = { rtb, dbb };
-            VkDependencyInfo di { VK_STRUCTURE_TYPE_DEPENDENCY_INFO };
-            di.imageMemoryBarrierCount = 2;
-            di.pImageMemoryBarriers = bars;
-            vkCmdPipelineBarrier2(cmd, &di);
-
-            VkImageCopy sunCopy {};
-            sunCopy.srcSubresource = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1 };
-            sunCopy.dstSubresource = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1 };
-            sunCopy.extent = { kSunDepthRes, kSunDepthRes, 1 };
-            vkCmdCopyImage(cmd, m_sunDepthRT.img, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
-                           m_sunDepth.img, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
-                           1, &sunCopy);
-
-            // Restore layouts: RT -> COLOR_ATTACHMENT_OPTIMAL, copy -> GENERAL.
-            VkImageMemoryBarrier2 rb1 = rtb;
-            rb1.srcStageMask = VK_PIPELINE_STAGE_2_TRANSFER_BIT;
-            rb1.srcAccessMask = VK_ACCESS_2_TRANSFER_READ_BIT;
-            rb1.dstStageMask = VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT;
-            rb1.dstAccessMask = VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT;
-            rb1.oldLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
-            rb1.newLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
-            VkImageMemoryBarrier2 rb2 = dbb;
-            rb2.srcStageMask = VK_PIPELINE_STAGE_2_TRANSFER_BIT;
-            rb2.srcAccessMask = VK_ACCESS_2_TRANSFER_WRITE_BIT;
-            rb2.dstStageMask = VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT |
-                               VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT;
-            rb2.dstAccessMask = VK_ACCESS_2_SHADER_STORAGE_READ_BIT;
-            rb2.oldLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
-            rb2.newLayout = VK_IMAGE_LAYOUT_GENERAL;
-            VkImageMemoryBarrier2 rbs[] = { rb1, rb2 };
-            VkDependencyInfo rdi { VK_STRUCTURE_TYPE_DEPENDENCY_INFO };
-            rdi.imageMemoryBarrierCount = 2;
-            rdi.pImageMemoryBarriers = rbs;
-            vkCmdPipelineBarrier2(cmd, &rdi);
-        }
-
         const VkRect2D rect { { rectMinX, rectMinY },
                               { uint32_t(rectMaxX - rectMinX),
                                 uint32_t(rectMaxY - rectMinY) } };
@@ -1588,13 +1318,6 @@ void MicroSvoPass::destroy()
         vkDestroyPipeline(dev, m_meshPipeline, nullptr);
     if (m_meshDepthPipeline)
         vkDestroyPipeline(dev, m_meshDepthPipeline, nullptr);
-    if (m_sunPipeline)
-        vkDestroyPipeline(dev, m_sunPipeline, nullptr);
-    destroyImage3D(*m_ctx, m_sunDepthRT);
-    destroyImage3D(*m_ctx, m_sunDepthAttach);
-    destroyImage3D(*m_ctx, m_sunDepth);
-    m_sunDepthExtent = { 0, 0 };
-    destroyBuffer(*m_ctx, m_sunUbo);
     for (int s = 0; s < kMeshSlots; ++s) {
         destroyImage3D(*m_ctx, m_meshDepth[s]);
         m_meshDepthExtent[s] = { 0, 0 };

@@ -145,6 +145,9 @@ bool App::switchScenery(const std::string& name)
             setSunAngles(e, a);
     }
     applyWorldReload();
+    // The seen-snapshots belonged to the scene just left; the new scene's
+    // "ui"/"sun" blocks must be judged against this switch's applied state.
+    resetUiSettingsState();
     spdlog::info("scenery: switched live to '{}'", newRoot);
     return true;
 }

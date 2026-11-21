@@ -131,11 +131,6 @@ struct WorldLayer {
     // mesh is the ground truth for deformation (voxelize the deformed mesh
     // each frame instead of animating rigid voxel cells). See
     // .opencode/wiki/concepts/micro-deformation-surface.md.
-    // Material id for a MESH-ONLY micro layer (no .vxw): the uniform material
-    // stamped onto the transient field synthesized from the mesh at load.
-    // -1 = unset (use the default plaster 20). Parsed AND written so an app
-    // run cannot erase it (the meshUp / behaviour trap).
-    int meshMat = -1;
     std::string meshSource;
     // UP AXIS of `meshSource`: "" / "y" = Y-up (the engine's object frame,
     // default), "z" = Z-up (a DCC export). The mesh loader converts a Z-up
@@ -245,6 +240,50 @@ bool loadLightManifest(const std::string& path, std::vector<LightSource>& out);
 // caller keeps its CLI/default value. An elevation below the horizon is a
 // valid scene (night) - the shader derives the moon from it.
 bool loadSunManifest(const std::string& path, float& elev, float& azim);
+
+// Rewrite only the top-level "sun" object, preserving every other key with
+// the atomic temp+rename + self-check discipline of writeLightManifest.
+bool writeSunManifest(const std::string& path, float elev, float azim);
+
+// UI settings from a top-level "ui" object in the same manifest: the
+// MCP/sidebar-free control surface. Each field is OPTIONAL (kUiAbsent float /
+// empty string = absent in the file, do not apply), so a patch touches only
+// what it names and a manifest without the block renders byte-identically.
+// The app diffs the parsed block against its last-seen snapshot on manifest
+// changes, applying only fields that actually changed there - a GUI drag is
+// never snapped back by an unrelated edit. The app's own manifest rewrite
+// preserves "ui" as an unknown top-level key; writeUiManifest OWNS the block.
+struct UiSettings {
+    static constexpr float kUiAbsent = -1e30f;
+    float renderFlags = kUiAbsent;   // int bitmask
+    std::string backend;             // "splats" | "svo"
+    float taa = kUiAbsent, volFog = kUiAbsent, motionBlur = kUiAbsent;
+    float dof = kUiAbsent, linearFx = kUiAbsent, autoExposure = kUiAbsent;
+    float exposure = kUiAbsent, tonemapLook = kUiAbsent;
+    float ssaoStrength = kUiAbsent, ssaoRadius = kUiAbsent;
+    float ssaoBlur = kUiAbsent, ssaoDebug = kUiAbsent;
+    float splatRadius = kUiAbsent, edgeBlend = kUiAbsent;
+    float edgeShrink = kUiAbsent, edgeFill = kUiAbsent;
+    float edgeBridgeSize = kUiAbsent, cornerFill = kUiAbsent;
+    float lightBudget = kUiAbsent, lightK = kUiAbsent;
+    float camSpeed = kUiAbsent;
+    float camX = kUiAbsent, camY = kUiAbsent, camZ = kUiAbsent;
+    float camYaw = kUiAbsent, camPitch = kUiAbsent;
+    float furEnabled = kUiAbsent, furPerCell = kUiAbsent;
+    float furLength = kUiAbsent, furWidth = kUiAbsent, furCurl = kUiAbsent;
+    float furCycles = kUiAbsent, furTilt = kUiAbsent, furSss = kUiAbsent;
+    std::string brushMode;           // carve|add|delete|paint|smooth|rotate|move
+    float brushWidth = kUiAbsent, brushDepth = kUiAbsent;
+    float brushMaterial = kUiAbsent, smoothStrength = kUiAbsent;
+    std::string falloffCurve;
+    float smoothPreserveVolume = kUiAbsent;
+    float uiFontScale = kUiAbsent;   // ImGui font/style scale, 0.8..2.0
+    std::string scenery;             // switch the live app to this scenery
+};
+bool loadUiManifest(const std::string& path, UiSettings& out);
+bool writeUiManifest(const std::string& path, const UiSettings& ui);
+bool mergeUiManifest(const std::string& path, const UiSettings& patch);
+std::string uiSettingsToJson(const UiSettings& ui);
 
 // Rewrite only the top-level "textures" array, preserving every other key
 // (layers, version, unknown keys) verbatim from the file on disk. Used by the

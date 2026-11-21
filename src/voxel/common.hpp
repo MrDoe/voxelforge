@@ -21,7 +21,7 @@ constexpr int GRID_N = int(WORLD / CHUNK_M);
 
 // The palette size is load-bearing: the shader tables (kPalette/kMatRefl/
 // matTex) and the atlas layer count must all match it exactly.
-inline constexpr int kPaletteN = 23;
+inline constexpr int kPaletteN = 57;
 
 inline const std::array<glm::vec3, kPaletteN> kPalette {
     glm::vec3 { 0.07f, 0.52f, 0.06f }, // 0 grass dark - vivid
@@ -56,6 +56,40 @@ inline const std::array<glm::vec3, kPaletteN> kPalette {
     // dry soil (mat 2), and so its low roughness / raised reflectance can drive
     // roughness-aware SSR and IBL specular (the wet look).
     glm::vec3 { 0.24f, 0.14f, 0.07f }, // 22 wet soil
+    glm::vec3 { 0.50f, 0.50f, 0.50f }, // 23 slot (placeholder - bind a texture in world.json)
+    glm::vec3 { 0.50f, 0.50f, 0.50f }, // 24 slot (placeholder - bind a texture in world.json)
+    glm::vec3 { 0.50f, 0.50f, 0.50f }, // 25 slot (placeholder - bind a texture in world.json)
+    glm::vec3 { 0.50f, 0.50f, 0.50f }, // 26 slot (placeholder - bind a texture in world.json)
+    glm::vec3 { 0.50f, 0.50f, 0.50f }, // 27 slot (placeholder - bind a texture in world.json)
+    glm::vec3 { 0.50f, 0.50f, 0.50f }, // 28 slot (placeholder - bind a texture in world.json)
+    glm::vec3 { 0.50f, 0.50f, 0.50f }, // 29 slot (placeholder - bind a texture in world.json)
+    glm::vec3 { 0.50f, 0.50f, 0.50f }, // 30 slot (placeholder - bind a texture in world.json)
+    glm::vec3 { 0.50f, 0.50f, 0.50f }, // 31 slot (placeholder - bind a texture in world.json)
+    glm::vec3 { 0.50f, 0.50f, 0.50f }, // 32 slot (placeholder - bind a texture in world.json)
+    glm::vec3 { 0.50f, 0.50f, 0.50f }, // 33 slot (placeholder - bind a texture in world.json)
+    glm::vec3 { 0.50f, 0.50f, 0.50f }, // 34 slot (placeholder - bind a texture in world.json)
+    glm::vec3 { 0.50f, 0.50f, 0.50f }, // 35 slot (placeholder - bind a texture in world.json)
+    glm::vec3 { 0.50f, 0.50f, 0.50f }, // 36 slot (placeholder - bind a texture in world.json)
+    glm::vec3 { 0.50f, 0.50f, 0.50f }, // 37 slot (placeholder - bind a texture in world.json)
+    glm::vec3 { 0.50f, 0.50f, 0.50f }, // 38 slot (placeholder - bind a texture in world.json)
+    glm::vec3 { 0.50f, 0.50f, 0.50f }, // 39 slot (placeholder - bind a texture in world.json)
+    glm::vec3 { 0.50f, 0.50f, 0.50f }, // 40 slot (placeholder - bind a texture in world.json)
+    glm::vec3 { 0.50f, 0.50f, 0.50f }, // 41 slot (placeholder - bind a texture in world.json)
+    glm::vec3 { 0.50f, 0.50f, 0.50f }, // 42 slot (placeholder - bind a texture in world.json)
+    glm::vec3 { 0.50f, 0.50f, 0.50f }, // 43 slot (placeholder - bind a texture in world.json)
+    glm::vec3 { 0.50f, 0.50f, 0.50f }, // 44 slot (placeholder - bind a texture in world.json)
+    glm::vec3 { 0.50f, 0.50f, 0.50f }, // 45 slot (placeholder - bind a texture in world.json)
+    glm::vec3 { 0.50f, 0.50f, 0.50f }, // 46 slot (placeholder - bind a texture in world.json)
+    glm::vec3 { 0.50f, 0.50f, 0.50f }, // 47 slot (placeholder - bind a texture in world.json)
+    glm::vec3 { 0.50f, 0.50f, 0.50f }, // 48 slot (placeholder - bind a texture in world.json)
+    glm::vec3 { 0.50f, 0.50f, 0.50f }, // 49 slot (placeholder - bind a texture in world.json)
+    glm::vec3 { 0.50f, 0.50f, 0.50f }, // 50 slot (placeholder - bind a texture in world.json)
+    glm::vec3 { 0.50f, 0.50f, 0.50f }, // 51 slot (placeholder - bind a texture in world.json)
+    glm::vec3 { 0.50f, 0.50f, 0.50f }, // 52 slot (placeholder - bind a texture in world.json)
+    glm::vec3 { 0.50f, 0.50f, 0.50f }, // 53 slot (placeholder - bind a texture in world.json)
+    glm::vec3 { 0.50f, 0.50f, 0.50f }, // 54 slot (placeholder - bind a texture in world.json)
+    glm::vec3 { 0.50f, 0.50f, 0.50f }, // 55 slot (placeholder - bind a texture in world.json)
+    glm::vec3 { 0.50f, 0.50f, 0.50f }, // 56 slot (placeholder - bind a texture in world.json)
 };
 
 // Self-emission colour per material, MIRROR of kEmissive[] in
@@ -89,6 +123,40 @@ inline const std::array<glm::vec3, kPaletteN> kEmissive {
     glm::vec3 { 0.0f },                   // 20 plaster
     glm::vec3 { 0.0f },                   // 21 fleece
     glm::vec3 { 0.0f },                   // 22 wet soil
+    glm::vec3 { 0.0f },                   // 23 slot
+    glm::vec3 { 0.0f },                   // 24 slot
+    glm::vec3 { 0.0f },                   // 25 slot
+    glm::vec3 { 0.0f },                   // 26 slot
+    glm::vec3 { 0.0f },                   // 27 slot
+    glm::vec3 { 0.0f },                   // 28 slot
+    glm::vec3 { 0.0f },                   // 29 slot
+    glm::vec3 { 0.0f },                   // 30 slot
+    glm::vec3 { 0.0f },                   // 31 slot
+    glm::vec3 { 0.0f },                   // 32 slot
+    glm::vec3 { 0.0f },                   // 33 slot
+    glm::vec3 { 0.0f },                   // 34 slot
+    glm::vec3 { 0.0f },                   // 35 slot
+    glm::vec3 { 0.0f },                   // 36 slot
+    glm::vec3 { 0.0f },                   // 37 slot
+    glm::vec3 { 0.0f },                   // 38 slot
+    glm::vec3 { 0.0f },                   // 39 slot
+    glm::vec3 { 0.0f },                   // 40 slot
+    glm::vec3 { 0.0f },                   // 41 slot
+    glm::vec3 { 0.0f },                   // 42 slot
+    glm::vec3 { 0.0f },                   // 43 slot
+    glm::vec3 { 0.0f },                   // 44 slot
+    glm::vec3 { 0.0f },                   // 45 slot
+    glm::vec3 { 0.0f },                   // 46 slot
+    glm::vec3 { 0.0f },                   // 47 slot
+    glm::vec3 { 0.0f },                   // 48 slot
+    glm::vec3 { 0.0f },                   // 49 slot
+    glm::vec3 { 0.0f },                   // 50 slot
+    glm::vec3 { 0.0f },                   // 51 slot
+    glm::vec3 { 0.0f },                   // 52 slot
+    glm::vec3 { 0.0f },                   // 53 slot
+    glm::vec3 { 0.0f },                   // 54 slot
+    glm::vec3 { 0.0f },                   // 55 slot
+    glm::vec3 { 0.0f },                   // 56 slot
 };
 // Emission magnitude -> point-light intensity, shared by the bake upload
 // and the live trigger so both sides agree on brightness.
@@ -119,6 +187,40 @@ inline const std::array<glm::vec2, kPaletteN> kMaterialReflection {
     glm::vec2 { 115.f, 135.f }, // 20 plaster
     glm::vec2 { 20.f, 245.f },  // 21 fleece - matte, almost no specular
     glm::vec2 { 150.f, 55.f },  // 22 wet soil - glossy: raised refl, low roughness
+    glm::vec2 { 90.f, 160.f },  // 23 slot
+    glm::vec2 { 90.f, 160.f },  // 24 slot
+    glm::vec2 { 90.f, 160.f },  // 25 slot
+    glm::vec2 { 90.f, 160.f },  // 26 slot
+    glm::vec2 { 90.f, 160.f },  // 27 slot
+    glm::vec2 { 90.f, 160.f },  // 28 slot
+    glm::vec2 { 90.f, 160.f },  // 29 slot
+    glm::vec2 { 90.f, 160.f },  // 30 slot
+    glm::vec2 { 90.f, 160.f },  // 31 slot
+    glm::vec2 { 90.f, 160.f },  // 32 slot
+    glm::vec2 { 90.f, 160.f },  // 33 slot
+    glm::vec2 { 90.f, 160.f },  // 34 slot
+    glm::vec2 { 90.f, 160.f },  // 35 slot
+    glm::vec2 { 90.f, 160.f },  // 36 slot
+    glm::vec2 { 90.f, 160.f },  // 37 slot
+    glm::vec2 { 90.f, 160.f },  // 38 slot
+    glm::vec2 { 90.f, 160.f },  // 39 slot
+    glm::vec2 { 90.f, 160.f },  // 40 slot
+    glm::vec2 { 90.f, 160.f },  // 41 slot
+    glm::vec2 { 90.f, 160.f },  // 42 slot
+    glm::vec2 { 90.f, 160.f },  // 43 slot
+    glm::vec2 { 90.f, 160.f },  // 44 slot
+    glm::vec2 { 90.f, 160.f },  // 45 slot
+    glm::vec2 { 90.f, 160.f },  // 46 slot
+    glm::vec2 { 90.f, 160.f },  // 47 slot
+    glm::vec2 { 90.f, 160.f },  // 48 slot
+    glm::vec2 { 90.f, 160.f },  // 49 slot
+    glm::vec2 { 90.f, 160.f },  // 50 slot
+    glm::vec2 { 90.f, 160.f },  // 51 slot
+    glm::vec2 { 90.f, 160.f },  // 52 slot
+    glm::vec2 { 90.f, 160.f },  // 53 slot
+    glm::vec2 { 90.f, 160.f },  // 54 slot
+    glm::vec2 { 90.f, 160.f },  // 55 slot
+    glm::vec2 { 90.f, 160.f },  // 56 slot
 };
 
 inline constexpr float WATER_LEVEL = -0.9f;

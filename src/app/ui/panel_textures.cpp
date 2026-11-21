@@ -5,6 +5,7 @@
 #include "app/ui/ui_primitives.hpp"
 
 #include <algorithm>
+#include <cctype>
 #include <cmath>
 #include <cstdio>
 #include <functional>
@@ -54,64 +55,20 @@ void App::drawPanelTextures()
                 ImGui::TextColored(kWarn, "File is not in the scanned folder");
             continue;
         }
-        // Texture picker: a gallery of thumbnails instead of a text dropdown.
-        // First tile = palette (no texture); then one tile per file in
-        // assets/textures/. Clicking a tile binds it to this material.
-        const float tileSize = 44.0f;
-        const float avail = ImGui::GetContentRegionAvail().x;
-        int cols = std::max(1, int(avail / (tileSize + 6.0f)));
-        int tileIdx = 0;
-        auto afterTile = [&]() {
-            ++tileIdx;
-            if (tileIdx % cols != 0)
-                ImGui::SameLine(0.0f, 6.0f);
-        };
-        auto tile = [&](const char* id, ImTextureID tex, const char* tooltip,
-                        bool selected, const std::function<void()>& onClick) {
-            ImVec2 pos = ImGui::GetCursorScreenPos();
-            if (ImGui::InvisibleButton(id, ImVec2(tileSize, tileSize)))
-                onClick();
-            ImDrawList* dl = ImGui::GetWindowDrawList();
-            if (tex) {
-                dl->AddImage(tex, pos, ImVec2(pos.x + tileSize, pos.y + tileSize));
-            } else {
-                dl->AddRectFilled(pos, ImVec2(pos.x + tileSize, pos.y + tileSize),
-                                  IM_COL32(40, 44, 52, 255));
-                dl->AddText(ImVec2(pos.x + 6, pos.y + tileSize * 0.5f - 6),
-                            IM_COL32(180, 180, 180, 255), "none");
-            }
-            ImU32 border = selected ? IM_COL32(50, 200, 230, 255)
-                                    : IM_COL32(70, 80, 95, 255);
-            dl->AddRect(pos, ImVec2(pos.x + tileSize, pos.y + tileSize), border,
-                        0.0f, 0, selected ? 2.0f : 1.0f);
-            if (ImGui::IsItemHovered())
-                ImGui::SetTooltip("%s", tooltip);
-            afterTile();
-        };
-        // palette tile
-        {
-            char pid[32];
-            snprintf(pid, sizeof(pid), "pal.%d", material);
-            tile(pid, 0, "(palette)", current.empty(), [&]() {
-                setTextureBinding(material, std::string());
-                textureChanged = true;
-            });
+        // One button opens the shared modal gallery; the current binding is
+        // already visible in the row's badge. The modal holds ALL thumbnails,
+        // so expanding a material no longer floods the narrow sidebar.
+        char pickId[32];
+        snprintf(pickId, sizeof(pickId), "Choose texture##tex.%d", material);
+        if (ImGui::Button(pickId, ImVec2(-1.0f, 0.0f))) {
+            m_texPickerOpen = true;
+            m_texPickerKind = TexturePickerKind::Texture;
+            m_texPickerMaterial = material;
+            m_texPickerFilter[0] = '\0';
         }
-        // file tiles
-        for (size_t fi = 0; fi < m_texFiles.size(); ++fi) {
-            const std::string& file = m_texFiles[fi];
-            ImTextureID tid = 0;
-            for (const auto& t : m_texThumbs)
-                if (t.file == file) { tid = t.id; break; }
-            char fid[64];
-            snprintf(fid, sizeof(fid), "texfile.%d.%zu", material, fi);
-            std::string tip = file.substr(file.find_last_of('/') + 1);
-            tile(fid, tid, tip.c_str(), file == current, [&]() {
-                setTextureBinding(material, file);
-                textureChanged = true;
-            });
-        }
-        ImGui::NewLine();
+        if (ImGui::IsItemHovered())
+            ImGui::SetTooltip("Open the texture gallery. Includes (palette) "
+                              "to remove the binding.");
         // A COAT is a property of the MATERIAL: a material that grows fur
         // gets a coat of hair cards wherever a micro object uses it. The
         // fleece (21) is the one that ships with one.
@@ -173,62 +130,36 @@ void App::drawPanelTextures()
         if (!groupHeader(id, kMatNames[material], false, badge.c_str())) {
             continue;
         }
-        const float tileSize = 44.0f;
-        const float avail = ImGui::GetContentRegionAvail().x;
-        int cols = std::max(1, int(avail / (tileSize + 6.0f)));
-        int tileIdx = 0;
-        auto afterTile = [&]() {
-            ++tileIdx;
-            if (tileIdx % cols != 0)
-                ImGui::SameLine(0.0f, 6.0f);
-        };
-        auto tile = [&](const char* tid, ImTextureID tex, const char* tooltip,
-                        bool selected, const std::function<void()>& onClick) {
-            ImVec2 pos = ImGui::GetCursorScreenPos();
-            if (ImGui::InvisibleButton(tid, ImVec2(tileSize, tileSize)))
-                onClick();
-            ImDrawList* dl = ImGui::GetWindowDrawList();
-            if (tex) {
-                dl->AddImage(tex, pos, ImVec2(pos.x + tileSize, pos.y + tileSize));
-            } else {
-                dl->AddRectFilled(pos, ImVec2(pos.x + tileSize, pos.y + tileSize),
-                                  IM_COL32(40, 44, 52, 255));
-                dl->AddText(ImVec2(pos.x + 6, pos.y + tileSize * 0.5f - 6),
-                            IM_COL32(180, 180, 180, 255), "none");
-            }
-            ImU32 border = selected ? IM_COL32(50, 200, 230, 255)
-                                    : IM_COL32(70, 80, 95, 255);
-            dl->AddRect(pos, ImVec2(pos.x + tileSize, pos.y + tileSize), border,
-                        0.0f, 0, selected ? 2.0f : 1.0f);
-            if (ImGui::IsItemHovered())
-                ImGui::SetTooltip("%s", tooltip);
-            afterTile();
-        };
-        // none tile
-        {
-            char pid[32];
-            snprintf(pid, sizeof(pid), "cardnone.%d", material);
-            tile(pid, 0, "(none)", currentCard.empty(), [&]() {
-                setCardBinding(material, std::string());
-                cardChanged = true;
-            });
+        // The card binding IS the material's "Has foliage" flag: checked means
+        // this ground material grows the photographic plants wherever it is
+        // painted. Toggling rebuilds the cards at once, like picking a tile.
+        bool hasFoliage = !currentCard.empty();
+        if (ImGui::Checkbox("Has foliage", &hasFoliage)) {
+            const std::string card = hasFoliage
+                ? (currentCard.empty()
+                       ? (m_cardFiles.empty() ? std::string("grass")
+                                              : m_cardFiles.front().first)
+                       : currentCard)
+                : std::string();
+            setCardBinding(material, card);
+            cardChanged = true;
         }
-        for (size_t ci = 0; ci < m_cardFiles.size(); ++ci) {
-            const std::string& cname = m_cardFiles[ci].first;
-            const std::string& cfile = m_cardFiles[ci].second;
-            ImTextureID tid = 0;
-            for (const auto& t : m_cardThumbs)
-                if (t.file == cfile) { tid = t.id; break; }
-            char fid[64];
-            snprintf(fid, sizeof(fid), "card.%d.%zu", material, ci);
-            tile(fid, tid, cname.c_str(), cname == currentCard, [&]() {
-                setCardBinding(material, cname);
-                cardChanged = true;
-            });
+        if (ImGui::IsItemHovered())
+            ImGui::SetTooltip("Grow photographic foliage over this material. "
+                              "The gallery includes (none) to remove it.");
+        char cardPickId[32];
+        snprintf(cardPickId, sizeof(cardPickId), "Choose card##card.%d", material);
+        if (ImGui::Button(cardPickId, ImVec2(-1.0f, 0.0f))) {
+            m_texPickerOpen = true;
+            m_texPickerKind = TexturePickerKind::Card;
+            m_texPickerMaterial = material;
+            m_texPickerFilter[0] = '\0';
         }
-        ImGui::NewLine();
         groupEnd();
     }
+    // The modal may bind a texture or a card this frame; run it before the
+    // pending-apply flags are latched so the change lands in the same frame.
+    drawTexturePickerModal(textureChanged, cardChanged);
     if (cardChanged)
         m_cardApplyPending = true;
     if (textureChanged)
@@ -242,6 +173,126 @@ void App::drawPanelTextures()
         rescanTextureFiles();
         m_texReloadPending = true;
     }
+}
+
+void App::drawTexturePickerModal(bool& textureChanged, bool& cardChanged)
+{
+    if (m_texPickerOpen) {
+        m_texPickerOpen = false;
+        ImGui::OpenPopup("Texture picker");
+    }
+    const bool isCard = m_texPickerKind == TexturePickerKind::Card;
+    const int material = m_texPickerMaterial;
+    std::string current;
+    if (isCard) {
+        auto it = std::find_if(m_cardBindings.begin(), m_cardBindings.end(),
+                               [&](const vf::voxel::worldfile::FoliageCardBinding& b) {
+                                   return b.mat == material;
+                               });
+        if (it != m_cardBindings.end())
+            current = it->card;
+    } else {
+        auto it = std::find_if(m_texBindings.begin(), m_texBindings.end(),
+                               [&](const vf::voxel::worldfile::TextureBinding& b) {
+                                   return b.mat == material;
+                               });
+        if (it != m_texBindings.end())
+            current = it->file;
+    }
+
+    ImGui::SetNextWindowSize(ImVec2(560.0f, 420.0f), ImGuiCond_FirstUseEver);
+    if (!ImGui::BeginPopupModal("Texture picker", nullptr,
+                                ImGuiWindowFlags_NoSavedSettings |
+                                ImGuiWindowFlags_NoCollapse))
+        return;
+    ImGui::Text("%s  ·  %s", isCard ? "Foliage card" : "Photo texture",
+                kMatNames[std::clamp(material, 0, int(vf::voxel::kPaletteN) - 1)]);
+    ImGui::SetNextItemWidth(-1.0f);
+    ImGui::InputTextWithHint("##texPickerFilter", "Filter by name…",
+                             m_texPickerFilter, sizeof(m_texPickerFilter));
+    ImGui::Separator();
+
+    struct Option {
+        std::string label;
+        std::string value;
+        ImTextureID thumb = 0;
+    };
+    std::vector<Option> options;
+    if (isCard) {
+        options.push_back({ "(none)", std::string(), 0 });
+        for (const auto& c : m_cardFiles) {
+            ImTextureID tid = 0;
+            for (const auto& t : m_cardThumbs)
+                if (t.file == c.second) { tid = t.id; break; }
+            options.push_back({ c.first, c.first, tid });
+        }
+    } else {
+        options.push_back({ "(palette)", std::string(), 0 });
+        for (const auto& file : m_texFiles) {
+            ImTextureID tid = 0;
+            for (const auto& t : m_texThumbs)
+                if (t.file == file) { tid = t.id; break; }
+            const size_t slash = file.find_last_of('/');
+            options.push_back({ slash == std::string::npos ? file
+                                                           : file.substr(slash + 1),
+                                file, tid });
+        }
+    }
+
+    std::string filter = m_texPickerFilter;
+    std::transform(filter.begin(), filter.end(), filter.begin(),
+                   [](unsigned char c) { return char(std::tolower(c)); });
+    const float tile = 72.0f;
+    const int cols = std::max(1, int(ImGui::GetContentRegionAvail().x / (tile + 8.0f)));
+    ImGui::BeginChild("##texPickerGrid", ImVec2(0.0f, -34.0f), true);
+    int cell = 0;
+    for (const auto& opt : options) {
+        std::string label = opt.label;
+        std::transform(label.begin(), label.end(), label.begin(),
+                       [](unsigned char c) { return char(std::tolower(c)); });
+        if (!filter.empty() && label.find(filter) == std::string::npos)
+            continue;
+        ImVec2 pos = ImGui::GetCursorScreenPos();
+        char cellId[48];
+        snprintf(cellId, sizeof(cellId), "picker.%d", cell);
+        const bool selected = opt.value == current;
+        if (ImGui::InvisibleButton(cellId, ImVec2(tile, tile))) {
+            if (isCard) {
+                setCardBinding(material, opt.value);
+                cardChanged = true;
+            } else {
+                setTextureBinding(material, opt.value);
+                textureChanged = true;
+            }
+            ImGui::CloseCurrentPopup();
+        }
+        ImDrawList* dl = ImGui::GetWindowDrawList();
+        if (opt.thumb) {
+            dl->AddImage(opt.thumb, pos, ImVec2(pos.x + tile, pos.y + tile));
+        } else {
+            dl->AddRectFilled(pos, ImVec2(pos.x + tile, pos.y + tile),
+                              IM_COL32(40, 44, 52, 255));
+        }
+        dl->AddRect(pos, ImVec2(pos.x + tile, pos.y + tile),
+                    selected ? IM_COL32(50, 200, 230, 255) : IM_COL32(70, 80, 95, 255),
+                    0.0f, 0, selected ? 2.0f : 1.0f);
+        const ImVec2 textPos(pos.x + 2.0f, pos.y + tile - 14.0f);
+        const ImVec2 textEnd(textPos.x + tile, textPos.y + 14.0f);
+        dl->AddRectFilled(textPos, textEnd, IM_COL32(12, 14, 18, 220));
+        dl->AddText(ImVec2(textPos.x + 2.0f, textPos.y + 1.0f),
+                    IM_COL32(220, 228, 236, 255), opt.label.c_str());
+        if (ImGui::IsItemHovered())
+            ImGui::SetTooltip("%s", opt.label.c_str());
+        if ((cell + 1) % cols != 0)
+            ImGui::SameLine(0.0f, 8.0f);
+        else
+            ImGui::NewLine();
+        ++cell;
+    }
+    ImGui::EndChild();
+    if (ImGui::Button("Cancel", ImVec2(-1.0f, 0.0f)))
+        ImGui::CloseCurrentPopup();
+    ImGui::EndPopup();
 }
 
 } // namespace app

@@ -17,6 +17,17 @@ TEST_CASE("tool names normalize onto canonical tools")
     CHECK(normalizeToolCall("probe", "{}").name == "probe");
 }
 
+TEST_CASE("deletion aliases split surgical carve from whole-layer delete")
+{
+    // An invented "remove voxels" used to normalise to delete_object, which
+    // silently deleted the ENTIRE layer (all trees, not just one).
+    CHECK(normalizeToolCall("delete_voxels", "{}").name == "delete_voxels");
+    CHECK(normalizeToolCall("remove_cells", "{}").name == "delete_voxels");
+    CHECK(normalizeToolCall("erase voxel region", "{}").name == "delete_voxels");
+    CHECK(normalizeToolCall("delete_object", "{}").name == "delete_object");
+    CHECK(normalizeToolCall("delete_layer", "{}").name == "delete_object");
+}
+
 TEST_CASE("aliased rock calls get boulder defaults and rock material")
 {
     NormalizedCall n = normalizeToolCall("rock_1", "{\"name\":\"rock\"}");

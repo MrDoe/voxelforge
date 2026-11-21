@@ -28,13 +28,16 @@ void App::drawSidebar()
 {
     ImGuiIO& io = ImGui::GetIO();
     const float height = io.DisplaySize.y;
+    const float uiScale = m_uiFontScale;
+    const float railW = kRailW * uiScale;
+    const float footerH = kFooterH * uiScale;
 
     // The width is user-owned once the right-edge grip is dragged, but stays
     // clamped to the current display. Width zero means "use the responsive
     // default"; double-clicking the grip restores that default.
     float totalW = m_sidebarCollapsed
-        ? std::min(kRailW, io.DisplaySize.x)
-        : sidebarWidthFor(m_sidebarWidth, io.DisplaySize.x);
+        ? std::min(railW, io.DisplaySize.x)
+        : sidebarWidthFor(m_sidebarWidth, io.DisplaySize.x, uiScale);
     bool overResizeGrip = !m_sidebarCollapsed &&
         overSidebarResizeGrip(io, totalW, height);
     if (m_sidebarCollapsed) {
@@ -42,7 +45,7 @@ void App::drawSidebar()
     } else if (io.MouseDoubleClicked[0] && overResizeGrip) {
         m_sidebarWidth = 0.0f;
         m_sidebarResizing = false;
-        totalW = sidebarWidthFor(m_sidebarWidth, io.DisplaySize.x);
+        totalW = sidebarWidthFor(m_sidebarWidth, io.DisplaySize.x, uiScale);
     } else if (!m_sidebarResizing && io.MouseClicked[0] &&
                overResizeGrip) {
         m_sidebarResizing = true;
@@ -50,13 +53,24 @@ void App::drawSidebar()
     if (m_sidebarResizing) {
         if (io.MouseDown[0]) {
             m_sidebarWidth = clampSidebarWidth(io.MousePos.x,
-                                                io.DisplaySize.x);
+                                                io.DisplaySize.x, uiScale);
         } else {
             m_sidebarResizing = false;
             spdlog::info("sidebar width -> {:.0f} px", m_sidebarWidth);
         }
-        totalW = sidebarWidthFor(m_sidebarWidth, io.DisplaySize.x);
+        totalW = sidebarWidthFor(m_sidebarWidth, io.DisplaySize.x, uiScale);
     }
+    // One-shot layout log: the default width now depends on the text scale,
+    // so a screenshot alone cannot prove which geometry was actually used.
+    {
+        static bool logged = false;
+        if (!logged) {
+            spdlog::info("sidebar layout: width {:.0f} rail {:.0f} footer {:.0f} scale {:.2f}",
+                         totalW, railW, footerH, uiScale);
+            logged = true;
+        }
+    }
+
     const bool resizeCapturesMouse = overResizeGrip || m_sidebarResizing;
 
     // A trackball ring is drawn over the scene, so it can land on top of the
@@ -107,7 +121,7 @@ void App::drawSidebar()
     ImGui::PopStyleVar(5);
     ImGui::PopStyleColor();
     if (open) {
-        const float topH = std::max(0.0f, height - kFooterH - 2.0f * ImGui::GetStyle().WindowPadding.y);
+        const float topH = std::max(0.0f, height - footerH - 2.0f * ImGui::GetStyle().WindowPadding.y);
 
         // ---- icon rail -------------------------------------------------
         // The rail is a column of vector icons, not of two-letter codes: the
@@ -116,7 +130,7 @@ void App::drawSidebar()
         // filled pill, an accent-coloured glyph and an accent underline -
         // because the rail is the one thing that must stay legible while the
         // eye is on the scene.
-        ImGui::BeginChild("rail", ImVec2(kRailW, topH), ImGuiChildFlags_None);
+        ImGui::BeginChild("rail", ImVec2(railW, topH), ImGuiChildFlags_None);
         ImGui::Dummy(ImVec2(0.0f, 4.0f));
         for (int i = 0; i < kPanelCount; ++i) {
             const Panel p = Panel(i);
@@ -128,7 +142,7 @@ void App::drawSidebar()
             const bool active = (m_panel == p);
             const float cw = ImGui::GetContentRegionAvail().x;
             const ImVec2 pos = ImGui::GetCursorScreenPos();
-            const float bs = 36.0f;
+            const float bs = 36.0f * uiScale;
             ImGui::InvisibleButton(kPanels[i].label, ImVec2(cw, bs));
             const bool hovered = ImGui::IsItemHovered();
             if (ImGui::IsItemClicked()) {
@@ -152,7 +166,8 @@ void App::drawSidebar()
             }
             const ImU32 iconCol = ImGui::GetColorU32(
                 active ? kAccent : (hovered ? kTextPrimary : kTextSecondary));
-            drawPanelIcon(p, ImVec2(r0.x + cw * 0.5f, r0.y + bs * 0.5f), kUiIcon,
+            drawPanelIcon(p, ImVec2(r0.x + cw * 0.5f, r0.y + bs * 0.5f),
+                          kUiIcon * uiScale,
                           iconCol);
             // The armed brush is tool state, not section state: a dot on the
             // Edit glyph says "the tool is live" without stealing the rail's

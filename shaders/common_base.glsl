@@ -16,8 +16,8 @@ const vec3 kHorizon = vec3(0.72, 0.80, 0.90);
 // same `kPaletteN`): a material byte is range-checked against this before it
 // indexes kPalette/kMatRefl, so an out-of-range value can only fall back, never
 // read past the end. Change all three together (0..21 is the shipped set).
-const int kPaletteN = 23;
-const vec3 kPalette[23] = vec3[23](
+const int kPaletteN = 57;
+const vec3 kPalette[57] = vec3[57](
     vec3(0.07,0.52,0.06), vec3(0.16,0.68,0.10), vec3(0.62,0.36,0.14),
     vec3(0.84,0.72,0.38), vec3(0.48,0.42,0.38), vec3(0.66,0.64,0.60),
     vec3(0.62,0.33,0.10), vec3(0.42,0.22,0.10), vec3(0.04,0.52,0.03),
@@ -29,9 +29,43 @@ const vec3 kPalette[23] = vec3[23](
     vec3(0.62,0.50,0.20), // 19 thatch
     vec3(0.80,0.76,0.70), // 20 plaster
     vec3(0.93,0.89,0.81), // 21 fleece
-    vec3(0.24,0.14,0.07)  // 22 wet soil - dark saturated earth
+    vec3(0.24,0.14,0.07),  // 22 wet soil - dark saturated earth
+    vec3(0.50,0.50,0.50),  // 23 slot
+    vec3(0.50,0.50,0.50),  // 24 slot
+    vec3(0.50,0.50,0.50),  // 25 slot
+    vec3(0.50,0.50,0.50),  // 26 slot
+    vec3(0.50,0.50,0.50),  // 27 slot
+    vec3(0.50,0.50,0.50),  // 28 slot
+    vec3(0.50,0.50,0.50),  // 29 slot
+    vec3(0.50,0.50,0.50),  // 30 slot
+    vec3(0.50,0.50,0.50),  // 31 slot
+    vec3(0.50,0.50,0.50),  // 32 slot
+    vec3(0.50,0.50,0.50),  // 33 slot
+    vec3(0.50,0.50,0.50),  // 34 slot
+    vec3(0.50,0.50,0.50),  // 35 slot
+    vec3(0.50,0.50,0.50),  // 36 slot
+    vec3(0.50,0.50,0.50),  // 37 slot
+    vec3(0.50,0.50,0.50),  // 38 slot
+    vec3(0.50,0.50,0.50),  // 39 slot
+    vec3(0.50,0.50,0.50),  // 40 slot
+    vec3(0.50,0.50,0.50),  // 41 slot
+    vec3(0.50,0.50,0.50),  // 42 slot
+    vec3(0.50,0.50,0.50),  // 43 slot
+    vec3(0.50,0.50,0.50),  // 44 slot
+    vec3(0.50,0.50,0.50),  // 45 slot
+    vec3(0.50,0.50,0.50),  // 46 slot
+    vec3(0.50,0.50,0.50),  // 47 slot
+    vec3(0.50,0.50,0.50),  // 48 slot
+    vec3(0.50,0.50,0.50),  // 49 slot
+    vec3(0.50,0.50,0.50),  // 50 slot
+    vec3(0.50,0.50,0.50),  // 51 slot
+    vec3(0.50,0.50,0.50),  // 52 slot
+    vec3(0.50,0.50,0.50),  // 53 slot
+    vec3(0.50,0.50,0.50),  // 54 slot
+    vec3(0.50,0.50,0.50),  // 55 slot
+    vec3(0.50,0.50,0.50)   // 56 slot
 );
-const vec2 kMatRefl[23] = vec2[23](
+const vec2 kMatRefl[57] = vec2[57](
     vec2(35,235)/255.0, vec2(40,230)/255.0, vec2(55,225)/255.0,
     vec2(130,190)/255.0, vec2(95,150)/255.0, vec2(115,135)/255.0,
     vec2(70,160)/255.0, vec2(60,170)/255.0, vec2(30,235)/255.0,
@@ -43,7 +77,41 @@ const vec2 kMatRefl[23] = vec2[23](
     vec2(60,170)/255.0,  // 19 thatch
     vec2(115,135)/255.0, // 20 plaster
     vec2(20,245)/255.0,  // 21 fleece - matte, almost no specular
-    vec2(150,55)/255.0   // 22 wet soil - glossy: raised refl, low roughness
+    vec2(150,55)/255.0,  // 22 wet soil - glossy: raised refl, low roughness,
+    vec2(90,160)/255.0,   // 23 slot,
+    vec2(90,160)/255.0,   // 24 slot,
+    vec2(90,160)/255.0,   // 25 slot,
+    vec2(90,160)/255.0,   // 26 slot,
+    vec2(90,160)/255.0,   // 27 slot,
+    vec2(90,160)/255.0,   // 28 slot,
+    vec2(90,160)/255.0,   // 29 slot,
+    vec2(90,160)/255.0,   // 30 slot,
+    vec2(90,160)/255.0,   // 31 slot,
+    vec2(90,160)/255.0,   // 32 slot,
+    vec2(90,160)/255.0,   // 33 slot,
+    vec2(90,160)/255.0,   // 34 slot,
+    vec2(90,160)/255.0,   // 35 slot,
+    vec2(90,160)/255.0,   // 36 slot,
+    vec2(90,160)/255.0,   // 37 slot,
+    vec2(90,160)/255.0,   // 38 slot,
+    vec2(90,160)/255.0,   // 39 slot,
+    vec2(90,160)/255.0,   // 40 slot,
+    vec2(90,160)/255.0,   // 41 slot,
+    vec2(90,160)/255.0,   // 42 slot,
+    vec2(90,160)/255.0,   // 43 slot,
+    vec2(90,160)/255.0,   // 44 slot,
+    vec2(90,160)/255.0,   // 45 slot,
+    vec2(90,160)/255.0,   // 46 slot,
+    vec2(90,160)/255.0,   // 47 slot,
+    vec2(90,160)/255.0,   // 48 slot,
+    vec2(90,160)/255.0,   // 49 slot,
+    vec2(90,160)/255.0,   // 50 slot,
+    vec2(90,160)/255.0,   // 51 slot,
+    vec2(90,160)/255.0,   // 52 slot,
+    vec2(90,160)/255.0,   // 53 slot,
+    vec2(90,160)/255.0,   // 54 slot,
+    vec2(90,160)/255.0,   // 55 slot,
+    vec2(90,160)/255.0    // 56 slot
 );
 // emissive (self-illuminating) term per material id; 0-8 are inert, 9-15 glow.
 const vec3 kEmissive[16] = vec3[16](
@@ -150,7 +218,7 @@ float causticAt(vec2 xz, float t)
 // gTexOv (phase 2) overrides the material slot per surfel: > 0 = atlas layer.
 layout(set = 0, binding = 22) uniform sampler2DArray uTexAtlas;
 layout(std140, set = 0, binding = 23) uniform TexTable {
-    vec4 matTex[28]; // x = layer index (-1 = none, palette), y = m/tile,
+    vec4 matTex[62]; // x = layer index (-1 = none, palette), y = m/tile,
                      // z = emissive scale (0 = this texture does not emit)
 } uTex;
 float gTexOv = 0.0;
@@ -204,7 +272,7 @@ vec3 emissiveTerm(vec3 p, vec3 n, uint mId, vec3 alb)
 {
     vec3 e = (mId >= 9u && mId <= 15u) ? kEmissive[mId] : vec3(0.0);
     const float slot = texSlotFor(mId);
-    if (slot >= 0.0 && slot < 23.0) {
+    if (slot >= 0.0 && slot < 57.0) {
         const float em = uTex.matTex[int(slot)].z;
         if (em > 0.0) {
             const vec3 t = sampleTex(p, n, mId);
@@ -1139,7 +1207,7 @@ float softShadowTerrain(vec3 ro, vec3 rd)
 {
     float res = 1.0;
     float t = 0.05;
-    for (int i = 0; i < 28; ++i) {
+    for (int i = 0; i < 62; ++i) {
         vec3 sp = ro + rd * t;
         float s = sp.y - heightAt(sp.xz);
         res = min(res, 9.0 * max(s, pc.b.y * 0.45) / t);
@@ -1229,7 +1297,7 @@ void applyFlora(vec3 p, vec3 rd, vec3 ro, uint mId, bool useBaked, float shBaked
                 // procedural escape hatch. Also the fallback when bit 13 is on
                 // but this ground material has no foliage-card binding.
                 if (!photoOn || !cardGround) {
-                    Card cd = grassCard(ro, rd, length(p - ro), ghS, 23.0, false);
+                    Card cd = grassCard(ro, rd, length(p - ro), ghS, 57.0, false);
                     if (cd.hit) {
                         float m = cd.alpha * lod;
                         vec3 bn2 = normalize(cd.n * 0.50 + vec3(0.0, 0.80, 0.0));
