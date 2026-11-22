@@ -11,6 +11,60 @@ channel** for the running app: every write goes into the active scenery folder
 and the app hot-reloads within ~1 s. No recompile, no hand-written binary
 `.vxw`, no special-case code.
 
+## FAST PATH — read first (selection-driven edits)
+
+When the user says "do X here/this/selected" and the prompt carries
+`[UI context: selected voxel cell [x,y,z], world position [...] metres]`,
+**call the one-shot builder with that cell immediately — no inspection round-trips**:
+
+- "dig a cave here" → `dig_cave {cell:[x,y,z], style:"dripstone"}` (one call;
+  posts the whole mouth+tunnel+chamber+dripstone as a single store-lane intent).
+- "draw a gravel path to here" → `add_path {from:[...], to:[x,z of selection]}`.
+- "add a tree here" → `add_tree {ground:[x,z], seed:<fixed>}`.
+
+Do NOT front-load `view_pick`, `ground`, `surface_scan` slope scans,
+`list_layers`, or doc re-reading before the first dig. The selection cell is a
+lattice cell (bottom-center anchor); pass it straight through. The builder
+computes geometry server-side and encodes the domain contract as defaults.
+The "Inspect first" workflow below is for **ambiguous/open-ended** requests,
+not for a selection + a known verb. Verify AFTER the edit has started:
+`edit_result {id}` then `capture_screen` (the live view, not `render_shot` —
+headless shots isolate the overlay and cannot prove a live-view change).
+
+### Cave contract (MUST follow — a cave dug wrong is invisible forever)
+
+A walk-in cave is a **natural feature**. Two lanes, and only two:
+
+1. **Baked lane (preferred for anything that must persist)**: a rock-shell
+   object layer with an OPEN MOUTH above the heightfield column top, sitting
+   on the terrain. The cave air is the empty space INSIDE the shell. Air must
+   be ABOVE the column top (terrain promotion re-solidifies below it). The
+   interior must CONNECT to outside air (an open mouth or skylight) —
+   VoxelField flood-fills enclosed air and promotes it to solid.
+2. **Store lane (prototyping only)**: `view_click mode delete` / `stamp mode
+   delete` carves air cells into the live store. These persist in
+   `runtime_edits.vxw` and show immediately, but are LOST on the next full
+   world reload (the store re-adopts from baked pools) and the overlay can be
+   silently corrupted/shrunk by any headless render that loads it.
+
+**Rules:**
+- NEVER carve a cave below the heightfield column top in the store lane and
+  expect it to persist — it will be re-solidified on reload.
+- NEVER run a headless `render_shot`/`--shot`/`--smoke`/`--selftest` against
+  a scenery with a live `runtime_edits.vxw` without `VF_OVERLAY_PATH=<tmp>` or
+  `VF_NO_OVERLAY=1`. The overlay is gitignored, so damage is silent and
+  unrecoverable.
+- ALWAYS verify live-view changes with `capture_screen`, NEVER `render_shot`
+  (which isolates the overlay and cannot prove a live change).
+- To A/B overlay vs baked: run two renders at IDENTICAL camera+resolution, one
+  with `VF_NO_OVERLAY=1`, one without; >200k pixel diff means the overlay is
+  masking baked content.
+- Before clearing the overlay (`clear_edits`/`view_clear`), copy it to a
+  non-.vxw path OUTSIDE /tmp and md5-verify — `Clear live edits` is irreversible.
+- If a cave must be permanent, build it as a baked rock-shell layer, not a
+  store carve. Use `write_object` with a shapes list forming walls+ceiling+floor
+  with an open mouth, or a heightmap depression + object layer.
+
 ## Tool map (50 tools)
 
 - **Inspect**: `list_layers`, `get_layer`, `inspect_layer`, `layer_stats`,

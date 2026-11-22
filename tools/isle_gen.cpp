@@ -122,15 +122,44 @@ float terrainHeightAt(float x, float z)
         land += 4.6f * smoothstepf(8.5f, 2.2f, hd) *
                 (0.82f + 0.30f * fbm2(x * 0.10f + 11.f, z * 0.10f));
     }
-    // volcanic cone at the N (rocky; heightfield so its flanks slope-class)
+    // volcanic cone at the N — a NATURAL but ASYMMETRIC stratovolcano from the
+    // heightfield: off-centre summit, uneven flanks, deeper gullies on one
+    // side, a breached caldera rim, and a low spill terrace on that breach.
     {
-        float cd = std::sqrt((x - kVolcano.x) * (x - kVolcano.x) / (10.5f * 10.5f) +
-                             (z - kVolcano.y) * (z - kVolcano.y) / (9.f * 9.f));
-        float cone = 10.5f * smoothstepf(1.0f, 0.35f, cd);
-        // small crater dent at the very top
-        cone -= 1.6f * smoothstepf(0.28f, 0.10f, cd);
-        cone += 0.7f * fbm2(x * 0.16f, z * 0.16f) * smoothstepf(0.9f, 0.4f, cd);
-        land += std::max(cone, 0.f);
+        float vx = (x - kVolcano.x) / 11.0f;
+        float vz = (z - kVolcano.y) / 9.5f;
+        float cd = std::sqrt(vx * vx + vz * vz);
+        if (cd < 1.12f) {
+            float ang = std::atan2(vz, vx);
+            // summit crest drifts off-centre; one flank (the +x/-z side) is
+            // broader and lower, the opposite side steeper and higher.
+            float sx = 0.10f, sz = -0.06f;                 // summit offset
+            float sd = std::sqrt((vx - sx) * (vx - sx) + (vz - sz) * (vz - sz));
+            float asym = 0.5f + 0.5f * std::sin(ang + 0.7f);   // 0..1 around the cone
+            float capH = 14.0f - 2.4f * asym;             // 11.6..14.0 m peak height
+            float body = capH * (1.f - smoothstepf(0.16f, 1.02f, sd));
+            // gullies: deeper on the steep (-x) side
+            float gully = 0.5f + 0.5f * std::sin(ang * 9.f +
+                          fbm2(x * 0.25f, z * 0.25f) * 4.f);
+            float gullyDepth = 0.07f + 0.10f * (0.5f - 0.5f * std::sin(ang));
+            body *= 1.f - gullyDepth * gully * smoothstepf(0.98f, 0.28f, sd);
+            body += 0.7f * fbm2(x * 0.22f + 5.f, z * 0.22f) *
+                    smoothstepf(0.98f, 0.22f, sd);
+            // caldera hollow follows the offset summit
+            float bowl = 1.f - smoothstepf(0.09f, 0.16f, sd);
+            body -= 2.7f * bowl;
+            // rim: raised all round EXCEPT a breach on the +x/-z side, where
+            // it is cut low so the crater opens toward a spill terrace.
+            float ring = gauss((sd - 0.185f) / 0.038f);
+            float breach = smoothstepf(0.55f, 0.92f,
+                            0.5f + 0.5f * std::sin(ang - 0.6f));
+            body += (1.2f - 0.95f * breach) * ring;
+            // spill terrace: a gentle low shoulder running out of the breach
+            float spill = smoothstepf(0.9f, 0.3f,
+                          std::hypot(vx - 0.55f, vz + 0.30f) * 2.2f);
+            body += 1.4f * spill * breach * smoothstepf(0.98f, 0.30f, sd);
+            land += std::max(body, 0.f);
+        }
     }
     // dune line behind the south beach
     land += 0.34f * southness * gauss((d - 0.93f) / 0.06f) *
@@ -171,6 +200,19 @@ uint8_t isleMat(float x, float z, float H, float slope)
     // lighthouse rock platform (pad apron included)
     if (glm::length(glm::vec2(x, z) - kHeadland) < 5.2f && wd < -0.2f)
         return n > 0.0f ? uint8_t(5) : uint8_t(4);
+
+    // volcanic summit caldera: dark basalt flanks + a glowing lava floor that
+    // follows the OFFSET crater. Lava is confined strictly INSIDE the crater.
+    {
+        float vx = (x - kVolcano.x) / 11.0f;
+        float vz = (z - kVolcano.y) / 9.5f;
+        float sd = std::hypot(vx - 0.10f, vz + 0.06f);   // distance to offset summit
+        if (sd < 1.0f) {
+            if (sd < 0.12f && H > 8.f) return 9;         // lava lake, inside only
+            if (sd < 0.18f) return 4;                    // scorched inner wall
+            return n > 0.0f ? uint8_t(4) : uint8_t(5);   // basalt flanks
+        }
+    }
 
     if (wd > 0.55f)
         return n > 0.15f ? uint8_t(5) : uint8_t(4); // deep bed: dark rock

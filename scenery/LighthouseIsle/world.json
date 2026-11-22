@@ -1,8 +1,11 @@
 {
   "version": 1,
   "layers": [
-    { "file": "ai_edits.vxw", "role": "object", "name": "ai_edits",  "pos": [0.00, 0.00, 0.00], "rot": 0.0, "rotX": 0.0,  "rotZ": 0.0, "enabled": false },
+    { "file": "ai_edits.vxw", "role": "object", "name": "ai_edits",  "pos": [0.00, 0.00, 0.00], "rot": 0.0, "rotX": 0.0,  "rotZ": 0.0, "enabled": true },
+    { "file": "isle_cave_drips.vxw", "role": "object", "name": "isle_cave_drips",  "pos": [0.00, 0.00, 0.00], "rot": 0.0, "rotX": 0.0,  "rotZ": 0.0, "enabled": true },
     { "file": "landscape.vxw", "role": "landscape", "name": "landscape",  "pos": [0.00, 0.00, 0.00], "rot": 0.0, "rotX": 0.0,  "rotZ": 0.0, "enabled": true },
+    { "file": "path_lighthouse_barn.vxw", "role": "object", "name": "path_lighthouse_barn",  "pos": [0.00, 0.00, 0.00], "rot": 0.0, "rotX": 0.0,  "rotZ": 0.0, "enabled": true },
+    { "file": "path_gravel_to_selected.vxw", "role": "object", "name": "path_gravel_to_selected",  "pos": [0.00, 0.00, 0.00], "rot": 0.0, "rotX": 0.0,  "rotZ": 0.0, "enabled": true },
     { "file": "isle_palms.vxw", "role": "object", "name": "isle_palms",  "pos": [0.00, 0.00, 0.00], "rot": 0.0, "rotX": 0.0,  "rotZ": 0.0, "enabled": true },
     { "file": "isle_interiors.vxw", "role": "object", "name": "isle_interiors",  "pos": [0.00, 0.00, 0.00], "rot": 0.0, "rotX": 0.0,  "rotZ": 0.0, "enabled": true },
     { "file": "isle_jungle.vxw", "role": "object", "name": "isle_jungle",  "pos": [0.00, 0.00, 0.00], "rot": 0.0, "rotX": 0.0,  "rotZ": 0.0, "enabled": true },
@@ -16,13 +19,17 @@
     { "file": "isle_lighthouse.vxw", "role": "object", "name": "isle_lighthouse",  "pos": [0.00, 0.00, 0.00], "rot": 0.0, "rotX": 0.0,  "rotZ": 0.0, "enabled": true },
     { "file": "isle_jetty.vxw", "role": "object", "name": "isle_jetty",  "pos": [0.00, 0.00, 0.00], "rot": 0.0, "rotX": 0.0,  "rotZ": 0.0, "enabled": true },
     { "file": "isle_driftwood.vxw", "role": "object", "name": "isle_driftwood",  "pos": [0.00, 0.00, 0.00], "rot": 0.0, "rotX": 0.0,  "rotZ": 0.0, "enabled": true },
-    { "file": "micro/isle_torch.vxw", "role": "micro", "name": "isle_torch",  "pos": [28.00, 0.12, -16.00], "rot": 0.0, "rotX": 0.0,  "rotZ": 0.0, "enabled": true, "meshSource": "micro/isle_torch.stl", "meshUp": "y" },
-    { "file": "micro/isle_compass.vxw", "role": "micro", "name": "isle_compass",  "pos": [24.00, 0.31, -16.00], "rot": 0.0, "rotX": 0.0,  "rotZ": 0.0, "enabled": true, "meshSource": "micro/isle_compass.stl", "meshUp": "y" },
-    { "file": "micro/isle_radio.vxw", "role": "micro", "name": "isle_radio",  "pos": [-12.00, 1.84, -10.50], "rot": 0.0, "rotX": 0.0,  "rotZ": 0.0, "enabled": true, "meshSource": "micro/isle_radio.stl", "meshUp": "y" },
-    { "file": "micro/isle_backpack.vxw", "role": "micro", "name": "isle_backpack",  "pos": [-8.50, 2.29, -7.00], "rot": 0.0, "rotX": 0.0,  "rotZ": 0.0, "enabled": true, "meshSource": "micro/isle_backpack.stl", "meshUp": "y" },
-    { "file": "micro/isle_pot.vxw", "role": "micro", "name": "isle_pot",  "pos": [-2.80, 0.31, -23.00], "rot": 0.0, "rotX": 0.0,  "rotZ": 0.0, "enabled": true, "meshSource": "micro/isle_pot.stl", "meshUp": "y" },
-    { "file": "micro/isle_gascan.vxw", "role": "micro", "name": "isle_gascan",  "pos": [18.00, 1.62, -4.00], "rot": 0.0, "rotX": 0.0,  "rotZ": 0.0, "enabled": true, "meshSource": "micro/isle_gascan.stl", "meshUp": "y" },
-    { "file": "micro/isle_log.vxw", "role": "micro", "name": "isle_log",  "pos": [5.00, 3.31, 8.00], "rot": 0.0, "rotX": 0.0,  "rotZ": 0.0, "enabled": true, "meshSource": "micro/isle_log.stl", "meshUp": "y" }
+    { "file": "micro/isle_lamp.vxw", "role": "micro", "name": "isle_lamp",  "pos": [28.00, 0.12, -16.00], "rot": 0.0, "rotX": 0.0,  "rotZ": 0.0, "enabled": true, "meshSource": "models/isle_lamp.stl", "meshUp": "y" },
+    { "file": "micro/isle_vase.vxw", "role": "micro", "name": "isle_vase",  "pos": [30.00, 0.88, -10.00], "rot": 0.0, "rotX": 0.0,  "rotZ": 0.0, "enabled": true, "meshSource": "models/isle_vase.stl", "meshUp": "y" },
+    { "file": "micro/isle_lamp_barn.vxw", "role": "micro", "name": "isle_lamp_barn",  "pos": [-8.50, 2.29, -7.00], "rot": 0.0, "rotX": 0.0,  "rotZ": 0.0, "enabled": true, "meshSource": "models/isle_lamp_barn.stl", "meshUp": "y" },
+    { "file": "micro/isle_lamp_jetty.vxw", "role": "micro", "name": "isle_lamp_jetty",  "pos": [-2.80, 0.31, -23.00], "rot": 0.0, "rotX": 0.0,  "rotZ": 0.0, "enabled": true, "meshSource": "models/isle_lamp.stl", "meshUp": "y" },
+    { "file": "micro/isle_vase_house.vxw", "role": "micro", "name": "isle_vase_house",  "pos": [-12.00, 1.84, -10.50], "rot": 0.0, "rotX": 0.0,  "rotZ": 0.0, "enabled": true, "meshSource": "models/isle_vase_house.stl", "meshUp": "y" },
+    { "file": "micro/cave_spike_up.vxw", "role": "micro", "name": "cave_spike_up",  "pos": [-13.15, 1.35, 14.65], "rot": 0.0, "rotX": 0.0,  "rotZ": 0.0, "enabled": true },
+    { "file": "micro/cave_spike_down.vxw", "role": "micro", "name": "cave_spike_down",  "pos": [-10.15, 4.35, 14.85], "rot": 0.0, "rotX": 0.0,  "rotZ": 0.0, "enabled": true },
+    { "file": "micro/cave_spike_up2.vxw", "role": "micro", "name": "cave_spike_up2",  "pos": [-11.50, 1.35, 14.50], "rot": 0.0, "rotX": 0.0,  "rotZ": 0.0, "enabled": true },
+    { "file": "micro/cave_spike_up3.vxw", "role": "micro", "name": "cave_spike_up3",  "pos": [-10.00, 1.50, 14.00], "rot": 0.0, "rotX": 0.0,  "rotZ": 0.0, "enabled": true },
+    { "file": "micro/cave_spike_down2.vxw", "role": "micro", "name": "cave_spike_down2",  "pos": [-12.00, 3.55, 14.50], "rot": 0.0, "rotX": 0.0,  "rotZ": 0.0, "enabled": true },
+    { "file": "micro/cave_spike_down3.vxw", "role": "micro", "name": "cave_spike_down3",  "pos": [-9.00, 4.05, 14.00], "rot": 0.0, "rotX": 0.0,  "rotZ": 0.0, "enabled": true }
   ],
   "lights": [
   {
@@ -111,15 +118,15 @@
   }
  ],
   "textures": [
-    { "file": "textures/dark_green_grass_dense_natural_meadow_topdown_vie_1.png", "mat": 0, "scale": 2.60, "card": "jungle" },
+    { "file": "textures/dark_green_grass_dense_natural_meadow_topdown_vie_1_seamless.png", "mat": 0, "scale": 2.60, "card": "nandina" },
     { "file": "textures/coastal_grass_sandy_soil_sparse_green_tufts_beach__1_seamless.png", "mat": 1, "scale": 2.60, "card": "nandina" },
     { "file": "textures/soil_dark.png", "mat": 2, "scale": 1.80 },
     { "file": "textures/fine_beach_sand_pale_golden_smooth_coastal_1.png", "mat": 3, "scale": 0.90 },
     { "file": "textures/gravel.png", "mat": 4, "scale": 1.20 },
-    { "file": "textures/rock_grey.png", "mat": 5, "scale": 1.20 },
+    { "file": "textures/concrete_grey.png", "mat": 5, "scale": 1.20 },
     { "file": "textures/dark_walnut_wood_seamless.png", "mat": 6, "scale": 1.00 },
     { "file": "textures/brick_red.png", "mat": 7, "scale": 0.90 },
-    { "file": "textures/dark_green_grass_dense_natural_meadow_topdown_vie_1_seamless.png", "mat": 8, "scale": 2.00 },
+    { "file": "textures/dark_green_grass_dense_natural_meadow_topdown_vie_1_seamless.png", "mat": 8, "scale": 2.00, "card": "jungle" },
     { "file": "textures/isle_gravel.png", "mat": 15, "scale": 0.90 },
     { "file": "textures/snow_highres.jpeg", "mat": 16, "scale": 1.00 },
     { "file": "textures/bark_brown.png", "mat": 17, "scale": 0.40 },
@@ -127,6 +134,8 @@
     { "file": "textures/thatch_straw_prepared.png", "mat": 19, "scale": 0.60 },
     { "file": "textures/grey_stone_smooth_seamless.png", "mat": 20, "scale": 1.00 },
     { "file": "textures/fur.jpeg", "mat": 21, "scale": 0.50 },
-    { "file": "textures/fine_beach_sand_pale_golden_smooth_coastal_1.png", "mat": 22, "scale": 0.50 }
-  ]
+    { "file": "textures/fine_beach_sand_pale_golden_smooth_coastal_1.png", "mat": 22, "scale": 0.50 },
+    { "file": "textures/gravel.png", "mat": 23, "scale": 1.20 }
+  ],
+  "ui":{ "camX": -15.5, "camY": 2.2, "camZ": 14.65, "camYaw": 0, "camPitch": -5, "uiFontScale": 2 }
 }

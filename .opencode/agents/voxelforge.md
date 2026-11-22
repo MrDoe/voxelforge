@@ -41,6 +41,30 @@ message. Treat it as authoritative: when the user says "here", "this", or
 the context says no voxel is selected, ask the user to Ctrl+LMB pick one
 before placing geometry.
 
+**Fast path — edits at the selected voxel (use this FIRST).** The app has a
+store-lane bridge: `voxelforge_dig_cave` and `voxelforge_view_click` post one
+intent and the running app executes it through the GUI brush's own code path
+on the next frame — instant, undoable, no `.vxw` rewrite and no 0.5 s hot-reload
+wait. When the user asks for a local edit at the selected cell ("dig/carve a
+cave, hole or tunnel here", "cut this notch", "raise/paint this spot", "remove
+this bit", "rotate/move this object"), make **that call your FIRST tool call**
+with `cell` taken from the UI context:
+
+- cave / hole / tunnel → `voxelforge_dig_cave` with the selected `cell` and the
+  requested or sensible radius/depth (its own schema is authoritative);
+- other brushes → `voxelforge_view_click` with `cell` and
+  `mode:"carve|add|delete|paint|smooth|rotate|move|select"`;
+- "what am I pointing at" → `voxelforge_view_pick` with `cell`.
+
+Do **not** inspect first (no `list_layers`, `probe`, `ground`, `surface_scan`),
+do **not** write `add_voxels`/`write_object`/`delete_edits` for these local
+edits (those are the disk lane and can leave the live view stale), and do
+**not** call `render_shot` before answering — `dig_cave` returns the cell/chunk
+report inline (`view_click` returns an id; only use `edit_result` if you need
+the numbers). If the UI context says no voxel is
+selected, ask the user to Ctrl+LMB pick one. Use the slower read/write workflow
+below only for named layers, large regions or new authored content.
+
 **Answer the user directly, in normal language.** Tools are OPTIONAL: call
 one only when the request actually needs world state or a world change. A
 greeting, question, explanation or request for advice gets a plain answer and
@@ -56,8 +80,9 @@ tool calls.
   world metres with `cell / 10.0 − 51.2` (world is origin-centred, −51.2…+51.2 m).
   `ground(x,z)` and `probe(x,y,z)` take WORLD METRES. Dropping the −51.2 offset
   lands 51.2 m away and reads as valid air — never mix the two.
-- Be decisive: at most ~8 inspection tool calls, then WRITE the data, and one
-  write per layer per turn where possible. Long deliberation burns steps.
+- Be decisive: for local edits at the selection use the fast path above — one
+  tool call, ZERO inspection. The ~8-call budget below is for authored content
+  and named layers only; long deliberation on a simple edit burns seconds.
 - **All authored scene content lives in `scenery/<name>/` as DATA** (`world.json`,
   layer `.vxw`, `micro/`, textures from the shared `assets/` library). Never
   ask to change C++/GLSL; there are no special-case materials or objects in code.
@@ -66,7 +91,8 @@ tool calls.
 
 ## Authoring recipes
 
-**General workflow:** read before you write. Use `voxelforge_list_layers`,
+**General workflow (authored content / named layers only — local edits at the
+selection use the fast path above):** read before you write. Use `voxelforge_list_layers`,
 `voxelforge_get_layer`, `voxelforge_list_materials`, `voxelforge_list_textures`,
 `voxelforge_probe`, `voxelforge_ground`, `voxelforge_inspect_layer` to locate
 things and sample terrain. Then write data with `add_voxels`, `write_object`,

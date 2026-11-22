@@ -70,6 +70,14 @@ std::vector<VoxelRecord> makeLathe(const Options& o, int& nx, int& ny, int& nz)
             return R * (0.55f + 0.45f * std::sin(t * 3.14159f)) *
                    (1.0f - 0.35f * t) + R * 0.28f * smoothstepf(0.86f, 1.0f, t);
         }
+        if (o.profile == "spike") {
+            // stalagmite: wide at base (bottom), point at tip (top)
+            return R * (1.0f - t) * (1.0f - t) + R * 0.05f;
+        }
+        if (o.profile == "spike_down") {
+            // stalactite: point at tip (bottom), wide at base (top)
+            return R * t * t + R * 0.05f;
+        }
         // vase: foot, belly, shoulder, flared lip
         float r = R * 0.42f;                                       // foot
         r = mixf(r, R, smoothstepf(0.02f, 0.34f, t));               // belly
@@ -358,7 +366,9 @@ int main(int argc, char** argv)
                     "       micro_voxel [--ground X,Z | --at X,Y,Z] [--out NAME] "
                     "[--append]\n"
                     "       micro_voxel --alpaca [--voxel 0.008] [--at X,Y,Z] "
-                    "[--out NAME] [--append]\n");
+                    "[--out NAME] [--append]\n"
+                     "       micro_voxel --spike [--voxel 0.005] [--scale S] [--mat N]\n"
+                     "       micro_voxel --spike-down [--voxel 0.005] [--scale S] [--mat N]\n");
         return 2;
     }
     std::vector<std::string> pos;
@@ -382,6 +392,12 @@ int main(int argc, char** argv)
         } else if (a == "--alpaca") {
             o.procedural = true;
             o.profile = "alpaca";
+        } else if (a == "--spike") {
+            o.procedural = true;
+            o.profile = "spike";
+        } else if (a == "--spike-down") {
+            o.procedural = true;
+            o.profile = "spike_down";
         } else if (take("--profile", v)) {
             o.profile = v;
         } else if (take("--voxel", v)) {

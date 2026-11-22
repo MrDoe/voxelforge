@@ -50,6 +50,30 @@ come for free because they live downstream of `applyEditLive`.
   environment, so `VF_SCENERY` on the app does not reach MCP tools in normal
   use. Tests must set it on both processes.
 
+# Latency budget: "dig a cave here" in seconds
+
+Measured 2026-11-22 on a scratch scenery (`/tmp/opencode/mcp_latency.py`, fresh
+`vf_mcp` process per call):
+
+| stage | measured | why |
+|---|---|---|
+| MCP process start | **4 ms** | `init()` only loads `ai_edits`; `LayeredWorld` is a lazy static |
+| `view_pick` / `view_click` | **3–5 ms** | skip `refreshIfChanged()` — no `VoxelField` build |
+| `help` / `ground` / `surface_scan` | **~5 s** | blanket `refreshIfChanged()` in `callTool` builds `LayeredWorld`+`VoxelField` (~5 s); `help` doesn't even use it |
+| intent → `applyEditLive` | **one frame**, stamp 5–25 ms | `consumeMcpIntents()` runs every frame in `pollWorldAndTextures`, NOT on the 0.5 s layer-poll |
+| disk-lane `.vxw` rewrite → live view | **≥0.5 s**, sometimes never | poll watches `world.json` signature; rewriting an existing layer's `.vxw` does not bump it — the hot-reload trap recorded in quirk memory) |
+
+So the app-side bridge is already fast; the seconds are spent **before** the
+intent exists: the agent's old "read before you write" workflow issued up to
+8 inspection calls (first one pays the ~5 s field build), then wrote through
+the disk lane, then rendered a verification shot (another ~5 s process). The
+fix is a one-call fast path: the agent prompt (`.opencode/agents/voxelforge.md`)
+now says that a local edit at the UI-context cell must be the FIRST tool call
+through `dig_cave`/`view_click`, with no inspection, no `.vxw` write and no
+`render_shot` before the reply. `dig_cave` posts the intent and returns the
+engine report inline so one tool call is enough. Residual latency is model
+inference, not the engine.
+
 # Beyond stamps: a click into the view
 
 The bridge now carries every edit tool, not just cell stamps. `vf_mcp` exposes
