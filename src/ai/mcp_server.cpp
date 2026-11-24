@@ -54,6 +54,7 @@
 #include <unordered_map>
 #include <unordered_set>
 #include <deque>
+#include <thread>
 #include <unistd.h>
 #include <limits.h>
 
@@ -367,11 +368,25 @@ struct ToolResult {
     bool isError = false;
 };
 
+struct Server; // forward decl: quickEditTool dispatches through callTool
+ToolResult callTool(Server& srv, const std::string& name, std::string args);
+
 struct Server {
     voxel::EditableWorld editable{ voxel::scenery::root() };
     std::string m_worldSig; // mtime+size of world.json + ai_edits.vxw
+    std::mutex m_loadMtx; // guards the world/editable reload
 
-    void init() { editable.load(); }
+    void init()
+    {
+        // No eager warm thread: the mcp_view_check gate requires the FIRST
+        // tool call (help) to be instant (<2 s) with no world build. Starting
+        // a build at init saturates CPU during the JSON-RPC handshake and
+        // made help take 4 s. The field is built lazily on the first tool that
+        // actually needs it (positive field-tool list in callTool) - the
+        // skip-list is the latency win; the warm thread was a regression.
+        editable.load();
+    }
+    void shutdown() {} // no background thread to join
 
     // A long-lived vf_mcp process must not answer probe/ground from a world
     // snapshot from before an agent turn or an UNDO. The signature changes
@@ -389,6 +404,7 @@ struct Server {
     }
     void refreshIfChanged()
     {
+        std::lock_guard<std::mutex> lk(m_loadMtx);
         const std::string sig = worldSignature();
         if (sig == m_worldSig)
             return;
@@ -1520,7 +1536,8 @@ struct Server {
             std::chrono::steady_clock::now().time_since_epoch().count()) +
             "_" + std::to_string(++counter);
     }
-    ToolResult postIntent(const char* tool, const std::string& args)
+    ToolResult postIntent(const char* tool, const std::string& args,
+                          int waitMs = 0)
     {
         const std::string id = nextIntentId();
         std::ofstream f(intentsPath(), std::ios::app);
@@ -1528,6 +1545,32 @@ struct Server {
         f << "{\"id\":" << jstr(id) << ",\"tool\":" << jstr(tool)
           << ",\"args\":" << (args.empty() ? std::string("{}") : args) << "}\n";
         f.flush();
+
+        // The one-shot builders return the engine report INLINE. The app
+        // consumes intents every frame, so a healthy live window answers in
+        // milliseconds; waiting here removes a second model->tool round trip.
+        // No app is a normal failure mode: keep the queued id and say so
+        // rather than blocking the stdio server indefinitely.
+        if (waitMs > 0) {
+            const auto deadline = std::chrono::steady_clock::now() +
+                                  std::chrono::milliseconds(waitMs);
+            for (;;) {
+                std::ifstream rf(resultsPath());
+                std::string line;
+                while (std::getline(rf, line)) {
+                    if (line.find("\"id\":\"" + id + "\"") != std::string::npos ||
+                        line.find("\"id\": \"" + id + "\"") != std::string::npos)
+                        return { line, line.find("\"ok\":false") != std::string::npos ||
+                                         line.find("\"ok\": false") != std::string::npos };
+                }
+                if (std::chrono::steady_clock::now() >= deadline)
+                    return { std::string("queued ") + tool + " id=" + id +
+                             "; no running app responded within " +
+                             std::to_string(waitMs) +
+                             " ms (pending; call edit_result later)", true };
+                std::this_thread::sleep_for(std::chrono::milliseconds(10));
+            }
+        }
         return { std::string("queued ") + tool + " id=" + id +
                  "; call stamp_result / commit_result for the engine report", false };
     }
@@ -1573,7 +1616,11 @@ struct Server {
             strength < 0.f || strength > 1.f || mat >= int(voxel::kPaletteN))
             return { "stamp: diameter 0.1..32, depth 0.1..12, strength 0..1, mat 0.."
                      + std::to_string(voxel::kPaletteN - 1), true };
-        return postIntent("stamp", args);
+        // Phase 2: optional inline report. Default (wait_ms absent/0) keeps
+        // the queued behavior that the gate and callers rely on.
+        int waitMs = 0;
+        ai::jsonGetInt(args, "wait_ms", waitMs);
+        return postIntent("stamp", args, std::clamp(waitMs, 0, 3000));
     }
 
     // View/edit intents. Validation lives here (so an agent gets an instant
@@ -1583,6 +1630,10 @@ struct Server {
     // screen->ray + store/micro competition the mouse uses.
     ToolResult viewTool(const std::string& tool, const std::string& args)
     {
+        // Phase 2: optional inline report (default 0 = queued, matching the gate).
+        int waitMs = 0;
+        ai::jsonGetInt(args, "wait_ms", waitMs);
+        const int inlineWait = std::clamp(waitMs, 0, 3000);
         auto boolArg = [&](const char* key, bool fallback) {
             const std::string pat = std::string("\"") + key + "\"";
             size_t p = args.find(pat);
@@ -1597,13 +1648,13 @@ struct Server {
         };
 
         if (tool == "undo" || tool == "clear")
-            return postIntent(tool.c_str(), "{}");
+            return postIntent(tool.c_str(), "{}", inlineWait);
         if (tool == "box") {
             std::vector<int> box;
             const bool clear = boolArg("clear", false);
             if (!clear && !ai::jsonGetIntArray(args, "box", box, 6))
                 return { "view_box needs box:[x0,y0,z0,x1,y1,z1] or clear:true", true };
-            return postIntent("box", args);
+            return postIntent("box", args, inlineWait);
         }
 
         std::vector<float> scr;
@@ -1658,7 +1709,89 @@ struct Server {
                     return { "view_click move: dx/dy/dz within +-100 m", true };
             }
         }
-        return postIntent(tool.c_str(), args);
+        return postIntent(tool.c_str(), args, inlineWait);
+    }
+
+    // Phase 3: deterministic intent router. Maps a natural-language intent to
+    // the right builder/edit path without LLM deliberation or discovery calls.
+    // "dig a cave here" -> dig_cave, "add a tree here" -> add_tree, etc. The
+    // selection cell is passed straight through; the chosen tool's own result
+    // (inline report where available) is returned to the caller.
+    ToolResult quickEditTool(const std::string& args)
+    {
+        std::string intent = jsonGetString(args, "intent");
+        if (intent.empty()) intent = jsonGetString(args, "text");
+        if (intent.empty())
+            return { "quick_edit needs intent:<text> (e.g. \"dig a cave here\")", true };
+        std::string low = intent;
+        for (char& c : low) c = char(std::tolower(static_cast<unsigned char>(c)));
+        // Selection cell / target, forwarded verbatim to the chosen tool.
+        std::vector<int> cell;
+        bool haveCell = ai::jsonGetIntArray(args, "cell", cell, 3);
+        std::vector<float> xyz;
+        bool haveXyz = ai::jsonGetFloatArray(args, "at", xyz, 3);
+        std::vector<float> ground;
+        bool haveGround = ai::jsonGetFloatArray(args, "ground", ground, 2);
+
+        auto forward = [&](const std::string& tool, std::string a) -> ToolResult {
+            if (haveCell)
+                a += ",\"cell\":[" + std::to_string(cell[0]) + "," +
+                     std::to_string(cell[1]) + "," + std::to_string(cell[2]) + "]";
+            else if (haveXyz)
+                a += ",\"at\":[" + std::to_string(xyz[0]) + "," +
+                     std::to_string(xyz[1]) + "," + std::to_string(xyz[2]) + "]";
+            else if (haveGround)
+                a += ",\"ground\":[" + std::to_string(ground[0]) + "," +
+                     std::to_string(ground[1]) + "]";
+            // wrap into an object if the caller passed extra args as bare pairs
+            if (a.empty() || a[0] != '{') a = "{" + (a.empty() ? std::string() : a.substr(a[0] == ',' ? 1 : 0)) + "}";
+            ToolResult r = callTool(*this, tool, a);
+            return { "quick_edit -> " + tool + ": " + r.text, r.isError };
+        };
+
+        if (low.find("cave") != std::string::npos || low.find("tunnel") != std::string::npos)
+            return forward("dig_cave", std::string());
+        if (low.find("tree") != std::string::npos || low.find("palm") != std::string::npos)
+            return forward("add_tree", std::string());
+        if (low.find("path") != std::string::npos || low.find("road") != std::string::npos)
+            return forward("add_path", std::string());
+        if (low.find("gravel") != std::string::npos || low.find("rock") != std::string::npos)
+            return forward("add_box", std::string("\"material\":4"));
+        if (low.find("light") != std::string::npos || low.find("lamp") != std::string::npos)
+            return forward("add_light", std::string());
+        return { "quick_edit: no deterministic rule for intent '" + intent +
+                 "' - choose a tool explicitly (dig_cave/add_tree/add_path/...)", true };
+    }
+
+    // The selection-driven fast path. Validation is deliberately cheap: no
+    // LayeredWorld/VoxelField build, no inspection calls. The App resolves the
+    // target and composes the cave from its own brush rasterizers.
+    ToolResult digCaveTool(const std::string& args)
+    {
+        std::vector<float> scr;
+        const bool hasScreen = ai::jsonGetFloatArray(args, "screen", scr, 2) ||
+                               ai::jsonGetFloatArray(args, "pixel", scr, 2);
+        int cell[3] = {};
+        std::string err;
+        const bool hasCell = parseCellArg(args, cell, err);
+        if (!hasScreen && !hasCell)
+            return { "dig_cave needs screen:[x,y], cell:[x,y,z], or x/y/z in metres", true };
+        if (hasScreen && (!std::isfinite(scr[0]) || !std::isfinite(scr[1]) ||
+                          std::abs(scr[0]) > 100000.f || std::abs(scr[1]) > 100000.f))
+            return { "dig_cave screen coordinates are logical window pixels", true };
+
+        float radius = 1.0f, depth = 3.0f;
+        ai::jsonGetFloat(args, "radius", radius);
+        ai::jsonGetFloat(args, "depth", depth);
+        if (!std::isfinite(radius) || !std::isfinite(depth) ||
+            radius < 0.3f || radius > 2.5f || depth < 0.5f || depth > 10.f)
+            return { "dig_cave: radius 0.3..2.5 m, depth 0.5..10 m", true };
+        std::string style = jsonGetString(args, "style");
+        if (style.empty()) style = "dripstone";
+        if (style == "simple") style = "plain";
+        if (style != "dripstone" && style != "plain")
+            return { "dig_cave: style dripstone|plain", true };
+        return postIntent("dig_cave", args, 2000);
     }
 
     ToolResult snapshotLayer(const std::string& args, bool restore)
@@ -2392,45 +2525,14 @@ struct Server {
                 o << " follow=" << l.follow;
             o << "\\n";
         }
-        o << lights.size() << " lights";
+        o << lights.size() << " legacy authored lights (ignored by the renderer)";
         return { o.str(), false };
     }
 
-    ToolResult addLight(const std::string& args)
+    ToolResult addLight(const std::string& /*args*/)
     {
-        std::vector<float> pos, col;
-        if (!ai::jsonGetFloatArray(args, "pos", pos, 3))
-            return { "add_light needs pos:[x,y,z]", true };
-        if (pos.size() != 3)
-            return { "pos must be [x,y,z]", true };
-        voxel::worldfile::LightSource l;
-        l.pos = { pos[0], pos[1], pos[2] };
-        if (ai::jsonGetFloatArray(args, "color", col, 3) && col.size() == 3)
-            l.color = { col[0], col[1], col[2] };
-        else if (ai::jsonGetFloatArray(args, "colour", col, 3) && col.size() == 3)
-            l.color = { col[0], col[1], col[2] };
-        float v = 0.f;
-        if (ai::jsonGetFloat(args, "radius", v) && v > 0.f)
-            l.radius = v;
-        else
-            l.radius = 8.f;
-        if (ai::jsonGetFloat(args, "intensity", v) && v > 0.f)
-            l.intensity = v;
-        else
-            l.intensity = 1.5f;
-        std::string follow = jsonGetString(args, "follow");
-        if (!follow.empty())
-            l.follow = follow;
-        // load existing + append
-        std::vector<voxel::worldfile::LightSource> lights;
-        voxel::worldfile::loadLightManifest(manifestPath(), lights);
-        lights.push_back(l);
-        if (!voxel::worldfile::writeLightManifest(manifestPath(), lights))
-            return { "failed to write lights", true };
-        return { "added light at [" + std::to_string(pos[0]) + "," +
-                     std::to_string(pos[1]) + "," + std::to_string(pos[2]) +
-                     "]; running app hot-reloads within ~1 s",
-                 false };
+        return { "authored point lights are disabled; light the scene with "
+                 "visible emissive geometry/materials or sun/moon", true };
     }
 
     ToolResult removeLight(const std::string& args)
@@ -2693,39 +2795,12 @@ struct Server {
         return { o.str(), false };
     }
 
-    // Change one authored light in place (add_light only appends).
-    ToolResult updateLight(const std::string& args)
+    // Legacy authored lights are accepted for cleanup only; the renderer
+    // ignores them because every light must have visible emissive geometry.
+    ToolResult updateLight(const std::string& /*args*/)
     {
-        int idx = -1;
-        ai::jsonGetInt(args, "index", idx);
-        if (idx < 0) ai::jsonGetInt(args, "id", idx);
-        std::vector<voxel::worldfile::LightSource> lights;
-        if (!voxel::worldfile::loadLightManifest(manifestPath(), lights))
-            return { "no lights / manifest unreadable", true };
-        if (idx < 0 || idx >= int(lights.size()))
-            return { "invalid light index (0.." +
-                         std::to_string(lights.size() - 1) + ")", true };
-        auto& l = lights[size_t(idx)];
-        std::vector<float> v3;
-        if (ai::jsonGetFloatArray(args, "pos", v3, 3) && v3.size() == 3)
-            l.pos = { v3[0], v3[1], v3[2] };
-        if ((ai::jsonGetFloatArray(args, "color", v3, 3) ||
-             ai::jsonGetFloatArray(args, "colour", v3, 3)) && v3.size() == 3)
-            l.color = { v3[0], v3[1], v3[2] };
-        float f;
-        if (ai::jsonGetFloat(args, "radius", f) && f > 0.f) l.radius = f;
-        if (ai::jsonGetFloat(args, "intensity", f) && f > 0.f) l.intensity = f;
-        std::string s = jsonGetString(args, "follow");
-        if (args.find("\"follow\"") != std::string::npos) l.follow = s;
-        if (!voxel::worldfile::writeLightManifest(manifestPath(), lights))
-            return { "failed to write lights", true };
-        std::ostringstream o;
-        o << "light " << idx << " updated: pos=[" << l.pos.x << "," << l.pos.y
-          << "," << l.pos.z << "] radius=" << l.radius
-          << " intensity=" << l.intensity;
-        if (!l.follow.empty()) o << " follow=" << l.follow;
-        o << "; the running app hot-reloads within ~1 s";
-        return { o.str(), false };
+        return { "authored point lights are disabled and cannot be updated; "
+                 "use visible emissive geometry/materials or sun/moon", true };
     }
 
     // ----- reload cached world ----------------------------------------------
@@ -2800,6 +2875,123 @@ struct Server {
         return { "captured LIVE app window " + winId + " -> " + out + " (" +
                  std::to_string(sz) + " bytes) - this is the user's actual view "
                  "(HUD + sidebar included)", false };
+    }
+
+    // Phase 4: numeric pixel verification - no vision captions, no shell
+    // round-trip. Decodes a PNG and counts pixels matching a predicate:
+    //   mode "lava" (default): r>170 && r>b+50 && g<170 && r>g+25
+    //   mode "bright": r,g,b all > 180        mode "dark": all < 80
+    // Returns count + bounding box of the matches. The agent uses this to
+    // prove a live-view change (e.g. lava visible) with numbers.
+    ToolResult regionStats(const std::string& args)
+    {
+        std::string path = jsonGetString(args, "path");
+        if (path.empty()) path = jsonGetString(args, "out");
+        if (path.empty())
+            return { "region_stats needs path:<png>", true };
+        std::string mode = jsonGetString(args, "mode");
+        if (mode.empty()) mode = "lava";
+        std::vector<int> box;
+        bool haveBox = ai::jsonGetIntArray(args, "box", box, 4);
+        std::vector<uint8_t> px;
+        int w = 0, h = 0;
+        if (!voxel::loadPngRGBA8(path, px, w, h) || w <= 0 || h <= 0)
+            return { "region_stats: cannot decode " + path, true };
+        int bx0 = 0, by0 = 0, bx1 = w - 1, by1 = h - 1;
+        if (haveBox && box.size() == 4) {
+            bx0 = std::clamp(box[0], 0, w - 1); by0 = std::clamp(box[1], 0, h - 1);
+            bx1 = std::clamp(box[2], 0, w - 1); by1 = std::clamp(box[3], 0, h - 1);
+        }
+        long count = 0, loX = w, loY = h, hiX = -1, hiY = -1;
+        for (int y = by0; y <= by1; ++y)
+            for (int x = bx0; x <= bx1; ++x) {
+                const size_t i = (size_t(y) * size_t(w) + size_t(x)) * 4;
+                if (i + 2 >= px.size()) continue;
+                const int r = px[i], g = px[i + 1], b = px[i + 2];
+                bool match = false;
+                if (mode == "lava")   match = r > 170 && r > b + 50 && g < 170 && r > g + 25;
+                else if (mode == "bright") match = r > 180 && g > 180 && b > 180;
+                else if (mode == "dark")   match = r < 80 && g < 80 && b < 80;
+                else return { "region_stats: mode must be lava|bright|dark", true };
+                if (match) {
+                    ++count;
+                    loX = std::min<long>(loX, x); loY = std::min<long>(loY, y);
+                    hiX = std::max<long>(hiX, x); hiY = std::max<long>(hiY, y);
+                }
+            }
+        std::ostringstream o;
+        o << "region_stats mode=" << mode << " count=" << count;
+        if (count > 0)
+            o << " bounds=[" << loX << ".." << hiX << "]x[" << loY << ".." << hiY << "]";
+        return { o.str(), false };
+    }
+
+    // Phase 4: contract-as-query. will_persist answers "will a Delete-brush
+    // cave at this cell survive a world reload?" without waiting for a failure.
+    // Rule: explicit air below the heightfield column top is re-solidified by
+    // terrain promotion on reload -> NOT persistent. Above the top -> persistent.
+    ToolResult willPersist(const std::string& args)
+    {
+        int cell[3] = {};
+        std::string err;
+        if (!parseCellArg(args, cell, err)) return { err, true };
+        const auto wp = voxel::selector::cellCentreWorld(cell);
+        const float H = world().field().terrainHeightAtWorld(wp[0], wp[2]);
+        const bool above = wp[1] > H + 0.05f;
+        std::ostringstream o;
+        o << "cell [" << cell[0] << "," << cell[1] << "," << cell[2] << "] world y="
+          << wp[1] << " terrain=" << H << " -> ";
+        if (above)
+            o << "PERSISTENT (above column top: use baked rock-shell or store carve)";
+        else
+            o << "NOT persistent (below column top: store-lane air will be "
+              << "re-solidified on reload; bake into heightmap or object layer)";
+        return { o.str(), false };
+    }
+
+    // Phase 4: is_connected_to_air - a bounded BFS over the merged field from
+    // a cell, checking whether the air component reaches outside the box (the
+    // cave contract: a sealed air pocket is flood-filled solid by VoxelField).
+    ToolResult isConnectedToAir(const std::string& args)
+    {
+        int cell[3] = {};
+        std::string err;
+        if (!parseCellArg(args, cell, err)) return { err, true };
+        std::vector<int> box;
+        if (!ai::jsonGetIntArray(args, "box", box, 6))
+            return { "is_connected_to_air needs box:[x0,y0,z0,x1,y1,z1]", true };
+        const int bx0 = box[0], by0 = box[1], bz0 = box[2];
+        const int bx1 = box[3], by1 = box[4], bz1 = box[5];
+        const auto sample = [this](int x, int y, int z) {
+            const int c[3] = { x, y, z };
+            const auto wp = voxel::selector::cellCentreWorld(c);
+            const glm::vec3 p(wp[0], wp[1], wp[2]);
+            return world().field().sampleWorld(p).d > 0.f; // air
+        };
+        std::unordered_set<uint32_t> seen;
+        std::deque<std::array<int,3>> q;
+        q.push_back({ cell[0], cell[1], cell[2] });
+        seen.insert(voxel::selector::keyOf(cell[0], cell[1], cell[2]));
+        bool escaped = false;
+        static const int dir[6][3] = { {1,0,0},{-1,0,0},{0,1,0},{0,-1,0},{0,0,1},{0,0,-1} };
+        size_t visited = 0;
+        while (!q.empty() && visited < 200000) {
+            auto c = q.front(); q.pop_front(); ++visited;
+            if (c[0] < bx0 || c[0] > bx1 || c[1] < by0 || c[1] > by1 ||
+                c[2] < bz0 || c[2] > bz1) { escaped = true; break; }
+            for (int d = 0; d < 6; ++d) {
+                const int n[3] = { c[0]+dir[d][0], c[1]+dir[d][1], c[2]+dir[d][2] };
+                const uint32_t k = voxel::selector::keyOf(n[0], n[1], n[2]);
+                if (seen.count(k)) continue;
+                seen.insert(k);
+                if (sample(n[0], n[1], n[2])) q.push_back({ n[0], n[1], n[2] });
+            }
+        }
+        std::ostringstream o;
+        o << "is_connected_to_air visited=" << visited << " -> "
+          << (escaped ? "CONNECTED to outside air (cave stays open)"
+                      : "SEALED (VoxelField will flood-fill this air component solid)");
+        return { o.str(), false };
     }
 
     // ----- headless render shot ---------------------------------------------
@@ -3271,8 +3463,8 @@ std::string toolSchemas()
           false);
     entry("delete_layer", "Delete a non-protected layer (file + manifest entry)",
           obj(jstr("layer") + ":{\"type\":\"string\"}"), false);
-    entry("list_lights", "List authored point lights in world.json", obj(""), false);
-    entry("add_light", "Add a point light (pos, color, radius, intensity, optional follow layer)",
+    entry("list_lights", "List legacy authored point lights (ignored by the renderer)", obj(""), false);
+    entry("add_light", "Disabled: use visible emissive geometry/materials or sun/moon",
           obj(jstr("pos") + ":{\"type\":\"array\",\"items\":{\"type\":\"number\"}},"
               "\"color\":{\"type\":\"array\",\"items\":{\"type\":\"number\"}},"
               "\"radius\":{\"type\":\"number\"},\"intensity\":{\"type\":\"number\"},"
@@ -3356,7 +3548,7 @@ std::string toolSchemas()
               "\"b\":{\"type\":\"integer\"},\"refl\":{\"type\":\"integer\"},"
               "\"rough\":{\"type\":\"integer\"},\"tex\":{\"type\":\"integer\"}"), false);
     entry("update_light",
-          "Change one authored light in place (index + any of pos, color, radius, intensity, follow)",
+          "Disabled: authored point lights are ignored; use visible emissive geometry/materials or sun/moon",
           obj(jstr("index") + ":{\"type\":\"integer\"}," + jstr("pos") +
               ":{\"type\":\"array\",\"items\":{\"type\":\"number\"}},"
               "\"color\":{\"type\":\"array\",\"items\":{\"type\":\"number\"}},"
@@ -3405,6 +3597,19 @@ std::string toolSchemas()
         "\"cell\":{\"type\":\"array\",\"items\":{\"type\":\"integer\"}},"
         "\"x\":{\"type\":\"number\"},\"y\":{\"type\":\"number\"},"
         "\"z\":{\"type\":\"number\"}";
+    entry("dig_cave",
+          "FAST PATH: dig a natural cave at the selected voxel in ONE call. "
+          "Posts a store-lane intent; the running App composes mouth, tunnel, "
+          "chamber and optional dripstone through the GUI brush's own paths "
+          "as one undoable stroke. No inspection, .vxw rewrite or hot-reload. "
+          "Returns the engine cell/chunk report inline; if no app responds "
+          "within 2 s the id remains queued for edit_result. Args: target "
+          "screen:[x,y] logical pixels / cell:[x,y,z] / x,y,z metres, "
+          "radius 0.3..2.5 m (default 1), depth 0.5..10 m (default 3), "
+          "style dripstone|plain (default dripstone).",
+          obj(viewTarget + ",\"radius\":{\"type\":\"number\"},"
+              "\"depth\":{\"type\":\"number\"},\"style\":{\"type\":\"string\"}"),
+          false);
     entry("view_pick",
           "Click into the live VIEW at logical window pixels screen:[x,y] (or "
           "a cell/world point) and report what the app's real pick path hits: "
@@ -3543,7 +3748,40 @@ std::string toolSchemas()
           "view - use it to verify a hot-reload really landed. Returns the PNG "
           "path; read it with an image viewer. Args: out/path (default "
           "workspace/screenshots/live_<time>.png).",
-          obj("\"out\":{\"type\":\"string\"},\"path\":{\"type\":\"string\"}"), true);
+          obj("\"out\":{\"type\":\"string\"},\"path\":{\"type\":\"string\"}"), false);
+    entry("region_stats",
+          "Phase 4: numeric pixel verification of a PNG (no vision captions). "
+          "Counts pixels matching mode: lava (red-dominant glowing), bright, "
+          "or dark; returns count + bounding box. Use with capture_screen's "
+          "path to prove a live-view change with numbers. Optional box:[x0,y0,"
+          "x1,y1] pixel region.",
+          obj("\"path\":{\"type\":\"string\"},\"mode\":{\"type\":\"string\"},"
+              "\"box\":{\"type\":\"array\",\"items\":{\"type\":\"integer\"}}"), false);
+    entry("will_persist",
+          "Phase 4: contract-as-query. Answers whether a Delete-brush carve at "
+          "cell survives a world reload: air above the heightfield column top "
+          "persists; below it is re-solidified by terrain promotion. Accepts "
+          "cell:[x,y,z] or x/y/z metres. Use BEFORE digging a cave.",
+          obj("\"cell\":{\"type\":\"array\",\"items\":{\"type\":\"integer\"}},"
+              "\"x\":{\"type\":\"number\"},\"y\":{\"type\":\"number\"},"
+              "\"z\":{\"type\":\"number\"}"), false);
+    entry("is_connected_to_air",
+          "Phase 4: contract-as-query. Bounded BFS over the merged field from "
+          "cell within box:[x0,y0,z0,x1,y1,z1]; CONNECTED means the air "
+          "component reaches outside (a cave stays open), SEALED means "
+          "VoxelField will flood-fill it solid. Use BEFORE digging.",
+          obj("\"cell\":{\"type\":\"array\",\"items\":{\"type\":\"integer\"}},"
+              "\"box\":{\"type\":\"array\",\"items\":{\"type\":\"integer\"}}"), false);
+    entry("quick_edit",
+          "Phase 3: one-call natural-language router. Pass intent:<text> plus "
+          "the selection cell:[x,y,z] (or ground/at); it deterministically "
+          "dispatches to dig_cave / add_tree / add_path / add_box / add_light "
+          "and returns that tool's inline result. Removes LLM deliberation "
+          "about which tool to call for a known verb.",
+          obj("\"intent\":{\"type\":\"string\"},"
+              "\"cell\":{\"type\":\"array\",\"items\":{\"type\":\"integer\"}},"
+              "\"ground\":{\"type\":\"array\",\"items\":{\"type\":\"number\"}},"
+              "\"at\":{\"type\":\"array\",\"items\":{\"type\":\"number\"}}"), true);
     t += "] } ";
     return t;
 }
@@ -3573,9 +3811,11 @@ ToolResult callTool(Server& srv, const std::string& name, std::string args)
                                       "add_path", "add_tree", "place_copy", "transform",
                                       "diff_shots", "clip_key",
                                       "surface_scan", "delete_edits", "help",
-                                      "capture_screen",
+                                      "capture_screen", "dig_cave",
                                       "view_pick", "view_click", "view_undo",
-                                      "view_clear", "view_box", "edit_result" };
+                                      "view_clear", "view_box", "edit_result",
+                                      "region_stats", "will_persist",
+                                      "is_connected_to_air", "quick_edit" };
     std::string canonical = name;
     bool native = false;
     for (const char* n : kNative)
@@ -3594,17 +3834,26 @@ ToolResult callTool(Server& srv, const std::string& name, std::string args)
         args = n.argsJson; // normalized args may carry injected defaults
     }
 
-    // Read-only tools never touch the layered world: stamp_result reads the
-    // intent results file, commit_overlay posts an intent, diff_shots reads
-    // PPMs. Rebuilding VoxelField + LayeredWorld for them made a cold
-    // `stamp_result` take ~7 s and look like a frozen chat.
-    if (canonical != "stamp_result" && canonical != "commit_overlay" &&
-        canonical != "diff_shots" && canonical != "view_pick" &&
-        canonical != "view_click" && canonical != "view_undo" &&
-        canonical != "view_clear" && canonical != "view_box" &&
-        canonical != "edit_result") {
+    // Phase 1 (latency): only tools that actually read the LayeredWorld field
+    // need a refresh. Building VoxelField + LayeredWorld is ~5 s cold; doing it
+    // for manifest-only / intent / PPM tools made `help` and `stamp_result`
+    // look like a frozen chat. This is a POSITIVE list of field-dependent
+    // tools - every other tool skips the build entirely.
+    static const char* kFieldTools[] = {
+        "probe", "ground", "surface_scan", "probe_region", "describe",
+        "will_persist", "is_connected_to_air", // Phase 4 validators read the field
+        // these resolve anchors via terrainHeightAtWorld (resolveAnchor):
+        "add_box", "add_cylinder", "add_ellipsoid", "add_stamp", "add_voxels",
+        "write_object", "add_tree", "add_path", "place_copy", "import_mesh"
+    };
+    bool needsField = false;
+    for (const char* f : kFieldTools)
+        if (canonical == f) { needsField = true; break; }
+    if (needsField) {
         // The world is DATA on disk: re-adopt if the app or an undo changed it
         // since the previous tool call (this server is a long-lived process).
+        // The warm thread in init() may already have built it; this is then a
+        // cheap signature check (and waits on the mutex if warm is running).
         srv.refreshIfChanged();
     }
     if (canonical == "list_layers")
@@ -3683,6 +3932,14 @@ ToolResult callTool(Server& srv, const std::string& name, std::string args)
         return srv.renderShot(args);
     if (canonical == "capture_screen")
         return srv.captureScreen(args);
+    if (canonical == "region_stats")
+        return srv.regionStats(args);
+    if (canonical == "will_persist")
+        return srv.willPersist(args);
+    if (canonical == "is_connected_to_air")
+        return srv.isConnectedToAir(args);
+    if (canonical == "quick_edit")
+        return srv.quickEditTool(args);
     if (canonical == "inspect_rig")
         return srv.inspectRig(args);
     if (canonical == "set_pose")
@@ -3709,6 +3966,8 @@ ToolResult callTool(Server& srv, const std::string& name, std::string args)
         return srv.paintCells(args);
     if (canonical == "stamp")
         return srv.stampTool(args);
+    if (canonical == "dig_cave")
+        return srv.digCaveTool(args);
     if (canonical == "stamp_result")
         return srv.readResult("stamp", args);
     if (canonical == "edit_result")
@@ -3818,5 +4077,6 @@ int main()
                   << resultPayload << "}\n"
                   << std::flush;
     }
+    srv.shutdown();
     return 0;
 }
