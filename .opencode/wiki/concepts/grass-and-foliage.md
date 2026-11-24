@@ -98,5 +98,7 @@ normals (bit 7) adding a Sobel-of-luminance bump.
 [[concepts/photoreal-neural-postprocess]] (transmission + GI + roughness
 ranking), [[concepts/detail-normals]] (Sobel bump), [[concepts/texture-atlas]]
 (binding), [[concepts/texture-resolution]] (how much resolution buys),
-[[concepts/enclosed-space-lighting]] (cave/interior lighting of foliage).
+[[concepts/enclosed-space-lighting]] (cave/interior lighting of foliage),
+[[concepts/photo-foliage-cards]] (photographic ground cover bound per material
+through the shared cards library — small plants are cards, not voxels).
 

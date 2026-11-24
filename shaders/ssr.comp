@@ -28,8 +28,7 @@ layout(push_constant) uniform PC {
 } pc;
 
 const float kWaterLevel = -0.9;
-const int kMaxSteps = 64;
-const float kStepScale = 0.5;
+const int kMaxSteps = 32;
 
 int gRenderFlags = 31;
 
@@ -110,56 +109,87 @@ void main()
 
     vec3 rd = reflect(-viewDir, n);
 
-    // march the reflected ray; a G-buffer sample close to the marched point
-    // counts as a reflection hit
-    vec3 col = skyColor(normalize(rd));
-    float t = 0.1;
-    for (int i = 0; i < kMaxSteps; ++i) {
-        vec3 sp = worldPos + rd * t;
-        vec2 px;
-        if (projectToPixel(sp, px)) {
-            if (px.x >= 0.0 && px.y >= 0.0 && px.x < pc.a.z && px.y < pc.a.w) {
-                vec4 g = imageLoad(uGPos, ivec2(int(px.x), int(px.y)));
-                if (g.w > 0.5 && length(g.xyz - sp) < 0.3) {
-                    col = imageLoad(uScene, ivec2(int(px.x), int(px.y))).rgb;
-                    break;
-                }
-            }
-        }
-        t += kStepScale;
-        if (t > 30.0)
-            break;
-    }
-
-    // Fresnel-weighted blend; water reflects more at all angles.
-    //
-    // A silhouette IS a grazing angle: dot(V, n) -> 0 there, so
-    // pow(1 - ndv, 3) -> 1. The old constants (0.8 solids / 0.30 water floor)
-    // therefore put the blend at its MAXIMUM exactly on the outline, blending
-    // 80% toward the near-white sky fallback - every edge read as a white
-    // "wet" rim. Subtle means the reflection is a tint, not a second surface:
-    // the peak is capped well below 1, and the face-on case is still ~0 so a
-    // flat wall keeps its own colour. Keep the water above the solid curve at
-    // every angle (that is what makes water read as water).
-    const float kReflStrength = 0.22; // peak blend on solids (was 0.8)
-    const float kReflWaterFloor = 0.10; // minimum blend on water (was 0.30)
+    // Fresnel-weighted blend; water reflects more at all angles. Compute it
+    // before the march so matte, face-on surfaces can skip SSR entirely.
+    const float kReflStrength = 0.22; // peak blend on solids
+    const float kReflWaterFloor = 0.10; // minimum blend on water
     float fresnel = pow(1.0 - max(dot(viewDir, n), 0.0), 3.0);
     float amt = (hitType > 1.5) ? max(fresnel * kReflStrength, kReflWaterFloor)
                                 : fresnel * kReflStrength;
     // Wet-surface reflections (render-flag bit 12): use the guidance lane's
-    // roughness (a = 150/55 for wet soil -> ~0.22; dry soil ~0.88). A glossy
-    // wet surface gets a strong specular reflection at all angles; a matte
-    // one keeps the historical Fresnel-only amount. Mirror-like at roughness
-    // -> 0, and a roughness blur via fewer/softer samples is approximated by
-    // scaling the amount so a wet pit reads as reflective without a second pass.
+    // roughness (a = 150/55 for wet soil -> ~0.22; dry soil ~0.88).
     if ((gRenderFlags & 4096) != 0 && hitType < 1.5) {
         float rough = clamp(imageLoad(uGAlb, pix).a, 0.0, 1.0);
-        // Wet soil is ~0.22 roughness; sand ~0.75, rock ~0.59, plaster ~0.53.
-        // Gate narrowly so only genuinely wet (low-roughness) surfaces get the
-        // boost — a broad gate repaints every mildly-glossy material.
         float gloss = 1.0 - smoothstep(0.20, 0.32, rough);
         amt = max(amt, gloss * 0.55);
     }
+    if (amt <= 0.006) {
+        imageStore(uOut, pix, vec4(baseCol, 1.0));
+        return;
+    }
+
+    // Depth-aware reflected-ray march. The old proximity-only test could
+    // accept a surface behind an intervening wall and used sky whenever the
+    // ray left the screen. Compare the ray's view depth with the visible
+    // G-buffer depth at every step. Once the ray crosses behind a visible
+    // surface, that surface is the reflection hit: sample the current pixel
+    // directly instead of spending extra taps on a refinement.
+    const vec3 rayOrigin = worldPos + n * 0.035;
+    vec3 col = skyColor(rd);
+    bool reflected = false;
+    bool skyAllowed = true;
+    float t = 0.04;
+    const vec2 extent = vec2(pc.a.z, pc.a.w);
+    for (int i = 0; i < kMaxSteps; ++i) {
+        const vec3 sp = rayOrigin + rd * t;
+        vec2 px;
+        if (!projectToPixel(sp, px) || px.x < 0.0 || px.y < 0.0 ||
+            px.x >= extent.x || px.y >= extent.y) {
+            // Screen-space data cannot prove that an off-screen reflection is
+            // visible. Conservatively keep the base surface instead of
+            // leaking bright sky through an off-screen wall.
+            skyAllowed = false;
+            break;
+        }
+
+        const ivec2 ip = ivec2(int(px.x), int(px.y));
+        const vec4 g = imageLoad(uGPos, ip);
+        const float rayDepth = dot(sp - pc.camPos.xyz, pc.camFwd.xyz);
+        const float pixelWorld = max(0.018,
+            2.0 * pc.a.x * max(rayDepth, 0.1) / max(extent.y, 1.0));
+        const float thickness = clamp(pixelWorld * 0.65, 0.018, 0.22);
+        const bool sourcePixel = abs(ip.x - pix.x) <= 1 && abs(ip.y - pix.y) <= 1 &&
+                                 t < 0.35;
+
+        if (g.w > 0.5 && !sourcePixel) {
+            const float sceneDepth = dot(g.xyz - pc.camPos.xyz, pc.camFwd.xyz);
+            if (rayDepth > sceneDepth + thickness) {
+                // The ray crossed behind visible geometry. The current pixel
+                // already shows that nearest surface, so it is the correct
+                // reflection colour; never fall through to sky/source behind it.
+                col = imageLoad(uScene, ip).rgb;
+                reflected = true;
+                skyAllowed = false;
+                break;
+            }
+
+            if (t > 0.12 && length(g.xyz - sp) < thickness) {
+                col = imageLoad(uScene, ip).rgb;
+                reflected = true;
+                break;
+            }
+        }
+
+        // Grow with travelled distance, but cap at half a metre so a step
+        // cannot jump over a thin vertical emitter. Depth crossing still
+        // catches walls while useful SSR range costs fewer than 64 taps.
+        t += clamp(0.08 + t * 0.05, 0.08, 0.5);
+        if (t > 32.0)
+            break;
+    }
+
+    if (!reflected && !skyAllowed)
+        col = baseCol;
     vec3 result = mix(baseCol, col, clamp(amt, 0.0, 1.0));
     imageStore(uOut, pix, vec4(result, 1.0));
 }

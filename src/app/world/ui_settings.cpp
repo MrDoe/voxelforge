@@ -224,17 +224,50 @@ void App::applyUiSettingsFromManifest(bool heavy)
     // ---- camera (session view; applied only when the FILE changed, so the
     //      poller never fights WASD - an unchanged block is inert) -----------
     num(u.camSpeed, m_camera.speed, 0.5f, 40.0f);
-    if (present(u.camX) && present(u.camY) && present(u.camZ)) {
+    // Diff against the LAST-SEEN file block, not the live member: WASD/RMB
+    // are session state, and an unrelated manifest write (a layer toggle, a
+    // texture binding, an AI edit) must not pull the view back to the pose
+    // authored in world.json. This is the sun block's rule (see above).
+    auto camChanged = [](float file, float seen) {
+        return present(file) != present(seen) ||
+               (present(file) && std::fabs(file - seen) > 1e-4f);
+    };
+    const bool posAuthored = present(u.camX) && present(u.camY) && present(u.camZ);
+    const bool posChanged = posAuthored &&
+        (camChanged(u.camX, m_seenUi.camX) ||
+         camChanged(u.camY, m_seenUi.camY) ||
+         camChanged(u.camZ, m_seenUi.camZ));
+    if (posChanged) {
         m_camera.pos = glm::vec3(u.camX, u.camY, u.camZ);
         ++applied;
     }
-    if (present(u.camYaw)) {
-        m_camera.yaw = glm::radians(u.camYaw);
-        ++applied;
-    }
-    if (present(u.camPitch)) {
-        m_camera.pitch = glm::radians(std::clamp(u.camPitch, -89.0f, 89.0f));
-        ++applied;
+    const bool targetAuthored = present(u.camTargetX) && present(u.camTargetY) &&
+                                present(u.camTargetZ);
+    const bool targetChanged = targetAuthored &&
+        (camChanged(u.camTargetX, m_seenUi.camTargetX) ||
+         camChanged(u.camTargetY, m_seenUi.camTargetY) ||
+         camChanged(u.camTargetZ, m_seenUi.camTargetZ));
+    if (targetAuthored && posAuthored && (targetChanged || posChanged)) {
+        // Same convention as --cam (setupCameraAndShots): yaw 0 = +X,
+        // positive yaw toward +Z, pitch positive up. A complete target wins
+        // over camYaw/camPitch so an agent never has to guess the convention.
+        const glm::vec3 d = glm::vec3(u.camTargetX, u.camTargetY, u.camTargetZ) -
+                            m_camera.pos;
+        if (glm::length(d) > 1e-4f) {
+            const glm::vec3 dir = glm::normalize(d);
+            m_camera.yaw = std::atan2(dir.z, dir.x);
+            m_camera.pitch = std::asin(std::clamp(dir.y, -1.f, 1.f));
+            ++applied;
+        }
+    } else {
+        if (present(u.camYaw) && camChanged(u.camYaw, m_seenUi.camYaw)) {
+            m_camera.yaw = glm::radians(u.camYaw);
+            ++applied;
+        }
+        if (present(u.camPitch) && camChanged(u.camPitch, m_seenUi.camPitch)) {
+            m_camera.pitch = glm::radians(std::clamp(u.camPitch, -89.0f, 89.0f));
+            ++applied;
+        }
     }
 
     // ---- fur coat (structural keys rebuild the cards; sss is a uniform) ----

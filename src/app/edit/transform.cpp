@@ -168,44 +168,8 @@ void App::cancelMove()
     refreshPreviewLights(); // restores the base set to splat when one was shifted
 }
 
-std::vector<vf::voxel::LightSource> App::resolveFollowLights(
-    const std::vector<vf::voxel::worldfile::LightSource>& authored, bool warn) const
-{
-    std::vector<vf::voxel::worldfile::LightSource> out = authored;
-    for (auto& l : out) {
-        if (l.follow.empty())
-            continue;
-        const auto it = std::find_if(
-            m_worldLayers.begin(), m_worldLayers.end(),
-            [&](const vf::voxel::worldfile::WorldLayer& w) {
-                return w.file == l.follow;
-            });
-        glm::vec3 pivot(0.f);
-        if (it == m_worldLayers.end() || !m_layers.layerPivot(l.follow, pivot)) {
-            // Non-destructive: a typo'd target pins the lamp at its stored
-            // offset instead of dropping it (same forgiveness as a fixed
-            // light); the bake path owns the loud warning.
-            if (warn)
-                spdlog::warn("lighting: follow target '{}' not loaded - "
-                             "lamp pinned at its stored offset",
-                             l.follow);
-            continue;
-        }
-        // Stored pos is pivot-relative LOCAL (pre-rotation); the pivot
-        // already carries the manifest translation (layerPivot convention),
-        // so this mirrors transformRecords exactly (rotation only: follow
-        // lights do not rescale with the layer's `scale`).
-        const glm::mat3 R = vf::voxel::worldfile::placementRotation(
-            it->rotDeg, it->rotX, it->rotZ);
-        l.pos = pivot + R * l.pos;
-    }
-    return out;
-}
-
 // Bake-seeded splice base shared by the trigger and the preview overlay:
-// exactly the store-enumerated set the bake upload derives (FLIP: the seed
-// follows the bake to the store variant, so bake and trigger agree slot for
-// slot), truncated to the room the authored set leaves. Idempotent (a
+// exactly the store-enumerated set the bake upload derives. Idempotent (a
 // populated base is kept verbatim, so repeated strokes/previews never reseed
 // mid-session).
 void App::ensureDerivedBase()
@@ -214,15 +178,12 @@ void App::ensureDerivedBase()
         return;
     const std::vector<glm::vec3> emission =
         buildEmissionTable(m_texBindings, m_texAtlas);
-    std::vector<vf::voxel::LightSource> authored;
-    vf::voxel::worldfile::loadLightManifest(m_manifestPath, authored);
     std::vector<vf::voxel::VoxelField::EmissiveCluster> baked;
     m_layers.store().collectEmissive(emission, baked,
                                      std::numeric_limits<int>::max());
     const int budget = std::clamp(m_lightBudget, 1, vf::voxel::kMaxLights);
-    const int room = budget - std::min<int>(int(authored.size()), budget);
     for (const auto& c : baked) {
-        if (int(m_derivedClusters.size()) >= room)
+        if (int(m_derivedClusters.size()) >= budget)
             break;
         m_derivedClusters.push_back(c);
     }
@@ -242,7 +203,7 @@ void App::refreshPreviewLights()
     const float rotMag = std::abs(m_rotateDy) + std::abs(m_rotateDx) +
                          std::abs(m_rotateDz);
     if (!m_rotateLayer.empty() && (m_rotating || m_rotationStaged) &&
-        rotMag >= 1e-4f && m_layers.layerPivot(m_rotateLayer, pivot)) {
+        rotMag >= 1e-4f && layerPivotWorld(m_rotateLayer, pivot)) {
         const auto it = std::find_if(
             m_worldLayers.begin(), m_worldLayers.end(),
             [&](const vf::voxel::worldfile::WorldLayer& w) {
@@ -258,7 +219,7 @@ void App::refreshPreviewLights()
         }
     } else if (!m_moveLayer.empty() && (m_moving || m_moveStaged) &&
                glm::length(m_moveDelta) >= 1e-4f &&
-               m_layers.layerPivot(m_moveLayer, pivot)) {
+               layerPivotWorld(m_moveLayer, pivot)) {
         dT = m_moveDelta;
         layer = m_moveLayer;
         haveDelta = true;
@@ -270,39 +231,28 @@ void App::refreshPreviewLights()
             return;
         // Preview ended: splat rejoins the base set the SVO pass never left.
         ensureDerivedBase();
-        std::vector<vf::voxel::LightSource> authored;
-        vf::voxel::worldfile::loadLightManifest(m_manifestPath, authored);
-        const auto resolved = resolveFollowLights(authored, false);
         const int budget = std::clamp(m_lightBudget, 1, vf::voxel::kMaxLights);
         vf::voxel::LightUBO ubo{};
-        vf::voxel::fillLightUBO(resolved, m_derivedClusters, budget, ubo,
+        const std::vector<vf::voxel::LightSource> noAuthored;
+        vf::voxel::fillLightUBO(noAuthored, m_derivedClusters, budget, ubo,
                                 false);
         ubo.perPixelK =
             std::clamp(m_lightK, 1, vf::voxel::worldfile::kLightKMax);
         m_splatPass.setLights(ubo);
+        m_microSvoPass.setLights(ubo);
+        m_furPass.setLights(ubo);
         m_previewLightsShifted = false;
         return;
     }
 
     ensureDerivedBase();
-    std::vector<vf::voxel::LightSource> authored;
-    vf::voxel::worldfile::loadLightManifest(m_manifestPath, authored);
-    auto resolved = resolveFollowLights(authored, false);
-    // Followed lamps of the previewed layer ride the staged delta.
-    int shiftedAuthored = 0;
-    for (auto& l : resolved) {
-        if (l.follow == layer) {
-            l.pos = pivot + dR * (l.pos - pivot) + dT;
-            ++shiftedAuthored;
-        }
-    }
     // Derived clusters inside the layer's PRE-preview record box ride the
     // same delta (rigid shift: count/order preserved, so no slot flicker).
     // The box is grown 0.6 m: lifted centroids hover just outside the raw
     // records. Commit-reload re-enumerates exactly, so a shifted centroid
     // that lands inside geometry is preview-only transient.
     auto shifted = m_derivedClusters;
-    const vf::voxel::WorldAABB box = m_layers.layerBox(layer);
+    const vf::voxel::WorldAABB box = layerBounds(layer);
     int shiftedDerived = 0;
     if (box.valid()) {
         for (auto& c : shifted) {
@@ -316,19 +266,21 @@ void App::refreshPreviewLights()
     }
     const int budget = std::clamp(m_lightBudget, 1, vf::voxel::kMaxLights);
     vf::voxel::LightUBO ubo{};
-    vf::voxel::fillLightUBO(resolved, shifted, budget, ubo, false);
+    const std::vector<vf::voxel::LightSource> noAuthored;
+    vf::voxel::fillLightUBO(noAuthored, shifted, budget, ubo, false);
     ubo.perPixelK = std::clamp(m_lightK, 1, vf::voxel::worldfile::kLightKMax);
-    // SPLAT ONLY: the SVO backend ignores the geometry preview, so its
-    // unmoved geometry stays consistent with unmoved lights. Shadows follow
-    // free: the direct term marches visibility per frame from this UBO.
-    // The indirect volume is NOT rebaked per drag (bake cost); it refreshes
-    // on the commit reload.
+    // The world SVO backend ignores the world geometry preview, so it keeps
+    // the base set. Splat, micro and fur all can show the preview and receive
+    // the shifted set. Shadows follow for free: the direct term marches
+    // visibility per frame from this UBO. The indirect volume is not rebaked
+    // per drag (bake cost); commit/upload refreshes it.
     m_splatPass.setLights(ubo);
+    m_microSvoPass.setLights(ubo);
+    m_furPass.setLights(ubo);
     m_previewLightsShifted = true;
     if (getenv("VF_TRACE"))
-        spdlog::info("preview lights: layer {} shifted {} authored + {} "
-                     "derived (splat only)",
-                     layer, shiftedAuthored, shiftedDerived);
+        spdlog::info("preview lights: layer {} shifted {} derived clusters",
+                     layer, shiftedDerived);
 }
 
 } // namespace app

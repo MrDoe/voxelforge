@@ -342,36 +342,6 @@
       "behaviour": "stop"
     }
   ],
-  "lights": [
-    {
-      "pos": [
-        6.4,
-        4.2,
-        12.6
-      ],
-      "color": [
-        1.0,
-        0.72,
-        0.45
-      ],
-      "radius": 8.0,
-      "intensity": 1.5
-    },
-    {
-      "pos": [
-        3.6,
-        4.0,
-        11.6
-      ],
-      "color": [
-        1.0,
-        0.72,
-        0.45
-      ],
-      "radius": 8.0,
-      "intensity": 1.5
-    }
-  ],
   "textures": [
     {
       "file": "textures/dark_green_grass_dense_natural_meadow_topdown_vie_1_seamless.png",

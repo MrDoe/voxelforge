@@ -524,3 +524,7 @@ sufficient. (3) *Cell becomes air* → closed by the baked-geometry premise; the
 air control fails on both the pick assert and that premise.
 
 See also [[entities/svo-render]] for the two backends and the shared G-buffer.
+
+- [[concepts/box-selection-scope]] — the Shift+LMB box that scopes every cell stamp; its tint must clip to the same cells the CPU clamp will edit.
+- [[concepts/brush-falloff-curve-contract]] — the six-curve spec for the three rasterizers, including the Add dome's deliberate flat top.
+- [[concepts/water-flooding]] — why a dig below the level reads as water without per-column flood bookkeeping.

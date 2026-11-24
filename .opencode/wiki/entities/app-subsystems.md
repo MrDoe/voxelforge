@@ -162,3 +162,6 @@ Three reasons this slipped through everything, and each is a lesson worth keepin
 
 If a headless run hangs or loops forever with no output, suspect an
 always-empty gate variable before suspecting the renderer.
+
+- [[concepts/code-review-stale-unused]] — inventory of stale helpers and
+  undocumented passes found while mapping these subsystems.

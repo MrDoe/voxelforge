@@ -85,3 +85,7 @@ gamma 2.2. Tuning knobs are plain GLSL constants (push constant is exactly 128 B
 ## Priorities for the next realism step
 Per `docs/history/ImplementationPlan.md`: real 1-bounce GI (half-res temporal), TAA reprojection,
 leaf-cluster foliage warp. The SDF AO + bent normal is already the cheapest leg of that.
+
+- [[concepts/irradiance-volume]] — the emitter-lit indirect term, and why it is deliberately not called GI.
+- [[concepts/wet-surface-reflections]] — the default-off "stunning pits" set: wet soil, roughness-aware SSR and the depth-aware wall stop.
+- [[concepts/sunset-dimming]] — why a sunset measures as faint haze without the dedicated low-sun term.

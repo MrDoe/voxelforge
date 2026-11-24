@@ -12,6 +12,7 @@
 #include "app/app.hpp"
 #include "ai/tools.hpp"
 #include "app/ui/ui_primitives.hpp"
+#include "app/world/store_overlay.hpp"
 #include "voxel/scenery.hpp"
 #include "voxel/chunk_index.hpp"
 #include "voxel/picking.hpp"
@@ -21,8 +22,10 @@
 
 #include <algorithm>
 #include <cctype>
+#include <chrono>
 #include <cmath>
 #include <cstdio>
+#include <cstdlib>
 #include <filesystem>
 #include <fstream>
 #include <string>
@@ -126,11 +129,13 @@ void App::consumeMcpIntents()
             decltype(m_editBrush) brush;
             float diameter = 0.f, depth = 0.f, strength = 0.f;
             uint8_t mat = 0;
+            vf::voxel::EditableWorld::FalloffCurve curve;
             decltype(m_boxSelect) box;
             bool dragging = false;
         };
         return Saved{ m_hoverHit, m_editBrush, m_editDiameter, m_editDepth,
-                      m_smoothStrength, m_editMat, m_boxSelect, m_dragging };
+                      m_smoothStrength, m_editMat, m_editFalloffCurve,
+                      m_boxSelect, m_dragging };
     };
     auto restoreInput = [this](const auto& s) {
         m_hoverHit = s.hover;
@@ -139,6 +144,7 @@ void App::consumeMcpIntents()
         m_editDepth = s.depth;
         m_smoothStrength = s.strength;
         m_editMat = s.mat;
+        m_editFalloffCurve = s.curve;
         m_boxSelect = s.box;
         m_dragging = s.dragging;
     };
@@ -278,8 +284,16 @@ void App::consumeMcpIntents()
         m_dragging = false; // a lone click is one whole stroke / undo step
 
         m_lastChangedChunks.clear();
+        m_lastEditCells = 0;
+        m_lastEditChunks = 0;
+        m_lastEditSurfels = 0;
+        m_lastEditMs = 0.f;
         applyEditLive();
         const bool solidAfter = store.cellAt(cell.x, cell.y, cell.z).solid;
+        // The GUI queues persistence on mouse release. An MCP stamp has no
+        // mouse release, so do that explicitly or the edit vanishes on exit.
+        if (m_lastEditCells > 0 && m_liveEditor.attached())
+            m_overlayWriter.queue(m_layers.store(), overlayPath());
 
         std::string extra =
             std::string(",\"mode\":") + jsonStr(mode) +
@@ -296,6 +310,212 @@ void App::consumeMcpIntents()
                      m_lastEditSurfels, m_lastEditMs);
         restoreInput(saved);
         return result(id, tool, true, extra);
+    };
+
+    // One natural cave, composed from the SAME brushes the GUI uses. Every
+    // sub-stamp runs with m_dragging=true, so the mouth, tunnel, chamber and
+    // optional dripstone share ONE undo step. The stdio server only validates
+    // and posts this intent; all picking and rasterisation stays in the App.
+    auto applyCave = [this, &result, &errorResult, &snapshotInput,
+                      &restoreInput, &pickFields](
+        const std::string& id, const std::string& args,
+        const voxel::PickHit& hit) -> std::string {
+        if (!hit.microFile.empty())
+            return errorResult(id, "dig_cave",
+                "the click hit micro object '" + hit.microFile +
+                "'; world brushes cannot edit a micro world");
+
+        float radius = 1.0f, depth = 3.0f;
+        ai::jsonGetFloat(args, "radius", radius);
+        ai::jsonGetFloat(args, "depth", depth);
+        if (!std::isfinite(radius) || !std::isfinite(depth) ||
+            radius < 0.3f || radius > 2.5f || depth < 0.5f || depth > 10.f)
+            return errorResult(id, "dig_cave", "radius 0.3..2.5 m, depth 0.5..10 m");
+        std::string style;
+        if (!ai::jsonGetString(args, "style", style) || style.empty())
+            style = "dripstone";
+        if (style == "simple") style = "plain";
+        if (style != "dripstone" && style != "plain")
+            return errorResult(id, "dig_cave", "style: dripstone|plain");
+
+        auto& store = m_layers.store();
+        const glm::ivec3 cell = hit.voxel;
+        if (!store.cellAt(cell.x, cell.y, cell.z).solid)
+            return errorResult(id, "dig_cave", "selected cell [" +
+                std::to_string(cell.x) + "," + std::to_string(cell.y) + "," +
+                std::to_string(cell.z) + "] is not solid");
+        if (m_dragging || !m_undoPending.empty())
+            return errorResult(id, "dig_cave", "finish the current brush stroke first");
+
+        glm::vec3 n = hit.normal;
+        if (glm::length(n) < 1e-3f) n = glm::vec3(0.f, 1.f, 0.f);
+        n = glm::normalize(n);
+        const glm::vec3 inward = -n;
+        const glm::vec3 centreW = voxel::voxelCenter(cell) + inward * depth;
+        const glm::ivec3 chamber = voxel::worldToVoxel(centreW);
+        const int latN = store.latN();
+        if (chamber.x < 0 || chamber.y < 0 || chamber.z < 0 ||
+            chamber.x >= latN || chamber.y >= latN || chamber.z >= latN)
+            return errorResult(id, "dig_cave", "cave chamber leaves the world lattice");
+        if (centreW.y - radius < voxel::WATER_LEVEL + 0.2f)
+            return errorResult(id, "dig_cave", "cave at [" +
+                std::to_string(cell.x) + "," + std::to_string(cell.y) + "," +
+                std::to_string(cell.z) + "] normal [" + jsonNum(n.x) + "," +
+                jsonNum(n.y) + "," + jsonNum(n.z) + "] would breach the water "
+                "plane (chamber bottom " + jsonNum(centreW.y - radius) + " m)");
+
+        // Conservative unique-cell estimate keeps the whole feature inside
+        // the GUI's 250k-cell undo budget (overlap only makes this smaller).
+        const double v = voxel::VOXEL;
+        const double estimate =
+            (4.18879020479 * (std::pow(radius, 3) +
+                              std::pow(radius * 0.75, 3)) +
+             3.14159265359 * std::pow(radius * 0.45, 2) * depth) /
+                (v * v * v) + 2000.0;
+        if (estimate > double(kUndoMaxCells) * 0.8)
+            return errorResult(id, "dig_cave", "cave is too large for one undo step");
+
+        auto saved = snapshotInput();
+        const bool solidBefore = true;
+        const size_t undoBefore = m_undo.size();
+        const auto t0 = std::chrono::steady_clock::now();
+        m_boxSelect.clear();
+        m_editMat = 4; // rock for the dripstone
+        m_editFalloffCurve = voxel::EditableWorld::FalloffCurve::Constant;
+        m_lastChangedChunks.clear();
+        m_dragging = true; // accumulate one stroke across every sub-stamp
+        int stamps = 0;
+        double firstStampMs = -1.0;
+
+        auto caveStamp = [&](const glm::ivec3& at, const glm::vec3& normal,
+                             EditBrush brush, float diameter, float length,
+                             voxel::EditableWorld::FalloffCurve curve) {
+            const auto stampStart = std::chrono::steady_clock::now();
+            m_hoverHit = {};
+            m_hoverHit.hit = true;
+            m_hoverHit.voxel = at;
+            m_hoverHit.pos = voxel::voxelCenter(at);
+            m_hoverHit.normal = normal;
+            m_hoverHit.object = store.cellAt(at.x, at.y, at.z).obj;
+            m_editBrush = brush;
+            m_editDiameter = diameter;
+            m_editDepth = length;
+            m_editFalloffCurve = curve;
+            quantiseBrush();
+            applyEditLive();
+            if (stamps == 0)
+                firstStampMs = std::chrono::duration<double, std::milli>(
+                    std::chrono::steady_clock::now() - stampStart).count();
+            ++stamps;
+        };
+
+        // Open mouth, narrow inward tunnel, then a wider chamber.
+        caveStamp(cell, n, EditBrush::Delete, radius * 1.5f, 0.1f,
+                  voxel::EditableWorld::FalloffCurve::Constant);
+        caveStamp(cell, n, EditBrush::Carve, radius * 0.9f, depth,
+                  voxel::EditableWorld::FalloffCurve::Constant);
+        caveStamp(chamber, n, EditBrush::Delete, radius * 2.0f, 0.1f,
+                  voxel::EditableWorld::FalloffCurve::Constant);
+
+        if (style == "dripstone") {
+            // Deterministic pairs on the chamber ceiling/floor. The first
+            // solid cell met while scanning out from the carved centre is the
+            // boundary; Add grows back into the air along the opposite axis.
+            static const float kOffsets[5][2] = {
+                {0.f, 0.f}, {0.45f, 0.f}, {-0.45f, 0.f},
+                {0.f, 0.45f}, {0.f, -0.45f}
+            };
+            const int reach = int(std::ceil(radius / voxel::VOXEL)) + 2;
+            for (int i = 0; i < 5; ++i) {
+                const int x = std::clamp(
+                    chamber.x + int(std::lround(kOffsets[i][0] * radius / voxel::VOXEL)),
+                    0, latN - 1);
+                const int z = std::clamp(
+                    chamber.z + int(std::lround(kOffsets[i][1] * radius / voxel::VOXEL)),
+                    0, latN - 1);
+                glm::ivec3 ceiling, floor;
+                bool haveCeiling = false, haveFloor = false;
+                for (int dy = 0; dy <= reach; ++dy) {
+                    const int yu = chamber.y + dy, yd = chamber.y - dy;
+                    if (!haveCeiling && yu >= 0 && yu < latN &&
+                        store.cellAt(x, yu, z).solid) {
+                        ceiling = { x, yu, z };
+                        haveCeiling = true;
+                    }
+                    if (!haveFloor && yd >= 0 && yd < latN &&
+                        store.cellAt(x, yd, z).solid) {
+                        floor = { x, yd, z };
+                        haveFloor = true;
+                    }
+                    if (haveCeiling && haveFloor) break;
+                }
+                const float diameter = 0.2f + 0.05f * float(i % 3);
+                const float length = 0.3f + 0.1f * float(i % 4);
+                const auto sharp = voxel::EditableWorld::FalloffCurve::Sharp;
+                if (haveCeiling)
+                    caveStamp(ceiling, glm::vec3(0.f, -1.f, 0.f), EditBrush::Add,
+                              diameter, length, sharp);
+                if (haveFloor)
+                    caveStamp(floor, glm::vec3(0.f, 1.f, 0.f), EditBrush::Add,
+                              diameter, length, sharp);
+            }
+        }
+
+        std::vector<int> changed = m_lastChangedChunks;
+        std::sort(changed.begin(), changed.end());
+        changed.erase(std::unique(changed.begin(), changed.end()), changed.end());
+        const size_t touched = m_undoPending.size();
+        const bool undoable = !m_undoOverflow && touched > 0;
+        m_dragging = false;
+        finishStroke();
+        if (touched > 0 && m_liveEditor.attached())
+            m_overlayWriter.queue(m_layers.store(), overlayPath());
+
+        // Final run sizes across the touched chunks (not a sum over sub-stamps,
+        // which would count a chunk several times).
+        vf::voxel::SurfelParams sp;
+        sp.edgeShrink = m_edgeShrink;
+        sp.edgeFill = m_edgeFill;
+        sp.edgeBridgeSize = m_edgeBridgeSize;
+        sp.cornerFill = m_cornerFill;
+        sp.sunDir = glm::vec3(m_sunDir);
+        sp.microOccluders = &m_microOccluders;
+        sp.lodRings = false;
+        sp.anisotropy = true;
+        if (const char* e = getenv("VF_ANISO")) sp.anisotropy = atoi(e) != 0;
+        size_t runSurfels = 0;
+        for (int ci : changed)
+            runSurfels += m_liveEditor.chunkRun(ci, sp).size();
+        const double ms = std::chrono::duration<double, std::milli>(
+                              std::chrono::steady_clock::now() - t0).count();
+        const bool solidAfter = store.cellAt(cell.x, cell.y, cell.z).solid;
+        m_lastEditCells = touched;
+        m_lastEditChunks = changed.size();
+        m_lastEditSurfels = runSurfels;
+        m_lastEditMs = float(ms);
+        restoreInput(saved);
+
+        spdlog::info("mcp dig_cave {}: style={} r={:.2f} depth={:.2f}, {} stamps, "
+                     "{} cells, {} chunks, {} run surfels, {:.1f} ms, undo={}",
+                     id, style, radius, depth, stamps, touched, changed.size(),
+                     runSurfels, ms, undoable);
+        if (touched == 0)
+            return errorResult(id, "dig_cave", "cave changed no cells");
+        return result(id, "dig_cave", true,
+            ",\"style\":" + jsonStr(style) +
+            ",\"radius\":" + jsonNum(radius) +
+            ",\"depth\":" + jsonNum(depth) +
+            ",\"stamps\":" + jsonNum(stamps) +
+            ",\"firstStampMs\":" + jsonNum(firstStampMs) +
+            ",\"cells\":" + jsonNum(touched) +
+            ",\"chunks\":" + jsonNum(changed.size()) +
+            ",\"runSurfels\":" + jsonNum(runSurfels) +
+            ",\"ms\":" + jsonNum(ms) +
+            ",\"undoable\":" + (undoable ? "true" : "false") +
+            ",\"undoSteps\":" + jsonNum(m_undo.size() - undoBefore) +
+            ",\"cellSolidBefore\":" + jsonNum(solidBefore ? 1 : 0) +
+            ",\"cellSolidAfter\":" + jsonNum(solidAfter ? 1 : 0) +
+            ",\"persisted\":true" + pickFields(hit));
     };
 
     // Rotate / Move reuse the sidebar's Apply functions, including the
@@ -484,7 +704,22 @@ void App::consumeMcpIntents()
             continue;
         }
 
-        if (tool != "stamp" && tool != "pick" && tool != "click") {
+        if (tool == "camera_pose") {
+            // Read-only live-pose probe for vf_mcp. The camera is the App's
+            // own (a separate process must not guess it from the manifest:
+            // the user may have flown away since the ui block was written).
+            const auto& c = m_camera;
+            const glm::vec3 f = c.forward();
+            results.push_back(result(id, tool, true,
+                ",\"pos\":" + jsonFloats({ c.pos.x, c.pos.y, c.pos.z }) +
+                ",\"yawDeg\":" + jsonNum(glm::degrees(c.yaw)) +
+                ",\"pitchDeg\":" + jsonNum(glm::degrees(c.pitch)) +
+                ",\"forward\":" + jsonFloats({ f.x, f.y, f.z })));
+            continue;
+        }
+
+        if (tool != "stamp" && tool != "pick" && tool != "click" &&
+            tool != "dig_cave") {
             results.push_back(errorResult(id, tool, "unknown intent"));
             continue;
         }
@@ -493,6 +728,11 @@ void App::consumeMcpIntents()
         std::string err;
         if (!resolveTarget(args, hit, err)) {
             results.push_back(errorResult(id, tool, err));
+            continue;
+        }
+
+        if (tool == "dig_cave") {
+            results.push_back(applyCave(id, args, hit));
             continue;
         }
 

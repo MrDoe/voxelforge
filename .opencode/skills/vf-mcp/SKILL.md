@@ -1,15 +1,16 @@
 ---
 name: vf-mcp
-description: Drive VoxelForge through the vf_mcp MCP server — inspect the live world, author object/scatter/micro layers, bind textures with per-cell overrides, place lights, tweak UI settings, and verify with headless shots. Use for any request that changes the rendered scene via MCP tools, instead of hand-editing .vxw files or C++/GLSL.
+description: Drive VoxelForge through the vf_mcp MCP server — inspect the live world, author object/scatter/micro layers, bind textures with per-cell overrides, place lights, tweak UI settings, drive live view/edit tools, and verify with screenshots. Use for any request that changes the rendered scene via MCP tools, instead of hand-editing .vxw files or C++/GLSL.
 ---
 
 # Using the Voxelforge MCP server
 
 `vf_mcp` is a stdio JSON-RPC server (`src/ai/mcp_server.cpp`) registered as
-`voxelforge` in `.opencode/opencode.json`. It is the **data-only authoring
-channel** for the running app: every write goes into the active scenery folder
-and the app hot-reloads within ~1 s. No recompile, no hand-written binary
-`.vxw`, no special-case code.
+`voxelforge` in `.opencode/opencode.json`. It is the authoring channel for the
+running app, with two lanes: baked DATA writes under the active scenery folder
+(hot-reloaded within ~1 s) and live-store intents executed by the App's own
+brush paths on the next frame. No recompile, no hand-written binary `.vxw`,
+no special-case code.
 
 ## FAST PATH — read first (selection-driven edits)
 
@@ -17,60 +18,65 @@ When the user says "do X here/this/selected" and the prompt carries
 `[UI context: selected voxel cell [x,y,z], world position [...] metres]`,
 **call the one-shot builder with that cell immediately — no inspection round-trips**:
 
-- "dig a cave here" → `dig_cave {cell:[x,y,z], style:"dripstone"}` (one call;
-  posts the whole mouth+tunnel+chamber+dripstone as a single store-lane intent).
+- "dig a cave here" → `dig_cave {cell:[x,y,z], radius:1.0, depth:3.0,
+  style:"dripstone"}` (one call; the App composes mouth+tunnel+chamber+
+  dripstone as one undoable store-lane stroke and returns its report inline).
 - "draw a gravel path to here" → `add_path {from:[...], to:[x,z of selection]}`.
 - "add a tree here" → `add_tree {ground:[x,z], seed:<fixed>}`.
 
 Do NOT front-load `view_pick`, `ground`, `surface_scan` slope scans,
 `list_layers`, or doc re-reading before the first dig. The selection cell is a
-lattice cell (bottom-center anchor); pass it straight through. The builder
-computes geometry server-side and encodes the domain contract as defaults.
-The "Inspect first" workflow below is for **ambiguous/open-ended** requests,
-not for a selection + a known verb. Verify AFTER the edit has started:
-`edit_result {id}` then `capture_screen` (the live view, not `render_shot` —
-headless shots isolate the overlay and cannot prove a live-view change).
+lattice cell (bottom-center anchor); pass it straight through. `dig_cave`
+computes geometry **inside the running App** through the GUI brush rasterizers;
+the stdio server only validates and posts the intent. The "Inspect first"
+workflow below is for **ambiguous/open-ended** requests, not for a selection +
+a known verb. `dig_cave` already returns cells/chunks/first-stamp-ms/undo
+inline — do not call `edit_result` or `render_shot` before replying. Use
+`capture_screen` only when the user asks for visual verification.
 
 ### Cave contract (MUST follow — a cave dug wrong is invisible forever)
 
 A walk-in cave is a **natural feature**. Two lanes, and only two:
 
-1. **Baked lane (preferred for anything that must persist)**: a rock-shell
-   object layer with an OPEN MOUTH above the heightfield column top, sitting
-   on the terrain. The cave air is the empty space INSIDE the shell. Air must
-   be ABOVE the column top (terrain promotion re-solidifies below it). The
-   interior must CONNECT to outside air (an open mouth or skylight) —
-   VoxelField flood-fills enclosed air and promotes it to solid.
-2. **Store lane (prototyping only)**: `view_click mode delete` / `stamp mode
-   delete` carves air cells into the live store. These persist in
-   `runtime_edits.vxw` and show immediately, but are LOST on the next full
-   world reload (the store re-adopts from baked pools) and the overlay can be
-   silently corrupted/shrunk by any headless render that loads it.
+1. **Store lane (fast/reversible)**: `dig_cave` (or `view_click`/`stamp` for a
+   manual brush) carves the live `ChunkStore` immediately. The whole compound
+   cave is ONE undo step and is queued to `runtime_edits.vxw`; the App restores
+   that overlay after a world reload/restart. This is session state, not
+   authored source content, and `commit_overlay` cannot promote deletions
+   because record layers cannot express air.
+2. **Baked lane (permanent/authored)**: a rock-shell object layer with an OPEN
+   MOUTH above the heightfield column top, sitting on the terrain. The cave air
+   is the empty space INSIDE the shell. The interior must CONNECT to outside
+   air (an open mouth or skylight) — `VoxelField` flood-fills enclosed air and
+   promotes it to solid.
 
 **Rules:**
-- NEVER carve a cave below the heightfield column top in the store lane and
-  expect it to persist — it will be re-solidified on reload.
-- NEVER run a headless `render_shot`/`--shot`/`--smoke`/`--selftest` against
-  a scenery with a live `runtime_edits.vxw` without `VF_OVERLAY_PATH=<tmp>` or
+- Use `dig_cave` FIRST for "dig here"; it never needs an inspection call and
+  returns the instrument report in the same tool call.
+- NEVER assume a store carve changed the authored `.vxw`; it lives in the
+  gitignored overlay. If the cave must become permanent source content, build
+  the baked shell deliberately.
+- NEVER run a headless `render_shot`/`--shot`/`--smoke`/`--selftest` against a
+  scenery with a live `runtime_edits.vxw` without `VF_OVERLAY_PATH=<tmp>` or
   `VF_NO_OVERLAY=1`. The overlay is gitignored, so damage is silent and
   unrecoverable.
-- ALWAYS verify live-view changes with `capture_screen`, NEVER `render_shot`
-  (which isolates the overlay and cannot prove a live change).
-- To A/B overlay vs baked: run two renders at IDENTICAL camera+resolution, one
-  with `VF_NO_OVERLAY=1`, one without; >200k pixel diff means the overlay is
-  masking baked content.
-- Before clearing the overlay (`clear_edits`/`view_clear`), copy it to a
-  non-.vxw path OUTSIDE /tmp and md5-verify — `Clear live edits` is irreversible.
-- If a cave must be permanent, build it as a baked rock-shell layer, not a
-  store carve. Use `write_object` with a shapes list forming walls+ceiling+floor
-  with an open mouth, or a heightmap depression + object layer.
+- Verify the LIVE window with `capture_screen`. A default `render_shot` is a
+  fresh process and does not prove the long-running window changed; it can
+  only A/B the overlay when explicitly pointed at the same isolated path.
+- Before `view_clear` / the GUI's **Clear live edits**, copy the overlay to a
+  labelled non-`.vxw` path and md5-verify — that action is irreversible.
+- If a cave must be permanent, use `write_object` with a shapes list forming
+  walls+ceiling+floor with an open mouth, or author a heightmap depression +
+  object shell. Do not try to converge a store-lane deletion with
+  `commit_overlay`.
 
-## Tool map (50 tools)
+## Tool map
 
 - **Inspect**: `list_layers`, `get_layer`, `inspect_layer`, `layer_stats`,
   `list_micro`, `list_materials`, `list_textures`, `list_models`,
   `list_lights`, `world_info`, `probe`, `probe_region`, `ground`,
-  `read_object`, `inspect_rig`, `fur_stats`, `get_ui`, `list_sceneries`.
+  `read_object`, `inspect_rig`, `fur_stats`, `get_ui`, `camera_pose`,
+  `list_sceneries`.
 - **Author geometry**: `add_box`, `add_cylinder`, `add_ellipsoid`,
   `add_stamp`, `add_voxels`, `write_object`, `import_mesh`, `recolor_layer`,
   `duplicate_layer`, `rename_layer`, `delete_layer`, `delete_object`,
@@ -79,17 +85,18 @@ A walk-in cave is a **natural feature**. Two lanes, and only two:
 - **Look**: `set_texture`, `update_light`, `add_light`,
   `remove_light`, `set_ui`, `set_sun`, `set_scenery`.
 - **Live view / edit tools** (the App's own paths, not data-file writes):
-  `view_pick`, `view_click`, `view_undo`, `view_clear`, `view_box`,
-  `edit_result`. `view_pick {screen:[x,y]}` clicks into the running view at
-  **logical window pixels** (use a `capture_screen`/`render_shot` image to pick
-  the pixel) and reports cell/world/material/owner. `view_click` uses the same
-  pick with `mode: carve|add|delete|paint|smooth|rotate|move|select`; pass
+  `dig_cave`, `view_pick`, `view_click`, `view_undo`, `view_clear`, `view_box`,
+  `edit_result`. `dig_cave` is the selection-driven one-call cave builder and
+  returns its engine report inline. `view_pick {screen:[x,y]}` clicks into the
+  running view at **logical window pixels** (use a `capture_screen` image to
+  pick the pixel) and reports cell/world/material/owner. `view_click` uses the
+  same pick with `mode: carve|add|delete|paint|smooth|rotate|move|select`; pass
   `commit:false` to stage a rotate/move preview instead of writing `world.json`.
-  Every one returns an id — read the engine report with `edit_result {id}`
-  (or `stamp_result`, same queue). A cell/xyz target is still accepted for
-  deterministic, camera-independent edits. These intents are consumed by the
-  running app; if no app is running the result stays "pending". `view_clear`
-  is irreversible; `view_undo` reverts one whole stroke.
+  The `view_*` tools return an id — read the engine report with
+  `edit_result {id}` (or `stamp_result`, same queue). A cell/xyz target is still
+  accepted for deterministic, camera-independent edits. These intents are
+  consumed by the running app; if no app is running the result stays "pending".
+  `view_clear` is irreversible; `view_undo` reverts one whole stroke.
 - **Verify/control**: `render_shot`, `capture_screen`, `reload_world`.
 
 Tool names keep their raw MCP names in a direct `tools/call`; Code Mode
@@ -146,10 +153,11 @@ The server fuzzy-normalizes invented names (`create_box` → `add_box`).
    chosen `--cam`-style argument (default output
    `workspace/screenshots/shot_<time>.ppm` — gitignored). A screenshot is the
    proof the edit landed and the material reads correctly.
-6. **Undo**: the app's AI panel has "Undo Last AI Turn" — mention it in the
-   final reply and state exactly what one undo reverts (the manifest,
-   `ai_edits.vxw` and any layer files changed during that turn). Outside the
-   panel, snapshot the authored files before large edits and restore deliberately.
+6. **Undo**: authored-file changes use the app's AI-panel "Undo Last AI Turn"
+   (manifest, `ai_edits.vxw` and layer files from that turn). Live-store changes
+   use `view_undo`, which reverts one whole stroke — including every sub-stamp
+   of a `dig_cave`. Mention the applicable Undo in the final reply. Outside the
+   panel, snapshot authored files before large edits and restore deliberately.
 
 ## Recipes
 
@@ -175,7 +183,14 @@ Micro layers have their own fine lattice/SVO — do not world-brush them.
 ### UI settings / sun / lights (power tools)
 `get_ui`/`set_ui` patch a flat `world.json` `"ui"` block (`renderFlags`,
 `backend`, `exposure`, `volFog`, `splatRadius`, `uiFontScale`, …) which the app
-hot-applies with member-diff guards. `set_sun {elev,azim}` authors the scene
+hot-applies with diff guards. **Camera placement**: use
+`set_ui {camPos:[px,py,pz], camTarget:[tx,ty,tz]}` and aim by a POINT — the app
+derives yaw/pitch (`atan2/asin`, same as `--cam`) and a complete target wins
+over raw angles. Raw `camYaw`/`camPitch` are DEGREES in the app convention
+(yaw 0 = +X, positive toward +Z; pitch positive up), NOT radians or a compass
+bearing from −Z. `get_ui` echoes the AUTHORED pose; `camera_pose` reads the
+LIVE camera from the running app. `render_shot {cam:[...]}` takes SIX numbers
+= position + look-at target in metres, not angles. `set_sun {elev,azim}` authors the scene
 sun. `add_light`/`update_light`/`remove_light` and `list_lights` manage authored
 point lights — never exceed the manifest's light budget. In the in-app AI
 agent these tools are denied by permission (the panel owns them); external

@@ -356,3 +356,5 @@ flicker's cause (4,843 px after the change).
 - [[concepts/fur-raster-parity]] — the fur's barrier chain and its rect bug.
 - [[concepts/measurement-discipline]] — contention invalidates a verdict in
   either direction, so a contended PASS is not evidence either.
+- [[concepts/motion-blur-prevcam]] — the unseeded previous-frame camera that
+  made headless motion blur diverge from the interactive path.

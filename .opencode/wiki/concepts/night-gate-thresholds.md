@@ -2,19 +2,16 @@
 title: "The night gate needs its own analyze(): three visual_check metrics fail on a correct night frame"
 tags: [testing, night, day-night, visual-check, thresholds, calibration, gate]
 sourceRefs: [tests/night_check.py, tests/visual_check.py, shaders/common_base.glsl, src/app/sun_angles.hpp, src/app/ui/sun_time.hpp, tests/test_app_cli_ui.cpp]
-lastReviewed: 2026-10-08
+lastReviewed: 2026-11-24
 ---
 
-> ## RE-BASELINE IN PROGRESS 2026-10-08 — do not gate against the table below
-> until it lands.
->
-> The flip landed the same day this band was confirmed: the light set went
-> 14 → ~169 derived (store enumeration, submerged lava included) at budget
-> 192. The table below is the **pre-flip record** — the day/night means,
-> especially water, moved with 150+ new underwater emitters, and the ratio
-> band must be re-derived against the new set before it gates again.
-> Calibration done 2026-10-08 (Victor): hero 0.337, house 0.336, water 0.515
-> in the 169-light state; his re-baseline write-up replaces this box.
+> **Current baseline 2026-11-24:** visible-emissive-only lighting removed the
+> old submerged/authored lamps, and night was deliberately darkened further:
+> `kMoonCol` 0.14 → 0.10, `nightBase` ~25% lower. Canonical night means are
+> **8.13 / 16.55 / 29.26** (hero/house/water), ratios **0.076 / 0.211 / 0.249**.
+> The gate floor is 0.06; the old upper ceilings remain broad dusk tripwires.
+> Historical 0.14/0.62 measurements below are retained as provenance, not the
+> current target.
 >
 > **The 0.10 … 0.27 night/day ratio band was re-measured on the tree *with* the
 > 14 derived emissive lights present, and came back at the pre-emissive values,
@@ -149,10 +146,10 @@ would be a statement about a camera, not about night.
 
 | metric | night threshold | measured (hero/house/water) |
 |---|---|---|
-| night/day mean-luma ratio | 0.10 … **0.27** | 0.185 / 0.143 / 0.229 |
-| night sky (own classifier) | ≥ 5 % | 40.1 / 8.7 / 10.0 % |
-| top-eighth blue-dominant | ≥ 60 % | 100.0 / 75.1 / 70.9 % |
-| dark share | **relative**, reported not gated | rel<0.5×: 30.8 / 39.6 / 44.9 % |
+| night/day mean-luma ratio | 0.06 … 0.27/0.27/0.44 | 0.076 / 0.211 / 0.249 |
+| night sky (own classifier) | ≥ 5 % | 18.45 / 37.50 / 71.40 % |
+| top-eighth blue-dominant | ≥ 60/60/50 % | 96.6 / 93.1 / 98.1 % |
+| dark share | **relative**, reported not gated | rel<0.5×: 53.72 / 50.78 / 15.52 % |
 
 The dark share is measured two ways deliberately: **relative** (`< 0.5 ×` the
 frame's own mean, the gate-scaled one) and **absolute** (`< 30`, printed as
@@ -160,9 +157,10 @@ frame's own mean, the gate-scaled one) and **absolute** (`< 30`, printed as
 
 ## The tripwire: VALIDATED by measurement, and set below the regression
 
-`kMoonCol` is `vec3(0.62,0.70,0.92) * 0.14`. The `0.62` gave mean luma 46 and
-read as dusk, so 0.14 is settled — and 0.62 is a *plausible-looking* number to
-"brighten" a moon, which is why review will not catch it.
+`kMoonCol` is `vec3(0.62,0.70,0.92) * 0.10` on the current tree. The older
+0.14 setting measured 10.59/18.37/32.16 night luma; lowering it to 0.10 plus
+the darker `nightBase` measured 8.13/16.55/29.26. The historical 0.62 value
+read as dusk and remains the positive-control regression.
 
 Measured **in-window at this camera** on 2026-10-07 (480×270 splat, hero, this
 binary, this tree) — not extrapolated from another camera, and **re-measured

@@ -1652,38 +1652,23 @@ one costs a whole turn, because the bad call is rejected before any work runs.
   underground. A heightfield cannot have overhangs, so terrain can never
   occlude an upward ray; the per-light shadow test still marches terrain,
   because a lamp behind a hill must not light the far side.
-- **Light sources**: a top-level `"lights"` array in `world.json`
-  (`{"pos":[x,y,z], "color":[r,g,b], "radius":m, "intensity":n}`, max 16,
-  `radius<=0`/`intensity<=0` entries are dropped) parsed by
-  `worldfile::loadLightManifest` into a std140 UBO at **binding 25** (528 B =
-  two `vec4[16]` + count at byte 512 + 3 pad ints), declared once in
-  `common_base.glsl` and read by `applyLights()`. Both backends march for the
-  light (`lightVisibilitySvo` = one `exactSVOHit`; `lightVisibilitySPlat` =
-  the heightfield+objVol binary march). Uploaded by `App::uploadLightSources()`
-  — **call it only after every pass is initialised**: `setLights()` writes a
-  descriptor of a set that does not exist until `init()` ran, and the silent
-  no-op looks exactly like "the lamp is in the manifest but does nothing".
-  Measured with one lamp in the cabin: mean luma 42 → 87, pixels under luma 30
-  44.9 % → 11.0 %; the splat↔SVO delta is unchanged (-16.7 → -14.3), i.e. the
-  light does not add backend divergence.
-  **Emissive materials derive lights too**: `uploadLightSources()` builds a
-  per-material emission table — palette `kEmissive` mats 9-15 (CPU copy in
-  `common.hpp`, GLSL copy in `common_base.glsl`; change both or lit colour
-  and glowing colour disagree) plus every texture binding flagged
-  `"emissive"` in world.json, read from the ATLAS (`emissiveScale`/
-  `meanColor`, both zeroed by `VF_TEXTURES=0`, so the bit-exact escape hatch
-  kills derived lights with the glow) — then
-  `VoxelField::collectEmissive()` buckets emitter cells on a 1 m grid, sorts
-  count-desc/key-asc (same content ⇒ same lights, every reload), thins to
-  1.5 m separation (one hearth, not twenty lights) and lifts each centroid
-  to the nearest AIR cell, because a light buried in its own emitter is
-  occluded by every receiver's march and would occupy a slot contributing
-  nothing. AUTHORED lights fill the 16 slots first, derived fill the rest,
-  truncation logged. Derived lights are a function of content — never
-  persisted (`writeLightManifest` must not learn about them). Re-derived on
-  every atlas reload (`reloadTexAtlas`) and world reload; the default hamlet
-  derives 14 from `ai_edits` mat 15 + cabin/tower emitters. Texture-flagged
-  light colour = the texture's mean colour × 3 × `emissiveScale`, gain 0.5.
+- **Light sources**: only the **sun/moon** and **visible emissive materials**
+  may light the scene. Legacy `world.json` `"lights"` point sources are ignored
+  (with a warning); `vf_mcp add_light`/`update_light` are disabled, while
+  `list_lights`/`remove_light` remain for cleanup. `App::uploadLightSources()`
+  builds the emission table from palette `kEmissive` mats 9-15 plus atlas
+  textures flagged `"emissive"`, then enumerates **exposed cells above
+  `WATER_LEVEL`**. Submerged emitters may self-glow but never cast invisible
+  point light onto the surface. Clusters are bucketed on a 1 m grid, sorted
+  count-desc/key-asc, thinned to 1.5 m, and lifted at most 0.85 m into air; if
+  no air is found the cluster is **dropped**, never placed by a last-resort
+  offset inside/through solid geometry. The resulting set fills the 256-slot
+  std140 UBO at **binding 25** (budget 192, per-pixel K=4), declared in
+  `common_base.glsl` and read by `applyLights()`. Upload only after every pass
+  `init()`; re-derived on atlas/world reload. `VF_TEXTURES=0` still kills both
+  texture emission and its derived light. `tests/reflection_check.py` proves a
+  bright authored lamp changes zero pixels, and `test_store` pins submerged
+  emitter rejection.
 - **Photo textures** (both backends): a `world.json` top-level `"textures"`
   array (`{file, mat, scale}` in m/tile, optional `emissive` +
   `emissiveScale` — written ONLY when set, so manifests that never used them

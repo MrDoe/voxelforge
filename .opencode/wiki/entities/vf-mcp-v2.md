@@ -1,13 +1,13 @@
 ---
 title: vf_mcp v2 tool surface
 tags: [mcp, tools, authoring, entities]
-sourceRefs: [src/ai/mcp_server.cpp, src/ai/tools.hpp, src/voxel/selector.hpp, src/ai/builders.hpp, tests/mcp_v2_check.py]
-lastReviewed: 2026-11-21
+sourceRefs: [src/ai/mcp_server.cpp, src/app/edit/mcp_intents.cpp, src/ai/tools.hpp, src/voxel/selector.hpp, src/ai/builders.hpp, tests/mcp_v2_check.py, tests/mcp_view_check.py]
+lastReviewed: 2026-11-24
 ---
 
 # vf_mcp v2
 
-The MCP server (64 tools after this change) now reaches **both** authoring
+The MCP server (69 tools) now reaches **both** authoring
 lanes and the running app's live edit tools. Two invariants shape it: one code path with the GUI (via the
 [[concepts/mcp-intent-bridge]]) and one selector grammar for every cell verb.
 
@@ -15,7 +15,7 @@ lanes and the running app's live edit tools. Two invariants shape it: one code p
 
 | Lane | Tools | Persisted in | Undo |
 |---|---|---|---|
-| Store (reversible/interactive) | `stamp`, `stamp_result`, `commit_overlay`, `view_pick`, `view_click`, `view_undo`, `view_clear`, `view_box`, `edit_result` | `runtime_edits.vxw` / staged `world.json` pose | one stroke/step via the app |
+| Store (reversible/interactive) | `dig_cave`, `stamp`, `stamp_result`, `commit_overlay`, `view_pick`, `view_click`, `view_undo`, `view_clear`, `view_box`, `edit_result` | `runtime_edits.vxw` / staged `world.json` pose | one stroke/step via the app |
 | Baked (permanent/authored) | `delete_voxels`, `paint`, `write_object`, `add_path`, `add_tree`, `recolor_layer`, `set_layer_transform`, … | named `.vxw` + `world.json` | `snapshot` / `restore_snapshot` |
 
 ## Selector grammar (`src/voxel/selector.hpp`)
@@ -36,6 +36,12 @@ before the write.
 - `paint {layer, selector, mat?, r/g/b?, refl?, rough?, tex?, dry_run?}` —
   region-scoped recolor; `mat` is the TARGET, `from` is the filter (conflating
   them silently selects zero cells — measured and fixed).
+- `dig_cave {screen|cell|xyz, radius?, depth?, style?}` — the selection-driven
+  one-call cave builder. The server skips its world build; the App composes
+  Delete/Carve/Add sub-stamps through `applyEditLive` as one undoable stroke and
+  the server returns the engine report inline (two-second wait, then pending).
+  Defaults: radius 1 m, depth 3 m, `style:"dripstone"`. This is store/session
+  state, not baked source geometry; `commit_overlay` cannot promote deletions.
 - `stamp {mode: carve|add|delete|paint|smooth, cell, diameter?, depth?, mat?,
   strength?, box_scope?}` — posts an intent; the app runs `applyEditLive`.
 - `stamp_result {id}` — instrument report.
@@ -71,7 +77,9 @@ before the write.
   against throwaway sceneries with `VF_OVERLAY_PATH` in `/tmp/opencode`.
   `tests/mcp_view_check.py` (CTest `mcp_view_check`) adds the view-click path:
   pick/select/screen-carve share one resolved cell, all edit tools run, and
-  rotate/move persist in `world.json`.
+  rotate/move persist in `world.json`. Its live-App `dig_cave` case measures
+  the one-call path (787 ms round trip, 89 ms first stamp), one undo step and
+  overlay persistence.
 
 ## Verification
 

@@ -130,6 +130,21 @@ TEST_CASE("app session key writer appends and replaces without breaking JSON")
     CHECK(std::count(text.begin(), text.end(), '}') == 1);
 }
 
+TEST_CASE("app session key writer resets a spliced entry instead of extending it")
+{
+    // Observed in .opencode/voxelforge_sessions.json: two concurrent writers
+    // left one line with a key and two concatenated values. Patching that in
+    // place would keep the garbage; the writer must start from a clean object.
+    const std::string corrupt =
+        "{\n  \"/tmp/sc::model\"opencode-go/beam-free\"opencode-go/hy4-flash-free\"\n}\n";
+    const std::string text =
+        vf::ai::ChatUi::setSessionKey(corrupt, "/tmp/sc::model", "opencode-go/beam-free");
+    CHECK(text.find("hy4-flash-free") == std::string::npos);
+    CHECK(text.find("\"/tmp/sc::model\": \"opencode-go/beam-free\"") != std::string::npos);
+    CHECK(std::count(text.begin(), text.end(), '{') == 1);
+    CHECK(std::count(text.begin(), text.end(), '}') == 1);
+}
+
 TEST_CASE("chat transcript decodes JSON newlines from SSE deltas")
 {
     using vf::ai::ChatUi;

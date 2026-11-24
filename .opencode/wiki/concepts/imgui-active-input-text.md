@@ -91,3 +91,6 @@ disjunction is folded into a named `bool` first.
   lifecycle, different rule.
 - [[entities/hud-sidebar]] — the AI pane is a section of the sidebar, and the
   composer has no window of its own.
+- [[concepts/opencode-request-timeout]] — the other way a submit can appear to
+  fail: `Send failed: malformed OpenCode response` is a no-response/timeout in
+  the HTTP client, not a cleared field.

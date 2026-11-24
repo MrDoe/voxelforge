@@ -751,7 +751,7 @@ vec3 moonDir()
     return normalize(vec3(-kSunDir.x, -kSunDir.y * 0.75 + 0.30, -kSunDir.z));
 }
 
-const vec3 kMoonCol = vec3(0.62, 0.70, 0.92) * 0.14;
+const vec3 kMoonCol = vec3(0.62, 0.70, 0.92) * 0.10;
 
 // Moonlight: a second, much dimmer directional light that takes over at night.
 // It uses AO only, NEVER the baked sun shadow - the CPU bake marches the sun's
@@ -775,7 +775,7 @@ vec3 applyNight(vec3 d, vec3 col, bool withDetail)
     if (night <= 0.001)
         return col;
     // Keep a faint horizon glow: silhouettes must stay readable against it.
-    vec3 nightBase = mix(vec3(0.030, 0.045, 0.078), vec3(0.005, 0.010, 0.026),
+    vec3 nightBase = mix(vec3(0.024, 0.036, 0.062), vec3(0.004, 0.008, 0.020),
                          pow(max(d.y, 0.0), 0.55));
     col = mix(col, nightBase, night);
 

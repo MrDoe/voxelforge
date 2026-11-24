@@ -249,31 +249,38 @@ std::vector<glm::vec3> App::buildEmissionTable(
 
 void App::uploadLightSources()
 {
-    std::vector<vf::voxel::LightSource> rawAuthored;
-    vf::voxel::worldfile::loadLightManifest(m_manifestPath, rawAuthored);
-    // Follow-attachment resolves here (bake truth: current placement), and
-    // identically in the trigger seed - one helper, no drift.
-    const std::vector<vf::voxel::LightSource> lightSources =
-        resolveFollowLights(rawAuthored, true);
+    std::vector<vf::voxel::LightSource> legacyAuthored;
+    vf::voxel::worldfile::loadLightManifest(m_manifestPath, legacyAuthored);
+    if (!legacyAuthored.empty())
+        spdlog::warn("lighting: ignoring {} authored point light(s); use visible "
+                     "emissive geometry or sun/moon", legacyAuthored.size());
+    const std::vector<vf::voxel::LightSource> lightSources;
 
     const std::vector<glm::vec3> emission =
         buildEmissionTable(m_texBindings, m_texAtlas);
-    // FLIP (UBO-256): the bake enumerates the STORE, not the field. The
-    // store sees the propagated interior mats the pools render (submerged
-    // lava included), so this is a superset of the old field set; the
-    // budget (default 192) keeps the whole tail live. Uncapped
-    // enumeration here - fillLightUBO owns the single truncation.
+    // FLIP (UBO-256): the bake enumerates the STORE, not the field. Only
+    // exposed emissive cells above the water plane contribute; submerged
+    // emitters may glow but cannot cast invisible light onto the surface.
+    // Uncapped enumeration here - fillLightUBO owns the single truncation.
     std::vector<vf::voxel::VoxelField::EmissiveCluster> clusters;
     m_layers.store().collectEmissive(emission, clusters,
                                      std::numeric_limits<int>::max());
+    if (getenv("VF_TRACE_LIGHTS")) {
+        spdlog::info("lighting: {} emissive clusters before budget", clusters.size());
+        for (size_t i = 0; i < clusters.size(); ++i) {
+            const auto& c = clusters[i];
+            spdlog::info("light[{}]: pos=({:.2f},{:.2f},{:.2f}) "
+                         "color=({:.2f},{:.2f},{:.2f}) intensity={:.2f} "
+                         "radius={:.2f}", i, c.pos.x, c.pos.y, c.pos.z,
+                         c.color.r, c.color.g, c.color.b, c.intensity, c.radius);
+        }
+    }
 
     vf::voxel::LightUBO ubo{};
     const int budget =
         std::clamp(m_lightBudget, 1, vf::voxel::kMaxLights);
     const int n = vf::voxel::fillLightUBO(lightSources, clusters, budget,
                                           ubo, true);
-    const int nAuthored =
-        std::min<int>(int(lightSources.size()), budget);
 
     ubo.perPixelK =
         std::clamp(m_lightK, 1, vf::voxel::worldfile::kLightKMax);
@@ -282,9 +289,8 @@ void App::uploadLightSources()
     m_microSvoPass.setLights(ubo);
     m_furPass.setLights(ubo);
     if (n > 0)
-        spdlog::info("lighting: {} authored (world.json), {} derived from emissive "
-                     "materials, {}/{} budget used, K={}",
-                     nAuthored, n - nAuthored, n, budget, ubo.perPixelK);
+        spdlog::info("lighting: {} visible emissive clusters, {}/{} budget used, K={}",
+                     n, n, budget, ubo.perPixelK);
 
     // Indirect term from the SAME ubo, at the tail, so the direct and the
     // baked-indirect term can never be derived from different emitter sets

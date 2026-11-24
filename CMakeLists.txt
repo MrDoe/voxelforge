@@ -410,6 +410,13 @@ add_test(NAME texture_check
     COMMAND ${Python3_EXECUTABLE} ${GROUP_GATE} textures
             ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/tests/texture_check.py
             $<TARGET_FILE:voxelforge>)
+# Emissive textured panel reflected in a glossy floor, with and without an
+# intervening wall. Pins both the texture->derived-light path and SSR depth
+# occlusion on the splat and SVO backends.
+add_test(NAME reflection_check
+    COMMAND ${Python3_EXECUTABLE} ${GROUP_GATE} effects,textures
+            ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/tests/reflection_check.py
+            $<TARGET_FILE:voxelforge>)
 add_test(NAME fog_check
     COMMAND ${Python3_EXECUTABLE} ${GROUP_GATE} fog
             ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/tests/fog_check.py
@@ -495,6 +502,8 @@ set_tests_properties(ssao_check
     PROPERTIES LABELS "effects;ssao" SKIP_RETURN_CODE 77)
 set_tests_properties(texture_check
     PROPERTIES LABELS "textures" SKIP_RETURN_CODE 77)
+set_tests_properties(reflection_check
+    PROPERTIES LABELS "effects;textures" SKIP_RETURN_CODE 77)
 set_tests_properties(fog_check
     PROPERTIES LABELS "fog" SKIP_RETURN_CODE 77)
 set_tests_properties(gbuffer_check
@@ -588,8 +597,8 @@ vf_add_test_group(visual voxelforge)
 vf_add_test_group(micro voxelforge)
 # The fur cards over the micro objects.
 vf_add_test_group(fur voxelforge)
-vf_add_test_group(effects voxelforge)
-vf_add_test_group(textures voxelforge)
+vf_add_test_group(effects voxelforge vf_mcp)
+vf_add_test_group(textures voxelforge vf_mcp)
 vf_add_test_group(fog voxelforge)
 # Night phase: its own thresholds, because every visual_check metric is
 # calibrated on daylight. Two extra world loads, so it is NOT in smoke --

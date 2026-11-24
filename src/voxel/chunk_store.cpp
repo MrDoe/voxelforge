@@ -364,6 +364,8 @@ void ChunkStore::emitChunkEmitters(int ci,
                                 continue;
                             const int gx = ox + bx + dx, gy = oy + by + dy,
                                       gz = oz + bz + dz;
+                            if (cellWorld(gy) <= WATER_LEVEL + 0.02f)
+                                continue;
                             if (!hasAirNeighbour(gx, gy, gz))
                                 continue;
                             cells.push_back(
@@ -392,6 +394,8 @@ void ChunkStore::emitChunkEmitters(int ci,
                     c.slotOf[blockKeyOf(lx, ly, lz)] != kNoBrick)
                     return; // brick wins
                 const int gx = ox + lx, gy = oy + ly, gz = oz + lz;
+                if (cellWorld(gy) <= WATER_LEVEL + 0.02f)
+                    return;
                 const glm::vec3* e =
                     boxEmis ? boxEmis
                             : emissionOf(int(m_colMat[size_t(gz) * m_latN +

@@ -269,6 +269,12 @@ struct UiSettings {
     float camSpeed = kUiAbsent;
     float camX = kUiAbsent, camY = kUiAbsent, camZ = kUiAbsent;
     float camYaw = kUiAbsent, camPitch = kUiAbsent;
+    // Optional look-at target (metres). When all three are present WITH a
+    // complete camX/Y/Z, the app derives yaw/pitch from pos -> target with
+    // the same rule as --cam, so an MCP client can aim by a point instead of
+    // knowing the app's yaw convention (yaw 0 = +X, degrees). A complete
+    // target wins over camYaw/camPitch; the raw angles stay valid fallbacks.
+    float camTargetX = kUiAbsent, camTargetY = kUiAbsent, camTargetZ = kUiAbsent;
     float furEnabled = kUiAbsent, furPerCell = kUiAbsent;
     float furLength = kUiAbsent, furWidth = kUiAbsent, furCurl = kUiAbsent;
     float furCycles = kUiAbsent, furTilt = kUiAbsent, furSss = kUiAbsent;

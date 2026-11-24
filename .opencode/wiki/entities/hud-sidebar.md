@@ -129,3 +129,17 @@ sidebar change by running the app and looking:
   `glfwGetKey` per frame, so a press+release that both land inside one frame
   is invisible. See [[concepts/focused-test-groups]] for what the gates do and
   do not cover.
+
+## Captured panels (2026-11-24)
+
+Captured with `VF_TEST_PANEL=<section> VF_HUD_SHOT=12:<ppm>` under Xvfb, then
+channel-swapped on load (the swapchain is B8G8R8A8). These are documentation
+evidence, not assertions — headless `--shot` omits the HUD entirely
+([[concepts/interactive-ui-coverage-gap]]).
+
+- [AI / chat panel](../../../tests/screenshots/wiki_panel_ai.png) — model
+  picker, composer and tool cards.
+- [Edit panel](../../../tests/screenshots/wiki_panel_edit.png) — brush modes,
+  width in voxels, depth and falloff curve.
+- [Render panel](../../../tests/screenshots/wiki_panel_render.png) — backend,
+  sun and speed settings (some lower rows clip at the default viewport size).

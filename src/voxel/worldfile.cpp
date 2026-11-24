@@ -1668,6 +1668,9 @@ std::string uiSettingsToJson(const UiSettings& u)
     uiNum(b, "camZ", u.camZ);
     uiNum(b, "camYaw", u.camYaw);
     uiNum(b, "camPitch", u.camPitch);
+    uiNum(b, "camTargetX", u.camTargetX);
+    uiNum(b, "camTargetY", u.camTargetY);
+    uiNum(b, "camTargetZ", u.camTargetZ);
     uiNum(b, "furEnabled", u.furEnabled);
     uiNum(b, "furPerCell", u.furPerCell);
     uiNum(b, "furLength", u.furLength);
@@ -1768,6 +1771,9 @@ bool loadUiManifest(const std::string& path, UiSettings& out)
             field("camSpeed", out.camSpeed) || field("camX", out.camX) ||
             field("camY", out.camY) || field("camZ", out.camZ) ||
             field("camYaw", out.camYaw) || field("camPitch", out.camPitch) ||
+            field("camTargetX", out.camTargetX) ||
+            field("camTargetY", out.camTargetY) ||
+            field("camTargetZ", out.camTargetZ) ||
             field("furEnabled", out.furEnabled) || field("furPerCell", out.furPerCell) ||
             field("furLength", out.furLength) || field("furWidth", out.furWidth) ||
             field("furCurl", out.furCurl) || field("furCycles", out.furCycles) ||
@@ -1820,6 +1826,8 @@ bool mergeUiManifest(const std::string& path, const UiSettings& patch)
     num(patch.camSpeed, cur.camSpeed); num(patch.camX, cur.camX);
     num(patch.camY, cur.camY); num(patch.camZ, cur.camZ);
     num(patch.camYaw, cur.camYaw); num(patch.camPitch, cur.camPitch);
+    num(patch.camTargetX, cur.camTargetX); num(patch.camTargetY, cur.camTargetY);
+    num(patch.camTargetZ, cur.camTargetZ);
     num(patch.furEnabled, cur.furEnabled); num(patch.furPerCell, cur.furPerCell);
     num(patch.furLength, cur.furLength); num(patch.furWidth, cur.furWidth);
     num(patch.furCurl, cur.furCurl); num(patch.furCycles, cur.furCycles);

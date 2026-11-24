@@ -1,8 +1,8 @@
 ---
 title: MCP intent bridge to the store lane
 tags: [mcp, live-edit, store, architecture, parity]
-sourceRefs: [src/ai/mcp_server.cpp, src/app/edit/mcp_intents.cpp, src/app/frame/run_poll.cpp, tests/mcp_v2_check.py, tests/mcp_view_check.py]
-lastReviewed: 2026-11-21
+sourceRefs: [src/ai/mcp_server.cpp, src/app/edit/mcp_intents.cpp, src/app/frame/run_poll.cpp, tests/mcp_v2_check.py, tests/mcp_view_check.py, .opencode/agents/voxelforge.md, .opencode/skills/vf-mcp/SKILL.md]
+lastReviewed: 2026-11-24
 ---
 
 # Why a bridge exists
@@ -52,35 +52,44 @@ come for free because they live downstream of `applyEditLive`.
 
 # Latency budget: "dig a cave here" in seconds
 
-Measured 2026-11-22 on a scratch scenery (`/tmp/opencode/mcp_latency.py`, fresh
-`vf_mcp` process per call):
+Measured 2026-11-24 on a LakesideHamlet scratch scenery with a live headless
+App (`tests/mcp_view_check.py`; fresh `vf_mcp` process per call):
 
 | stage | measured | why |
 |---|---|---|
 | MCP process start | **4 ms** | `init()` only loads `ai_edits`; `LayeredWorld` is a lazy static |
-| `view_pick` / `view_click` | **3–5 ms** | skip `refreshIfChanged()` — no `VoxelField` build |
-| `help` / `ground` / `surface_scan` | **~5 s** | blanket `refreshIfChanged()` in `callTool` builds `LayeredWorld`+`VoxelField` (~5 s); `help` doesn't even use it |
-| intent → `applyEditLive` | **one frame**, stamp 5–25 ms | `consumeMcpIntents()` runs every frame in `pollWorldAndTextures`, NOT on the 0.5 s layer-poll |
-| disk-lane `.vxw` rewrite → live view | **≥0.5 s**, sometimes never | poll watches `world.json` signature; rewriting an existing layer's `.vxw` does not bump it — the hot-reload trap recorded in quirk memory) |
+| `help` | **3 ms** | now skips `refreshIfChanged()` — it never reads the world |
+| `view_pick` / `view_click` / `stamp` | **3–5 ms** to queue | skip the world build; the App owns picking and rasterisation |
+| `ground` / `surface_scan` | **~5 s** | these genuinely need `LayeredWorld`+`VoxelField` |
+| `dig_cave` one-call round trip | **787 ms** | one intent + inline result poll; no second tool round trip |
+| cave first stamp (mouth opens) | **89 ms** | first `applyEditLive` in the compound stroke |
+| complete 13-stamp dripstone cave | **776 ms** | 1,365 touched cells, 2 chunks, 8,789 final run surfels |
+| intent → `applyEditLive` | **one frame** | `consumeMcpIntents()` runs every frame in `pollWorldAndTextures`, NOT on the 0.5 s layer-poll |
+| disk-lane `.vxw` rewrite → live view | **≥0.5 s**, sometimes never | poll watches `world.json`; rewriting an existing layer's `.vxw` does not bump it |
 
-So the app-side bridge is already fast; the seconds are spent **before** the
-intent exists: the agent's old "read before you write" workflow issued up to
-8 inspection calls (first one pays the ~5 s field build), then wrote through
+The app-side bridge was never the bottleneck. The seconds were spent **before**
+the intent existed: the agent's old "read before you write" workflow issued up
+to 8 inspection calls (the first paying the ~5 s field build), then wrote through
 the disk lane, then rendered a verification shot (another ~5 s process). The
-fix is a one-call fast path: the agent prompt (`.opencode/agents/voxelforge.md`)
-now says that a local edit at the UI-context cell must be the FIRST tool call
-through `dig_cave`/`view_click`, with no inspection, no `.vxw` write and no
-`render_shot` before the reply. `dig_cave` posts the intent and returns the
-engine report inline so one tool call is enough. Residual latency is model
+fix is a one-call fast path: `.opencode/agents/voxelforge.md` now requires a
+local edit at the UI-context cell to be the FIRST tool call through
+`dig_cave`/`view_click`, with no inspection, no `.vxw` write and no
+`render_shot` before the reply. `dig_cave` returns the engine report inline,
+including `firstStampMs`, so one tool call is enough. Residual latency is model
 inference, not the engine.
 
 # Beyond stamps: a click into the view
 
 The bridge now carries every edit tool, not just cell stamps. `vf_mcp` exposes
-`view_pick`, `view_click`, `view_undo`, `view_clear` and `view_box`; each posts
-an intent (`pick`, `click`, `undo`, `clear`, `box`) that the consumer dispatches
-to the App's own functions. A `screen:[x,y]` target — **logical window pixels**,
-the same space GLFW/ImGui use, not framebuffer pixels — calls
+`dig_cave`, `view_pick`, `view_click`, `view_undo`, `view_clear` and `view_box`;
+each posts an intent (`dig_cave`, `pick`, `click`, `undo`, `clear`, `box`) that
+the consumer dispatches to the App's own functions. `dig_cave` is the one-call
+selection fast path: the App composes mouth/tunnel/chamber/dripstone from the
+GUI brush rasterizers under one drag state, so the whole feature is one undo
+step, and the stdio server waits up to two seconds for the engine report and
+returns it inline. No `LayeredWorld` build is needed on that path. A
+`screen:[x,y]` target — **logical window pixels**, the same space GLFW/ImGui
+use, not framebuffer pixels — calls
 `App::pickAtWindowPos`, so the ray conversion, the `ChunkStore` march and the
 micro-vs-world competition are the mouse's, not a second implementation. A
 `cell:[x,y,z]`/xyz target remains for camera-independent edits. Measured on the
@@ -118,3 +127,23 @@ overlay is untouched.
 paints into `ai_edits.vxw` (the live layer the baker preserves), refuses pure
 deletions (record layers cannot express air) and then clears the overlay.
 See [[entities/vf-mcp-v2]] for the full tool surface.
+
+## Camera pose is read through the same queue
+
+`set_ui` now accepts `camTarget:[x,y,z]` (or `camTargetX/Y/Z`) in metres.
+The App derives yaw/pitch from camera position → target on the next manifest
+poll; explicit `camYaw`/`camPitch` remain the alternative. `camera_pose` is a
+**read-only intent**: it posts to the same queue and the App reports the live
+camera (position, yaw, pitch) in `mcp_results.jsonl`, so an agent can prove
+where the running view actually landed. `get_ui` prints the persisted block as
+AUTHORED and points at `camera_pose`, because the manifest is not the live
+camera. The new `camTarget*` fields use the same `kUiAbsent` field-diffing as
+the other UI keys, so a GUI drag is never snapped back by the poll.
+
+## See also
+
+[[concepts/decision-driven-world-editing]] (proposal) — a Clef decision loop
+that generates option sentences from the observation and compiles the chosen
+one into exactly these intents. It adds the lane-discipline rule (store burst
+vs authored-file burst) and names the engine gaps this bridge still has:
+`tex` on store-lane paint and an instrument for disk-lane tool results.

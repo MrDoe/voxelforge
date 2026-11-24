@@ -66,6 +66,46 @@ static const char* kMatNames[int(vf::voxel::kPaletteN)] = {
     "glow purple", "glow blue", "white-hot", "snow", "bark", "moss", "thatch",
     "plaster", "fleece", "wet soil"};
 
+// The "ui" block is the PERSISTED camera pose. Report the derived aim so an
+// agent can see that a pos+target placement means what it thinks it means;
+// camera_pose (the live intent) is the authoritative reading of the running
+// app, which the user may have moved with WASD since the block was written.
+static std::string cameraPoseFromManifest(const vf::voxel::worldfile::UiSettings& u)
+{
+    using U = vf::voxel::worldfile::UiSettings;
+    constexpr float kPi = 3.14159265358979323846f;
+    const auto has = [](float v) {
+        return v != U::kUiAbsent && std::isfinite(v);
+    };
+    if (!(has(u.camX) && has(u.camY) && has(u.camZ)))
+        return std::string();
+    float yawDeg = has(u.camYaw) ? u.camYaw : 0.f;
+    float pitchDeg = has(u.camPitch) ? u.camPitch : 0.f;
+    const char* aim = "angles";
+    if (has(u.camTargetX) && has(u.camTargetY) && has(u.camTargetZ)) {
+        const float dx = u.camTargetX - u.camX;
+        const float dy = u.camTargetY - u.camY;
+        const float dz = u.camTargetZ - u.camZ;
+        const float len = std::sqrt(dx * dx + dy * dy + dz * dz);
+        if (len > 1e-4f) {
+            yawDeg = 180.f / kPi * std::atan2(dz, dx);
+            pitchDeg = 180.f / kPi *
+                       std::asin(std::clamp(dy / len, -1.f, 1.f));
+            aim = "target";
+        }
+    }
+    const float yaw = yawDeg * kPi / 180.f;
+    const float pitch = pitchDeg * kPi / 180.f;
+    const float cp = std::cos(pitch);
+    char buf[256];
+    std::snprintf(buf, sizeof(buf),
+                  "camera: pos=(%.2f,%.2f,%.2f) yaw=%.2f pitch=%.2f "
+                  "forward=(%.3f,%.3f,%.3f) aim=%s",
+                  u.camX, u.camY, u.camZ, yawDeg, pitchDeg,
+                  cp * std::cos(yaw), std::sin(pitch), cp * std::sin(yaw), aim);
+    return std::string(buf);
+}
+
 // --- tiny JSON writers -------------------------------------------------------
 static std::string jsonEscape(const std::string& s)
 {
@@ -2405,18 +2445,27 @@ struct Server {
         std::string safe = voxel::EditableWorld::sanitizeLayerName(newName);
         if (safe.empty())
             return { "illegal target name", true };
-        // resolve source file
+        // Resolve the source file, carrying its role and directory across. A
+        // micro layer has its OWN fine lattice; duplicating it as a world-lattice
+        // "object" makes layered_world silently resample it on load, so the copy
+        // loses its detail. Keep role="micro" and write beside the source
+        // (micro/), matching world.json's convention.
         std::string srcFile = src;
+        std::string srcRole = "object";
+        std::string srcDir;
         std::vector<voxel::worldfile::WorldLayer> layers;
         if (voxel::worldfile::loadManifest(manifestPath(), layers))
             for (auto& l : layers)
                 if (l.name == src || l.file == src) {
                     srcFile = l.file;
+                    srcRole = l.role.empty() ? "object" : l.role;
+                    const size_t slash = srcFile.find_last_of('/');
+                    srcDir = slash == std::string::npos ? std::string() : srcFile.substr(0, slash + 1);
                     break;
                 }
         if (srcFile.find(".vxw") == std::string::npos)
             srcFile += ".vxw";
-        std::string dstFile = safe + ".vxw";
+        std::string dstFile = srcDir + safe + ".vxw";
         std::ifstream in(voxel::scenery::root() + "/" + srcFile, std::ios::binary);
         if (!in)
             return { "cannot read source layer: " + srcFile, true };
@@ -2430,7 +2479,7 @@ struct Server {
         voxel::worldfile::WorldLayer nl;
         nl.file = dstFile;
         nl.name = safe;
-        nl.role = "object";
+        nl.role = srcRole;
         nl.enabled = false;
         nl.listed = true;
         nl.pos[0] = nl.pos[1] = nl.pos[2] = 0.f;
@@ -2608,21 +2657,35 @@ struct Server {
         if (voxel::worldfile::loadSunManifest(manifestPath(), e, a))
             o << "sun: elev " << e << " azim " << a << "\\n";
         voxel::worldfile::UiSettings u;
-        if (voxel::worldfile::loadUiManifest(manifestPath(), u))
+        if (voxel::worldfile::loadUiManifest(manifestPath(), u)) {
             o << "ui: " << voxel::worldfile::uiSettingsToJson(u) << "\\n";
-        else
+            const std::string cam = cameraPoseFromManifest(u);
+            if (!cam.empty())
+                o << cam << " (AUTHORED - call camera_pose for the live view)\\n";
+        } else
             o << "ui: (none - controls are at startup/env defaults)\\n";
         o << "keys: renderFlags backend taa volFog motionBlur dof linearFx "
             "autoExposure exposure tonemapLook ssaoStrength ssaoRadius "
             "ssaoBlur ssaoDebug splatRadius edgeBlend edgeShrink edgeFill "
             "edgeBridgeSize cornerFill lightBudget lightK camSpeed camPos "
-            "camYaw camPitch furEnabled furPerCell furLength furWidth furCurl "
+            "camYaw camPitch camTargetX/Y/Z furEnabled furPerCell furLength furWidth furCurl "
             "furCycles furTilt furSss brushMode brushWidth brushDepth "
             "brushMaterial smoothStrength falloffCurve smoothPreserveVolume "
             "uiFontScale scenery\\nrenderFlags bits: 0 AO 1 Shadows 2 Flora 3 Water "
             "5 SSR 6 SSAO 7 DetailNormals 8 Enclosure 9 TerrainInterp "
             "10 AutoExpose 11 Transmission 13 PhotoCards";
         return { o.str(), false };
+    }
+
+    // The live camera lives in the App (a different process). Post a read-only
+    // intent through the same lane the view/edit tools use, so the answer is
+    // the App's actual pose - not the persisted ui block the user may have
+    // flown away from. No running app is a normal case: postIntent keeps the
+    // id queued and says so instead of blocking the stdio server forever.
+    ToolResult cameraPoseTool(const std::string& args)
+    {
+        return postIntent("camera_pose", args.empty() ? std::string("{}") : args,
+                          800);
     }
 
     ToolResult setUi(const std::string& args)
@@ -2659,6 +2722,21 @@ struct Server {
         }
         num("camX", p.camX); num("camY", p.camY); num("camZ", p.camZ);
         num("camYaw", p.camYaw); num("camPitch", p.camPitch);
+        // Aim by a POINT, not by the app's yaw convention (yaw 0 = +X,
+        // degrees). The app derives yaw/pitch from pos -> target on apply;
+        // a complete target wins over any camYaw/camPitch in the same call.
+        std::vector<float> tgt;
+        if (ai::jsonGetFloatArray(args, "camTarget", tgt, 3) ||
+            ai::jsonGetFloatArray(args, "target", tgt, 3) ||
+            ai::jsonGetFloatArray(args, "lookAt", tgt, 3)) {
+            if (tgt.size() != 3 || !std::isfinite(tgt[0]) ||
+                !std::isfinite(tgt[1]) || !std::isfinite(tgt[2]))
+                return { "set_ui: camTarget needs three finite [x,y,z] metres", true };
+            p.camTargetX = tgt[0]; p.camTargetY = tgt[1]; p.camTargetZ = tgt[2];
+            applied << " camTarget";
+        }
+        num("camTargetX", p.camTargetX); num("camTargetY", p.camTargetY);
+        num("camTargetZ", p.camTargetZ);
         num("furEnabled", p.furEnabled); num("furPerCell", p.furPerCell);
         num("furLength", p.furLength); num("furWidth", p.furWidth);
         num("furCurl", p.furCurl); num("furCycles", p.furCycles);
@@ -2674,8 +2752,16 @@ struct Server {
             return { "set_ui: no known keys in arguments (see get_ui)", true };
         if (!voxel::worldfile::mergeUiManifest(manifestPath(), p))
             return { "failed to write the ui block", true };
-        return {"ui" + applied.str() +
-                    " written; the running app hot-applies within ~1 s", false};
+        std::string msg = "ui" + applied.str() +
+                          " written; the running app hot-applies within ~1 s";
+        voxel::worldfile::UiSettings merged;
+        if (voxel::worldfile::loadUiManifest(manifestPath(), merged)) {
+            const std::string cam = cameraPoseFromManifest(merged);
+            if (!cam.empty())
+                msg += "\n" + cam +
+                       " (AUTHORED; camera_pose reads the live view)";
+        }
+        return { msg, false };
     }
 
     ToolResult setSun(const std::string& args)
@@ -3498,14 +3584,24 @@ std::string toolSchemas()
               ":{\"type\":\"array\",\"items\":{\"type\":\"number\"}}"), false);
     entry("fur_stats", "Dump fur card counts per micro object (from .opencode/fur_stats.json)", obj(""), false);
     entry("get_ui", "Read persisted UI settings (world.json ui block + authored sun)", obj(""), false);
+    entry("camera_pose",
+          "Read the LIVE camera from the running app: pos, yaw/pitch (degrees), "
+          "forward vector. Inline answer when a live window is present; "
+          "otherwise a queued id for edit_result. Use after set_ui(camPos/"
+          "camTarget) to prove the view actually landed and where it points.",
+          obj(""), false);
     entry("set_ui",
           "Patch sidebar UI settings: any of renderFlags, backend, taa, volFog, motionBlur, dof, "
           "linearFx, autoExposure, exposure, tonemapLook, ssaoStrength, ssaoRadius, ssaoBlur, "
           "ssaoDebug, splatRadius, edgeBlend, edgeShrink, edgeFill, edgeBridgeSize, cornerFill, "
-          "lightBudget, lightK, camSpeed, camPos, camYaw, camPitch, furEnabled, furPerCell, "
+          "lightBudget, lightK, camSpeed, camPos, camYaw, camPitch, camTarget:[x,y,z] "
+          "(look-at POINT in metres; wins over camYaw/camPitch), furEnabled, furPerCell, "
           "furLength, furWidth, furCurl, furCycles, furTilt, furSss, brushMode, brushWidth, "
           "brushDepth, brushMaterial, smoothStrength, falloffCurve, smoothPreserveVolume, scenery. "
-          "Only provided keys change; the app hot-applies within ~1 s.",
+          "Raw camYaw/camPitch are DEGREES in the app's convention (yaw 0 = +X, "
+          "positive yaw toward +Z) - use camTarget to aim by a point instead. "
+          "Only provided keys change; the app hot-applies within ~1 s. "
+          "Verify with camera_pose.",
           obj("\"renderFlags\":{\"type\":\"integer\"}," + jstr("backend") +
               ":{\"type\":\"string\"},"
               "\"taa\":{\"type\":\"integer\"},\"volFog\":{\"type\":\"integer\"},"
@@ -3520,7 +3616,9 @@ std::string toolSchemas()
               "\"lightBudget\":{\"type\":\"integer\"},\"lightK\":{\"type\":\"integer\"},"
               "\"camSpeed\":{\"type\":\"number\"}," + jstr("camPos") +
               ":{\"type\":\"array\",\"items\":{\"type\":\"number\"}},"
-              "\"camYaw\":{\"type\":\"number\"},\"camPitch\":{\"type\":\"number\"},"
+              "\"camYaw\":{\"type\":\"number\"},\"camPitch\":{\"type\":\"number\"}," +
+              jstr("camTarget") +
+              ":{\"type\":\"array\",\"items\":{\"type\":\"number\"}},"
               "\"furEnabled\":{\"type\":\"integer\"},\"furPerCell\":{\"type\":\"integer\"},"
               "\"furLength\":{\"type\":\"number\"},\"furWidth\":{\"type\":\"number\"},"
               "\"furCurl\":{\"type\":\"number\"},\"furCycles\":{\"type\":\"number\"},"
@@ -3803,7 +3901,7 @@ ToolResult callTool(Server& srv, const std::string& name, std::string args)
                                       "set_texture", "inspect_layer", "probe_region",
                                       "reload_world", "render_shot", "inspect_rig",
                                       "set_pose", "fur_stats",
-                                      "get_ui", "set_ui", "set_sun",
+                                      "get_ui", "set_ui", "camera_pose", "set_sun",
                                       "list_sceneries", "set_scenery",
                                       "recolor_layer", "update_light",
                                       "describe", "paint", "stamp", "stamp_result",
@@ -3948,6 +4046,8 @@ ToolResult callTool(Server& srv, const std::string& name, std::string args)
         return srv.furStats(args);
     if (canonical == "get_ui")
         return srv.getUi();
+    if (canonical == "camera_pose")
+        return srv.cameraPoseTool(args);
     if (canonical == "set_ui")
         return srv.setUi(args);
     if (canonical == "set_sun")

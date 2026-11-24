@@ -152,6 +152,25 @@ view), all with `VF_NO_OVERLAY=1`. Checks:
 Env knobs: `VF_SSAO_STRENGTH` / `VF_SSAO_RADIUS` / `VF_SSAO_BLUR` /
 `VF_SSAO_DEBUG` (see `docs/rendering.md`).
 
+## `reflection_check` (`tests/reflection_check.py`)
+
+A hermetic SSR/emission gate. It builds a temporary scenery with a glossy
+floor, an emissive textured panel and a two-voxel wall, then renders four
+states per backend (`splat` and `svo`): wall absent/present × SSR on/off.
+The floor ROI is strictly in front of the wall, so wall-surface SSR cannot
+pollute the measurement. The open state must show a visible reflection; the
+behind-wall state must reduce its mean contribution to <25% and its changed
+pixel share below 1%. The direct emitter must also be occluded by the wall.
+The startup log must show the material-15 emissive texture and a derived
+light, proving the texture→atlas→emission path fired.
+
+The same gate then adds a 50-intensity authored point light at the camera.
+The renderer must report it as ignored and produce a pixel-identical frame
+(0.000000 mean, 0.000000% changed). All authoring and overlay writes stay in
+the temporary scenery. `test_store` separately pins that an above-water
+emissive stamp creates one cluster while an identical submerged stamp creates
+none.
+
 ## Test groups
 
 | Group | Use for | Includes |
@@ -164,8 +183,8 @@ Env knobs: `VF_SSAO_STRENGTH` / `VF_SSAO_RADIUS` / `VF_SSAO_BLUR` /
 | `test-preview` | brush hover preview: tint hue, Depth marker, SVO parity | `live_edit_check.py --only preview` (renders its own baseline) |
 | `test-visual` | camera, shaders, scene geometry | full visual check + fast variant + GPU selftest |
 | `test-fur` | the fur cards over the micro objects | `fur_check.py` (pose PINNED, noise floor must be 0 px, signal, confinement, footprint detail/spread, backend parity, escape hatch) |
-| `test-effects` | SSAO/post effects | full SSAO check + fast variant |
-| `test-textures` | atlas/material textures | full texture check + fast variant |
+| `test-effects` | SSAO/post effects | full SSAO check + fast variant + reflection/occlusion check |
+| `test-textures` | atlas/material textures | full texture check + fast variant + emissive reflection check |
 | `test-fog` | volumetric fog | full fog check + fast variant |
 | `test-smoke` | quick cross-area sanity | all fast variants; `test-fast` is an alias |
 

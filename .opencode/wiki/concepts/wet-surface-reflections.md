@@ -9,7 +9,8 @@ sourceRefs:
   - src/render/ssr_pass.cpp
   - src/render/texture_atlas.hpp
   - tools/gen_textures.py
-lastReviewed: 2026-11-19
+  - tests/reflection_check.py
+lastReviewed: 2026-11-24
 ---
 
 # Wet-surface reflections (stunning pits)
@@ -60,6 +61,30 @@ the `kMaterialReflection` table, not in the water path.
 - bit 12 on: mean 15.7/255, effect confined to near-water terrain/water
   (sky top-20% barely changes; it only moves where reflected in water).
 - smoke 120 frames: avg 4.23 ms, no errors.
+
+## Depth-aware wall occlusion (2026-11-24)
+
+The original SSR march accepted any G-buffer surface within a fixed 0.3 m of
+the reflected point and otherwise returned sky. It had no view-depth test, so
+a ray could accept geometry behind an intervening wall, skip a thin wall
+between fixed 0.5 m steps, or leak bright sky after leaving the screen.
+
+`shaders/ssr.comp` now starts from a normal-offset origin, skips the source
+pixel neighbourhood, and compares reflected-ray view depth with visible
+G-buffer view depth at every projected sample. A crossing from in front to
+behind is occlusion; the current projected pixel already shows the nearest
+occluder and supplies its reflection colour directly, with no refinement
+taps. The 32-step march grows from 0.08 m to a 0.5 m cap, matte/face-on
+pixels skip SSR, and an off-screen ray keeps the base surface rather than
+assuming sky. No extra descriptors or world-space marches were added.
+
+`tests/reflection_check.py` builds a glossy floor, an emissive textured panel
+and a two-voxel wall in a temporary scenery. Its floor ROI is strictly in
+front of the wall: an earlier full-floor polygon included the wall itself and
+misreported legitimate wall SSR as a leak. The gate measures open reflection
+vs behind-wall reflection on splat and SVO, checks direct wall occlusion, and
+also proves a lights-only manifest edit refreshes the UBO/irradiance volume
+without a voxel rebuild.
 
 ## Integration notes / gotchas
 

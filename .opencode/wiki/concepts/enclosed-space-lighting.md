@@ -1,13 +1,18 @@
 ---
 title: Enclosed-space shading and light sources
 tags: [shading, lighting, cave, ambient, ibl, worldfile, manifest, vulkan, bit-1, render-flags]
-sourceRefs: [shaders/common_base.glsl, shaders/common_svo.glsl, shaders/common_splat.glsl, src/voxel/worldfile.cpp, src/voxel/worldfile.hpp, src/render/texture_atlas.cpp, src/render/texture_atlas.hpp, src/render/splat_pass.cpp, src/render/svo_pass.cpp, src/app/rhi/surface.cpp, src/app/world/world_layers.cpp, src/app/ui/panel_render.cpp, tests/test_worldfile.cpp, docs/rendering.md]
-lastReviewed: 2026-10-08
+sourceRefs: [shaders/common_base.glsl, shaders/common_svo.glsl, shaders/common_splat.glsl, src/voxel/worldfile.cpp, src/voxel/worldfile.hpp, src/voxel/voxel_field.cpp, src/voxel/chunk_store.cpp, src/render/texture_atlas.cpp, src/render/texture_atlas.hpp, src/render/splat_pass.cpp, src/render/svo_pass.cpp, src/app/rhi/surface.cpp, src/app/world/world_layers.cpp, src/app/frame/run_poll.cpp, src/app/edit/transform.cpp, src/ai/mcp_server.cpp, src/app/ui/panel_render.cpp, tests/test_worldfile.cpp, tests/test_store.cpp, tests/reflection_check.py, scenery/LakesideHamlet/world.json, docs/rendering.md]
+lastReviewed: 2026-11-24
 ---
 
 > **Landed 2026-10-08:** the emission path below is live (store enumeration,
 > budget 192, parity green). Line numbers drift with the tree — re-verify
 > before citing.
+>
+> **Policy update 2026-11-24:** authored `world.json` point lights are now
+> **ignored**. Only sun/moon and exposed, above-water emissive materials may
+> light the scene. The authored-light editing sections below are retained as
+> history; `vf_mcp add_light`/`update_light` are disabled.
 
 # Why a cave stayed as bright as a meadow
 
@@ -353,45 +358,35 @@ emitting 17 would persist a lamp that silently never renders — the manifest
 would disagree with the GPU with no error anywhere. The writer emits
 `min(lights.size(), kMaxLights)`.
 
-### A moved light is staged, not written through
+## Visible-emissive source policy (2026-11-24)
 
-Same UX contract as the trackball and Move: preview live, commit on **Apply**.
-Three reasons, in order of weight:
+The screenshot investigation found 164 derived lights in the hamlet. Many
+were submerged lava/water-volume cells; several cluster positions were still
+inside solid because `clusterEmissiveCells()` used a last-resort `+0.9 m`
+lift. Both paths made warm light with no visible source.
 
-1. A light that wrote straight through would be the **only transform in the app
-   that silently rewrites a tracked file mid-drag**.
-2. An accidental write to `world.json` is not hypothetical here.
-3. A staged light **cannot desync the UBO from the manifest**: preview by
-   patching `LightUBO` in RAM — the same in-RAM lane
-   [[concepts/sun-direction-pipeline]] uses for the sun — so `Apply` is the
-   single call site of the writer. There is no code path where a drag reaches
-   the disk.
+The runtime now enforces one rule: **sun/moon or a visible emissive surface**.
+`ChunkStore::emitChunkEmitters()` and `VoxelField::collectEmissive()` accept
+only cells above `WATER_LEVEL + 0.02 m`; the field path also requires an air
+neighbour. `clusterEmissiveCells()` lifts at most 0.85 m and drops the cluster
+if no air is found. Submerged emissive materials still self-glow through
+`emissiveTerm()`, but cast no point light. Authored `world.json` lamps are
+ignored with a warning, and MCP add/update are disabled (list/remove remain
+for cleanup). The hamlet trace falls from 164 clusters to 4.
 
-### Move mode has no lane for lights
-
-Move currently drags a **selected layer owner** and writes that layer's `pos`.
-A light has no `.vxw` and no layer ID, so it needs its own selection and its own
-translation path. Picking resolves to a voxel and its **winning `.vxw` owner**,
-never a layer AABB (`src/voxel/picking`) — so "what did the cursor hit" has no
-answer for a light until selection gains a second, non-voxel answer.
-Note `App::uploadLightSources()` **re-reads the manifest**, so a preview that
-only patched the UBO must not be followed by an unrelated reload re-deriving
-lights from disk and undoing it.
+`tests/reflection_check.py` adds a bright authored lamp at the test camera and
+requires a **0.000000 mean / 0.000000% changed** frame. `test_store` pins that
+an above-water emissive stamp creates one cluster while the same stamp below
+water creates none.
 
 ## Verification
 
-One lamp inside the cabin, 320×180, camera inside the shell:
-
-| shot | mean luma | pixels < 30 |
-|---|---|---|
-| splat, no light | 42.01 | 44.86 % |
-| splat, 1 lamp | **87.10** | **11.04 %** |
-| SVO, 1 lamp | 101.37 | 2.06 % |
-| splat↔SVO delta, unlit | −16.68 | — |
-| splat↔SVO delta, lit | −14.28 | — |
-
-The light does **not** add backend divergence: the delta is unchanged within
-noise, so the two backends agree on what the lamp does.
+- `VF_TRACE_LIGHTS=1` on LakesideHamlet: 4 visible emissive clusters, all above
+  water and lifted into nearby air.
+- Authored-light policy A/B: mean 0.000000, 0.000000% pixels changed.
+- `reflection_check`: splat/SVO wall occlusion plus authored-light policy pass.
+- `vf_tests --test-case='*collectEmissive*'`: field/store prefix coverage,
+  above-water live stamp, and submerged rejection pass.
 
 Cross-links: [[concepts/shading-model]], [[concepts/measurement-discipline]],
 [[concepts/ssao-gbuffer]], [[entities/svo-render]].

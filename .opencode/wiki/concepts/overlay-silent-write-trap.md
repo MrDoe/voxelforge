@@ -92,3 +92,5 @@ edit hooks, `--selftest`, `--smoke`). Any render that can stamp must set
   mechanism and the env vars.
 - [[concepts/sun-direction-pipeline]] — the sun-manifest lane that also
   silently changes reference shots.
+- [[concepts/app-shutdown-segfault]] — a shutdown SIGSEGV from a freed stack
+  address, diagnosed from the same kind of "not a renderer bug" backtrace.

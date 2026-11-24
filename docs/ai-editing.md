@@ -14,11 +14,13 @@ Two entry points mutate the world:
 2. the **`vf_mcp` stdio MCP server** (`src/ai/mcp_server.cpp`) itself, for
    external agent hosts.
 
-Both write authored DATA under `scenery/<name>/` (`ai_edits.vxw`, layer `.vxw`,
-`world.json`); the running app hot-reloads within ~1 s. The in-app panel adds
-whole-turn Undo (snapshot/restore of authored files), renders agent screenshots
-from `workspace/screenshots/`, and persists UI-wide text size through the
-`uiFontScale` UI setting.
+Both can mutate the world through two lanes: authored DATA under
+`scenery/<name>/` (`ai_edits.vxw`, layer `.vxw`, `world.json`), which the running
+app hot-reloads within ~1 s, and live-store intents (`mcp_intents.jsonl`) that
+the App executes through its own brush/undo/GPU paths on the next frame. The
+in-app panel adds whole-turn Undo (snapshot/restore of authored files), renders
+agent screenshots from `workspace/screenshots/`, and persists UI-wide text size
+through the `uiFontScale` UI setting.
 
 ## In-app panel / OpenCode backend
 
@@ -29,9 +31,12 @@ from `workspace/screenshots/`, and persists UI-wide text size through the
   `/api/event` SSE on a worker thread, and `/api/session/{id}/environment` for
   per-turn scene context.
 - Session IDs are cached per scenery in `.opencode/voxelforge_sessions.json`.
-- The agent is limited by permissions to `voxelforge_*` MCP tools plus reads;
-  `set_scenery`/`set_ui` are denied this milestone. Shell, file edits and git
-  commands are denied (a previous session lost tree-wide work to `git stash`).
+- The agent is limited by permissions to `voxelforge_*` MCP tools, the
+  OpenCodeRAG tools (`search_semantic`, `get_file_skeleton`, `find_usages`,
+  `describe_image`, quirk memory) and RAG-backed reads; `set_scenery`/`set_ui`
+  are denied this milestone. Shell, file edits and git commands are denied (a
+  previous session lost tree-wide work to `git stash`). See the allow rules in
+  `.opencode/agents/voxelforge.md`.
 - Screenshots: `vf_mcp render_shot` now defaults to
   `workspace/screenshots/shot_<time>.ppm` (gitignored); the panel decodes PPM
   into a cached Vulkan texture and shows it on the tool card.
@@ -224,15 +229,17 @@ ai_edits), and writes edits through its own `EditableWorld` instance.
 | `update_light` | `index`, `pos?`, `color?`, `radius?`, `intensity?`, `follow?` | edit one authored light in place |
 | `set_texture` | `mat`, `file?`, `scale?`, `emissive?`, `emissiveScale?`, `card?` | bind a texture to a material (empty file = palette; card preserved unless given) |
 | `recolor_layer` | `layer`, `mat?`, `from?`, `r?`, `g?`, `b?`, `refl?`, `rough?`, `tex?` | edit existing cells: material/colour/response and per-cell atlas slot (`tex`: 0 clears, 1..255 binds a slot) |
-| `get_ui` | – | read the persisted "ui" block + authored sun |
+| `get_ui` | – | read the persisted "ui" block + authored sun (and the derived camera aim) |
+| `camera_pose` | – | read the LIVE camera from the running app (pos, yaw/pitch degrees, forward); inline or a queued id for `edit_result` |
 | `set_ui` | any of ~40 named keys (see below) | patch sidebar-rendered settings; only given keys change |
 | `set_sun` | `elev`, `azim` (degrees, toward the sun) | author the scene sun; the app rebakes shadows |
 | `list_sceneries` | – | list scenery folders and mark the active one |
 | `set_scenery` | `scenery` | switch the live app to another scenery (World panel path) |
-| `render_shot` | `out?`, `cam?` (6 nums), `width?`, `height?`, `mode?`, `animtime?`, `sun?` | headless render to a PPM image path |
+| `render_shot` | `out?`, `cam?` = `[px,py,pz,tx,ty,tz]` (position **and look-at target**, metres), `width?`, `height?`, `mode?`, `animtime?`, `sun?` | headless render to a PPM image path; the last three numbers are a target point, NOT yaw/pitch |
 | `inspect_rig` | `layer` | derive + report the skeleton (bones, roles, parents, segments) of a micro layer |
 | `set_pose` | `layer`, `pose` (flat: bone,rx,ry,rz,...) | set a static rigged pose on a micro layer |
 | `view_pick` | `screen:[x,y]` (logical window pixels) or `cell`/`x,y,z` | click into the running VIEW; report cell, world position, material, owning layer, distance |
+| `dig_cave` | target as above + `radius?` (0.3–2.5 m, default 1), `depth?` (0.5–10 m, default 3), `style?` (`dripstone\|plain`, default `dripstone`) | one-call natural cave: App composes mouth, tunnel, chamber and optional dripstone through the GUI brushes as one undoable store stroke; returns cells/chunks/ms/undo **inline** |
 | `view_click` | target as above + `mode:carve\|add\|delete\|paint\|smooth\|rotate\|move\|select`; brush args `diameter`/`depth`/`strength`/`mat`/`box_scope`, transform args `yaw`/`pitch`/`roll` or `dx`/`dy`/`dz`, `layer?`, `commit?` | use an edit tool directly through the App's real paths; returns an id for `edit_result` |
 | `view_undo` | – | undo the last live-edit stroke in the running app |
 | `view_clear` | – | clear ALL live edits and the overlay (irreversible) |
@@ -255,6 +262,32 @@ stages a rotate/move preview without writing `world.json`. Results land in
 `mcp_results.jsonl` and are read with `edit_result {id}` — if no app is running
 the result stays "pending". See `.opencode/wiki/concepts/mcp-intent-bridge.md`.
 Gate: `tests/mcp_view_check.py` (CTest `mcp_view_check`, label `mcp`).
+
+#### One-call cave fast path
+
+When the prompt carries `[UI context: selected voxel cell [...]]`, "dig a cave
+here" is one `dig_cave` call — no `list_layers`, `ground`, `surface_scan`, or
+`render_shot` first. `vf_mcp` validates the target/style/size and posts a
+`dig_cave` intent without building its own `LayeredWorld`. The running App
+resolves the target (a `screen:[x,y]` click uses `pickAtWindowPos`), then runs
+Delete/Carve/Add sub-stamps through `applyEditLive` with one shared drag state.
+The result is one undo step, one overlay queue, and an inline JSON instrument
+report (`cells`, `chunks`, `runSurfels`, `firstStampMs`, `ms`, `undoSteps`).
+If no App answers within two seconds the id stays queued for `edit_result`.
+
+This is the fast **store lane**: it appears on the next frame and persists in
+the gitignored `runtime_edits.vxw`, but it is not authored source content.
+`commit_overlay` cannot promote deletions because record layers cannot express
+air. A permanent cave still needs a baked rock-shell layer with an open mouth.
+Every scratch/headless run must use `VF_OVERLAY_PATH=<tmp>` or
+`VF_NO_OVERLAY=1`; use `capture_screen`, not a default fresh-process
+`render_shot`, to prove the live window changed.
+
+Gate: `tests/mcp_view_check.py` starts a live headless App, calls `dig_cave`
+once, requires an inline report in under five seconds, verifies one undo step
+and overlay persistence, then exercises the rest of the view/edit tools.
+Measured on the shipped hamlet: `help` 3 ms, first mouth stamp 89 ms, complete
+13-stamp cave 776 ms, one-call round trip 787 ms.
 
 #### Carving one object out of a baked layer
 
@@ -293,12 +326,25 @@ Keys (all optional; `set_ui` merges): `renderFlags` (bitmask: 0 AO,
 `ssaoStrength`, `ssaoRadius`, `ssaoBlur`, `ssaoDebug`, `splatRadius` (0.5–2),
 `edgeBlend`, `edgeShrink`, `edgeFill`, `edgeBridgeSize`, `cornerFill`,
 `lightBudget`, `lightK`, `camSpeed`, `camPos` [x,y,z] / `camX/Y/Z`,
-`camYaw`, `camPitch` (deg), `furEnabled`, `furPerCell`, `furLength` (m),
+`camYaw`, `camPitch` (deg), `camTarget` [x,y,z] (look-at POINT, metres;
+wins over `camYaw`/`camPitch`), `furEnabled`, `furPerCell`, `furLength` (m),
 `furWidth` (m), `furCurl`, `furCycles`, `furTilt` (deg), `furSss`,
 `brushMode` (`carve|add|delete|paint|smooth|rotate|move`), `brushWidth`
 (voxels), `brushDepth` (voxels), `brushMaterial` (palette id),
 `smoothStrength`, `falloffCurve`, `smoothPreserveVolume`, `scenery` (folder
 name — routes through the same between-frames switcher as the GUI).
+
+Camera placement is the part agents get wrong: raw `camYaw`/`camPitch` are
+**degrees in the app's convention** (yaw 0 looks along +X, positive yaw turns
+toward +Z, pitch positive looks up), not a compass bearing from −Z and not
+radians. Prefer `set_ui {camPos:[px,py,pz], camTarget:[tx,ty,tz]}` — the app
+derives yaw/pitch from position → target with the same `atan2/asin` rule as
+`--cam`, and a complete target wins over raw angles. `get_ui` echoes the
+**authored** pose and its derived forward vector; `camera_pose` reads the
+**live** camera from the running app (it may have moved with WASD since the
+manifest was written). The app diffs camera fields against its last-seen ui
+block, so an unrelated manifest write never snaps a moved view back to the
+authored pose.
 
 The sun is its own block (`set_sun`): the live follower applies it only when
 the FILE value changed since the app last saw it — the session-only Day/Night

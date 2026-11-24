@@ -789,3 +789,7 @@ signature is fixed, and the fix is pinned by the world-lattice rule above.
 | the gait | the head up at t=0, a quarter down at t=1.2 s, the muzzle in the grass at t=3 s (2.5 s of easing) |
 | the move drag | `move: grabbed micro/alpaca.vxw on axis X` → the X handle at (349, 300) → the drag ends with delta (+2.000, 0, 0) m |
 | shadow reaches the LEGS | ratio 0.87 → 0.57 after the 0.35 m step cap |
+
+- [[concepts/animation-studio-bone-editing]] — posing a rig and editing its bones in the Animate section (`--anim`), with per-bone local keys and projected-axis rings.
+- [[concepts/mesh-to-micro-authoring]] — `vf_mesh2micro`, runtime mesh-only layers and posed-mesh pick.
+- [[concepts/micro-dispatch-rect]] — why a pass's screen rect must follow the object's POSE, not its baked AABB.

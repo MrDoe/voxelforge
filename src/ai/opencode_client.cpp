@@ -8,6 +8,7 @@
 #include <unistd.h>
 
 #include <algorithm>
+#include <cerrno>
 #include <chrono>
 #include <cctype>
 #include <cstdlib>
@@ -266,8 +267,11 @@ std::string OpenCodeClient::request(const std::string& method, const std::string
     int fd = connectSocket(m->host, m->port, err);
     if (fd < 0) return {};
     // A remote/unresponsive service must never stall the app's startup or a
-    // UI frame for the full default recv timeout.
-    timeval tv { 1, 0 }; // 1 s
+    // UI frame for the full default recv timeout. Health/model GETs stay at
+    // 1 s; a prompt POST has to enter the service's session event loop, which
+    // can take seconds when it is busy. A 1 s POST timeout made EVERY send
+    // fail with "malformed OpenCode response" while the service was healthy.
+    timeval tv { method == "GET" ? 1 : 5, 0 };
     ::setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
     ::setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv));
     std::ostringstream req;
@@ -288,10 +292,17 @@ std::string OpenCodeClient::request(const std::string& method, const std::string
         sent += size_t(n);
     }
     std::string response = readAll(fd);
+    // readAll() stops on EAGAIN after the timeout; capture it before close()
+    // can overwrite errno, so the panel can tell a timeout from a reset.
+    const int recvErrno = errno;
     ::close(fd);
     size_t hdrEnd = response.find("\r\n\r\n");
     if (hdrEnd == std::string::npos) {
-        if (err) *err = "malformed OpenCode response";
+        if (err) {
+            *err = "malformed OpenCode response (" + method + " " + path + ": " +
+                   std::to_string(response.size()) + " bytes, errno " +
+                   std::to_string(recvErrno) + " - " + std::strerror(recvErrno) + ")";
+        }
         return {};
     }
     std::string headers = lower(response.substr(0, hdrEnd));

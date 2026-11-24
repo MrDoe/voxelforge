@@ -79,3 +79,5 @@ redirect the test suite, and `tests/main.cpp` pins it for the unit tests.
   shared-library-second via `resolveShared`, same contract as textures.
 - **Phase 3:** pointer-following inside one long-running `vf_mcp`, and the
   second authored scenery to prove the format (in flight: LighthouseIsle).
+- [[concepts/large-landscape-streaming]] — the proposal for escaping the fixed
+  102.4 m cube when a scenery outgrows it (streaming + LOD, still a design).

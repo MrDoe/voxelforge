@@ -53,23 +53,15 @@ W, H = 480, 270
 FAST = os.environ.get("VF_FAST_TESTS") == "1"
 FLAGS = "31"  # bit0 AO, bit1 shadows, bit2 flora, bit3 water, bit4 outline
 
-# Reference (measured 2026-10-08 on the 169-light flip tree, 480x270 splat,
-# VF_RENDER_FLAGS=31, VF_TEST_SUN_PHASE=night, overlay suppressed;
-# 2 authored courtyard + 167 derived incl. ~150 underwater lava emitters).
-# Per-shot night/day mean-luma ratio: hero 0.204, house 0.200, water 0.368.
-RATIO_FLOOR = 0.10   # night must actually be night
-# Tripwire: a kMoonCol regression from 0.14 to 0.62. RE-MEASURED in the
-# 169-light state on 2026-10-08 (temp shader bump 0.14->0.62 + SPV rebuild,
-# reverted + rebuilt after; this retires the old PROVISIONAL note):
-#     view    healthy   regressed   midpoint
-#     hero    0.204     0.337       0.270
-#     house   0.200     0.336       0.268
-#     water   0.368     0.515       0.442
-# One scalar ceiling cannot serve all three: the hero regression (0.337) sits
-# BELOW healthy water (0.368), because lava owns the water view while the moon
-# owns hero. So the ceiling is per view, each the midpoint of that view's own
-# healthy/regressed pair (same symmetric-margin method the single 0.27 came
-# from). Margins: hero +-0.066, house +-0.068, water +-0.073.
+# Reference (measured 2026-11-24, 480x270 splat, VF_RENDER_FLAGS=31,
+# VF_TEST_SUN_PHASE=night, overlay suppressed, visible-emissive-only lights).
+# Night ambient/moon were deliberately darkened: kMoonCol 0.14 -> 0.10 and
+# nightBase ~25% lower. Per-shot night/day mean-luma ratio:
+# hero 0.076, house 0.211, water 0.249 (previously 0.099/0.235/0.273).
+RATIO_FLOOR = 0.06   # night must actually be night, not merely dimmer
+# Broad upper tripwires against accidentally restoring the old bright moon
+# (kMoonCol 0.62 read as dusk). They are not targets; the current night is
+# intentionally below all three.
 RATIO_CEIL = {"hero": 0.27, "house": 0.27, "water": 0.44}
 MIN_SKY_PCT = 5.0   # night sky is still sky (own classifier, no b>120 term)
 # Moonlight is blue-dominant in the top eighth - except where lava owns the

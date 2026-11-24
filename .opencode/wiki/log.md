@@ -1,5 +1,5 @@
 # log
-Append-only timeline — 74 dated session entries, 5547 lines. Entries are appended
+Append-only timeline — 76 dated session entries, 7642 lines. Entries are appended
 in **session order, not date order**, so this index is the only chronological view.
 Do not infer causation from vertical position in the file itself.
 
@@ -8,6 +8,13 @@ Do not infer causation from vertical position in the file itself.
 > [[concepts/measurement-discipline]].
 
 ## Index
+
+### 2026-11-24
+- **ingest** — One-call `dig_cave`: 89 ms to first stamp, 787 ms round trip; inline engine report, one undo step, overlay persistence fixed. [[concepts/mcp-intent-bridge]]
+- **lint** — Wiki health after the fast path: touched pages current; pre-existing stale/dead-ref/orphan backlog unchanged, no new structural defect.
+- **ingest** — Decision-driven world editing proposal and its DOOM source: Clef-on-llama.cpp option loop, mission-typed action families, lane discipline. [[concepts/decision-driven-world-editing]] [[sources/brain-doom-decision-sample]]
+- **ingest** — Feature-discoverability sweep: 14 orphan pages cross-linked and the dangling `water-flooding` link closed with a real page; wiki now 0 orphans / 0 dangling.
+- **ingest** — MCP camera placement: `set_ui(camTarget)` + live read-only `camera_pose` intent. [[concepts/mcp-intent-bridge]]
 
 ### 2026-11-19
 - **query** — How could we change this engine to render arbitrary large landscapes? Filed analysis as [[concepts/large-landscape-streaming]]
@@ -7630,3 +7637,122 @@ Key refresh sequence measured at the CLI (fresh config read): 401 `api_key_expir
 
 ## [2026-11-22] ingest | the composer clears because ImGui's input state is told to reload
 The AI composer's "Enter submits but the text stays" bug, root-caused and fixed in `src/app/chat_ui.cpp`: an ACTIVE `InputTextMultiline` owns its text (`ImGuiInputTextState::TextA`), renders it, and writes it back over the caller's buffer, so `buf[0]='\0'` after the widget call is undone next frame; clicking Send adds a second hazard because the deactivation snapshot (`InputTextDeactivatedState`) is re-applied a frame later. `ChatUi::clearInputBuffer` now zeroes the buffer, calls `ReloadUserBufAndMoveToEnd()` and drops the matching deactivation id. The widget id must come from `ImGui::GetID("##aiInput")`, not `GetItemID()`: multiline's `BeginGroup/EndGroup` leaves `LastItemData.ID` at 0 unless the field is active. Negative control measured by temporarily restoring the bare clear: the new headless case in `tests/test_app_opencode.cpp` fails 2 of 5 assertions (`buf[0]==104`, `stateCleared=false`), so the gate is live; it passes under `test-app` (and inside `test-unit`). Filed [[concepts/imgui-active-input-text]], cross-linked from [[concepts/textbox-input-gate]].
+
+## [2026-11-24] ingest | one-call `dig_cave`: selection to first stamp in 89 ms
+Implemented the missing selection-driven fast path behind the agent prompt: `vf_mcp dig_cave` validates without building `LayeredWorld`, posts one intent, and polls `mcp_results.jsonl` for up to two seconds to return the engine report inline. The App composes mouth/tunnel/chamber/dripstone through `applyEditLive` under one drag state, then records one undo step and queues the overlay once. `help`, `list_layers`, `stamp`, view tools, `capture_screen` and `render_shot` now skip the unnecessary world build. Measured in `tests/mcp_view_check.py` on a live LakesideHamlet scratch App: help 3 ms, first mouth stamp 89 ms, complete 13-stamp cave 776 ms, one-call round trip 787 ms (1,365 cells, 2 chunks, one undo). Also fixed a persistence hole: MCP stamps had no mouse-release event to queue `OverlayWriter`, so edits vanished on exit. Two gate traps were measured and recorded: a bare probe follows `scenery/last.json` (LighthouseIsle) rather than the test's `VF_SCENERY` copy, and `ground()` can suggest the air cell one row above the first solid cell. Focused `mcp_view_check` and the full `test-mcp` group pass (3/3, 197.24 s); pages [[concepts/mcp-intent-bridge]], [[entities/vf-mcp-v2]], docs `ai-editing.md`, skill and agent prompt updated.
+
+## [2026-11-24] lint | wiki health after the `dig_cave` fast path
+`wiki_lint`: 99 pages / 97 content, 0 uncataloged, 0 missing frontmatter. Backlog unchanged in class: 87 stale pages, 2 pages with dead sourceRefs, 14 orphans and the pre-existing `log → [[concepts/water-flooding]]` dangling link. The pages touched for this change were reviewed against current code, dated 2026-11-24 and remain indexed/cross-linked; no new orphan, dangling link or schema defect was introduced. Re-lint with a 10-commit walk reported 81 stale pages, 3 dead sourceRefs, the same 14 orphans and the same single dangling link — the structural backlog is unchanged.
+
+## [2026-11-24] fix | night generally darkened after visible-source cleanup
+After removing invisible authored/submerged lamps, the user requested a darker night overall. Lowered `kMoonCol` 0.14 → 0.10 and `nightBase` roughly 25% (horizon 0.030/0.045/0.078 → 0.024/0.036/0.062, zenith 0.005/0.010/0.026 → 0.004/0.008/0.020). Canonical 480×270 splat night means moved hero 10.59 → 8.13, house 18.37 → 16.55, water 32.16 → 29.26; ratios are 0.076/0.211/0.249. `night_check` floor lowered to 0.06 and passes; daylight is unchanged. [[concepts/night-gate-thresholds]] re-baselined.
+
+## [2026-11-24] fix | visible-emissive-only lighting; submerged/buried emitters rejected
+The user-reported warm patches had no visible source. `VF_TRACE_LIGHTS` found 164 derived hamlet clusters, many below the water plane; probing showed several “lifted” positions still inside solid because `clusterEmissiveCells()` used a last-resort `+0.9 m`. Removed the two authored courtyard lamps from `LakesideHamlet/world.json`, made the runtime ignore legacy authored lights (MCP add/update disabled; list/remove remain), and restricted point lighting to exposed cells above `WATER_LEVEL + 0.02 m`. Both `ChunkStore` and `VoxelField` now reject submerged emitters; the field also requires an air neighbour. Cluster lifting is capped at 0.85 m and drops the cluster when no air exists. The hamlet trace falls 164 → 6 → 4 clusters. `reflection_check` adds a 50-intensity authored lamp at the camera and measures exactly 0.000000 mean / 0.000000% changed pixels; `test_store` pins above-water stamp → one cluster and submerged stamp → none. Docs/AGENTS and [[concepts/enclosed-space-lighting]] now state the sun/moon-or-visible-emissive policy.
+
+## [2026-11-24] fix | live light refresh + depth-aware SSR wall occlusion
+A lights-only `world.json` edit changed no voxel signature, so `reloadIfChanged()` correctly skipped the world rebuild but the poll never called `uploadLightSources()`; `vf_mcp update_light` therefore left direct and indirect lighting stale. Added a resolved-light snapshot comparison in the manifest poll, micro-aware follow pivots, micro Move/Rotate preview uploads to splat/micro/fur, and reordered `applyWorldReload()` so micro placement is current before lights resolve. Rewrote SSR as a normal-offset, source-pixel-safe, view-depth-aware march: crossing behind a visible surface samples that nearest occluder directly, and off-screen rays keep the base surface instead of leaking sky. The final 32-step march grows from 0.08 m to a 0.5 m cap and skips reflection amounts below 0.006. Added `tests/reflection_check.py`: an emissive textured panel reflected in a glossy floor, with a two-voxel wall in front/behind states on splat and SVO, plus a real light-only manifest reload assertion. The first floor mask included the wall and produced a false leak; restricting the ROI in front of the wall gave final open→behind-wall mean contributions of 0.692→0.032 (splat) and 3.823→0.100 (SVO). Pages [[concepts/enclosed-space-lighting]] and [[concepts/wet-surface-reflections]] updated.
+
+## [2026-11-24] verify | focused shading gates + SSR cost
+`reflection_check` passes directly and inside both `test-textures` and `test-effects`; `texture_check`, `fast_texture_check`, `gbuffer_check`, `gpu_selftest` and `test-app` pass. A same-binary SPV A/B at 1280×720 / hero / 180 frames measured final SSR `fx` at 0.49 ms versus the old shader's 0.45 ms (+0.04 ms); the first correct-but-heavy version cost 0.72 ms, so step growth, direct occluder sampling and the sub-visible cutoff removed most of that overhead. `test-visual` geometry/coverage checks pass, but the group remains red on pre-existing micro/fur/3DGS gates and the ownership mask. Ownership was isolated: old SSR 17.12%, new SSR 17.097%, SSR-off 61.576% terrain/water-blue — `visual_check` runs `VF_SPLAT_DEBUG=16` through SSR and its <20% ownership failure is not caused by this change. `test-effects` likewise still has its existing SSR-off SSAO/fog/night threshold failures.
+
+## [2026-11-24] lint | health after live-light + SSR occlusion
+`wiki_lint` (10-commit walk): 100 pages / 98 content, 0 uncataloged, 0 missing frontmatter, 0 missing `lastReviewed`. The three touched pages are structurally valid and indexed; they remain stale only because their source files are dirty in this uncommitted change. Existing backlog unchanged in class: 89 stale pages, 2 pages with dead sourceRefs, 14 orphans and the pre-existing `log → [[concepts/water-flooding]]` dangling link. Re-lint after commit to clear the dirty-source staleness.
+
+## [2026-11-24] ingest | "malformed OpenCode response" is a timeout, not a parse error
+Diagnosed the in-app chat's blanket `Send failed: malformed OpenCode response`: that string is emitted only when `OpenCodeClient::request()` sees no `\r\n\r\n` in `readAll(fd)` — i.e. the service sent no HTTP response before the 1 s receive timeout, which was applied to every method. On the live service, an authenticated `GET /api/info` answered in 0.6 ms, a POST to a bogus session in 8 ms, and the shipping client's connect/interrupt/prompt took 3/7/68 ms, so the failure was not reproducible on demand; a silent TCP server reproduced the error at ~1020 ms with `errno 11`. Fixed by keeping 1 s for GET but raising writes to 5 s, and adding method/path/byte-count/errno to the error (captured before `close()`); no automatic retry because `/prompt` is not idempotent. Found and repaired an invalid `.opencode/voxelforge_sessions.json` (two writers staging into one `.tmp` spliced two model values into a line): per-PID temp names, flat-object validation in `setSessionKey`, and a new regression case. `ninja -C build`, `test-app` and `test-unit` green. Filed [[concepts/opencode-request-timeout]], cataloged in `index.md`, cross-linked from [[concepts/imgui-active-input-text]].
+
+## [2026-11-24] ingest | decision-driven world editing — from the DOOM sample to Clef
+User asked how the "decision model plays Doom" concept applies to the AI chat
+interface, then broadened it from carving to world/texture/object/move/smooth/
+micro manipulation and specified **Clef on llama.cpp** as the backend. Filed
+[[sources/brain-doom-decision-sample]] (lockstep engine, prose observation,
+options rebuilt as sentences each step, mission prepended to every option,
+fair-play state, history worth 2.67 return, prefix-computable reward, archive
+search→compress, "search may use snapshots, the artifact may not", paired sign
+test gate) and [[concepts/decision-driven-world-editing]] (proposal only, no
+code changed).
+
+The proposal's core: mission → action-family selector → short Clef `choice`
+over state-built option sentences → one authoritative engine intent →
+re-observe. Mission determines which families exist, which facts are reported
+and the done predicate; a burst stays in one lane (store = per-stroke undo,
+authored files = whole-turn snapshot) with an explicit checkpoint at
+transitions. Lights are excluded by the visible-emissive-only policy; the
+legal verb is assigning an emissive material. Four engine gaps are listed:
+`tex` on store-lane paint, an instrument for disk-lane tools, quiet/lockstep
+mode with `tag|params|observation-digest` replay logging, and generalizing
+`quick_edit` into the mission selector.
+
+Backend: **not Ollama, not `make_decision`, not tev1** — Clef is at
+`localhost:8080/v1/systemone` via llama-swap (Bearer `sk-llama-local`),
+`Clef-Flash` on GPU 1 with `Clef` (27B CPU) for low confidence. `tools.clef.ask`
+is Code-Mode-only, so a native loop posts to the HTTP endpoint directly; Clef
+emits no prose, so the chat LLM stays mission-setter and narrator. Measured one
+choice over 7 options on a 515-token state: **195 ms**; it picked B at p=0.343
+against A at p=0.339 (confidence 0.234), which is the concrete argument for
+consolidating near-duplicate options and escalating to the 27B model below
+~0.25 confidence. Stored the backend decision as a quirk and marked the old
+tev1-on-Ollama reference legacy after verifying `:11434` has only `phonon`
+models loaded. Both pages cataloged in `index.md` and cross-linked from
+[[concepts/decision-driven-navigation]] and [[concepts/mcp-intent-bridge]].
+
+`wiki_lint` verification: 102 pages / 100 content, 0 uncataloged, 0 missing
+frontmatter, 0 missing `lastReviewed`; both new pages have backlinks and are
+not orphans. The new concept page's STALE flag is only its uncommitted
+sourceRef files, not a content defect. The 14 orphans and the single
+`log → [[concepts/water-flooding]]` dangling link are pre-existing backlog.
+
+## [2026-11-24] ingest | oh-my-opencode-slim (OMO-Slim) assessment — plugin, not a model; low value with a single local provider
+
+## [2026-11-24] ingest | feature discoverability — 14 orphans linked, water-flooding stub
+The wiki had 14 content pages with **no inbound link from another content
+page** — real features (animation studio bone editing, box selection, brush
+falloff contract, irradiance volume, mesh-to-micro authoring, photo foliage
+cards, wet-surface reflections, sunset dimming, and others) that existed but
+could not be reached by navigation. Added targeted "See also" links from their
+natural parents: [[entities/live-edit-brush]], [[concepts/micro-voxel-svo-overlay]],
+[[concepts/grass-and-foliage]], [[concepts/shading-model]],
+[[concepts/render-nondeterminism]], [[concepts/overlay-silent-write-trap]],
+[[concepts/sceneries]], [[concepts/measurement-discipline]] and
+[[entities/app-subsystems]]. Created [[concepts/water-flooding]] to close the
+historic dangling `log → water-flooding` link; it records that the per-column
+flood design was removed in the 2026-09-17 rework and explains the fixed-level
+plane instead of resurrecting a dead feature. `wiki_graph`: 103 pages /
+101 content, **0 orphans, 0 dangling**, 0 missing frontmatter; the single
+uncataloged page was the new stub, now added to `index.md`.
+
+## [2026-11-24] ingest | MCP camera placement — camTarget + live camera_pose
+Recorded the in-flight camera-placement change at the Camera MCP
+Investigator's request. `set_ui` accepts `camTarget:[x,y,z]` (or
+`camTargetX/Y/Z`) in metres; the App derives yaw/pitch from position → target
+on the next manifest poll, with explicit `camYaw`/`camPitch` as the
+alternative. `camera_pose` is a new **read-only intent** posted through the
+existing queue — the App answers with the running camera's pos/yaw/pitch in
+`mcp_results.jsonl`, so an agent can verify the view actually landed. `get_ui`
+labels the persisted block AUTHORED and points at `camera_pose`, because the
+manifest is not the live camera. The new fields join the `kUiAbsent`
+field-diffing so a GUI drag is never snapped back. Documented in
+[[concepts/mcp-intent-bridge]] and the MCP line of `index.md`. The owning
+session confirmed `test-unit` 8/8 and `test-mcp` 3/3 green after the final
+rebuild.
+
+## [2026-11-24] ingest | crosstalk extension lessons from OMO-Slim — borrow coordination policy, not model routing
+Filed at Wiki Curator's request; page and catalog link are theirs. See
+[[concepts/crosstalk-extension-lessons]].
+
+## [2026-11-24] verification | captured screenshot gallery for the wiki
+After the camera session released the shared display, captured two kinds of
+evidence into `tests/screenshots/`: (1) `record_demo.py --mode shots` with
+`--variants splats voxel --animtime 0` on an explicit one-launch
+`VF_SCENERY=LakesideHamlet` (the pointer was `LighthouseIsle`, so a first
+unpinned pass produced hamlet cameras over the wrong scenery and was
+discarded); 18/20 keyframes passed the built-in acceptance band, and the two
+`wiki_*` hero/cabin/overview backend pairs use only passing frames; (2) the
+three HUD panels via `VF_TEST_PANEL=<section> VF_HUD_SHOT=12:<ppm>` under Xvfb
+with the R/B channel swap applied on conversion. Every app run used
+`VF_NO_OVERLAY=1` / a scratch `VF_OVERLAY_PATH`. Vision inspection confirmed
+the AI chat panel, the Edit brush panel and the Render panel are actually
+drawn, and that the hero shot shows the hamlet (tower, hall, dock, shoreline).
+Linked from [[entities/hud-sidebar]] and [[concepts/demo-capture]]; these are
+documentation evidence, not a new gate.

@@ -219,14 +219,18 @@ in `App::rebuildSurfels`, ~0.6 s for ~1.3 M surfels):
   counterpart marches `heightAt` + `objDist` (its *sky* test deliberately uses
   `objDist` alone — `heightAt` calls every point below the terrain surface
   solid, which would mark hillside interiors as underground).
-  Point lights come from a top-level `"lights"` array in `world.json`
-  (`pos`/`color`/`radius`/`intensity`, max 16, non-positive radius or intensity
-  dropped), parsed by `worldfile::loadLightManifest` into a 528 B std140 UBO at
-  binding 25 and consumed by `applyLights()` in `common_base.glsl` — shared by
-  the forward, GPU-cull and tile paths. `App::uploadLightSources()` is the only
-  writer and must run after every pass `init()` (see the descriptor-ordering
-  gotcha below). `VF_RENDER_FLAGS=255` disables the whole feature and restores
-  the pre-lights image bit-exactly.
+  Point lights are derived only from **visible emissive materials**: palette
+  emitters (9-15) and atlas textures flagged `"emissive"`. Enumeration accepts
+  only exposed cells above `WATER_LEVEL`; submerged emitters may self-glow but
+  do not cast invisible light onto the surface. A cluster is lifted at most
+  0.85 m into air and dropped if no air is found, so no last-resort offset can
+  place a lamp inside/through solid geometry. Legacy `world.json` `"lights"`
+  entries are ignored with a warning; `vf_mcp add_light`/`update_light` are
+  disabled. The 256-slot std140 UBO at binding 25 (budget 192, K=4) is consumed
+  by `applyLights()` in `common_base.glsl`, shared by forward/GPU-cull/tile.
+  `App::uploadLightSources()` must run after every pass `init()`.
+  `VF_RENDER_FLAGS=255` disables the whole feature and restores the pre-lights
+  image bit-exactly.
 
 **Surfel layout** (80 B, 5×vec4, std430): `pos_rU` (w = radiusU, along the
 stored tangent), `normal_rV` (w = radiusV, across), `bent_sh` (bent normal +
@@ -350,8 +354,19 @@ sky-ambient term that makes it aerial perspective. `tests/fog_check.py` pins
 all of that; keep J off by default until the gate is green on your scene.
 `VF_RENDER_FLAGS` overrides the whole mask.
 
-1. SSR (`ssr.comp`, G / bit 5): G-buffer march with a proper camera
-   projection, fresnel blend, water boosted (min 0.30 reflection).
+1. SSR (`ssr.comp`, G / bit 5): depth-aware G-buffer march with a proper
+   camera projection, fresnel blend, water boosted (min 0.10 reflection).
+   The reflected ray starts from a normal-offset origin, skips its source
+   neighbourhood, and compares its view depth with the visible G-buffer depth
+   at every projected sample. Crossing from in front to behind is occlusion,
+   not a hit; the current projected pixel already shows the nearest occluder
+   and supplies its reflection colour directly, with no refinement taps. The
+   32-step march grows from 0.08 m to a 0.5 m cap, and matte/face-on surfaces
+   skip the march. A ray that leaves the screen keeps the base surface rather
+   than leaking sky through an off-screen wall. The wet-soil guidance lane
+   (bit 12) still raises reflection strength on low-roughness surfaces.
+   `tests/reflection_check.py` pins an emissive textured panel's reflection in
+   front of and behind a thin wall on both backends.
 2. SSAO (`ssao.comp` + `ssao_apply.comp`, H / bit 6): two-band world-scale
    AO. 6 directions x 3 steps per band march screen-space rays; each tap's
    world position (from the `m_gpos` G-buffer) is tested against the pixel's

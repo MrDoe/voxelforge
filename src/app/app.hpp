@@ -160,7 +160,9 @@ private:
     void syncWorldLayerList();
     bool uploadTerrainTexture();
     bool uploadObjVolTexture();
-    // world.json "lights" -> both backends' LightUBO (binding 25).
+    // Emissive materials -> every lighting backend's LightUBO (binding 25).
+    // Authored world.json point lights are intentionally ignored: a light
+    // must have visible emissive geometry, or come from the sun/moon.
     void uploadLightSources();
     // Emission table shared by the bake upload and the live trigger:
     // palette emitters + emissive-flagged atlas textures (read from the
@@ -173,22 +175,10 @@ private:
     // re-upload. Flicker-free by construction: untouched chunks keep their
     // cached clusters verbatim.
     void refreshLiveLights();
-    // Follow-attachment (moving light sources): resolve authored lights with
-    // `follow` set to world positions at the layers' CURRENT manifest
-    // placement (placedPivot + placementR * storedOffset). Both the bake
-    // upload and the live trigger resolve through here, so a carried lamp
-    // agrees everywhere. Unknown follow targets resolve to a zero offset
-    // (warned only when `warn` - the trigger passes false to avoid
-    // per-stroke spam).
-    std::vector<vf::voxel::worldfile::LightSource>
-    resolveFollowLights(const std::vector<vf::voxel::worldfile::LightSource>& authored,
-                        bool warn) const;
-    // Move/rotate preview light overlay (splat backend ONLY): rigid-shift the
-    // followed lights + derived clusters of the previewed layer by the staged
-    // delta and re-upload binding 25 to the splat pass. SVO is deliberately
-    // untouched - it ignores the geometry preview too, so its unmoved
-    // geometry stays consistent with unmoved lights. No-op when no preview
-    // is staged; restores the base set to splat when a preview just ended.
+    // Move/rotate preview light overlay: rigid-shift derived emissive clusters
+    // of the previewed world layer and upload binding 25 to the splat, micro
+    // and fur passes that can show the preview. The world SVO pass keeps the
+    // base set because it does not show the world geometry preview.
     void refreshPreviewLights();
     // Idempotent bake-seed for the splice base (field enumeration truncated
     // to the authored room); shared by the trigger and the preview overlay.
@@ -680,10 +670,22 @@ private:
                     // A small margin keeps the low-angle (flat-looking) view;
                     // measured 0.05 m above the top already seals the slit.
                     const float standY = topY + 0.12f;
+                    // Heightfield-alone is WRONG for carved caves: the
+                    // heightfield reports "solid" for EVERY point below the
+                    // column top, so a camera inside an AI-dug tunnel was
+                    // teleported back to the surface every frame. The store
+                    // is the live geometry oracle (it carries the Delete
+                    // brush's air cells); eject only when the camera is
+                    // ACTUALLY inside solid material. The original slit case
+                    // (camera buried in terrain) is still solid there.
+                    const int cy = int(std::floor(
+                        (m_camera.pos.y + 0.5f * vf::voxel::WORLD) / vf::voxel::VOXEL));
+                    const bool buried = cy >= 0 && cy < n &&
+                        m_layers.store().cellAt(cx, cy, cz).solid;
                     // Only a DEEP embed is corrected: a camera a few cm under
                     // a rough surface is left alone, and interiors of objects
                     // (no colTop) are never touched.
-                    if (m_camera.pos.y < standY - 0.30f)
+                    if (buried && m_camera.pos.y < standY - 0.30f)
                         m_camera.pos.y = standY;
                 }
             }
@@ -883,8 +885,9 @@ private:
     // Dynamic derived lights (refreshLiveLights): last uploaded derived set
     // (splice base: survivors keep their slots) and the chunks the current
     // stroke touched (set by commitStoreEdits, consumed+cleared by the
-    // trigger). The emission table + authored lights are rebuilt per trigger
-    // from the atlas/manifest (microsecond lookups, always current).
+    // trigger). The emission table is rebuilt per trigger from the atlas
+    // (microsecond lookups, always current); only exposed, above-water
+    // emissive cells are legal point-light sources.
     std::vector<vf::voxel::VoxelField::EmissiveCluster> m_derivedClusters;
     std::vector<int> m_lastChangedChunks;
     // Preview overlay state (refreshPreviewLights): true while the splat
@@ -932,7 +935,7 @@ private:
     // untextured materials, so VF_TEXTURES=0 stays bit-exact. Bit 8 =
     // enclosed-space sky occlusion: attenuates sky/IBL ambient where a ray
     // along the bent normal hits geometry, so caves/interiors stop reading as
-    // open-sky daylight; authored lights (world.json "lights") take over there.
+    // open-sky daylight; visible emissive materials provide local light there.
     // VolFog / motion blur / DoF stay opt-in (separate toggles; volfog is WIP -
     // see shaders/volumetric_fog.comp).
     // Photo foliage cards (bit 13) ON by default: photographic CC0 grass/leaf

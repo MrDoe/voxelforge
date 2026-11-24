@@ -56,6 +56,10 @@ void App::pollWorldAndTextures(float dt)
         // layer) never triggers applyWorldReload, so reload them here.
         if (manifestChanged && !worldReloaded) {
             loadMicroObjects();
+            // loadMicroObjects reads the manifest directly; keep the editor's
+            // layer list in step so follow-attached lights resolve against the
+            // new micro placement before the light-only refresh below.
+            syncWorldLayerList();
             m_taaFirstFrame = true;
         }
         // A manifest edit may carry UI settings (vf_mcp set_ui/set_sun/

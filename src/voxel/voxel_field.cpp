@@ -870,6 +870,18 @@ void VoxelField::collectEmissive(const std::vector<glm::vec3>& matEmission,
     };
 
     std::vector<EmissiveCell> cells;
+    auto exposedToAir = [&](uint32_t k) {
+        const int x = int(k >> 20);
+        const int y = int((k >> 10) & 0x3FFu);
+        const int z = int(k & 0x3FFu);
+        static const int kD[6][3] = { { 1, 0, 0 }, { -1, 0, 0 },
+                                      { 0, 1, 0 }, { 0, -1, 0 },
+                                      { 0, 0, 1 }, { 0, 0, -1 } };
+        for (const auto& d : kD)
+            if (sample(x + d[0], y + d[1], z + d[2]).d >= 0.02f)
+                return true;
+        return false;
+    };
     // object cells: value = sdfRaw | mat << 8 | tex << 16 | layerId << 24
     for (size_t i = 0; i < m_okey.size(); ++i) {
         if (!m_okey[i])
@@ -878,10 +890,17 @@ void VoxelField::collectEmissive(const std::vector<glm::vec3>& matEmission,
         if (!e)
             continue;
         const uint32_t k = m_okey[i] - 1u;
-        cells.push_back({ glm::vec3(-0.5f * WORLD + (float(k >> 20) + 0.5f) * VOXEL,
-                                     -0.5f * WORLD + (float((k >> 10) & 0x3FFu) + 0.5f) * VOXEL,
-                                     -0.5f * WORLD + (float(k & 0x3FFu) + 0.5f) * VOXEL),
-                          *e });
+        const glm::vec3 pos(
+            -0.5f * WORLD + (float(k >> 20) + 0.5f) * VOXEL,
+            -0.5f * WORLD + (float((k >> 10) & 0x3FFu) + 0.5f) * VOXEL,
+            -0.5f * WORLD + (float(k & 0x3FFu) + 0.5f) * VOXEL);
+        // A submerged emitter may glow, but it must not become an invisible
+        // point light above the opaque water plane.
+        if (pos.y <= WATER_LEVEL + 0.02f)
+            continue;
+        if (!exposedToAir(k))
+            continue;
+        cells.push_back({ pos, *e });
     }
 
     // terrain columns emit from the centre of their top cell
@@ -893,10 +912,13 @@ void VoxelField::collectEmissive(const std::vector<glm::vec3>& matEmission,
             const glm::vec3* e = emissionOf(int(m_colMat[idx]));
             if (!e)
                 continue;
-            cells.push_back({ glm::vec3(-0.5f * WORLD + (float(x) + 0.5f) * VOXEL,
-                                        -0.5f * WORLD + (float(m_colTop[idx]) + 0.5f) * VOXEL,
-                                        -0.5f * WORLD + (float(z) + 0.5f) * VOXEL),
-                             *e });
+            const glm::vec3 pos(
+                -0.5f * WORLD + (float(x) + 0.5f) * VOXEL,
+                -0.5f * WORLD + (float(m_colTop[idx]) + 0.5f) * VOXEL,
+                -0.5f * WORLD + (float(z) + 0.5f) * VOXEL);
+            if (pos.y <= WATER_LEVEL + 0.02f)
+                continue;
+            cells.push_back({ pos, *e });
         }
     }
 
@@ -957,15 +979,22 @@ void clusterEmissiveCells(const std::vector<EmissiveCell>& cells, int budget,
     // Lift a centroid out of its own emitter: a light buried in solid is
     // occluded by the emitter itself on EVERY receiver's march, so it would
     // contribute nothing while still occupying a slot.
-    auto liftToAir = [&](glm::vec3 p) {
-        if (isAir(p))
-            return p;
+    auto liftToAir = [&](const glm::vec3& p, glm::vec3& out) -> bool {
+        if (isAir(p)) {
+            out = p;
+            return true;
+        }
         for (float up = 0.1f; up < 0.85f; up += 0.1f) {
             const glm::vec3 q = p + glm::vec3(0.0f, up, 0.0f);
-            if (isAir(q))
-                return q;
+            if (isAir(q)) {
+                out = q;
+                return true;
+            }
         }
-        return p + glm::vec3(0.0f, 0.9f, 0.0f); // last resort: above the emitter
+        // Never invent a light position above a buried emitter. The old
+        // last-resort +0.9 m could remain inside solid (or leap through a
+        // roof), producing warm light with no visible source.
+        return false;
     };
 
     constexpr float kMinSep2 = kEmissiveThinDist * kEmissiveThinDist;
@@ -1000,7 +1029,8 @@ void clusterEmissiveCells(const std::vector<EmissiveCell>& cells, int budget,
         // count lights; visibility marches stay capped at K nearest.
         c.radius = std::clamp(
             0.5f * std::max({ ext.r, ext.g, ext.b }) + 1.0f + mag, 1.0f, 8.0f);
-        c.pos = liftToAir(centroid);
+        if (!liftToAir(centroid, c.pos))
+            continue;
         out.push_back(c);
     }
 }

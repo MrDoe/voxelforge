@@ -2002,20 +2002,13 @@ TEST_CASE("chunk store: live surfel normals follow the bake, never a fabricated 
     lw.invalidateStore(); // leave the shared world as we found it
 }
 
-// UN-SKIPPED at the UBO-256 flip: bake and trigger both enumerate the
-// store now, so the flip contract is production-prefix coverage - every
-// field light (the old baked set) still has a store light within the thin
-// distance at the same intensity inside the production prefix (budget -
-// authored). The store's extras are submerged lava the pools already render
-// as lava (provenance: bricks-only recount also yields 169, exonerating the
-// box-face enumeration). The knee MESSAGE is the early warning: content
-// drift that pushes it past the production room re-fires this test instead
-// of silently darkening hearths.
-TEST_CASE("chunk store: collectEmissive covers the field variant")
+// Runtime point-light authority: every cluster must be above water and in
+// nearby air. The field variant is diagnostic only; it may still contain
+// buried buckets that the store correctly drops.
+TEST_CASE("chunk store: collectEmissive emits only visible above-water clusters")
 {
     LayeredWorld& lw = testLayeredWorld();
     REQUIRE(lw.loaded());
-    // palette emission table, no texture overrides in this content set
     std::vector<glm::vec3> emission(kPaletteN, glm::vec3(0.0f));
     for (int m = 0; m < kPaletteN; ++m)
         emission[size_t(m)] = kEmissive[size_t(m)];
@@ -2025,159 +2018,40 @@ TEST_CASE("chunk store: collectEmissive covers the field variant")
                                std::numeric_limits<int>::max());
     MESSAGE("emissive clusters: field ", fromField.size(), " store ",
             fromStore.size());
-    // The store reads pool bricks/boxes, which carry the bake's propagated
-    // interior mats; the field reads records + column tops only. So the
-    // store is a SUPERSET on baked content (measured: 19 field vs 169
-    // store on the hamlet). The flip contract is PREFIX coverage: every
-    // field light has a store light within the thin distance at the same
-    // intensity inside the production prefix (budget - authored), so the
-    // budget-truncated flip set loses no baked light.
-    REQUIRE(fromStore.size() >= fromField.size());
-    // Known field ghosts (probe-verified 2026-10-08, all in empty air):
-    //   (20.08,5.23,19.46) d=+4.25, (21.56,5.17,18.05) d=+4.05,
-    //   (20.05,4.48,19.62) d=+3.45 (mat=1, empty).
-    // Buried lava pockets whose bucket centroid lifted 3-4 m through solid
-    // to the surface: lights with no visible emitter. The store clusters
-    // the buried cells in place (occluded, correctly dark) instead, so the
-    // flip REMOVES these three - a fix, not a regression. Excluded from
-    // required coverage by exact position; any NEW field-only cluster still
-    // fails loudly below. Follow-up (needs shared-tail owner): cap
-    // liftToAir so buried buckets drop instead of surfacing.
-    const std::vector<glm::vec3> kKnownGhosts{
-        glm::vec3(20.0753f, 5.2251f, 19.4558f),
-        glm::vec3(21.5581f, 5.17027f, 18.0518f),
-        glm::vec3(20.047f, 4.47537f, 19.6172f),
-    };
-    auto isKnownGhost = [&](const glm::vec3& p) {
-        for (const glm::vec3& g : kKnownGhosts)
-            if (glm::distance(p, g) < 0.05f)
-                return true;
-        return false;
-    };
-    // Intensity match is relative (10%), not exact: a cluster's intensity
-    // is its bucket's mean max-component, and the field/store buckets hold
-    // slightly different cell sets, so exact equality evicts identical
-    // lights over sub-percent means (measured: 3.192 vs 3.200 at the same
-    // hearth). 10% is visually nil; the genuine divergences below differ
-    // by 25%+ at 4 m and still fire.
-    auto sameI = [](float a, float b) {
-        return std::abs(a - b) <= 0.1f * std::max({ a, b, 1e-6f });
-    };
-    auto coveredAt = [&](size_t prefix, std::vector<size_t>* skipped) {
-        for (size_t i = 0; i < fromField.size(); ++i) {
-            if (isKnownGhost(fromField[i].pos)) {
-                if (skipped)
-                    skipped->push_back(i);
-                continue;
-            }
-            bool matched = false;
-            for (size_t j = 0; j < std::min(prefix, fromStore.size());
-                 ++j) {
-                if (glm::distance(fromStore[j].pos, fromField[i].pos) <
-                        kEmissiveThinDist &&
-                    sameI(fromStore[j].intensity, fromField[i].intensity)) {
-                    matched = true;
-                    break;
-                }
-            }
-            if (!matched)
-                return false;
-        }
-        return true;
-    };
-    // Production room, derived from the manifests, never hardcoded: budget
-    // minus the world.json authored count (the courtyard lamps eat slots).
-    std::vector<worldfile::LightSource> authoredProd;
-    worldfile::loadLightManifest(vf::voxel::scenery::root() +
-                                     "/world.json",
-                                 authoredProd);
-    const size_t prodRoom =
-        size_t(worldfile::kLightBudgetDefault) -
-        std::min<size_t>(authoredProd.size(),
-                         size_t(worldfile::kLightBudgetDefault));
-    MESSAGE("authored ", authoredProd.size(), " production room ", prodRoom);
-    // Eviction knee: sweep up from the field count so the log carries the
-    // minimal survivable room, not just a pass/fail at one budget. A zero
-    // knee means UNCOVERED even at the full list (never misread the
-    // fallback size as a passing knee). Known ghosts are skipped in the
-    // sweep but audited right after: any NEW field-only cluster fails.
-    std::vector<size_t> skipped;
-    size_t minRoom = 0;
-    for (size_t room = fromField.size(); room <= fromStore.size(); ++room) {
-        if (coveredAt(room, nullptr)) {
-            minRoom = room;
-            break;
-        }
-    }
-    if (minRoom > 0)
-        MESSAGE("hearths survive at room >= ", minRoom);
-    else
-        MESSAGE("hearths UNCOVERED even at full ", fromStore.size());
-    CHECK(minRoom > 0);
-    CHECK(minRoom <= prodRoom);
-    CHECK(coveredAt(prodRoom, &skipped));
-    for (size_t i : skipped)
-        MESSAGE("ghost skip field #", i, " pos (", fromField[i].pos.x, ",",
-                fromField[i].pos.y, ",", fromField[i].pos.z, ")");
-    // The skip set must equal the known ghosts exactly: a new field-only
-    // cluster is a regression hiding as a ghost, not drift to absorb.
-    CHECK(skipped.size() == kKnownGhosts.size());
-    // Diagnosis on RED: for every field cluster missed at the production
-    // room, report the nearest store cluster (index, distance, intensity
-    // pair) so the eviction reads as position-loss vs intensity-strictness.
-    if (!coveredAt(prodRoom, nullptr)) {
-        for (size_t i = 0; i < fromField.size(); ++i) {
-            bool inProd = false;
-            for (size_t j = 0; j < std::min(prodRoom, fromStore.size());
-                 ++j) {
-                if (glm::distance(fromStore[j].pos, fromField[i].pos) <
-                        kEmissiveThinDist &&
-                    sameI(fromStore[j].intensity,
-                          fromField[i].intensity)) {
-                    inProd = true;
-                    break;
-                }
-            }
-            if (inProd)
-                continue;
-            if (isKnownGhost(fromField[i].pos))
-                continue; // audited above, not an eviction
-            size_t best = 0;
-            float bestD = 1e30f;
-            for (size_t j = 0; j < fromStore.size(); ++j) {
-                const float d =
-                    glm::distance(fromStore[j].pos, fromField[i].pos);
-                if (d < bestD) {
-                    bestD = d;
-                    best = j;
-                }
-            }
-            MESSAGE("evicted field #", i, " pos (", fromField[i].pos.x,
-                    ",", fromField[i].pos.y, ",", fromField[i].pos.z,
-                    ") I=", fromField[i].intensity, " nearest store #",
-                    best, " d=", bestD, " I=", fromStore[best].intensity);
-        }
+    // The store is the runtime authority. Every production cluster must be
+    // above water and in air; a bucket that cannot lift into nearby air is
+    // dropped rather than becoming a source-less lamp inside solid.
+    REQUIRE(!fromStore.empty());
+    for (const auto& c : fromStore) {
+        CHECK(c.pos.y > WATER_LEVEL + 0.02f);
+        CHECK(lw.store().sampleWorld(c.pos).d >= 0.02f);
     }
 }
 
 TEST_CASE("chunk store: collectEmissive reflects live emissive stamps")
 {
     // isolated synthetic store: stamping here cannot pollute the shared
-    // testLayeredWorld other cases read
-    ChunkStore store = makeSyntheticStore(0, true);
+    // testLayeredWorld other cases read. Use the world-origin chunk so the
+    // emitter is above the water plane and represents a visible source.
+    const int emitterChunk = chunkIndexOfCell(512, 512, 512);
+    const int ox = (emitterChunk % kChunkGridN) * CHUNK_N;
+    const int oy = ((emitterChunk / kChunkGridN) % kChunkGridN) * CHUNK_N;
+    const int oz = (emitterChunk / (kChunkGridN * kChunkGridN)) * CHUNK_N;
+    ChunkStore store = makeSyntheticStore(emitterChunk, true);
     std::vector<glm::vec3> emission(kPaletteN, glm::vec3(0.0f));
     for (int m = 0; m < kPaletteN; ++m)
         emission[size_t(m)] = kEmissive[size_t(m)];
     std::vector<VoxelField::EmissiveCluster> before;
     store.collectEmissive(emission, before, std::numeric_limits<int>::max());
 
-    // find a solid surface cell in chunk 0 and lay a 2x2 ember bed on it
+    // find a solid surface cell in the emitter chunk and lay a 2x2 ember bed on it
     int sx = -1, sy = -1, sz = -1;
     for (int y = 1; y < CHUNK_N - 1 && sx < 0; ++y)
         for (int z = 0; z < CHUNK_N && sx < 0; ++z)
             for (int x = 0; x < CHUNK_N - 1; ++x)
-                if (store.cellAt(x, y, z).solid && !store.cellAt(x, y + 1, z).solid &&
-                    !store.cellAt(x + 1, y, z).solid) {
+                if (store.cellAt(ox + x, oy + y, oz + z).solid &&
+                    !store.cellAt(ox + x, oy + y + 1, oz + z).solid &&
+                    !store.cellAt(ox + x + 1, oy + y, oz + z).solid) {
                     sx = x;
                     sy = y + 1;
                     sz = z;
@@ -2189,9 +2063,9 @@ TEST_CASE("chunk store: collectEmissive reflects live emissive stamps")
         for (int dx = 0; dx < 2; ++dx) {
             StoreEdit e;
             e.mode = StoreEdit::Mode::Set;
-            e.x = sx + dx;
-            e.y = sy;
-            e.z = sz + dz;
+            e.x = ox + sx + dx;
+            e.y = oy + sy;
+            e.z = oz + sz + dz;
             e.mat = 9; // lava: kEmissive max component 3.0
             edits.push_back(e);
         }
@@ -2206,9 +2080,9 @@ TEST_CASE("chunk store: collectEmissive reflects live emissive stamps")
     REQUIRE(after.size() == 1);
     // bed-cell centres averaged: (sx+1, sy+0.5, sz+1) in grid units, then
     // to world (the cluster lifts ~0.1 m off the bed into air on top)
-    const glm::vec3 bedW(-0.5f * WORLD + (float(sx) + 1.0f) * VOXEL,
-                         -0.5f * WORLD + (float(sy) + 0.5f) * VOXEL,
-                         -0.5f * WORLD + (float(sz) + 1.0f) * VOXEL);
+    const glm::vec3 bedW(-0.5f * WORLD + (float(ox + sx) + 1.0f) * VOXEL,
+                         -0.5f * WORLD + (float(oy + sy) + 0.5f) * VOXEL,
+                         -0.5f * WORLD + (float(oz + sz) + 1.0f) * VOXEL);
     CHECK(glm::distance(after[0].pos, bedW) < 1.5f);
     CHECK(after[0].intensity == doctest::Approx(3.0f));
     CHECK(after[0].radius >= 1.0f);
@@ -2242,6 +2116,53 @@ TEST_CASE("chunk store: collectEmissive reflects live emissive stamps")
     // region subset: only the stamped chunk's clusters come back
     std::vector<VoxelField::EmissiveCluster> sub;
     store.collectEmissiveRegion(emission, sub, std::numeric_limits<int>::max(),
-                                { 0 });
+                                { emitterChunk });
     CHECK(sub.size() == full.size());
+}
+
+TEST_CASE("chunk store: submerged emissive cells do not cast invisible light")
+{
+    ChunkStore store = makeSyntheticStore(0, true); // chunk 0 is far below water
+    std::vector<glm::vec3> emission(kPaletteN, glm::vec3(0.0f));
+    for (int m = 0; m < kPaletteN; ++m)
+        emission[size_t(m)] = kEmissive[size_t(m)];
+
+    int sx = -1, sy = -1, sz = -1;
+    for (int y = 1; y < CHUNK_N - 1 && sx < 0; ++y)
+        for (int z = 0; z < CHUNK_N && sx < 0; ++z)
+            for (int x = 0; x < CHUNK_N - 1; ++x)
+                if (store.cellAt(x, y, z).solid &&
+                    !store.cellAt(x, y + 1, z).solid &&
+                    !store.cellAt(x + 1, y, z).solid) {
+                    sx = x; sy = y + 1; sz = z;
+                    break;
+                }
+    REQUIRE(sx >= 0);
+    REQUIRE(-0.5f * WORLD + (float(sy) + 0.5f) * VOXEL < WATER_LEVEL);
+
+    std::vector<StoreEdit> edits;
+    for (int dz = 0; dz < 2; ++dz)
+        for (int dx = 0; dx < 2; ++dx) {
+            StoreEdit e;
+            e.mode = StoreEdit::Mode::Set;
+            e.x = sx + dx; e.y = sy; e.z = sz + dz;
+            e.mat = 9;
+            edits.push_back(e);
+        }
+    store.apply(edits);
+    store.rebuildDirty();
+
+    std::vector<VoxelField::EmissiveCluster> clusters;
+    store.collectEmissive(emission, clusters, std::numeric_limits<int>::max());
+    CHECK(clusters.empty());
+}
+
+TEST_CASE("emissive cluster: a buried bucket without nearby air is dropped")
+{
+    const std::vector<EmissiveCell> cells{
+        { glm::vec3(0.f, 0.f, 0.f), glm::vec3(3.f, 0.9f, 0.18f) }
+    };
+    std::vector<VoxelField::EmissiveCluster> out;
+    clusterEmissiveCells(cells, 8, [](const glm::vec3&) { return false; }, out);
+    CHECK(out.empty());
 }

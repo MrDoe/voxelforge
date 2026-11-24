@@ -18,6 +18,7 @@
 #include <fstream>
 #include <iterator>
 #include <sstream>
+#include <unistd.h>
 
 namespace vf::ai {
 namespace fs = std::filesystem;
@@ -188,6 +189,53 @@ std::string fileSignature(const fs::path& p)
            ":" + std::to_string(fs::file_size(p, ec));
 }
 
+// The sessions file is a flat map of string -> string. Before patching an
+// entry in place, make sure it really is one: jsonGetString() is a raw scan,
+// and a file with a spliced/duplicated entry made the quote search span two
+// keys and bake both values into one broken line.
+bool isFlatStringObject(const std::string& text)
+{
+    size_t i = 0;
+    auto space = [&] {
+        while (i < text.size() && std::isspace(static_cast<unsigned char>(text[i]))) ++i;
+    };
+    auto quoted = [&]() {
+        if (i >= text.size() || text[i++] != '"') return false;
+        while (i < text.size() && text[i] != '"') {
+            if (text[i] == '\\' && i + 1 < text.size()) ++i;
+            ++i;
+        }
+        if (i >= text.size()) return false;
+        ++i;
+        return true;
+    };
+    space();
+    if (i >= text.size() || text[i++] != '{') return false;
+    space();
+    if (i < text.size() && text[i] == '}') {
+        ++i;
+        space();
+        return i == text.size();
+    }
+    for (;;) {
+        space();
+        if (!quoted()) return false; // key
+        space();
+        if (i >= text.size() || text[i++] != ':') return false;
+        space();
+        if (!quoted()) return false; // value
+        space();
+        if (i >= text.size()) return false;
+        if (text[i] == ',') { ++i; continue; }
+        if (text[i] == '}') {
+            ++i;
+            space();
+            return i == text.size();
+        }
+        return false;
+    }
+}
+
 // Flat object text for incremental appends. A previous version popped the
 // last character assuming it was '}' — with a trailing newline that produced
 // two concatenated JSON objects ("{...}\n, {...}\n}") on the second scenery.
@@ -220,7 +268,11 @@ void saveSessionId(const std::string& file, const std::string& dir, const std::s
     std::ifstream in(file);
     std::string text((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
     text = ChatUi::setSessionKey(text, dir, id);
-    const std::string tmp = file + ".tmp";
+    // Two processes (the app plus a gated/headless one) can write this file
+    // at once. A shared ".tmp" name let one rename the other's half-written
+    // staging file, which produced a sessions JSON with two values spliced
+    // into one line. Keep each writer's staging file private.
+    const std::string tmp = file + ".tmp." + std::to_string(::getpid());
     { std::ofstream out(tmp); out << text; }
     std::error_code ec;
     fs::rename(tmp, file, ec);
@@ -246,7 +298,11 @@ void saveModelChoice(const std::string& file, const std::string& dir,
     std::ifstream in(file);
     std::string text((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
     text = ChatUi::setSessionKey(text, dir + "::model", choice);
-    const std::string tmp = file + ".tmp";
+    // Two processes (the app plus a gated/headless one) can write this file
+    // at once. A shared ".tmp" name let one rename the other's half-written
+    // staging file, which produced a sessions JSON with two values spliced
+    // into one line. Keep each writer's staging file private.
+    const std::string tmp = file + ".tmp." + std::to_string(::getpid());
     { std::ofstream out(tmp); out << text; }
     std::error_code ec;
     fs::rename(tmp, file, ec);
@@ -269,6 +325,8 @@ std::string ChatUi::setSessionKey(std::string text, const std::string& key,
                                   const std::string& value)
 {
     const std::string k = jsonEscape(key), v = jsonEscape(value);
+    if (!isFlatStringObject(text)) text = "{";
+    text = normalizeSessionJsonImpl(std::move(text)); // drop the trailing '}'
     std::string old;
     if (jsonGetString(text, k.c_str(), old)) {
         const size_t q = text.find("\"" + k + "\"");
@@ -277,10 +335,9 @@ std::string ChatUi::setSessionKey(std::string text, const std::string& key,
         const size_t e = b == std::string::npos ? std::string::npos : text.find('"', b + 1);
         if (b != std::string::npos && e != std::string::npos) {
             text.replace(b, e - b + 1, "\"" + v + "\"");
-            return text;
+            return text + "\n}\n";
         }
     }
-    text = normalizeSessionJsonImpl(std::move(text));
     if (text.size() > 1) text += ",";
     text += "\n  \"" + k + "\": \"" + v + "\"\n}\n";
     return text;

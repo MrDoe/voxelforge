@@ -1423,5 +1423,26 @@ TEST_CASE("worldfile ui manifest: write, merge, preserve and parse booleans")
         CHECK(u.renderFlags == worldfile::UiSettings::kUiAbsent);
         CHECK(u.brushMode.empty());
     }
+    // camera look-at target round-trips and merges alongside the raw angles
+    {
+        worldfile::UiSettings w;
+        w.camX = -3.85f; w.camY = 5.f; w.camZ = 8.95f;
+        w.camYaw = 0.f; w.camPitch = -15.f;
+        w.camTargetX = 2.f; w.camTargetY = 1.25f; w.camTargetZ = 12.f;
+        REQUIRE(worldfile::writeUiManifest(p.string(), w));
+        worldfile::UiSettings u;
+        REQUIRE(worldfile::loadUiManifest(p.string(), u));
+        CHECK(u.camX == doctest::Approx(-3.85f));
+        CHECK(u.camTargetX == doctest::Approx(2.f));
+        CHECK(u.camTargetY == doctest::Approx(1.25f));
+        CHECK(u.camTargetZ == doctest::Approx(12.f));
+        // a merge that touches another key must not drop the aim target
+        worldfile::UiSettings patch;
+        patch.exposure = 1.5f;
+        REQUIRE(worldfile::mergeUiManifest(p.string(), patch));
+        REQUIRE(worldfile::loadUiManifest(p.string(), u));
+        CHECK(u.camTargetZ == doctest::Approx(12.f));
+        CHECK(u.exposure == doctest::Approx(1.5f));
+    }
     fs::remove_all(dir);
 }

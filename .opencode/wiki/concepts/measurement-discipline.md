@@ -937,4 +937,6 @@ Cross-refs: [[concepts/focused-test-groups]] (what a green group actually
 covers), [[entities/live-edit-brush]] (a manual-verify-only behaviour),
 [[concepts/x11-input-injection]] (driving the real window, where most of these
 instances arose), [[concepts/load-time-field-build]] (a measured cost that
-was worth trusting *because* its phases were measured separately).
+was worth trusting *because* its phases were measured separately),
+[[concepts/image-description-vision-config]] (which vision backend a caption
+actually came from, and why config is captured at plugin load).

@@ -441,6 +441,50 @@ void App::runCollisionSelfCheck()
         }
     }
 
+    // 1b. A cave dug by AI must be WALKABLE. The embedded-camera eject is a
+    // heightfield rule: the heightfield calls every point below the column
+    // top "solid", including a carved tunnel. It must consult the LIVE store,
+    // where the Delete brush's air cells live, or the camera is teleported
+    // back to the surface every frame. This diagnostic carves one synthetic
+    // cell below the column top, puts the camera in it, and asserts no lift.
+    {
+        const auto& field = m_layers.field();
+        const int n = field.latN();
+        const glm::ivec3 c = vf::voxel::worldToVoxel(m_camera.pos);
+        if (c.x > 0 && c.z > 0 && c.x < n && c.z < n) {
+            const int16_t top = field.colTops()[size_t(c.z) * size_t(n) + size_t(c.x)];
+            if (top > 4) {
+                const glm::ivec3 cave(c.x, int(top) - 3, c.z);
+                auto& store = m_layers.store();
+                if (store.cellAt(cave.x, cave.y, cave.z).solid) {
+                    vf::voxel::StoreEdit e;
+                    e.x = cave.x; e.y = cave.y; e.z = cave.z;
+                    e.mode = vf::voxel::StoreEdit::Mode::Clear;
+                    store.apply(e);
+                    const glm::vec3 inside = vf::voxel::voxelCenter(cave);
+                    const glm::vec3 savedPos = m_camera.pos;
+                    m_camera.pos = inside;
+                    updateBuriedProbe(true);
+                    const float lifted = m_camera.pos.y - inside.y;
+                    m_camera.pos = savedPos;
+                    m_layers.invalidateStore(); // re-adopt pristine baked pools
+                    spdlog::info("collision check: carved cave cell [{},{},{}]: "
+                                 "camera ejected {:.3f} m",
+                                 cave.x, cave.y, cave.z, lifted);
+                    if (lifted > 0.05f) {
+                        spdlog::error("collision check: camera FAILED to enter "
+                                      "a carved cave (heightfield eject)");
+                        ++failures;
+                    }
+                } else
+                    spdlog::warn("collision check: cave probe cell already air "
+                                 "(nothing to carve)");
+            } else
+                spdlog::warn("collision check: no terrain column under the "
+                             "start camera for the cave probe");
+        }
+    }
+
     // 2. Camera vs a MICRO object. Approach each object's solid centre along
     // the first free cardinal direction; the sweep must stop OUTSIDE and be
     // refused. A micro-only predicate keeps a nearby world wall out of it.

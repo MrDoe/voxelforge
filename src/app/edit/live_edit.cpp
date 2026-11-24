@@ -340,12 +340,6 @@ void App::refreshLiveLights()
     const auto t0 = std::chrono::steady_clock::now();
     const std::vector<glm::vec3> emission =
         buildEmissionTable(m_texBindings, m_texAtlas);
-    std::vector<vf::voxel::LightSource> rawAuthored;
-    vf::voxel::worldfile::loadLightManifest(m_manifestPath, rawAuthored);
-    // Same follow resolution as the bake upload (silent here - the bake
-    // owns the loud warning, a per-stroke warn would spam every release).
-    const std::vector<vf::voxel::LightSource> authored =
-        resolveFollowLights(rawAuthored, false);
     const int budget =
         std::clamp(m_lightBudget, 1, vf::voxel::kMaxLights);
 
@@ -405,20 +399,20 @@ void App::refreshLiveLights()
     }
     m_derivedClusters = merged;
 
-    // fill binding 25 authored-first via the shared fill (same order, gain
-    // and budget as the bake; truncation is silent here — the bake path
-    // owns the loud warning, a per-stroke warn would spam every release)
+    // Fill binding 25 from visible emissive clusters only. Authored point
+    // lights are deliberately excluded; truncation is silent here because
+    // the bake path owns the loud warning.
     vf::voxel::LightUBO ubo{};
-    const int n = vf::voxel::fillLightUBO(authored, merged, budget, ubo, false);
-    const int nAuthored =
-        std::min<int>(int(authored.size()), budget);
+    const std::vector<vf::voxel::LightSource> noAuthored;
+    const int n = vf::voxel::fillLightUBO(noAuthored, merged, budget, ubo, false);
     ubo.perPixelK =
         std::clamp(m_lightK, 1, vf::voxel::worldfile::kLightKMax);
     m_svoPass.setLights(ubo);
     m_splatPass.setLights(ubo);
     const auto t1 = std::chrono::steady_clock::now();
-    spdlog::info("live lights: {} authored + {} derived in {} chunks, {}/{} slots ({:.1f} ms)",
-                 nAuthored, n - nAuthored, region.size(), n, budget,
+    spdlog::info("live lights: {} derived from visible emissive materials in {} "
+                 "chunks, {}/{} slots ({:.1f} ms)",
+                 n, region.size(), n, budget,
                  std::chrono::duration<double, std::milli>(t1 - t0).count());
     // A staged move/rotate preview survives strokes: the both-pass upload
     // above just restored base to splat, so re-apply the overlay (no-op

@@ -112,3 +112,20 @@ separate files.
   running processes — see [[concepts/x11-input-injection]].
 - ImageMagick and `xdotool` are not installed. Use ffmpeg for capture and
   python3-xlib for input.
+
+## Gallery captures (2026-11-24)
+
+`record_demo.py --mode shots --variants splats voxel --animtime 0` with an
+explicit one-launch `VF_SCENERY=LakesideHamlet` override (the pointer file was
+`LighthouseIsle`, and the shipped keyframes target the hamlet). Both variants
+paid one ~12 s world load; 18 of 20 keyframes passed the built-in acceptance
+band — the two `tower_low` frames failed the sky probe and are excluded.
+
+- [splat hero](../../../tests/screenshots/wiki_splat_hero.png) · [SVO hero](../../../tests/screenshots/wiki_svo_hero.png)
+- [splat cabin](../../../tests/screenshots/wiki_splat_cabin.png) · [SVO cabin](../../../tests/screenshots/wiki_svo_cabin.png)
+- [splat grove](../../../tests/screenshots/wiki_splat_grove.png)
+- [splat overview](../../../tests/screenshots/wiki_splat_overview.png) · [SVO overview](../../../tests/screenshots/wiki_svo_overview.png)
+
+The pointer/scenery trap is worth remembering: a capture without
+`VF_SCENERY` renders whichever scenery `scenery/last.json` names, so shots can
+be perfectly formed and still point the demo cameras at empty ground.

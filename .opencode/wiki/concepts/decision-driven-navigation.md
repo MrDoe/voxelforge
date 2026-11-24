@@ -2,7 +2,7 @@
 title: Decision-Driven Navigation (vf_nav)
 tags: [tooling, navigation, tev1, ascii, x11, testing]
 sourceRefs: [tools/vf_nav.py, tools/ascii_view.py, tools/vf_input.py]
-lastReviewed: 2026-10-04
+lastReviewed: 2026-11-24
 ---
 
 `tools/vf_nav.py` flies the live Voxelforge window around the hamlet with a
@@ -62,3 +62,10 @@ so no LLM round-trips sit between steps. `--policy fast` skips tev1 entirely
 [[entities/live-edit-brush]]). No pick line after a click means the centre
 ray hit no geometry - a cheap "looking at nothing / outside the world"
 signal, and the same ray reports the world position of whatever is ahead.
+
+## See also
+
+[[concepts/decision-driven-world-editing]] — the same fast-loop pattern applied
+to world editing, but with **Clef on llama.cpp** (this page's tev1-on-Ollama
+path is legacy) and option sentences rebuilt from the observation instead of a
+fixed move vocabulary. External basis: [[sources/brain-doom-decision-sample]].

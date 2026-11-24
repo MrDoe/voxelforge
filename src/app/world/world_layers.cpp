@@ -187,21 +187,22 @@ void App::applyWorldReload()
     // an external manifest edit must not leave a stale picker table behind
     // (a pending GUI pick is applied after this, so it still wins the frame)
     vf::voxel::worldfile::loadTextureManifest(m_manifestPath, m_texBindings);
-    // explicit light edits ride the same poll; they are tiny, so reload them
-    // with the manifest rather than waiting for a restart.
-    uploadLightSources();
     // micro objects are SEPARATE SVO worlds, so a manifest edit that adds,
     // removes or repositions one only re-uploads its own buffers - it never
-    // invalidates the world bake. They load FIRST because the surfel bake
-    // below consults their fields for the cast-shadow half of the two-way
-    // shadow contract.
+    // invalidates the world bake. They load before the surfel bake because it
+    // consults their fields for the cast-shadow half of the two-way shadow
+    // contract.
     loadMicroObjects();
+    syncWorldLayerList();
+    // Re-derive point lights from exposed, above-water emissive cells only;
+    // authored world.json lamps are ignored. Refresh the indirect volume from
+    // the same UBO immediately afterwards.
+    uploadLightSources();
     rebuildSurfels();       // splat backend follows the same live field
     // the reload re-adopted the store: re-apply the persisted live overlay
     m_liveEditor.clear();
     m_overlayLoaded = false;
     loadStoreOverlay();
-    syncWorldLayerList();
     rescanWorldLayers(); // layers dropped into the scenery while running show up too
     // Keep m_rotateLayer alive across the rebuild: it is the selected
     // interaction target, not a transient mouse-down state.
