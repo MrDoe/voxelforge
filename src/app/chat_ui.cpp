@@ -6,6 +6,7 @@
 #include "voxel/scenery.hpp"
 #include "voxel/worldfile.hpp"
 
+#include <imgui_internal.h>
 #include <spdlog/spdlog.h>
 
 #include <algorithm>
@@ -303,6 +304,23 @@ std::string ChatUi::promptWithSelection(const std::string& text,
              "on a position, ask the user to Ctrl+LMB pick one first.]";
     }
     return o.str();
+}
+
+void ChatUi::clearInputBuffer(char* buf, size_t bufSize, ImGuiID id)
+{
+    if (buf && bufSize > 0) buf[0] = '\0';
+    // While a multiline InputText is ACTIVE ImGui ignores the caller's buffer
+    // and re-applies its own copy (state->TextA) every frame, so the clear
+    // above would be silently undone. Ask the input state to reload from the
+    // now-empty buffer.
+    if (ImGuiInputTextState* st = ImGui::GetInputTextState(id))
+        st->ReloadUserBufAndMoveToEnd();
+    // Clicking Send deactivates the field; the deactivation snapshot is
+    // re-applied to the caller's buffer on the next frame if it was edited.
+    // Drop that snapshot so the old text cannot come back.
+    if (ImGuiContext* ctx = ImGui::GetCurrentContext())
+        if (ctx->InputTextDeactivatedState.ID == id)
+            ctx->InputTextDeactivatedState.ID = 0;
 }
 
 ChatUi::ChatUi()
@@ -733,6 +751,10 @@ void ChatUi::drawPanel(const vf::voxel::PickHit* hover,
         std::snprintf(m_inputBuf, sizeof(m_inputBuf),
                       "Draw a stony path from the lighthouse to the barn.");
     }
+    // Deterministic widget id: InputTextMultiline's BeginGroup()/EndGroup()
+    // pair leaves LastItemData.ID at the group's 0 unless the field is active,
+    // so GetItemID() is not usable here.
+    const ImGuiID inputId = ImGui::GetID("##aiInput");
     ImGui::InputTextMultiline("##aiInput", m_inputBuf, sizeof(m_inputBuf),
                               ImVec2(-1.0f, 52.0f * s));
     m_inputFocused = ImGui::IsItemActive();
@@ -758,7 +780,11 @@ void ChatUi::drawPanel(const vf::voxel::PickHit* hover,
     ImGui::BeginDisabled(m_inputBuf[0] == 0);
     if (ImGui::Button("Send", ImVec2(-1.0f, vf::app::kUiRowH * s)) || submit) {
         const std::string text = m_inputBuf;
-        m_inputBuf[0] = 0;
+        // ImGui owns the field's text while it is active, so clearing the
+        // caller's buffer alone would be undone on the next frame. This
+        // forces its state to reload the now-empty buffer (both the Enter
+        // and Send paths, the latter after the field was deactivated).
+        clearInputBuffer(m_inputBuf, sizeof(m_inputBuf), inputId);
         if (m_sending) {
             m_client.interrupt();
             m_sending = false;

@@ -4,8 +4,11 @@
 #include "ai/tools.hpp"
 #include "app/chat_ui.hpp"
 #include <doctest/doctest.h>
+#include <imgui.h>
+#include <imgui_internal.h>
 #include <algorithm>
 #include <chrono>
+#include <cstdint>
 #include <cstdlib>
 #include <thread>
 
@@ -146,4 +149,56 @@ TEST_CASE("opencode client builds HTTP Basic credentials")
 {
     CHECK(OpenCodeClient::base64("opencode:secret") == "b3BlbmNvZGU6c2VjcmV0");
     CHECK(OpenCodeClient::base64("") .empty());
+}
+
+TEST_CASE("composer buffer clear reaches ImGui's active input state")
+{
+    // ImGui keeps the live text in its own state while a multiline InputText
+    // is active, so clearing the caller's buffer alone is re-applied from
+    // state->TextA on the next frame and the field keeps showing the old text.
+    // ChatUi::clearInputBuffer must force the reload path.
+    struct ContextGuard {
+        ContextGuard() { ImGui::CreateContext(); }
+        ~ContextGuard() { ImGui::DestroyContext(); }
+    } guard;
+
+    ImGuiIO& io = ImGui::GetIO();
+    io.DisplaySize = ImVec2(800.0f, 600.0f);
+    io.DeltaTime = 1.0f / 60.0f;
+    io.Fonts->AddFontDefault();
+    unsigned char* pixels = nullptr;
+    int atlasW = 0, atlasH = 0;
+    io.Fonts->GetTexDataAsRGBA32(&pixels, &atlasW, &atlasH);
+    io.Fonts->SetTexID((ImTextureID)(intptr_t)1);
+
+    char buf[64] = {};
+    ImGuiID id = 0;
+    auto frame = [&](const char* type, bool focus) {
+        for (const char* p = type; *p; ++p)
+            io.AddInputCharacter((unsigned int)(unsigned char)*p);
+        ImGui::NewFrame();
+        ImGui::Begin("composer-test");
+        id = ImGui::GetID("##input");
+        if (focus)
+            ImGui::SetKeyboardFocusHere();
+        ImGui::InputTextMultiline("##input", buf, sizeof(buf),
+                                  ImVec2(200.0f, 40.0f));
+        ImGui::End();
+        ImGui::Render();
+    };
+
+    frame("", true);   // focus the field
+    frame("", false);  // it becomes active
+    frame("hello", false);
+    CHECK(std::string(buf) == "hello");
+    CHECK(ImGui::GetInputTextState(id) != nullptr);
+
+    vf::ai::ChatUi::clearInputBuffer(buf, sizeof(buf), id);
+    CHECK(buf[0] == '\0');
+
+    frame("", false); // next frame: ImGui reloads from the caller's buffer
+    CHECK(buf[0] == '\0');
+    ImGuiInputTextState* st = ImGui::GetInputTextState(id);
+    const bool stateCleared = (st == nullptr) || st->TextLen == 0;
+    CHECK(stateCleared);
 }

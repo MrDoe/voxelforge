@@ -121,3 +121,10 @@ frame diff cannot give (the icon rail repaints on hover and reads as "focused").
 
 Final result: 10.5 s of typing into the layer filter, zero hotkey log lines,
 scene diff 0.0006, camera moves again on W afterwards.
+
+## Related
+
+The same widget lifecycle has a second consequence: an **active** field owns its
+text, so clearing the caller's buffer does nothing until the input state is
+told to reload. That is the chat composer's "text stays after Enter" bug — see
+[[concepts/imgui-active-input-text]].

@@ -79,6 +79,10 @@ public:
     static std::string promptWithSelection(const std::string& text,
                                            const glm::ivec3& cell,
                                            bool hasSelection);
+    // Clear a composer buffer and make the clear stick while ImGui owns the
+    // multiline field's text (public for the regression test): a bare
+    // buf[0] = 0 is re-applied from ImGui's internal state on the next frame.
+    static void clearInputBuffer(char* buf, size_t bufSize, ImGuiID id);
 
 private:
     void onEvent(const OpenCodeEvent& e);   // SSE worker → queue only
