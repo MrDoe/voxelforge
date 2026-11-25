@@ -1,4 +1,5 @@
 #include "voxel/chunk_store.hpp"
+#include "voxel/picking.hpp" // voxelCenter: the same cell-centre mapping the pick uses
 #include "voxel/worldfile.hpp"
 #include <spdlog/spdlog.h>
 #include <algorithm>
@@ -593,12 +594,24 @@ void ChunkStore::apply(const std::vector<StoreEdit>& edits)
 SmoothTerrainEdits ChunkStore::makeSmoothEdits(glm::ivec3 center,
                                                float radiusM,
                                                float strength,
-                                               bool preserveVolume) const
+                                               bool preserveVolume,
+                                               const SmoothPlane* planeHint) const
 {
     SmoothTerrainEdits result;
     if (!m_loaded || m_latN <= 0 || !std::isfinite(radiusM) ||
         !std::isfinite(strength) || radiusM <= 0.0f || strength <= 0.0f)
         return result;
+
+    // Only a finite, non-degenerate surfel fit is authoritative. Everything
+    // else (unit tests, malformed headless hints, a brush over water) uses the
+    // voxel fallback so the tool still flattens instead of doing nothing.
+    const SmoothPlane* hint = nullptr;
+    if (planeHint && planeHint->valid && std::isfinite(planeHint->point.x) &&
+        std::isfinite(planeHint->point.y) && std::isfinite(planeHint->point.z) &&
+        std::isfinite(planeHint->normal.x) && std::isfinite(planeHint->normal.y) &&
+        std::isfinite(planeHint->normal.z) &&
+        glm::length(planeHint->normal) > 1e-3f)
+        hint = planeHint;
 
     // The UI's useful range is already modest; cap the public helper as well
     // so a malformed headless value cannot turn one click into a million-cell
@@ -635,22 +648,19 @@ SmoothTerrainEdits ChunkStore::makeSmoothEdits(glm::ivec3 center,
     // the centre column there, the standard Neumann boundary condition.
     const float fullW = kwSum * kwSum;
 
-    // A picked object is smoothed with the SAME relaxation the terrain path
-    // below uses, generalised to an arbitrary surface axis. The axis and the
-    // outward side come from the picked cell's exposed faces (the store SDF
-    // gradient only breaks the two-sided tie of a thin wall), so a roof is a Y
-    // surface and a wall is an X or Z surface, and the footprint is always the
-    // 2D plane of that surface: one click costs O(pi r^2) surface samples
-    // instead of an O(r^3) volume scan.
+    // A picked object is flattened with the SAME mean-normal plane the terrain
+    // path below uses. The row axis and the outward side come from the picked
+    // cell's exposed faces (the store SDF gradient only breaks the two-sided
+    // tie of a thin wall), so a roof is a Y surface and a wall is an X or Z
+    // surface, and the footprint is always the 2D plane of that surface: one
+    // click costs O(pi r^2) surface samples instead of an O(r^3) volume scan.
     //
-    // Relaxing a surface POSITION rather than filtering per-voxel occupancy is
-    // what makes this exact for splats. A bump is removed in a single stamp
-    // (the span from the neighbour level down to the bump is cleared as one
-    // contiguous run, so no unsupported floater is left behind), a notch is
-    // filled, and a flat face, a 1-cell wall, a post or a staircase is its own
-    // neighbourhood average and therefore survives untouched instead of being
-    // eroded. The min/max clamp is the same fixed point the terrain path has,
-    // so a second stamp over the same spot is a no-op. Only object cells are
+    // Moving a surface POSITION rather than filtering per-voxel occupancy is
+    // what makes this exact for splats. The plane crosses the bump in one
+    // stamp (the span down to the new level is cleared as one contiguous run,
+    // so no unsupported floater is left behind), fills a notch, and leaves a
+    // flat face, a lone post or a staircase step at its own crossing - a
+    // second stamp over the same spot is then a no-op. Only object cells are
     // ever cleared and every fill is an object cell, so terrain columns, the
     // height texture and the water bed are never touched.
     const StoreCell picked = cellAt(cx, cy, cz);
@@ -851,6 +861,62 @@ SmoothTerrainEdits ChunkStore::makeSmoothEdits(glm::ivec3 center,
             return c;
         };
 
+        // --- the flatten plane ---------------------------------------------
+        // Orientation is the MEAN NORMAL of the selected surface; its anchor
+        // is the centroid of that surface INCLUDING the surrounding ring, so
+        // the patch aligns with the voxels around it instead of cutting a
+        // shelf. The App supplies a surfel fit (continuous positions, baked
+        // smoothed normals) on the normal path; this is the voxel equivalent
+        // for callers that have no surfels.
+        glm::vec3 planeN(0.f, 1.f, 0.f), planeP(0.f);
+        if (hint) {
+            planeN = glm::normalize(hint->normal);
+            planeP = hint->point;
+        } else {
+            // Rows in the footprint and its ring vote with a radial weight;
+            // supported ground rows vote at half weight (the old ground rule)
+            // so a short grounded bump settles onto the level around it.
+            const int ring = std::max(2, radiusCells / 2);
+            float sw = 0.0f;
+            glm::vec3 sn(0.f), sp(0.f);
+            const glm::vec3 faceN =
+                glm::vec3(float(kUnit[axis][0] * sign),
+                          float(kUnit[axis][1] * sign),
+                          float(kUnit[axis][2] * sign));
+            for (int v = std::max(0, cv - radiusCells - ring);
+                 v <= std::min(m_latN - 1, cv + radiusCells + ring); ++v)
+                for (int u = std::max(0, cu - radiusCells - ring);
+                     u <= std::min(m_latN - 1, cu + radiusCells + ring); ++u) {
+                    const float du = float(u - cu), dv = float(v - cv);
+                    const float dist = std::sqrt(du * du + dv * dv) * VOXEL;
+                    if (dist > radiusM + ring * VOXEL)
+                        continue;
+                    const SurfaceColumn& c = surfaceAt(u, v);
+                    if (!c.valid)
+                        continue;
+                    const float w = (c.ground ? 0.5f : 1.0f) *
+                                    (dist <= radiusM ? 1.0f : 0.5f);
+                    int p[3] = { 0, 0, 0 };
+                    p[uAxis] = u; p[axis] = c.pos; p[vAxis] = v;
+                    sp += voxelCenter(glm::ivec3(p[0], p[1], p[2])) * w;
+                    sn += faceN * w;
+                    sw += w;
+                }
+            if (sw > 0.0f) {
+                planeP = sp / sw;
+                planeN = glm::normalize(sn);
+            } else {
+                planeP = voxelCenter(center);
+                planeN = faceN;
+            }
+        }
+        // Stepping along the picked face's axis keeps the row walk meaningful
+        // even when the mean normal is tilted off it. Clamp the divisor so a
+        // nearly perpendicular plane cannot turn one stamp into a cliff.
+        float na = planeN[axis];
+        if (std::abs(na) < 0.25f)
+            na = na >= 0.0f ? 0.25f : -0.25f;
+
         static constexpr int kNeighbour[8][2] = {
             { -1, 0 }, { 1, 0 }, { 0, -1 }, { 0, 1 },
             { -1, -1 }, { 1, -1 }, { -1, 1 }, { 1, 1 }
@@ -875,51 +941,39 @@ SmoothTerrainEdits ChunkStore::makeSmoothEdits(glm::ivec3 center,
                 observedMin = std::min(observedMin, current.pos);
                 observedMax = std::max(observedMax, current.pos);
 
-                float sum = 0.0f;
-                float weightSum = 0.0f;
-                int minPos = current.pos;
-                int maxPos = current.pos;
-                // Ground may stand in for a missing object surface only when
-                // the whole 3x3 ring is bare. If any lateral row carries an
-                // object surface - the adjacent step of a staircase, the rest
-                // of a wall top - that surface is the neighbourhood and the
-                // ground must not drag the feature down.
-                bool anyObjectNeighbour = false;
+                // A lone surface (a 1-cell post or spike) has no lateral
+                // neighbour on its own face: it is a feature, not a bump, and
+                // a surrounding ground plane must not drag it down.
+                bool lateral = false;
                 for (const auto& d : kNeighbour) {
-                    const SurfaceColumn& s = surfaceAt(u + d[0], v + d[1]);
-                    if (s.valid && !s.ground) {
-                        anyObjectNeighbour = true;
+                    if (surfaceAt(u + d[0], v + d[1]).valid) {
+                        lateral = true;
                         break;
                     }
                 }
-                for (const auto& d : kNeighbour) {
-                    const SurfaceColumn& sampleCol =
-                        surfaceAt(u + d[0], v + d[1]);
-                    if (!sampleCol.valid)
-                        continue;
-                    if (sampleCol.ground && anyObjectNeighbour)
-                        continue;
-                    const float w = (d[0] == 0 || d[1] == 0) ? 1.0f : 0.5f;
-                    // Ground stands in for a missing object surface, but at
-                    // half weight so object-to-object smoothing dominates.
-                    const float gw = sampleCol.ground ? 0.5f * w : w;
-                    sum += float(sampleCol.pos) * gw;
-                    weightSum += gw;
-                    minPos = std::min(minPos, sampleCol.pos);
-                    maxPos = std::max(maxPos, sampleCol.pos);
-                }
-                // A surface with no lateral object neighbour (a post, a lone
-                // 1-cell column) has nothing to average against: keep it.
-                if (weightSum <= 0.0f)
+                if (!lateral)
                     continue;
                 ++sampledRows;
 
+                // Mean-normal plane: project this row's surface point onto
+                // the plane along the surface axis, then take the usual
+                // strength/falloff fraction. A row already on the plane
+                // rounds to itself, so a flat face or a staircase step stays
+                // a fixed point; a bump or notch moves in one stamp.
+                int p[3] = { 0, 0, 0 };
+                p[uAxis] = u; p[axis] = current.pos; p[vAxis] = v;
+                const float d = glm::dot(voxelCenter(glm::ivec3(p[0], p[1], p[2])) - planeP,
+                                         planeN);
+                const float deviation = -d / (VOXEL * na); // cells to the plane
                 const float q =
                     std::clamp(1.0f - distance / radiusM, 0.0f, 1.0f);
                 const float falloff = q * q * (3.0f - 2.0f * q);
-                const float relaxed = float(current.pos) +
-                    (sum / weightSum - float(current.pos)) * strength * falloff;
-                int target = std::clamp(int(std::lround(relaxed)), minPos, maxPos);
+                const float gain = strength * falloff *
+                    (preserveVolume ? (1.0f - kSmoothTaubinReinflate) : 1.0f);
+                const float relaxed = float(current.pos) + deviation * gain;
+                int target = std::clamp(int(std::lround(relaxed)),
+                                        current.pos - kSmoothStepCapCells,
+                                        current.pos + kSmoothStepCapCells);
                 target = std::clamp(target, 0, m_latN - 1);
                 if (target == current.pos)
                     continue;
@@ -987,10 +1041,13 @@ SmoothTerrainEdits ChunkStore::makeSmoothEdits(glm::ivec3 center,
         if (getenv("VF_TRACE")) {
             spdlog::info("smooth object: center=({},{},{}) radius={:.2f} "
                          "strength={:.2f} axis={} sign={:+d} bump={} rows={} "
-                         "sampled={} posRange=[{},{}] edits={}",
+                         "sampled={} posRange=[{},{}] edits={} "
+                         "plane=(n {:.2f},{:.2f},{:.2f} @ {:.2f},{:.2f},{:.2f} {})",
                          center.x, center.y, center.z, radiusM, strength, axis,
                          sign, bumpMode, validRows, sampledRows, observedMin,
-                         observedMax, result.edits.size());
+                         observedMax, result.edits.size(), planeN.x, planeN.y,
+                         planeN.z, planeP.x, planeP.y, planeP.z,
+                         hint ? "surfel" : "voxel");
         }
         return result;
     }
@@ -1114,30 +1171,63 @@ SmoothTerrainEdits ChunkStore::makeSmoothEdits(glm::ivec3 center,
         return c;
     };
 
-    // Blur along z once per window column; the x half of the separable kernel
-    // is applied per target below. A Gaussian is separable, so this is
-    // numerically identical to the 2-D kernel at (2*reach+1) multiply-adds per
-    // column instead of (2*reach+1)^2 - the difference between a stamp that
-    // costs a millisecond and one that costs a hundred.
-    std::vector<float> zSum(size_t(nx) * size_t(nz), 0.0f);
+    // Coverage only: the flatten target comes from the fitted plane, but the
+    // obstacle guard still needs to know how much of each window is terrain.
+    // A separable Gaussian gives that in (2*reach+1) taps per column.
     std::vector<float> zWeight(size_t(nx) * size_t(nz), 0.0f);
     for (int z = z0; z <= z1; ++z)
         for (int x = x0; x <= x1; ++x) {
             if (!columnAt(x, z).valid)
                 continue; // a void column stays a void sample, never terrain
             const size_t at = size_t(z - z0) * size_t(nx) + size_t(x - x0);
-            float s = 0.0f, w = 0.0f;
+            float w = 0.0f;
             for (int d = -reach; d <= reach; ++d) {
                 const float wd = kw[size_t(d + reach)];
-                const Column& sample = columnAt(x, z + d);
-                if (!sample.valid)
-                    continue;
-                s += float(sample.top) * wd;
-                w += wd;
+                if (columnAt(x, z + d).valid)
+                    w += wd;
             }
-            zSum[at] = s;
             zWeight[at] = w;
         }
+
+    // --- the flatten plane -------------------------------------------------
+    // The App fits this from the rendered surfels: mean normal over the
+    // selection and its surrounding ring, anchored at the surface centroid.
+    // Without that hint, fit the voxel equivalent over the same window: the
+    // mean height gradient for orientation, the weighted mean top for anchor.
+    glm::vec3 planeN(0.f, 1.f, 0.f), planeP(0.f);
+    if (hint) {
+        planeN = glm::normalize(hint->normal);
+        if (planeN.y < 0.0f)
+            planeN = -planeN; // terrain surfaces always face up
+        planeP = hint->point;
+    } else {
+        float sw = 0.0f;
+        glm::vec3 sn(0.f), sp(0.f);
+        for (int z = z0; z <= z1; ++z)
+            for (int x = x0; x <= x1; ++x) {
+                const Column& c = columnAt(x, z);
+                if (!c.valid)
+                    continue;
+                const float w =
+                    kw[size_t(std::clamp(x - cx + reach, 0, 2 * reach))] *
+                    kw[size_t(std::clamp(z - cz + reach, 0, 2 * reach))];
+                const float h = voxelCenter(glm::ivec3(x, c.top, z)).y;
+                auto hAt = [&](int xx, int zz) {
+                    const Column& q = columnAt(xx, zz);
+                    return q.valid ? voxelCenter(glm::ivec3(xx, q.top, zz)).y : h;
+                };
+                sn += glm::normalize(glm::vec3(
+                          -(hAt(x + 1, z) - hAt(x - 1, z)) / (2.0f * VOXEL),
+                          1.0f,
+                          -(hAt(x, z + 1) - hAt(x, z - 1)) / (2.0f * VOXEL))) * w;
+                sp += voxelCenter(glm::ivec3(x, c.top, z)) * w;
+                sw += w;
+            }
+        if (sw > 0.0f) {
+            planeN = glm::normalize(sn);
+            planeP = sp / sw;
+        }
+    }
 
     result.edits.reserve(size_t(radiusCells * radiusCells) * 2u);
     int validColumns = 0;
@@ -1170,18 +1260,15 @@ SmoothTerrainEdits ChunkStore::makeSmoothEdits(glm::ivec3 center,
                 observedMaxZ = z;
             }
 
-            // The x half of the separable kernel. `acc` is the weighted sum of
-            // column tops and `validW` the weight of the VALID ones, so
-            // acc - validW*top is the kernel-weighted deviation from this
-            // column and dividing it by the constant fullW measures how far
-            // the terrain deviates from its own neighbourhood mean.
-            float acc = 0.0f;
+            // Coverage of the kernel window: a mostly-void window is an
+            // obstacle or a world edge and is left alone (guard below). The
+            // flatten target itself comes from the fitted plane, not a local
+            // average, so no weighted sum of tops is needed here.
             float validW = 0.0f;
             for (int d = -reach; d <= reach; ++d) {
                 const float wd = kw[size_t(d + reach)];
                 const size_t at = size_t(z - z0) * size_t(nx) +
                                   size_t(x + d - x0);
-                acc += wd * zSum[at];
                 validW += wd * zWeight[at];
             }
             // Obstacle guard. A window that is mostly NOT valid terrain - a
@@ -1195,7 +1282,13 @@ SmoothTerrainEdits ChunkStore::makeSmoothEdits(glm::ivec3 center,
 
             float q = std::clamp(1.0f - distance / radiusM, 0.0f, 1.0f);
             const float falloff = q * q * (3.0f - 2.0f * q);
-            const float deviation = (acc - validW * float(current.top)) / fullW;
+            // Signed distance from this column's surface point to the
+            // mean-normal plane, converted to the Y cells needed to cross it.
+            // n.y is floored so a near-horizontal plane cannot turn one stamp
+            // into a cliff (the step cap below still bounds every move).
+            const float d = glm::dot(voxelCenter(glm::ivec3(x, current.top, z)) - planeP,
+                                     planeN);
+            const float deviation = -d / (VOXEL * std::max(0.25f, planeN.y));
             // Taubin's second step, expressed as a FRACTION of the smoothing step
             // this column received, so the net gain is bounded to [0, s] and
             // can never reverse into inflation. A constant offset would: see
@@ -1291,6 +1384,10 @@ SmoothTerrainEdits ChunkStore::makeSmoothEdits(glm::ivec3 center,
             }
             return "?";
         };
+        spdlog::info("smooth probe: plane n=({:.3f},{:.3f},{:.3f}) "
+                     "point=({:.2f},{:.2f},{:.2f}) source={}",
+                     planeN.x, planeN.y, planeN.z, planeP.x, planeP.y,
+                     planeP.z, hint ? "surfel" : "voxel");
         spdlog::info("smooth probe: {} edits", result.edits.size());
         for (const StoreEdit& e : result.edits) {
             spdlog::info("  {} ({},{},{}) {}", modeName(e.mode), e.x, e.y, e.z,
@@ -1301,12 +1398,15 @@ SmoothTerrainEdits ChunkStore::makeSmoothEdits(glm::ivec3 center,
         const StoreCell centre = cellAt(cx, std::clamp(center.y, 0, m_latN - 1), cz);
         spdlog::info("smooth terrain: center=({},{},{}) radius={:.2f} strength={:.2f} "
                      "centreCell=(solid={}, obj={}, mat={}) valid={} sampled={} "
-                     "topRange=[{},{}] at=({}, {})..({}, {}) edits={} rise={}",
+                     "topRange=[{},{}] at=({}, {})..({}, {}) edits={} rise={} "
+                     "plane=(n {:.2f},{:.2f},{:.2f} @ {:.2f},{:.2f},{:.2f} {})",
                      center.x, center.y, center.z, radiusM, strength,
                      centre.solid, centre.obj, int(centre.mat), validColumns,
                      sampledColumns, observedMin, observedMax,
                      observedMinX, observedMinZ, observedMaxX, observedMaxZ,
-                     result.edits.size(), result.riseCells);
+                     result.edits.size(), result.riseCells,
+                     planeN.x, planeN.y, planeN.z,
+                     planeP.x, planeP.y, planeP.z, hint ? "surfel" : "voxel");
     }
     return result;
 }
@@ -1879,16 +1979,8 @@ bool writeOverlayBytes(const std::string& path, const std::vector<uint8_t>& byte
     s.type = worldfile::kSectionStoreChunks;
     s.data = bytes;
     d.sections.push_back(std::move(s));
-    const std::string tmp = path + ".tmp";
-    if (!worldfile::write(tmp, d))
-        return false;
-    std::error_code ec;
-    std::filesystem::rename(tmp, path, ec);
-    if (ec) {
-        std::remove(tmp.c_str());
-        return false;
-    }
-    return true;
+    // worldfile::write is temp+rename with a per-process unique temp name.
+    return worldfile::write(path, d);
 }
 
 } // namespace
@@ -1971,38 +2063,43 @@ std::vector<uint8_t> ChunkStore::serializeEdited() const
 
 bool ChunkStore::applyEdited(const std::vector<uint8_t>& data)
 {
+    // ALL OR NOTHING. The section is parsed and validated into a staging list
+    // first and only committed once every record has parsed. Applying chunk by
+    // chunk used to leave the chunks before a bad record applied and flagged
+    // `edited`, and the next stroke then saved that partial set over the
+    // whole session on disk.
+    struct Staged {
+        uint32_t ci = 0;
+        int32_t bounds[6] = {};
+        Chunk::State state = Chunk::State::Empty;
+        std::vector<SolidBox> boxes;
+        std::vector<uint32_t> bricks;
+        std::vector<uint32_t> slotOf;
+    };
     SecReader r { data.data(), data.size() };
     uint32_t schema = 0, chunkCount = 0;
     if (!r.pod(schema) || schema != kOverlaySchema)
         return false; // older/unknown overlay schema: ignore (not an error)
     if (!r.pod(chunkCount) || chunkCount > uint32_t(kChunkCount))
         return false;
+    std::vector<Staged> staged;
+    staged.reserve(chunkCount);
     for (uint32_t k = 0; k < chunkCount; ++k) {
-        uint32_t ci = 0, boxCount = 0, brickCount = 0;
+        Staged st;
+        uint32_t boxCount = 0, brickCount = 0;
         uint8_t state = 0, pad[3] = {};
-        if (!r.pod(ci) || ci >= uint32_t(kChunkCount))
+        if (!r.pod(st.ci) || st.ci >= uint32_t(kChunkCount))
             return false;
         if (!r.get(&state, 1) || !r.get(pad, 3))
             return false;
-        int32_t bounds[6] = {};
-        if (!r.get(bounds, sizeof(bounds)))
+        if (!r.get(st.bounds, sizeof(st.bounds)))
             return false;
         if (!r.pod(boxCount) || !r.pod(brickCount))
             return false;
         if (boxCount > uint32_t(kBricksPerChunk) || brickCount > uint32_t(kBricksPerChunk))
             return false;
-        Chunk& c = m_chunks[size_t(ci)];
-        for (int i = 0; i < 3; ++i) {
-            c.lo[i] = bounds[i];
-            c.hi[i] = bounds[3 + i];
-        }
-        c.state = state <= 2 ? Chunk::State(state) : Chunk::State::Empty;
-        c.bricks.clear();
-        c.slotOf.assign(kBricksPerChunk, kNoBrick);
-        c.boxes.clear();
-        c.pool.reset();
-        c.poolValid = false;
-        c.dirty = false;
+        st.state = state <= 2 ? Chunk::State(state) : Chunk::State::Empty;
+        st.slotOf.assign(kBricksPerChunk, kNoBrick);
         for (uint32_t b = 0; b < boxCount; ++b) {
             int16_t xy[4];
             uint8_t mb[2];
@@ -2019,19 +2116,34 @@ bool ChunkStore::applyEdited(const std::vector<uint8_t>& data)
                 box.x + box.side > CHUNK_N || box.y + box.side > CHUNK_N ||
                 box.z + box.side > CHUNK_N)
                 return false;
-            c.boxes.push_back(box);
+            st.boxes.push_back(box);
         }
         for (uint32_t b = 0; b < brickCount; ++b) {
             uint32_t key = 0;
             if (!r.pod(key) || key >= uint32_t(kBricksPerChunk))
                 return false;
-            const uint32_t slot = uint32_t(c.bricks.size() / BRICK_WORDS);
-            c.bricks.resize(c.bricks.size() + BRICK_WORDS);
-            if (!r.get(c.bricks.data() + size_t(slot) * BRICK_WORDS,
+            const uint32_t slot = uint32_t(st.bricks.size() / BRICK_WORDS);
+            st.bricks.resize(st.bricks.size() + BRICK_WORDS);
+            if (!r.get(st.bricks.data() + size_t(slot) * BRICK_WORDS,
                        BRICK_WORDS * sizeof(uint32_t)))
                 return false;
-            c.slotOf[size_t(key)] = slot;
+            st.slotOf[size_t(key)] = slot;
         }
+        staged.push_back(std::move(st));
+    }
+    for (Staged& st : staged) {
+        Chunk& c = m_chunks[size_t(st.ci)];
+        for (int i = 0; i < 3; ++i) {
+            c.lo[i] = st.bounds[i];
+            c.hi[i] = st.bounds[3 + i];
+        }
+        c.state = st.state;
+        c.bricks = std::move(st.bricks);
+        c.slotOf = std::move(st.slotOf);
+        c.boxes = std::move(st.boxes);
+        c.pool.reset();
+        c.poolValid = false;
+        c.dirty = false;
         c.edited = true;
     }
     return true;

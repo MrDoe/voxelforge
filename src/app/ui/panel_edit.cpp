@@ -350,10 +350,9 @@ void App::drawPanelEdit()
                 hintLine("LMB drag: recolor solid cells in the ball.");
                 break;
             case EditBrush::Smooth:
-                hintLine("LMB drag: relax the picked surface toward its local "
-                         "average — terrain heights on ground, an object's own "
-                         "surface on objects; terrain and objects never convert "
-                         "into each other.");
+                hintLine("LMB drag: flatten the selection toward the plane of "
+                         "its mean normal, aligned to the surrounding voxels; "
+                         "terrain and objects never convert into each other.");
                 break;
             case EditBrush::Rotate:
             case EditBrush::Move:

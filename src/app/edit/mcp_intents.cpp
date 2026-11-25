@@ -293,7 +293,7 @@ void App::consumeMcpIntents()
         // The GUI queues persistence on mouse release. An MCP stamp has no
         // mouse release, so do that explicitly or the edit vanishes on exit.
         if (m_lastEditCells > 0 && m_liveEditor.attached())
-            m_overlayWriter.queue(m_layers.store(), overlayPath());
+            queueOverlaySave();
 
         std::string extra =
             std::string(",\"mode\":") + jsonStr(mode) +
@@ -469,20 +469,11 @@ void App::consumeMcpIntents()
         m_dragging = false;
         finishStroke();
         if (touched > 0 && m_liveEditor.attached())
-            m_overlayWriter.queue(m_layers.store(), overlayPath());
+            queueOverlaySave();
 
         // Final run sizes across the touched chunks (not a sum over sub-stamps,
         // which would count a chunk several times).
-        vf::voxel::SurfelParams sp;
-        sp.edgeShrink = m_edgeShrink;
-        sp.edgeFill = m_edgeFill;
-        sp.edgeBridgeSize = m_edgeBridgeSize;
-        sp.cornerFill = m_cornerFill;
-        sp.sunDir = glm::vec3(m_sunDir);
-        sp.microOccluders = &m_microOccluders;
-        sp.lodRings = false;
-        sp.anisotropy = true;
-        if (const char* e = getenv("VF_ANISO")) sp.anisotropy = atoi(e) != 0;
+        const vf::voxel::SurfelParams sp = surfelParams(false);
         size_t runSurfels = 0;
         for (int ci : changed)
             runSurfels += m_liveEditor.chunkRun(ci, sp).size();

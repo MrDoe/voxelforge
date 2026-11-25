@@ -37,6 +37,14 @@ import subprocess
 import sys
 import tempfile
 
+# These cells, cameras and boxes were authored against LakesideHamlet. Without
+# this pin the gate inherits `scenery/last.json` (the session's last-used
+# scenery), so a switch to LighthouseIsle silently buries every cell ~7 m
+# underground: the stamp still runs but no surfel is in frame, and the gate
+# reports phantom "edit too small" / "no preview" failures. visual_check.py,
+# micro_check.py and fur_check.py already pin the same default.
+os.environ.setdefault("VF_SCENERY", "LakesideHamlet")
+
 W, H = 480, 270
 FAST = os.environ.get("VF_FAST_TESTS") == "1"
 # close view of the edited terrain cell (432,509,452): the dome fills a

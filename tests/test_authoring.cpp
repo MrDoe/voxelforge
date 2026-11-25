@@ -3,6 +3,7 @@
 // plus cross-checks that the baked VoxelField matches the analytic truth.
 #include "voxel/common.hpp"
 #include "voxel/layered_world.hpp"
+#include "voxel/worldfile.hpp"
 #include "voxel/editable_world.hpp"
 #include "voxel/picking.hpp"
 #include <filesystem>
@@ -45,7 +46,10 @@ std::string allLayersManifest()
         }
         j += "]}";
         path = dir + "/world_all.json";
-        std::ofstream(path) << j;
+        // temp+rename (see test_world.cpp): never truncate the tracked file.
+        const std::string tmp = vf::voxel::worldfile::tempPathFor(path);
+        std::ofstream(tmp) << j;
+        std::filesystem::rename(tmp, path);
     }
     return path;
 }

@@ -6,7 +6,9 @@
 #include "voxel/layered_world.hpp"
 #include "voxel/scenery.hpp"
 #include "voxel/live_editor.hpp"
+#include "voxel/picking.hpp" // voxelCenter: world position of a lattice cell
 #include "voxel/surfelize.hpp"
+#include "voxel/worldfile.hpp"
 #include <doctest/doctest.h>
 #include <spdlog/spdlog.h>
 #include <algorithm>
@@ -878,6 +880,114 @@ TEST_CASE("chunk store: smooth finds a live terrain top beyond the search band")
     CHECK(clearedBeyondBand);
 }
 
+// The surfel hint is the precision path: the App fits the plane to the
+// rendered surface (continuous positions, smoothed normals) instead of
+// quantised cell occupancy. These tests pin that the planner honours the
+// hint's ORIENTATION and ANCHOR, which a purely local voxel average cannot.
+TEST_CASE("chunk store: a surfel plane hint flattens along its mean normal")
+{
+    const int ci = chunkIndexOf(2, 1, 3);
+    int ccx, ccy, ccz;
+    chunkCoordsOf(ci, ccx, ccy, ccz);
+    const int gx = ccx * CHUNK_N + 28;
+    const int gz = ccz * CHUNK_N + 32;
+    const int gy = ccy * CHUNK_N + 16;
+
+    // makeRampStore's top steps down one cell every three columns, so its
+    // surfel normals average to this tilted plane through (gx, gy, gz).
+    SmoothPlane tilted;
+    tilted.normal = glm::normalize(glm::vec3(1.f / 3.f, 1.f, 0.f));
+    tilted.point = voxelCenter(glm::ivec3(gx, gy, gz));
+    tilted.valid = true;
+    // A horizontal fit (what a flat surrounding floor would vote for) is a
+    // different plane through the same anchor.
+    SmoothPlane horizontal = tilted;
+    horizontal.normal = glm::vec3(0.f, 1.f, 0.f);
+
+    auto flatten = [&](const SmoothPlane& hint) {
+        ChunkStore s = makeRampStore(ci, 16, 3, 20);
+        const SmoothTerrainEdits batch =
+            s.makeSmoothEdits({ gx, gy, gz }, 0.6f, 1.0f, false, &hint);
+        s.apply(batch.edits);
+        s.rebuildDirty();
+        return s;
+    };
+    const ChunkStore onTilt = flatten(tilted);
+    const ChunkStore onFlat = flatten(horizontal);
+    // At x-2 the ramp sits one cell above the horizontal anchor but below
+    // the tilted plane's crossing. The tilt keeps that step; the horizontal
+    // plane cuts it down. This is the difference between "align to the
+    // surrounding slope" and cutting a shelf. (x+3 is a half-cell rounding
+    // knife edge at this falloff, so it cannot pin either outcome.)
+    CHECK(onTilt.cellAt(gx - 2, gy + 1, gz).solid);
+    CHECK_FALSE(onFlat.cellAt(gx - 2, gy + 1, gz).solid);
+    CHECK(onFlat.cellAt(gx - 2, gy, gz).solid);
+}
+
+TEST_CASE("chunk store: a surrounding plane collapses a bump and converges")
+{
+    const int ci = chunkIndexOf(2, 1, 3);
+    const int gx = 2 * CHUNK_N + CHUNK_N / 2;
+    const int gz = 3 * CHUNK_N + CHUNK_N / 2;
+    const int gy = CHUNK_N + 7; // ridge top (base 4 + 3)
+    ChunkStore store = makeRidgeStore(ci, /*halfCells=*/16, /*ridgeHalf=*/1);
+
+    // The surfel fit over the footprint plus the surrounding ring is dominated
+    // by the flat floor at y=4: the bump is flattened onto THAT plane, not
+    // onto its own top. A short grounded run is a bump, not a feature.
+    SmoothPlane around;
+    around.normal = glm::vec3(0.f, 1.f, 0.f);
+    around.point = voxelCenter(glm::ivec3(gx, CHUNK_N + 4, gz));
+    around.valid = true;
+
+    // A one-voxel footprint gives the centre full falloff: one stamp lands
+    // exactly on the plane (a wide brush converges over several stamps
+    // instead, because its rim only moves a fraction of a cell).
+    const SmoothTerrainEdits batch =
+        store.makeSmoothEdits({ gx, gy, gz }, VOXEL, 1.0f, false, &around);
+    REQUIRE_FALSE(batch.edits.empty());
+    for (const StoreEdit& e : batch.edits) {
+        // Every raise stays terrain-owned; every cut is a clear.
+        if (e.mode == StoreEdit::Mode::Set)
+            CHECK(e.terrain);
+        else
+            CHECK(e.mode == StoreEdit::Mode::Clear);
+    }
+    store.apply(batch.edits);
+    store.rebuildDirty();
+    CHECK_FALSE(store.cellAt(gx, gy, gz).solid);
+    CHECK(store.cellAt(gx, CHUNK_N + 4, gz).solid);
+    CHECK_FALSE(store.cellAt(gx, CHUNK_N + 4, gz).obj);
+
+    // The plane is now satisfied: a second stamp is a no-op, the same fixed
+    // point the voxel fallback reaches via its min/max clamp.
+    CHECK(store.makeSmoothEdits({ gx, CHUNK_N + 4, gz }, VOXEL, 1.0f, false,
+                                &around).edits.empty());
+}
+
+TEST_CASE("chunk store: an invalid surfel hint falls back to the voxel plane")
+{
+    const int ci = chunkIndexOf(2, 1, 3);
+    const int gx = 2 * CHUNK_N + 4;
+    const int gz = 3 * CHUNK_N + 4;
+    const int gy = CHUNK_N;
+    ChunkStore store = makePatternStore(ci, /*pit=*/false, /*objectSpike=*/false);
+
+    SmoothPlane broken;
+    broken.normal = glm::vec3(0.f, 1.f, 0.f);
+    broken.point = voxelCenter(glm::ivec3(gx, gy + 7, gz));
+    broken.valid = false; // e.g. no surfels on this chunk
+    const SmoothTerrainEdits batch =
+        store.makeSmoothEdits({ gx, gy + 7, gz }, VOXEL * 1.5f, 1.0f, false,
+                              &broken);
+    REQUIRE_FALSE(batch.edits.empty());
+    bool cutSpike = false;
+    for (const StoreEdit& e : batch.edits)
+        if (e.x == gx && e.z == gz && e.mode == StoreEdit::Mode::Clear)
+            cutSpike = true;
+    CHECK(cutSpike);
+}
+
 TEST_CASE("chunk store: clear edit removes cells and rebuilds locally")
 {
     const int ci = chunkIndexOf(2, 1, 3);
@@ -1562,7 +1672,43 @@ TEST_CASE("chunk store: overlay serialize/apply round trip")
     REQUIRE(store.loadOverlay(path));
     CHECK(store.chunkHash(ci) == wanted);
     std::remove(path.c_str());
-    std::remove((path + ".tmp").c_str());
+
+    // ALL OR NOTHING: a truncated section must be refused WITHOUT touching
+    // the store. The old applier reset each chunk (bricks cleared) before
+    // reading its payload, so a bad record left a half-applied store that
+    // the next stroke then persisted over the whole session.
+    store.apply({ clobber });
+    store.rebuildDirty();
+    const uint64_t before = store.chunkHash(ci);
+    REQUIRE(before != wanted);
+    std::vector<uint8_t> truncated(bytes.begin(), bytes.end() - 16);
+    CHECK_FALSE(store.applyEdited(truncated));
+    CHECK(store.chunkHash(ci) == before);
+}
+
+TEST_CASE("worldfile: temp paths are unique and the writer leaves none behind")
+{
+    namespace fs = std::filesystem;
+    const fs::path dir = fs::temp_directory_path() / "vf_test_atomic";
+    fs::create_directories(dir);
+    const std::string path = (dir / "layer.vxw").string();
+    // two writers (app + vf_mcp) must never share a temp name
+    CHECK(worldfile::tempPathFor(path) != worldfile::tempPathFor(path));
+    WorldFileData d;
+    d.meta = { WORLD, VOXEL, WATER_LEVEL, uint32_t(GRID_N), 8 };
+    d.voxels.push_back(VoxelRecord{});
+    REQUIRE(worldfile::write(path, d));
+    REQUIRE(worldfile::write(path, d)); // replace an existing file
+    WorldFileData back;
+    CHECK(worldfile::read(path, back));
+    CHECK(back.voxels.size() == 1);
+    size_t files = 0;
+    for (const auto& e : fs::directory_iterator(dir)) {
+        (void)e;
+        ++files;
+    }
+    CHECK(files == 1); // no stray *.tmp
+    fs::remove_all(dir);
 }
 
 TEST_CASE("chunk store: rebuilding a dirty Solid neighbour is a no-op (no crash)")

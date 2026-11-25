@@ -244,6 +244,18 @@ bool Context::immediateSubmit(std::function<void(VkCommandBuffer)>&& record) con
     bi.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
     vkBeginCommandBuffer(m_uploadCmd, &bi);
     record(m_uploadCmd);
+    // Make every upload write visible to whatever reads it next. The fence
+    // below only orders the HOST against this submit; later submits on the
+    // device still need the transfer writes made available/visible, which is
+    // what this barrier does (one global barrier, so callers need none).
+    {
+        VkMemoryBarrier mb { VK_STRUCTURE_TYPE_MEMORY_BARRIER };
+        mb.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+        mb.dstAccessMask = VK_ACCESS_MEMORY_READ_BIT | VK_ACCESS_MEMORY_WRITE_BIT;
+        vkCmdPipelineBarrier(m_uploadCmd, VK_PIPELINE_STAGE_TRANSFER_BIT,
+                             VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, 0, 1, &mb, 0, nullptr,
+                             0, nullptr);
+    }
     vkEndCommandBuffer(m_uploadCmd);
 
     VkSubmitInfo si { VK_STRUCTURE_TYPE_SUBMIT_INFO };

@@ -3,6 +3,7 @@
 #include "voxel/micro_rig.hpp"
 
 #include "voxel/micro_field.hpp"
+#include "voxel/worldfile.hpp"
 
 #include <algorithm>
 #include <cmath>
@@ -728,7 +729,7 @@ bool readMicroRigOverride(const std::string& path, MicroRig& out,
 bool writeMicroRigOverride(const std::string& path, const MicroRig& rig,
                            uint64_t layerSize, uint64_t layerMtime)
 {
-    const std::string tmp = path + ".tmp";
+    const std::string tmp = worldfile::tempPathFor(path);
     std::FILE* f = std::fopen(tmp.c_str(), "wb");
     if (!f) return false;
     std::fprintf(f, "{\n  \"format\": \"vf-rig/1\",\n");
@@ -754,9 +755,7 @@ bool writeMicroRigOverride(const std::string& path, const MicroRig& rig,
                      i + 1 < rig.bones.size() ? "," : "");
     }
     std::fprintf(f, "  ]\n}\n");
-    std::fclose(f);
-    std::remove(path.c_str());
-    if (std::rename(tmp.c_str(), path.c_str()) != 0) {
+    if (std::fclose(f) != 0 || std::rename(tmp.c_str(), path.c_str()) != 0) {
         std::remove(tmp.c_str());
         return false;
     }

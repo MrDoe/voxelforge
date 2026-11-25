@@ -132,13 +132,7 @@ void App::reportBoxSelection()
     // over the chunks the box touches. Boundary disks of a chunk see the
     // range the way describeSurfelsAt does it - per chunk, clamped.
     int parents = 0, edges = 0;
-    vf::voxel::SurfelParams sp;
-    sp.edgeShrink = m_edgeShrink;
-    sp.edgeFill = m_edgeFill;
-    sp.edgeBridgeSize = m_edgeBridgeSize;
-    sp.cornerFill = m_cornerFill;
-    sp.sunDir = glm::vec3(m_sunDir);
-    sp.anisotropy = true;
+    const vf::voxel::SurfelParams sp = surfelParams(false);
     const int latN = store.latN();
     const glm::ivec3 blo = glm::max(lo, glm::ivec3(0));
     const glm::ivec3 bhi = glm::min(hi, glm::ivec3(latN - 1));

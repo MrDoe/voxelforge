@@ -231,6 +231,10 @@ private:
     void pollTextureFiles();
     void applyWorldReload();
     void rebuildSurfels(); // (re)build the surfel set from the live field
+    // The single SurfelParams builder every bake shares (full bake, live
+    // stamp/undo/Clear, overlay restore, MCP, diagnostics). `fullBake` adds
+    // the LOD rings only the whole-world bake produces.
+    vf::voxel::SurfelParams surfelParams(bool fullBake) const;
     // Load "role":"micro" manifest layers into SEPARATE micro SVO worlds and
     // hand them to the GPU overlay pass. They never enter the world record set,
     // the VoxelField, the ChunkStore or the live-edit overlay.
@@ -1229,6 +1233,13 @@ private:
     // read it; a carve must not leave it stale).
     std::vector<glm::vec2> m_heightCpu;
     bool m_overlayLoaded = false;
+    // Overlay save guards (see queueOverlaySave): chunk count of the file as
+    // loaded, whether a shrinking save already backed it up, and the
+    // VF_NO_OVERLAY block (saving would replace the unloaded session).
+    size_t m_overlayDiskChunks = 0;
+    bool m_overlayShrinkBackedUp = false;
+    bool m_overlaySaveBlocked = false;
+    bool m_overlayBlockWarned = false;
     bool m_hasStamp = false;
     bool m_dragging = false;
     glm::ivec3 m_lastStampVoxel { 0 };
@@ -1240,6 +1251,13 @@ private:
     glm::ivec3 m_lastStampWroteCell { -1, -1, -1 };
 
     void applyEditLive();
+    // Fit the Smooth flatten plane from the surfels around `pickCell`: the
+    // mean normal and centroid over the footprint plus a read-only ring of
+    // surrounding surfaces (water and synthetic edge bridges excluded).
+    // Defined in edit/live_edit.cpp; an invalid plane tells the store planner
+    // to fit the voxel equivalent itself.
+    vf::voxel::SmoothPlane collectSmoothPlane(const glm::ivec3& pickCell,
+                                              float radiusM, bool objectPick);
     // ---- bounding-box selection (defined in edit/box_select.cpp) -----------
     // Start/extend/end the Shift+LMB corner drag. The box is anchored at the
     // pressed cell and spans to the cell under the cursor, inclusive.
@@ -1298,6 +1316,9 @@ private:
     // re-upload that sub-rect (see the definition).
     void patchHeightTexture(int x0, int z0, int x1, int z1, int riseCells);
     void loadStoreOverlay();
+    // The ONE way to persist the live-edit store: honours the VF_NO_OVERLAY
+    // save block and backs the file up before a save that would shrink it.
+    void queueOverlaySave();
     // Store-gradient surface normal at a lattice cell (test hooks / injected
     // hovers); falls back to +Y when the field around the cell is flat.
     glm::vec3 storeNormalAt(const glm::ivec3& v);

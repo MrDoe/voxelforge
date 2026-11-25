@@ -10,12 +10,166 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstring>
 #include <limits>
 
 #include <spdlog/spdlog.h>
 
 namespace vf {
 namespace app {
+
+// Fit the plane a Smooth stamp flattens toward from the surfels actually
+// rendered around the pick. The mean normal and the surface centroid include
+// a read-only ring beyond the brush, so the patch aligns to the surrounding
+// voxels instead of cutting a shelf. Surfel normals are the bake's smoothed
+// ones (terrain tops include the heightfield blend), which makes the fit more
+// precise than voxel occupancy; water and synthetic edge bridges never vote.
+vf::voxel::SmoothPlane App::collectSmoothPlane(const glm::ivec3& pickCell,
+                                               float radiusM, bool objectPick)
+{
+    vf::voxel::SmoothPlane plane;
+    const glm::vec3 centre = vf::voxel::voxelCenter(pickCell);
+    const float ringM = std::min(radiusM, 1.0f);
+    const float reach = radiusM + ringM;
+    const auto cellOf = [](float w) {
+        return int(std::floor((w + 0.5f * vf::voxel::WORLD) / vf::voxel::VOXEL));
+    };
+    const glm::ivec3 lo(cellOf(centre.x - reach), cellOf(centre.y - reach),
+                        cellOf(centre.z - reach));
+    const glm::ivec3 hi(cellOf(centre.x + reach), cellOf(centre.y + reach),
+                        cellOf(centre.z + reach));
+    const auto chunkOf = [](int cell) {
+        return std::clamp(cell / vf::voxel::CHUNK_N, 0, vf::voxel::GRID_N - 1);
+    };
+
+    // A short grounded object run is a bump: let the surrounding GROUND into
+    // the fit so the bump collapses to the level around it. A tall run is a
+    // feature (a post or a wall): only object surfels vote, so it aligns to
+    // its own kind. Terrain picks always exclude object surfels entirely.
+    bool bumpLike = false;
+    if (objectPick) {
+        const auto& store = m_layers.store();
+        const vf::voxel::StoreCell picked =
+            store.cellAt(pickCell.x, pickCell.y, pickCell.z);
+        if (picked.solid && picked.obj) {
+            int run = 0;
+            for (int y = pickCell.y - 1; y >= 0; ++y) {
+                const vf::voxel::StoreCell c =
+                    store.cellAt(pickCell.x, y, pickCell.z);
+                if (c.solid && c.obj)
+                    ++run;
+                else
+                    break;
+            }
+            bumpLike = run > 0 &&
+                       run <= vf::voxel::ChunkStore::kSmoothBumpRunCells;
+        }
+    }
+
+    float sw = 0.0f;
+    glm::vec3 sumN(0.f), sumP(0.f);
+    int seenChunks = 0, seenSurfels = 0, rejectedWater = 0,
+        rejectedOwner = 0, rejectedDist = 0, nearVotes = 0;
+    auto vote = [&](const std::vector<vf::voxel::Surfel>& run) {
+        for (const vf::voxel::Surfel& s : run) {
+            ++seenSurfels;
+            // mat_ao.w: AO (<1.5) terrain, AO+2 (~2) water, AO+8+16*id object.
+            const float packed = s.mat_ao.w;
+            if (packed > 1.5f && packed < 5.5f) {
+                ++rejectedWater;
+                continue; // the fixed water plane is never a flatten sample
+            }
+            const bool isObj = vf::voxel::surfelIsObject(packed);
+            if (objectPick) {
+                if (!isObj && !bumpLike) {
+                    ++rejectedOwner;
+                    continue;
+                }
+            } else if (isObj) {
+                // Object-owned surfels can BE the surface around a terrain
+                // pick (planks, stonework, a path). They may inform the local
+                // plane, but only near the picked height: a wall towering
+                // above must not drag the ground up with it. The planner's
+                // objectInSpan guard still keeps terrain edits off their cells.
+                if (std::abs(glm::vec3(s.pos_rU).y - centre.y) > 0.5f) {
+                    ++rejectedOwner;
+                    continue;
+                }
+            }
+            const float d = glm::distance(glm::vec3(s.pos_rU), centre);
+            if (d < 0.5f)
+                ++nearVotes; // a buried/stale pick has no surfel to fit from
+            if (d > reach) {
+                ++rejectedDist;
+                continue;
+            }
+            const float radial =
+                d <= radiusM ? 1.0f
+                             : 1.0f - (d - radiusM) / std::max(ringM, 1e-3f);
+            const float area = std::max(1e-4f, s.pos_rU.w * s.normal_rV.w);
+            float w = radial * area;
+            if (objectPick && !isObj)
+                w *= 0.5f; // ground only helps a short grounded bump
+            else if (!objectPick && isObj)
+                w *= 0.3f; // terrain votes dominate a terrain pick's fit
+            const glm::vec3 n = glm::vec3(s.normal_rV);
+            const float len = glm::length(n);
+            if (len < 1e-4f)
+                continue;
+            sumN += (n / len) * w;
+            sumP += glm::vec3(s.pos_rU) * w;
+            sw += w;
+        }
+    };
+
+    // Cached live-editor runs are the current post-stroke state; uncached
+    // chunks splice from the GPU's current run, the same readback a stamp's
+    // first touch would pay. Edge bridges and the LOD/water tail are excluded.
+    vf::voxel::SurfelParams sp;
+    for (int cy = chunkOf(lo.y); cy <= chunkOf(hi.y); ++cy)
+        for (int cz = chunkOf(lo.z); cz <= chunkOf(hi.z); ++cz)
+            for (int cx = chunkOf(lo.x); cx <= chunkOf(hi.x); ++cx) {
+                const int ci = vf::voxel::chunkIndexOf(cx, cy, cz);
+                ++seenChunks;
+                if (m_liveEditor.hasChunk(ci)) {
+                    vote(m_liveEditor.chunkSurfels(ci, sp));
+                    continue;
+                }
+                std::vector<uint8_t> bytes;
+                uint32_t edgeCount = 0;
+                const uint32_t n = m_splatPass.readChunkSurfels(
+                    uint32_t(ci), bytes, &edgeCount);
+                const uint32_t parents = n - std::min(n, edgeCount);
+                if (!parents)
+                    continue;
+                std::vector<vf::voxel::Surfel> gpu(parents);
+                std::memcpy(gpu.data(), bytes.data(),
+                            size_t(parents) * sizeof(vf::voxel::Surfel));
+                vote(gpu);
+            }
+
+    // Without a vote ON the picked surface, the fit would describe geometry
+    // metres away (a stale test cell or a buried pick) and could raise the
+    // column to that foreign plane. Fall back to the store's voxel fit.
+    if (sw > 1e-6f && nearVotes > 0 && glm::length(sumN) > 1e-3f) {
+        plane.normal = glm::normalize(sumN);
+        plane.point = sumP / sw;
+        plane.valid = true;
+    }
+    if (getenv("VF_SMOOTH_PLANE") || getenv("VF_TRACE")) {
+        spdlog::info("smooth plane: pick=({},{},{}) {} valid={} "
+                     "chunks={} surfels={} (water={} owner={} far={} near={}) "
+                     "weight={:.4f} "
+                     "normal=({:.3f},{:.3f},{:.3f}) point=({:.2f},{:.2f},{:.2f})",
+                     pickCell.x, pickCell.y, pickCell.z,
+                     objectPick ? "object" : "terrain", int(plane.valid),
+                     seenChunks, seenSurfels, rejectedWater, rejectedOwner,
+                     rejectedDist, nearVotes, sw,
+                     plane.normal.x, plane.normal.y, plane.normal.z,
+                     plane.point.x, plane.point.y, plane.point.z);
+    }
+    return plane;
+}
 
 void App::applyEditLive()
 {
@@ -52,13 +206,15 @@ void App::applyEditLive()
     // other brush keeps the cheap +-3 margin.
     int refreshMargin = vf::voxel::LiveEditor::kStampMargin;
     if (m_editBrush == EditBrush::Smooth) {
-        // Smooth uses a terrain height relaxation for terrain picks and a
-        // generalised surface-axis relaxation for object picks. The store
-        // helper keeps the two ownership classes separate: terrain never
-        // becomes an object, and object surface edits never overwrite terrain.
-        vf::voxel::SmoothTerrainEdits smooth =
-            store.makeSmoothEdits(m_hoverHit.voxel, radius, m_smoothStrength,
-                                  m_smoothPreserveVolume);
+        // Smooth flattens the selection to the plane fitted from its mean
+        // normal and the surrounding surfels. The store helper keeps the two
+        // ownership classes separate: terrain never becomes an object, and
+        // object surface edits never overwrite terrain.
+        const vf::voxel::SmoothPlane plane =
+            collectSmoothPlane(m_hoverHit.voxel, radius, m_hoverHit.object);
+        vf::voxel::SmoothTerrainEdits smooth = store.makeSmoothEdits(
+            m_hoverHit.voxel, radius, m_smoothStrength,
+            m_smoothPreserveVolume, &plane);
         // Publish what the planner decided. The tint in the preview can only
         // mark geometry that already exists, so a relaxation that moved every
         // column by less than a voxel looks identical to one that did nothing;
@@ -226,7 +382,13 @@ void App::applyEditLive()
         if (m_undoPending.size() > kUndoMaxCells) {
             m_undoOverflow = true;
             m_undoPending.clear();
-            spdlog::warn("undo: stroke too large to record, this stroke is not undoable");
+            // The older steps are invalid now: each one restores pre-stroke
+            // cell states, and replaying them over this unrecorded stroke
+            // would resurrect or erase cells it changed. Drop the history.
+            const size_t dropped = m_undo.size();
+            m_undo.clear();
+            spdlog::warn("undo: stroke too large to record, this stroke is not undoable "
+                         "({} older undo steps dropped)", dropped);
         }
     }
 
@@ -251,20 +413,7 @@ void App::commitStoreEdits(std::vector<vf::voxel::StoreEdit>& edits, int riseCel
     if (!m_liveEditor.attached())
         m_liveEditor.attach(&store);
 
-    vf::voxel::SurfelParams sp;
-    sp.edgeShrink = m_edgeShrink;
-    sp.edgeFill = m_edgeFill;
-    sp.edgeBridgeSize = m_edgeBridgeSize;
-    sp.cornerFill = m_cornerFill;
-    sp.sunDir = glm::vec3(m_sunDir);
-    // The micro objects' CAST shadow is baked per surfel, so a live-edit
-    // re-bake must consult the same occluders as the world bake - otherwise
-    // editing the ground next to a micro object erases its shadow.
-    sp.microOccluders = &m_microOccluders;
-    sp.lodRings = false;
-    sp.anisotropy = true;
-    if (const char* e = getenv("VF_ANISO"))
-        sp.anisotropy = atoi(e) != 0;
+    const vf::voxel::SurfelParams sp = surfelParams(false);
     m_strokeMargin = margin; // undo must replay the same region
     std::vector<int> changed = m_liveEditor.stamp(edits, sp, margin);
     // The light trigger consumes these at stroke end (finishStroke/undo):
@@ -513,7 +662,7 @@ void App::undoEdit()
     // Persist the reverted state (no full rebuild here: undo must stay
     // instant; the touched chunks keep the live path's store-derived shading
     // until the next reload, exactly like a painted stroke).
-    m_overlayWriter.queue(m_layers.store(), overlayPath());
+    queueOverlaySave();
     refreshLiveLights();
     // Undo restores the pre-stroke materials, so the card set follows it.
     rebuildGrassCards();
@@ -529,10 +678,13 @@ void App::clearLiveEdits()
     // Stop a pending overlay write first: a snapshot queued before the click
     // could otherwise land after the delete and resurrect the edits.
     m_overlayWriter.flush();
+    // Move the file aside instead of deleting it: Clear used to be the one
+    // irreversible action in the editor (no backup anywhere). The backup is
+    // a plain overlay; copy it back over runtime_edits.vxw to restore.
     const std::string path = overlayPath();
-    std::error_code ec;
-    if (!std::filesystem::remove(path, ec) && ec)
-        spdlog::warn("live edits: cannot remove '{}': {}", path, ec.message());
+    if (const std::string bak = backupOverlayFile(path, "cleared", true); !bak.empty())
+        spdlog::info("live edits: previous overlay kept as '{}'", bak);
+    m_overlayDiskChunks = 0;
 
     const std::vector<int> chunks = store.editedChunks();
     // the per-chunk edit AABBs drive the height-texture refresh; collect them
@@ -550,20 +702,7 @@ void App::clearLiveEdits()
     auto& fresh = m_layers.store();
     m_liveEditor.attach(&fresh);
 
-    vf::voxel::SurfelParams sp;
-    sp.edgeShrink = m_edgeShrink;
-    sp.edgeFill = m_edgeFill;
-    sp.edgeBridgeSize = m_edgeBridgeSize;
-    sp.cornerFill = m_cornerFill;
-    sp.sunDir = glm::vec3(m_sunDir);
-    // The micro objects' CAST shadow is baked per surfel, so a live-edit
-    // re-bake must consult the same occluders as the world bake - otherwise
-    // editing the ground next to a micro object erases its shadow.
-    sp.microOccluders = &m_microOccluders;
-    sp.lodRings = false;
-    sp.anisotropy = true;
-    if (const char* e = getenv("VF_ANISO"))
-        sp.anisotropy = atoi(e) != 0;
+    const vf::voxel::SurfelParams sp = surfelParams(false);
     size_t n = 0;
     for (int ci : chunks) {
         m_liveEditor.seedFromStore(ci, sp);

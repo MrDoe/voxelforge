@@ -830,12 +830,17 @@ void SplatPass::setLights(const vf::voxel::LightUBO& lights)
         return;
     memcpy(m_lightsBuf.mapped, &lights, sizeof(lights));
     VkDescriptorBufferInfo info{ m_lightsBuf.buf, 0, sizeof(lights) };
-    if (m_set) {
+    // Bind binding 25 ONCE per set: the buffer never changes after creation,
+    // and vkUpdateDescriptorSets on a set that in-flight frames still use is
+    // undefined behaviour (no UPDATE_AFTER_BIND). Only the contents change.
+    if (m_set && m_lightsBoundSet != m_set) {
+        m_lightsBoundSet = m_set;
         VkWriteDescriptorSet w { VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, nullptr, m_set, 25,
                                  0, 1, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, nullptr, &info, nullptr };
         vkUpdateDescriptorSets(m_ctx->device(), 1, &w, 0, nullptr);
     }
-    if (m_tileReady) {
+    if (m_tileReady && m_lightsBoundTile != m_tileSet) {
+        m_lightsBoundTile = m_tileSet;
         VkWriteDescriptorSet w { VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, nullptr, m_tileSet, 25,
                                  0, 1, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, nullptr, &info, nullptr };
         vkUpdateDescriptorSets(m_ctx->device(), 1, &w, 0, nullptr);
@@ -1259,8 +1264,10 @@ void SplatPass::patchChunkSurfels(uint32_t chunk, const void* data, size_t bytes
                      m_bufSlots, m_compactBytes / 4);
     Buffer staging = makeBuffer(*m_ctx, bytes, VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
                                 VMA_MEMORY_USAGE_AUTO_PREFER_HOST, true);
-    if (!staging.buf || !staging.mapped)
+    if (!staging.buf || !staging.mapped) {
+        destroyBuffer(*m_ctx, staging); // was leaked on this early return
         return;
+    }
     memcpy(staging.mapped, data, bytes);
     const bool ok = m_ctx->immediateSubmit([&](VkCommandBuffer cmd) {
         VkBufferCopy c { 0, size_t(base) * kSurfelBytes, bytes };

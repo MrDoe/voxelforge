@@ -73,8 +73,15 @@ inline constexpr uint32_t kSectionRecords = 0;     // u64 count + VoxelRecord[n]
 inline constexpr uint32_t kSectionLegacySvo = 1;   // the v1 five-array block
 inline constexpr uint32_t kSectionStoreChunks = 2; // ChunkStore overlay (opaque)
 
+// Writes to a unique sibling temp file and renames it over `path`, so a
+// reader never sees a torn file and an interrupted write leaves the old one.
 bool write(const std::string& path, const WorldFileData& data);
 bool read(const std::string& path, WorldFileData& out); // v1 + v2, validates CRC
+
+// A sibling temp path unique to this process AND call (`path.<pid>.<n>.tmp`).
+// Every temp+rename writer uses it: a fixed `path + ".tmp"` lets two processes
+// (app + vf_mcp, or two sessions) rename each other's half-written file.
+std::string tempPathFor(const std::string& path);
 
 // --- layered worlds ---------------------------------------------------------
 // The static world is described by a set of record-only .vxw layer files plus

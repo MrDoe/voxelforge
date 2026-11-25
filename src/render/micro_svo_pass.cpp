@@ -119,8 +119,10 @@ bool MicroSvoPass::uploadSsbo(Ssbo& s, const void* data, size_t bytes)
     s.bytes = bytes;
     Buffer staging = makeBuffer(*m_ctx, bytes, VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
                                 VMA_MEMORY_USAGE_AUTO_PREFER_HOST, true);
-    if (!staging.buf || !staging.mapped)
+    if (!staging.buf || !staging.mapped) {
+        destroyBuffer(*m_ctx, staging); // was leaked on this early return
         return false;
+    }
     memcpy(staging.mapped, data, bytes);
     const bool ok = m_ctx->immediateSubmit([&](VkCommandBuffer cmd) {
         VkBufferCopy c { 0, 0, bytes };
@@ -937,7 +939,11 @@ void MicroSvoPass::setLights(const vf::voxel::LightUBO& lights)
     if (!m_lightsBuf.buf || !m_lightsBuf.mapped)
         return;
     memcpy(m_lightsBuf.mapped, &lights, sizeof(lights));
-    if (m_set) {
+    // Bind binding 25 ONCE per set: the buffer never changes after creation,
+    // and vkUpdateDescriptorSets on a set that in-flight frames still use is
+    // undefined behaviour (no UPDATE_AFTER_BIND). Only the contents change.
+    if (m_set && m_lightsBoundSet != m_set) {
+        m_lightsBoundSet = m_set;
         VkDescriptorBufferInfo info { m_lightsBuf.buf, 0, sizeof(lights) };
         VkWriteDescriptorSet w { VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, nullptr, m_set, 25, 0,
                                  1, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, nullptr, &info,
@@ -1337,6 +1343,7 @@ void MicroSvoPass::destroy()
         vkDestroyDescriptorPool(dev, m_pool, nullptr);
     destroyBuffer(*m_ctx, m_worldTable);
     destroyBuffer(*m_ctx, m_lightsBuf);
+    m_lightsBoundSet = VK_NULL_HANDLE;
     m_pipeline = VK_NULL_HANDLE;
     m_layout = VK_NULL_HANDLE;
     m_setLayout = VK_NULL_HANDLE;

@@ -73,13 +73,7 @@ void App::listFloatingSurfels()
     struct E { vf::voxel::Surfel s; uint64_t key; uint32_t seg, sub; int chunk; };
     std::vector<E> all;
     std::unordered_map<int, std::vector<int>> byChunk;
-    vf::voxel::SurfelParams sp;
-    sp.edgeShrink = m_edgeShrink;
-    sp.edgeFill = m_edgeFill;
-    sp.edgeBridgeSize = m_edgeBridgeSize;
-    sp.cornerFill = m_cornerFill;
-    sp.sunDir = glm::vec3(m_sunDir);
-    sp.anisotropy = true;
+    const vf::voxel::SurfelParams sp = surfelParams(false);
     for (int c : want) {
         int cx, cy, cz;
         vf::voxel::chunkCoordsOf(c, cx, cy, cz);
@@ -175,13 +169,7 @@ void App::describeSurfelsAt(const glm::ivec3& cell)
     const int cx = cell.x / CH, cy = cell.y / CH, cz = cell.z / CH;
     const int chunk = vf::voxel::chunkIndexOf(cx, cy, cz);
 
-    vf::voxel::SurfelParams sp;
-    sp.edgeShrink = m_edgeShrink;
-    sp.edgeFill = m_edgeFill;
-    sp.edgeBridgeSize = m_edgeBridgeSize;
-    sp.cornerFill = m_cornerFill;
-    sp.sunDir = glm::vec3(m_sunDir);
-    sp.anisotropy = true;
+    const vf::voxel::SurfelParams sp = surfelParams(false);
 
     // 3x3x3 around the cell: the cell itself plus the ring the support test
     // needs. Clamped to the chunk the range builder already clamps to.
@@ -288,11 +276,15 @@ void App::describeSurfelsAt(const glm::ivec3& cell)
                  cell.x, cell.y, cell.z, atCell, floating, lone, all.size());
 }
 
-void App::rebuildSurfels()
+// The ONE place SurfelParams are assembled. Every bake - the full world
+// bake, a live stamp, an undo, Clear, the overlay restore, the MCP intents and
+// the diagnostics - must agree on these, because a live re-derive splices its
+// run into the baked one: a field set in one copy and forgotten in another
+// re-aims untouched splats or (measured) dropped the micro objects' cast
+// shadow from every restored overlay chunk. `fullBake` adds the LOD rings,
+// which only the whole-world bake produces (patched chunks drop their ring).
+vf::voxel::SurfelParams App::surfelParams(bool fullBake) const
 {
-    if (!m_layers.loaded())
-        return;
-    vkDeviceWaitIdle(m_ctx.device());
     vf::voxel::SurfelParams sp;
     sp.edgeShrink = m_edgeShrink;
     sp.edgeFill = m_edgeFill;
@@ -301,8 +293,8 @@ void App::rebuildSurfels()
     sp.sunDir = glm::vec3(m_sunDir);
     // LOD rings: baked 2x2x2 / 4x4x4 merged-terrain surfel runs per chunk;
     // the renderer picks a ring per chunk by distance (VF_LOD1/VF_LOD2).
-    sp.lodRings = true;
-    if (const char* e = getenv("VF_LOD"))
+    sp.lodRings = fullBake;
+    if (const char* e = getenv("VF_LOD"); fullBake && e)
         sp.lodRings = atoi(e) != 0;
     // material-split LOD merging (VF_LOD_SPLIT=0: single majority disk)
     sp.lodMaterialSplit = true;
@@ -321,13 +313,24 @@ void App::rebuildSurfels()
         sp.terrainHeightfieldNormals = atoi(e) != 0;
     // TERRAIN ANALYTIC: place the terrain's top-cell surfels ON the
     // heightfield surface and orient them by the analytic heightfield normal
-    // (applied after the neighbour smoothing). OFF by default; the weight of
-    // the analytic field is VF_SURFEL_HFMIX (1.0 = fully analytic).
+    // (applied after the neighbour smoothing); the weight of the analytic
+    // field is VF_SURFEL_HFMIX (1.0 = fully analytic).
     if (const char* e = getenv("VF_TERRAIN_ANALYTIC"))
         sp.terrainAnalytic = atoi(e) != 0;
     if (const char* e = getenv("VF_SURFEL_HFMIX"))
         sp.heightfieldBlend = glm::clamp(float(atof(e)), 0.0f, 1.0f);
+    // The micro objects' CAST shadow is baked per surfel, so every re-bake
+    // must consult the same occluders as the world bake.
     sp.microOccluders = &m_microOccluders;
+    return sp;
+}
+
+void App::rebuildSurfels()
+{
+    if (!m_layers.loaded())
+        return;
+    vkDeviceWaitIdle(m_ctx.device());
+    const vf::voxel::SurfelParams sp = surfelParams(true);
     vf::voxel::SurfelSet set = vf::voxel::buildSurfels(m_layers.field(), sp);
     // The water is ONE fixed-level plane subdivided into a world-wide 0.2 m
     // grid of coplanar surfels (coverage only - the shader intersects the

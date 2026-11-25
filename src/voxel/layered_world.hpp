@@ -146,7 +146,8 @@ private:
                    std::vector<std::unique_ptr<ChunkPool>>* prevPools,
                    glm::vec3 camPos, GpuWorld& outGpu,
                    std::vector<std::unique_ptr<ChunkPool>>& outPools,
-                   VoxelField& outField, Stats& outStats);
+                   VoxelField& outField, Stats& outStats,
+                   std::vector<uint8_t>* reusedOut = nullptr);
 
     // Synchronous rebuild into the live members (initial load / VF_SYNC_RELOAD).
     bool rebuildNow(bool full, const std::vector<int>& dirty, glm::vec3 cam);
@@ -230,6 +231,10 @@ private:
     struct PendingBuild {
         GpuWorld gpu;
         std::vector<std::unique_ptr<ChunkPool>> pools;
+        // chunks whose pool is unchanged: the worker only BORROWED them from
+        // m_pools (read-only), and consumeRebuild moves them across on the
+        // main thread. Moving them on the worker raced store()/adopt().
+        std::vector<uint8_t> reused;
         VoxelField field;
         Stats stats;
     };

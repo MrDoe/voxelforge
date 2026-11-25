@@ -293,6 +293,8 @@ private:
                            glm::vec4(0.f), glm::vec4(0.f), glm::vec4(0.f) };
     // Explicit point lights (bind 25; same UBO in the forward and tile sets).
     Buffer m_lightsBuf {};
+    VkDescriptorSet m_lightsBoundSet = VK_NULL_HANDLE; // set binding 25 was written to
+    VkDescriptorSet m_lightsBoundTile = VK_NULL_HANDLE;
     // Live selected-layer transform (bind 14): exact owner rotation plus an
     // optional world translation for Move mode, shared by forward, cull and
     // tile paths. The target ID occupies row2.w; row4.xyz is translation.

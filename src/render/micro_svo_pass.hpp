@@ -207,6 +207,7 @@ private:
     VkImageView m_irrView = VK_NULL_HANDLE;
     VkSampler m_irrSampler = VK_NULL_HANDLE;
     Buffer m_lightsBuf {};
+    VkDescriptorSet m_lightsBoundSet = VK_NULL_HANDLE; // set binding 25 was written to
 };
 
 } // namespace vf

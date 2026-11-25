@@ -11,6 +11,8 @@
 #include <fstream>
 #include <filesystem>
 #include <algorithm>
+#include <atomic>
+#include <unistd.h>
 #include <unordered_map>
 #include <unordered_set>
 
@@ -162,6 +164,13 @@ bool readLegacySvo(Reader& r, WorldFileData& out)
 
 } // namespace
 
+std::string tempPathFor(const std::string& path)
+{
+    static std::atomic<uint64_t> counter{ 0 };
+    return path + "." + std::to_string(uint64_t(::getpid())) + "." +
+           std::to_string(counter.fetch_add(1)) + ".tmp";
+}
+
 bool write(const std::string& path, const WorldFileData& d)
 {
     std::vector<uint8_t> payload;
@@ -190,7 +199,8 @@ bool write(const std::string& path, const WorldFileData& d)
         }
     }
 
-    std::FILE* f = std::fopen(path.c_str(), "wb");
+    const std::string tmp = tempPathFor(path);
+    std::FILE* f = std::fopen(tmp.c_str(), "wb");
     if (!f) {
         spdlog::error("worldfile: cannot write '{}'", path);
         return false;
@@ -218,8 +228,12 @@ bool write(const std::string& path, const WorldFileData& d)
     bool ok = std::fwrite(hdr, 1, kHeaderBytes, f) == kHeaderBytes &&
               std::fwrite(payload.data(), 1, payload.size(), f) == payload.size();
     ok &= std::fclose(f) == 0;
-    if (!ok)
+    if (ok && std::rename(tmp.c_str(), path.c_str()) != 0)
+        ok = false;
+    if (!ok) {
         spdlog::error("worldfile: short write '{}'", path);
+        std::remove(tmp.c_str());
+    }
     return ok;
 }
 
@@ -1201,7 +1215,11 @@ bool writeTextureManifest(const std::string& path,
     std::vector<TopPair> pairs;
     scanTopLevel(readFileText(path), pairs);
 
-    std::FILE* f = std::fopen(path.c_str(), "wb");
+    // temp+rename, never in place: an fopen("wb") on the live manifest
+    // truncates it before the replacement exists, so an interrupted write
+    // left a truncated, tracked world.json with no error anywhere.
+    const std::string tmp = tempPathFor(path);
+    std::FILE* f = std::fopen(tmp.c_str(), "wb");
     if (!f)
         return false;
     std::fprintf(f, "{");
@@ -1237,7 +1255,11 @@ bool writeTextureManifest(const std::string& path,
         }
         std::fprintf(f, "  ]\n}\n");
     }
-    return std::fclose(f) == 0;
+    if (std::fclose(f) != 0 || std::rename(tmp.c_str(), path.c_str()) != 0) {
+        std::remove(tmp.c_str());
+        return false;
+    }
+    return true;
 }
 
 bool writeFoliageCardManifest(const std::string& path,
@@ -1246,7 +1268,7 @@ bool writeFoliageCardManifest(const std::string& path,
     std::vector<TopPair> pairs;
     scanTopLevel(readFileText(path), pairs);
 
-    const std::string tmp = path + ".tmp";
+    const std::string tmp = tempPathFor(path);
     std::FILE* f = std::fopen(tmp.c_str(), "wb");
     if (!f) return false;
     std::fprintf(f, "{");
@@ -1265,8 +1287,11 @@ bool writeFoliageCardManifest(const std::string& path,
         }
         std::fprintf(f, "  ]\n}\n");
     }
-    if (std::fclose(f) != 0) return false;
-    return std::rename(tmp.c_str(), path.c_str()) == 0;
+    if (std::fclose(f) != 0 || std::rename(tmp.c_str(), path.c_str()) != 0) {
+        std::remove(tmp.c_str());
+        return false;
+    }
+    return true;
 }
 
 bool writeManifest(const std::string& path, const std::vector<WorldLayer>& layers)
@@ -1280,7 +1305,7 @@ bool writeManifest(const std::string& path, const std::vector<WorldLayer>& layer
     // truncate and the close sees a half-written manifest, and an interrupted
     // write leaves it truncated for good. The overlay writer already uses
     // temp+rename for exactly this reason.
-    const std::string tmp = path + ".tmp";
+    const std::string tmp = tempPathFor(path);
     std::FILE* f = std::fopen(tmp.c_str(), "wb");
     if (!f)
         return false;
@@ -1375,7 +1400,7 @@ bool writeLightManifest(const std::string& path,
     // someone's uncommitted work is the last place to add that failure mode,
     // so the key-preservation machinery above is reused but its write
     // mechanism deliberately is not.
-    const std::string tmp = path + ".tmp";
+    const std::string tmp = tempPathFor(path);
     std::FILE* f = std::fopen(tmp.c_str(), "wb");
     if (!f)
         return false;
@@ -1540,7 +1565,7 @@ static bool writeOwnedTopKey(const std::string& path, const char* ownedKey,
         spdlog::warn("world.json: malformed top level, refusing to rewrite {}", ownedKey);
         return false;
     }
-    const std::string tmp = path + ".tmp";
+    const std::string tmp = tempPathFor(path);
     std::FILE* f = std::fopen(tmp.c_str(), "wb");
     if (!f)
         return false;

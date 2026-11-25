@@ -702,15 +702,21 @@ LayeredWorld::ReloadResult LayeredWorld::kick(bool full, std::vector<int> dirty,
         GpuWorld g;
         VoxelField f;
         Stats s;
-        buildInto(full, dirty, &m_pools, cam, g, newPools, f, s);
-        {
+        std::vector<uint8_t> reused;
+        // Borrow (never move) unchanged pools: the main thread may read
+        // m_pools concurrently (store() -> adopt after Clear).
+        const bool ok = buildInto(full, dirty, &m_pools, cam, g, newPools, f, s, &reused);
+        if (ok) {
             std::lock_guard<std::mutex> lk(m_pendingMtx);
             m_pending = std::make_unique<PendingBuild>();
             m_pending->gpu = std::move(g);
             m_pending->pools = std::move(newPools);
+            m_pending->reused = std::move(reused);
             m_pending->field = std::move(f);
             m_pending->stats = s;
         }
+        // A refused build publishes NOTHING: an empty PendingBuild used to be
+        // installed as an empty world (no GPU geometry, no pools).
         m_rebuildDone = true;
         m_rebuildRunning = false;
     });
@@ -738,6 +744,9 @@ bool LayeredWorld::consumeRebuild()
         return false;
     }
     m_gpu = std::move(m_pending->gpu);
+    for (size_t ci = 0; ci < m_pending->reused.size() && ci < m_pools.size(); ++ci)
+        if (m_pending->reused[ci] && !m_pending->pools[ci])
+            m_pending->pools[ci] = std::move(m_pools[ci]);
     m_pools = std::move(m_pending->pools);
     m_field = std::move(m_pending->field);
     m_stats = m_pending->stats;
@@ -752,7 +761,8 @@ bool LayeredWorld::buildInto(bool full, const std::vector<int>& dirty,
                               std::vector<std::unique_ptr<ChunkPool>>* prevPools,
                               glm::vec3 camPos, GpuWorld& outGpu,
                               std::vector<std::unique_ptr<ChunkPool>>& outPools,
-                              VoxelField& outField, Stats& outStats)
+                              VoxelField& outField, Stats& outStats,
+                              std::vector<uint8_t>* reusedOut)
 {
     auto t0 = std::chrono::steady_clock::now();
     if (m_records.empty()) {
@@ -813,6 +823,8 @@ bool LayeredWorld::buildInto(bool full, const std::vector<int>& dirty,
     const size_t numChunks = ctx.chunkRecords.size();
     outPools.clear();
     outPools.resize(numChunks);
+    if (reusedOut)
+        reusedOut->assign(numChunks, 0);
 
     std::unordered_set<int> dirtySet(dirty.begin(), dirty.end());
 
@@ -851,8 +863,12 @@ bool LayeredWorld::buildInto(bool full, const std::vector<int>& dirty,
                 size_t ci = order[oi];
                 // reuse the cached pool unless this chunk must be rebuilt
                 if (!full && dirtySet.find(int(ci)) == dirtySet.end()) {
-                    if (prevPools && (*prevPools)[ci])
-                        outPools[ci] = std::move((*prevPools)[ci]);
+                    if (prevPools && (*prevPools)[ci]) {
+                        if (reusedOut)
+                            (*reusedOut)[ci] = 1; // borrowed, see PendingBuild
+                        else
+                            outPools[ci] = std::move((*prevPools)[ci]);
+                    }
                     continue;
                 }
                 if (ctx.chunkRecords[ci].empty()) {
@@ -919,6 +935,8 @@ bool LayeredWorld::buildInto(bool full, const std::vector<int>& dirty,
     size_t nodeOff = 0, hOff = 0, bOff = 0;
     for (size_t ci = 0; ci < numChunks; ++ci) {
         ChunkPool* pp = outPools[ci].get();
+        if (!pp && reusedOut && (*reusedOut)[ci])
+            pp = (*prevPools)[ci].get();
         if (!pp || pp->root < 0) {
             outGpu.chunkGrid[ci] = -1;
             continue;
@@ -957,6 +975,8 @@ bool LayeredWorld::buildInto(bool full, const std::vector<int>& dirty,
             auto solid = std::make_unique<ChunkPool>();
             solid->root = int32_t(kSolidHandle);
             outPools[ci] = std::move(solid);
+            if (reusedOut)
+                (*reusedOut)[ci] = 0; // replaced, not borrowed
         }
     }
 

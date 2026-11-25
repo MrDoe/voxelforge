@@ -149,6 +149,7 @@ private:
 
     Buffer m_table {};   // the per-object table (std140)
     Buffer m_lightsBuf {};
+    VkDescriptorSet m_lightsBoundSet = VK_NULL_HANDLE; // set binding 25 was written to
 
     Image3D m_blackCube {};
     Image3D m_blackLut {};

@@ -1,10 +1,13 @@
-// The runtime-edit overlay (assets/runtime_edits.vxw): adopt it at startup and
+// The runtime-edit overlay (scenery/<name>/runtime_edits.vxw): adopt it at startup and
 // after every world reload, patching the chunks it names.
 #include "app/app.hpp"
 
 #include "app/world/store_overlay.hpp"
 
 #include <spdlog/spdlog.h>
+
+#include <chrono>
+#include <filesystem>
 
 namespace vf {
 namespace app {
@@ -19,39 +22,100 @@ std::string overlayPath()
     return vf::voxel::scenery::root() + "/runtime_edits.vxw";
 }
 
+// Move/copy `path` to a timestamped sibling (`<path>.<tag>-<unix-seconds>`)
+// so a destructive overlay operation never loses a session for good. Returns
+// the backup path, or an empty string when nothing was backed up.
+std::string backupOverlayFile(const std::string& path, const char* tag, bool move)
+{
+    std::error_code ec;
+    if (!std::filesystem::exists(path, ec))
+        return {};
+    const auto secs = std::chrono::duration_cast<std::chrono::seconds>(
+                          std::chrono::system_clock::now().time_since_epoch())
+                          .count();
+    std::string dst = path + "." + tag + "-" + std::to_string(secs);
+    for (int i = 1; std::filesystem::exists(dst, ec); ++i)
+        dst = path + "." + tag + "-" + std::to_string(secs) + "-" + std::to_string(i);
+    if (move)
+        std::filesystem::rename(path, dst, ec);
+    else
+        std::filesystem::copy_file(path, dst, ec);
+    if (ec) {
+        spdlog::warn("live overlay: cannot back up '{}' to '{}': {}", path, dst,
+                     ec.message());
+        return {};
+    }
+    return dst;
+}
+
+void App::queueOverlaySave()
+{
+    if (m_overlaySaveBlocked) {
+        if (!m_overlayBlockWarned)
+            spdlog::warn("live overlay: NOT saved - VF_NO_OVERLAY skipped loading '{}', "
+                         "so saving would replace that session with this run's "
+                         "edits (set VF_OVERLAY_PATH to persist them elsewhere)",
+                         overlayPath());
+        m_overlayBlockWarned = true;
+        return;
+    }
+    auto& store = m_layers.store();
+    const std::string path = overlayPath();
+    // The writer serializes the EDITED chunks only, so a process whose edited
+    // set is smaller than the file it loaded (a re-adopted store, a reload
+    // race) would persist a shrunken session. Keep one copy of the file as it
+    // was before the first shrinking save of this load.
+    if (!m_overlayShrinkBackedUp && m_overlayDiskChunks > 0) {
+        const size_t n = store.editedChunks().size();
+        if (n < m_overlayDiskChunks) {
+            m_overlayWriter.flush();
+            const std::string bak = backupOverlayFile(path, "bak-shrink", false);
+            spdlog::warn("live overlay: save shrinks {} -> {} chunks; previous file "
+                         "kept as '{}'",
+                         m_overlayDiskChunks, n, bak);
+            m_overlayShrinkBackedUp = true;
+        }
+    }
+    m_overlayWriter.queue(store, path);
+}
+
 void App::loadStoreOverlay()
 {
     if (m_overlayLoaded)
         return;
     m_overlayLoaded = true;
-    // Test/debug switch: ignore a saved live-edit overlay so gates run against
-    // the baked world (a session's painted edits would otherwise change every
-    // shot). The app still saves new strokes normally.
-    if (getenv("VF_NO_OVERLAY")) {
-        spdlog::info("live overlay: skipped (VF_NO_OVERLAY)");
-        return;
-    }
+    m_overlayDiskChunks = 0;
+    m_overlayShrinkBackedUp = false;
+    m_overlaySaveBlocked = false;
     const std::string path = overlayPath();
     std::error_code ec;
+    // Test/debug switch: ignore a saved live-edit overlay so gates run against
+    // the baked world (a session's painted edits would otherwise change every
+    // shot). Saving is then BLOCKED when the skipped file is the default one:
+    // the writer persists only this run's edits, so the first stroke used to
+    // replace the whole unloaded session. VF_OVERLAY_PATH re-enables saving.
+    if (getenv("VF_NO_OVERLAY")) {
+        const char* ov = getenv("VF_OVERLAY_PATH");
+        if (!(ov && *ov) && std::filesystem::exists(path, ec))
+            m_overlaySaveBlocked = true;
+        spdlog::info("live overlay: skipped (VF_NO_OVERLAY){}",
+                     m_overlaySaveBlocked ? ", saving disabled" : "");
+        return;
+    }
     if (!std::filesystem::exists(path, ec))
         return;
     auto& store = m_layers.store();
     if (!store.loadOverlay(path)) {
-        spdlog::warn("live overlay '{}' could not be applied", path);
+        // Unreadable (corrupt, or an older schema): move it aside instead of
+        // letting the next stroke overwrite it with this run's edits only.
+        const std::string bak = backupOverlayFile(path, "unreadable", true);
+        spdlog::warn("live overlay '{}' could not be applied; moved to '{}'", path, bak);
         return;
     }
+    m_overlayDiskChunks = store.editedChunks().size();
     if (!m_liveEditor.attached())
         m_liveEditor.attach(&store);
-    vf::voxel::SurfelParams sp;
-    sp.edgeShrink = m_edgeShrink;
-    sp.edgeFill = m_edgeFill;
-    sp.edgeBridgeSize = m_edgeBridgeSize;
-    sp.cornerFill = m_cornerFill;
-    sp.sunDir = glm::vec3(m_sunDir);
-    sp.lodRings = false;
-    sp.anisotropy = true;
-    if (const char* e = getenv("VF_ANISO"))
-        sp.anisotropy = atoi(e) != 0;
+    const vf::voxel::SurfelParams sp = surfelParams(false);
     const std::vector<int> chunks = store.editedChunks();
     size_t n = 0;
     for (int ci : chunks) {

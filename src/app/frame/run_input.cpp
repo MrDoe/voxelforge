@@ -679,7 +679,7 @@ void App::processInput(bool textCaptures, bool rotateLiveTest)
             if (m_hasStamp && m_liveEditor.attached()) {
                 // one undo step per stroke (mouse down..up)
                 finishStroke();
-                m_overlayWriter.queue(m_layers.store(), overlayPath());
+                queueOverlaySave();
             }
             m_hasStamp = false;
             m_dragging = false;

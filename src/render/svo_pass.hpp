@@ -127,6 +127,7 @@ private:
                            glm::vec4(0.f), glm::vec4(0.f), glm::vec4(0.f) };
     // Point light UBO (binding 25), written by setLights().
     Buffer m_lightsBuf {};
+    VkDescriptorSet m_lightsBoundSet = VK_NULL_HANDLE; // set binding 25 was written to
 
 };
 } // namespace vf

@@ -1,6 +1,7 @@
 // Tests for the layered world synthesis: chunked-SVO structure, VoxelField
 // point queries against the analytic authoring truth, and determinism.
 #include "voxel/layered_world.hpp"
+#include "voxel/worldfile.hpp"
 #include "voxel/scenery.hpp"
 #include "voxel/common.hpp"
 #include "voxel/irradiance_volume.hpp"
@@ -57,8 +58,12 @@ LayeredWorld& allLayersWorld()
         j += "]}";
         manifestPath = dir + "/world_all.json";
         {
-            std::ofstream out(manifestPath);
-            out << j;
+            // temp+rename: world_all.json is tracked and several vf_tests
+            // processes regenerate it; an in-place ofstream left a truncated
+            // manifest when a run was interrupted (or raced another).
+            const std::string tmp = vf::voxel::worldfile::tempPathFor(manifestPath);
+            { std::ofstream out(tmp); out << j; }
+            fs::rename(tmp, manifestPath);
         }
         return lw.load(manifestPath);
     }();

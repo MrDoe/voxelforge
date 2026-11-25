@@ -1337,6 +1337,7 @@ struct Server {
                     break;
                 }
         if (file.find(".vxw") == std::string::npos) file += ".vxw";
+        if (!safeLayerRel(file)) return { "layer path must stay inside the scenery: " + file, true };
         if (protectedLayer) return { "refusing to paint protected layer " + file, true };
         if (file == "ai_edits.vxw")
             return { "paint ai_edits via stamp(mat/...) in the store lane", true };
@@ -1374,7 +1375,7 @@ struct Server {
                 o << "  mat " << m << ": " << before[m] << " -> " << after[m] << "\n";
         int dry = 0; ai::jsonGetInt(args, "dry_run", dry);
         if (dry) return { o.str() + "dry run, nothing written", false };
-        const std::string tmp = path + ".tmp";
+        const std::string tmp = voxel::worldfile::tempPathFor(path);
         std::error_code ec;
         if (!voxel::worldfile::write(tmp, d)) {
             std::remove(tmp.c_str());
@@ -1467,6 +1468,7 @@ struct Server {
             for (auto& l : layers)
                 if (l.name == name || l.file == name) { file = l.file; break; }
         if (file.find(".vxw") == std::string::npos) file += ".vxw";
+        if (!safeLayerRel(file)) return { "layer path must stay inside the scenery: " + file, true };
         if (file == "ai_edits.vxw" || file == "landscape.vxw")
             return { "place_copy refuses " + file + " (live/derived layer)", true };
         glm::ivec3 anchor;
@@ -1845,6 +1847,7 @@ struct Server {
             for (auto& l : layers)
                 if (l.name == name || l.file == name) { file = l.file; break; }
         if (file.find(".vxw") == std::string::npos) file += ".vxw";
+        if (!safeLayerRel(file)) return { "layer path must stay inside the scenery: " + file, true };
         if (file == "ai_edits.vxw" || file == "landscape.vxw")
             return { "snapshot/restore of " + file + " is refused (live/derived layer)", true };
         const std::string path = voxel::scenery::root() + "/" + file;
@@ -1862,8 +1865,28 @@ struct Server {
         std::string src = jsonGetString(args, "file");
         if (src.empty()) src = jsonGetString(args, "snapshot");
         if (src.empty()) return { "restore_snapshot needs \"file\" (the .bak path)", true };
+        // Only a snapshot OF THIS LAYER may be restored: a sibling named
+        // `<layer>.vxw.snap-<n>.bak`, exactly what snapshot_layer writes.
+        // Copying an arbitrary path over a layer let a caller pull any file
+        // on the machine into the scenery.
+        {
+            namespace fs = std::filesystem;
+            const fs::path sp = fs::path(src).is_absolute()
+                                    ? fs::path(src)
+                                    : fs::path(voxel::scenery::root()) / src;
+            const std::string want = fs::path(path).filename().string() + ".snap-";
+            const std::string base = sp.filename().string();
+            const bool named = base.rfind(want, 0) == 0 && base.size() > want.size() + 4 &&
+                               base.compare(base.size() - 4, 4, ".bak") == 0;
+            const bool sibling = fs::weakly_canonical(sp.parent_path(), ec) ==
+                                 fs::weakly_canonical(fs::path(path).parent_path(), ec);
+            if (!named || !sibling)
+                return { "restore_snapshot only accepts a snapshot of " + file +
+                         " written by snapshot_layer (" + want + "<n>.bak next to it)", true };
+            src = sp.string();
+        }
         if (!std::filesystem::exists(src, ec)) return { "no such snapshot: " + src, true };
-        const std::string tmp = path + ".snaprestore.tmp";
+        const std::string tmp = voxel::worldfile::tempPathFor(path);
         std::filesystem::copy_file(src, tmp,
             std::filesystem::copy_options::overwrite_existing, ec);
         if (ec) return { "restore copy failed: " + ec.message(), true };
@@ -1904,6 +1927,7 @@ struct Server {
                     break;
                 }
         if (file.find(".vxw") == std::string::npos) file += ".vxw";
+        if (!safeLayerRel(file)) return { "layer path must stay inside the scenery: " + file, true };
         if (protectedLayer)
             return { "refusing to carve protected layer " + file +
                      " (landscape/packed)", true };
@@ -1966,7 +1990,7 @@ struct Server {
         // Same atomic temp+rename contract as writeManifest / OverlayWriter:
         // never truncate a tracked .vxw in place (a crash would leave a
         // corrupt layer and no way back).
-        const std::string tmp = path + ".tmp";
+        const std::string tmp = voxel::worldfile::tempPathFor(path);
         std::error_code ec;
         if (!voxel::worldfile::write(tmp, d)) {
             std::remove(tmp.c_str());
@@ -2057,7 +2081,7 @@ struct Server {
         if (ec) return { "snapshot copy failed: " + ec.message(), true };
 
         d.voxels = std::move(keep);
-        const std::string tmp = path + ".tmp";
+        const std::string tmp = voxel::worldfile::tempPathFor(path);
         if (!voxel::worldfile::write(tmp, d)) {
             std::remove(tmp.c_str());
             return { "failed to write ai_edits tmp; original untouched", true };
@@ -2157,6 +2181,20 @@ struct Server {
     }
 
     std::string manifestPath() const { return voxel::scenery::root() + "/world.json"; }
+    // A layer file a tool caller names must stay INSIDE the active scenery.
+    // A name missing from the manifest used to be joined raw onto root(), so
+    // `../x` read and WROTE files outside it, and `../<scenery>/landscape`
+    // slipped past the protected-layer check (which only matches manifest
+    // entries). No absolute path, no `..` component, no backslash.
+    static bool safeLayerRel(const std::string& rel)
+    {
+        if (rel.empty() || rel[0] == '/' || rel.find('\\') != std::string::npos)
+            return false;
+        for (const auto& part : std::filesystem::path(rel))
+            if (part == "..")
+                return false;
+        return true;
+    }
 
     ToolResult getLayer(const std::string& args)
     {
@@ -2406,6 +2444,7 @@ struct Server {
         }
         if (file.find(".vxw") == std::string::npos)
             file += ".vxw";
+        if (!safeLayerRel(file)) return { "layer path must stay inside the scenery: " + file, true };
         voxel::WorldFileData d;
         if (!voxel::worldfile::read(voxel::scenery::root() + "/" + file, d))
             return { "cannot read layer file: " + file, true };
@@ -2465,6 +2504,7 @@ struct Server {
                 }
         if (srcFile.find(".vxw") == std::string::npos)
             srcFile += ".vxw";
+        if (!safeLayerRel(srcFile)) return { "layer path must stay inside the scenery: " + srcFile, true };
         std::string dstFile = srcDir + safe + ".vxw";
         std::ifstream in(voxel::scenery::root() + "/" + srcFile, std::ios::binary);
         if (!in)
@@ -2828,6 +2868,7 @@ struct Server {
             for (auto& l : layers)
                 if (l.name == name || l.file == name) { file = l.file; break; }
         if (file.find(".vxw") == std::string::npos) file += ".vxw";
+        if (!safeLayerRel(file)) return { "layer path must stay inside the scenery: " + file, true };
         if (file == "ai_edits.vxw")
             return { "recolor ai_edits via the chat/brush tools instead "
                      "(the app owns that layer's live state)", true };
@@ -3170,6 +3211,7 @@ struct Server {
                 }
         if (file.find(".vxw") == std::string::npos)
             file += ".vxw";
+        if (!safeLayerRel(file)) return { "layer path must stay inside the scenery: " + file, true };
         voxel::WorldFileData d;
         if (!voxel::worldfile::read(voxel::scenery::root() + "/" + file, d))
             return { "cannot read layer file: " + file, true };
@@ -3281,6 +3323,7 @@ struct Server {
                 }
         if (file.find(".vxw") == std::string::npos)
             file += ".vxw";
+        if (!safeLayerRel(file)) return { "layer path must stay inside the scenery: " + file, true };
         // micro layers live under micro/ possibly; if not found try as-is
         std::string fullPath = voxel::scenery::root() + "/" + file;
         voxel::WorldFileData d;

@@ -60,17 +60,30 @@ struct StoreEdit {
     bool terrain = false;
 };
 
-// Result of one relaxation brush stamp (terrain column or object surface).
+// Result of one flatten brush stamp (terrain column or object surface).
 // `riseCells` is the greatest upward movement in the batch, which lets the
 // caller refresh the height texture without scanning from an arbitrary world
 // height. `objectSurface` marks a batch produced by the object-surface
-// relaxation, so the caller can refresh the splat cache over the full store
+// path, so the caller can refresh the splat cache over the full store
 // band the edit solved (a Smooth stroke changes nearby normals/AO beyond the
 // brush footprint).
 struct SmoothTerrainEdits {
     std::vector<StoreEdit> edits;
     int riseCells = 0;
     bool objectSurface = false;
+};
+
+// The plane a Smooth stamp flattens toward. Orientation is the MEAN NORMAL of
+// the selected surface and the anchor is its (area) centroid; the fit covers
+// the brush footprint PLUS a read-only ring of surrounding voxels, so the
+// flattened patch meets the geometry around it instead of becoming a shelf.
+// The App fits this from the rendered surfels (continuous positions and
+// bake-parity smoothed normals), which is more precise than voxel occupancy;
+// the store derives the same plane from rows/columns when no hint is supplied.
+struct SmoothPlane {
+    glm::vec3 normal = glm::vec3(0.f, 1.f, 0.f); // unit, outward
+    glm::vec3 point = glm::vec3(0.f);            // world metres
+    bool valid = false;
 };
 
 class ChunkStore {
@@ -175,14 +188,23 @@ public:
     // 47% reduction in effective smoothing strength, and shrinking relief is
     // not a defect anyone has complained about - the moat ring was.
     static constexpr float kSmoothTaubinReinflate = 0.53f;
-    // Build one non-mutating height-relaxation batch for the circular terrain
-    // footprint around `center`. Only terrain columns are changed; object
-    // surfaces are treated as protected samples and are never overwritten.
-    // `preserveVolume` softens each stamp by kSmoothTaubinReinflate so a held
-    // brush shrinks relief less. OFF by default: see the constant's note.
+    // A grounded object run of at most this many cells is a bump that settles
+    // onto the surrounding level; a longer run is a feature (a post) and keeps
+    // its height. Shared with the App's surfel hint so the same rule decides
+    // whether surrounding ground may vote in the plane fit.
+    static constexpr int kSmoothBumpRunCells = 4;
+    // Build one non-mutating flatten batch for the circular footprint around
+    // `center`. Every selected surface position moves toward the plane fitted
+    // from its mean normal and the surrounding voxels, scaled by strength and
+    // radial falloff and capped at kSmoothStepCapCells. Only terrain columns
+    // are changed on a terrain pick; object surfaces are protected samples and
+    // never overwritten. `preserveVolume` softens each stamp by
+    // kSmoothTaubinReinflate. `plane`, when valid, is the surfel-fitted hint
+    // from the App; without it the store fits the voxel equivalent itself.
     SmoothTerrainEdits makeSmoothEdits(glm::ivec3 center, float radiusM,
                                        float strength,
-                                       bool preserveVolume = false) const;
+                                       bool preserveVolume = false,
+                                       const SmoothPlane* plane = nullptr) const;
     // Rebuild every dirty chunk (SDF band + octree pool).
     void rebuildDirty();
     // Force the full-chunk rebuild path for one chunk (ignores the recorded
@@ -208,6 +230,7 @@ public:
     std::vector<uint8_t> serializeEdited() const;
     // Replace the listed chunks wholesale (used on startup to restore a saved
     // overlay). Pools are invalidated and rebuilt lazily on next access.
+    // All or nothing: a malformed section leaves the store untouched.
     bool applyEdited(const std::vector<uint8_t>& data);
     // Write/read assets/<name>.vxw as a VXW v2 file with one store section
     // (atomic temp+rename). Missing files are not an error on load.

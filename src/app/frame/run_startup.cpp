@@ -287,7 +287,7 @@ int App::runStartupTestHooks()
                          sorted.empty() ? 0.f : sorted.back(), spacing);
             if (getenv("VF_TEST_STROKE_SAVE")) {
                 // simulate the stroke-end async persistence and wait for it
-                m_overlayWriter.queue(m_layers.store(), overlayPath());
+                queueOverlaySave();
                 m_overlayWriter.flush();
                 spdlog::info("stroke: saved live overlay");
             }

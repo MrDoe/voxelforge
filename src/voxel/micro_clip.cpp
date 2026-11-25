@@ -1,5 +1,6 @@
 // micro_clip.cpp - recorded animation clip for a MICRO object.
 #include "voxel/micro_clip.hpp"
+#include "voxel/worldfile.hpp"
 
 #include <algorithm>
 #include <cmath>
@@ -317,7 +318,7 @@ bool readMicroClip(const std::string& path, MicroClip& out)
 
 bool writeMicroClip(const std::string& path, const MicroClip& clip)
 {
-    const std::string tmp = path + ".tmp";
+    const std::string tmp = worldfile::tempPathFor(path);
     std::FILE* f = std::fopen(tmp.c_str(), "wb");
     if (!f) return false;
     const std::string text = serializeMicroClip(clip);
@@ -326,9 +327,9 @@ bool writeMicroClip(const std::string& path, const MicroClip& clip)
         std::remove(tmp.c_str());
         return false;
     }
-    std::fclose(f);
-    std::remove(path.c_str());
-    if (std::rename(tmp.c_str(), path.c_str()) != 0) {
+    // rename(2) replaces atomically; removing `path` first only opened a
+    // window in which the clip did not exist at all.
+    if (std::fclose(f) != 0 || std::rename(tmp.c_str(), path.c_str()) != 0) {
         std::remove(tmp.c_str());
         return false;
     }

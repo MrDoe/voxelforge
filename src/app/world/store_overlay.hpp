@@ -12,5 +12,9 @@ namespace app {
 
 std::string overlayPath();
 
+// Move (or copy) the overlay at `path` to `<path>.<tag>-<unix-seconds>`;
+// returns the backup path, empty when there was nothing to back up.
+std::string backupOverlayFile(const std::string& path, const char* tag, bool move);
+
 } // namespace app
 } // namespace vf

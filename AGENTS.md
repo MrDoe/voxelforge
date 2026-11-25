@@ -255,7 +255,7 @@ one costs a whole turn, because the bad call is rejected before any work runs.
   state, and the shipped manifest came back without the grazer — the alpaca
   never walked again. The gate now snapshots whole entries, prints the
   snapshot, and replaces entries whole on restore.
-- **Five ways to destroy data here, and every one of them is silent.** The
+- **Ways to destroy data here — most are now GUARDED, all were silent.** The
   overlay is gitignored and the manifests are tracked, so damage is invisible
   in `git status`; check there before blaming a build.
   1. **Never `ninja -C build clean` (or `ninja clean`).** `build.ninja`
@@ -266,39 +266,44 @@ one costs a whole turn, because the bad call is rejected before any work runs.
      deletes tracked files. Recover with `git checkout -- scenery/…`, **not**
      `ninja -C build world`: a regen rewrites the authored hamlet and is a
      different, unrecoverable change. To force a recompile, `touch` the
-     sources (that is also the stale-object fix in Build).
-  2. **A headless run is NOT read-only against `scenery/<name>/runtime_edits.vxw`.**
-     With neither `VF_NO_OVERLAY=1` nor `VF_OVERLAY_PATH=<tmp>` set, the app
-     loads the overlay and then *writes it back*: `loadStoreOverlay`
-     re-derives chunks via `LiveEditor::refreshRegion`, which sets
-     `Chunk::edited`, and `OverlayWriter` re-serializes only the flagged
-     subset. Measured 2026-10-01: a 4-chunk / 42,969-surfel session became
-     1 chunk / 9,641, and 3.26 MB became 619 KB, with no warning. `VF_NO_OVERLAY`
-     suppresses only the *load* — a run that also stamps (`VF_TEST_EDIT`,
-     `VF_TEST_STROKE_SAVE=1`) still writes. Use `VF_OVERLAY_PATH=/tmp/…` for
-     every scratch render. (Caveat when debugging the reload bug itself:
-     that path *requires* the shared location, because the bug is precisely
-     that the layer path and the overlay path are the same file.)
-  3. **`serializeEdited` walks `Chunk::edited` only**, so any process whose
-     edited set is a *subset* of the file's chunk list persists a smaller
-     file. A plain load-then-save round-trips, but a world reload re-adopts
-     the store from freshly baked pools first, so repeated debugging runs
-     shrink a session progressively. A small restore count is therefore NOT
-     evidence of a broken restore path.
-  4. **"Clear live edits" is irreversible** (`src/app/edit/live_edit.cpp`):
-     it flushes the writer, then `std::filesystem::remove(overlayPath())`,
-     with no backup step anywhere. Same for `VF_TEST_CLEAR=1`.
-  5. `world_all.json` (in the default scenery) is **tracked** and rewritten by
-     `tests/test_authoring.cpp` and `tests/test_world.cpp` through a bare
-     `std::ofstream` with no temp+rename, so an interrupted `test-world` /
-     `test-unit` leaves a truncated manifest — the same reason `OverlayWriter`
-     uses temp+rename.
-  The durable fix for 2+3 is to stop rewriting the file from a derived subset
-  (persist the loaded chunk list, or refuse to save when the set shrinks) and
-  to default AUTOMATED runs at an isolated overlay path while keeping
-  `assets/` for the interactive app. Do **not** make the default per-process:
-  the interactive app is one long-lived process, so a PID-scoped default would
-  discard a user's edits on restart — the one consumer who wants persistence.
+     sources (that is also the stale-object fix in Build). *(Unguarded.)*
+  2. **A run that stamps writes `scenery/<name>/runtime_edits.vxw`**, and the
+     writer serializes `Chunk::edited` only (`serializeEdited`), so a process
+     whose edited set is a SUBSET of the file persists a smaller file
+     (measured 2026-10-01: 4 chunks / 3.26 MB became 1 chunk / 619 KB). The
+     real triggers (re-verified 2026-11-25; `refreshRegion` does NOT set
+     `edited`, contrary to an older note here) were: `VF_NO_OVERLAY` skips the
+     load but strokes still saved, so the first stroke replaced the whole
+     session; a malformed record left `applyEdited` half-applied; a schema
+     mismatch loaded nothing and the next stroke overwrote the file.
+     **Guards now (2026-11-25):** every save goes through
+     `App::queueOverlaySave()` (`src/app/world/store_overlay.cpp`) — with
+     `VF_NO_OVERLAY` and no `VF_OVERLAY_PATH`, saving is **disabled** while
+     the default file exists (logged once); `applyEdited` is all-or-nothing;
+     a file that fails to load is moved to `*.unreadable-<ts>`; the first
+     save of a load that would shrink the chunk set copies the file to
+     `*.bak-shrink-<ts>`. Still use `VF_OVERLAY_PATH=/tmp/…` for every
+     scratch render — the guards are a net, not a sandbox.
+  3. **"Clear live edits" / `VF_TEST_CLEAR=1`** used to `remove()` the
+     overlay with no backup; it now MOVES it to
+     `runtime_edits.vxw.cleared-<ts>` (copy back to restore). Backups are not
+     pruned automatically.
+  4. **Every manifest/`.vxw` writer is temp+rename with a unique temp name**
+     (`worldfile::tempPathFor` = `path.<pid>.<n>.tmp`). `writeTextureManifest`
+     and `worldfile::write` used to `fopen("wb")` in place (an interrupted
+     write truncated a tracked file), and the fixed `path + ".tmp"` let two
+     processes (app + vf_mcp) rename each other's half-written temp. The
+     `world_all.json` generators in `tests/test_world.cpp` /
+     `tests/test_authoring.cpp` use the same temp+rename now. Never add an
+     in-place writer.
+  5. **vf_mcp layer arguments are confined to the scenery**
+     (`Server::safeLayerRel`: no absolute path, no `..`, no backslash), and
+     `restore_snapshot` only accepts a `<layer>.vxw.snap-<n>.bak` sibling of
+     the layer it restores. Before, a name missing from the manifest was
+     joined raw onto `scenery::root()`.
+  Do **not** make the default overlay path per-process: the interactive app
+  is one long-lived process, so a PID-scoped default would discard a user's
+  edits on restart — the one consumer who wants persistence.
 - The default scenery's `heightmap.png`, `landscape.vxw` and `world.json` are baked by
   `heightmap_gen`, which now emits **only the terrain shell** (`landscape.vxw`)
   plus the preserved highest-priority `ai_edits.vxw`; object layers are
@@ -593,14 +598,16 @@ one costs a whole turn, because the bad call is rejected before any work runs.
   cells measured) and read as a bulge), **Delete** (clear every cell in the
   brush ball), **Paint**
   (recolour the brush ball with the panel's Material combo), **Smooth**
-  (`ChunkStore::makeSmoothEdits`: a terrain pick relaxes column tops toward a
-  weighted local average with a circular falloff and protects object-owned
-  columns; an object pick generalises the same surface-position relaxation to
-  the picked cell's one-sided face axis — thin wall/rod cells use the SDF
-  gradient, a diagonal rod is left alone — and moves the surface as one
-  contiguous Clear/Set span, so a grounded bump collapses whole, a notch
-  fills, and walls/posts/staircases stay fixed points; fills are always
-  object-owned, terrain is never converted), **Rotate**
+  (`ChunkStore::makeSmoothEdits`: flattens the selection to ONE plane fitted
+  from the mean normal of the selected surface plus a read-only ring of
+  surrounding voxels, anchored at their centroid. The App fits it from the
+  rendered surfels for precision (continuous positions and baked smoothed
+  normals); the store fits the voxel equivalent when no surfels are available.
+  Each surface point moves toward that plane by strength × radial falloff,
+  capped at 4 cells/stamp; terrain picks protect object-owned columns, object
+  picks move one contiguous Clear/Set span along the picked face axis. A short
+  grounded bump collapses onto the surrounding level and a notch fills; fills
+  are always object-owned, terrain is never converted), **Rotate**
   (click an object to activate its bounds-centered trackball, then click-drag
   a yaw/pitch/roll ring; release stages and **Apply** commits), and **Move**
   (grab the exact owner and drag along the selected X/Y/Z axis; release stages
